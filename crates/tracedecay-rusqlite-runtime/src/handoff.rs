@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use tracedecay_application::{
     HandoffOpenAuthorityError, HandoffOpenAuthorityPort, HandoffOpenConsumeOutcomeV1,
-    HandoffOpenConsumptionV1, HandoffOpenExpectationV1, HandoffOpenGrantV1, RequestId,
+    HandoffOpenConsumptionV1, HandoffOpenExpectationV1, HandoffOpenGrantV1,
+    HandoffOpenListFilterV1, HandoffOpenListingV1, RequestId,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
@@ -165,6 +166,55 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
             .commit()
             .map(|_| grant.clone())
             .map_err(unavailable)
+    }
+
+    fn list(
+        &self,
+        filter: &HandoffOpenListFilterV1,
+        limit: u32,
+    ) -> Result<Vec<HandoffOpenListingV1>, HandoffOpenAuthorityError> {
+        // The recipient/session/scope match lives inside the grant payload, so
+        // it cannot be pushed into SQL without denormalizing secret-adjacent
+        // binding fields into indexed columns. Ordering and the ceiling are
+        // pushed down; the match is applied after decoding. `limit + 1` rows
+        // are asked for so the caller can be told a ceiling was reached rather
+        // than being handed a silently short frontier.
+        //
+        // Expired grants are deliberately NOT filtered out here: a lapsed
+        // handoff is a reportable outcome, and `resolve`'s expiry check exists
+        // to refuse redemption, not to erase history.
+        let ceiling = i64::from(limit).saturating_add(1);
+        let rows = query_handle(
+            &self.handle,
+            "SELECT grant_payload, consumption_payload
+             FROM handoff_open_grants_v1
+             ORDER BY issued_at DESC, token_digest ASC
+             LIMIT ?1",
+            vec![ExactSqlValue::Integer(ceiling)],
+        )
+        .map_err(unavailable)?;
+
+        let mut listings = Vec::new();
+        for row in &rows.rows {
+            let payload = text(&row.values, 0).ok_or_else(codec_unavailable)?;
+            let grant: HandoffOpenGrantV1 = decode(payload)?;
+            if !filter.matches(grant.context()) {
+                continue;
+            }
+            let consumed_at = match optional_text(&row.values, 1).map_err(|_| codec_unavailable())?
+            {
+                Some(payload) => {
+                    let consumption: HandoffOpenConsumptionV1 = decode(payload)?;
+                    Some(*consumption.consumed_at())
+                }
+                None => None,
+            };
+            listings.push(HandoffOpenListingV1 { grant, consumed_at });
+            if listings.len() as u32 >= limit {
+                break;
+            }
+        }
+        Ok(listings)
     }
 
     fn resolve(

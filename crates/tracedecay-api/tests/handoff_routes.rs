@@ -25,6 +25,10 @@ fn descriptor_matches_the_typed_handoff_registry_routes() {
                 "/application/handoff/issue-task",
             ),
             (
+                "operation.handoff.list_task_handoffs",
+                "/application/handoff/list-task",
+            ),
+            (
                 "operation.handoff.open_investigation_handoff",
                 "/application/handoff/open-investigation",
             ),
@@ -37,7 +41,7 @@ fn descriptor_matches_the_typed_handoff_registry_routes() {
 }
 
 #[tokio::test]
-async fn router_dispatches_both_operations_to_one_application_owner() {
+async fn router_dispatches_every_operation_to_one_application_owner() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let owner_observed = Arc::clone(&observed);
     let app = handoff_application_router(move |request: tracedecay_api::HandoffHttpRequest| {

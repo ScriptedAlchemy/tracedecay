@@ -6,6 +6,7 @@ import { MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import {
   AnalyticsAgentsPayloadV1Schema,
+  AnalyticsSubagentTreePayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
   type AnalyticsAgentUsageV1,
 } from '../../contracts/generated.ts';
@@ -26,6 +27,10 @@ import {
 import { AgentFailureContext } from './AgentFailureContext.tsx';
 import { AgentHandoffs } from './AgentHandoffs.tsx';
 import { AgentToolActivity } from './AgentToolActivity.tsx';
+import { SubagentTree } from './SubagentTree.tsx';
+import { AgentHandoffTokens } from './AgentHandoffTokens.tsx';
+import { readHandoffTokens } from './handoffTokens.ts';
+import { newestTreeSession, useAgentHandoffTokens } from './handoffTokenQuery.ts';
 import { useAgentWorkGraph } from './agentWorkQuery.ts';
 import { readAttemptFailures } from './failure.ts';
 import { readHandoffFrontier } from './handoff.ts';
@@ -155,9 +160,27 @@ export function AgentsPage() {
     `${BASE}/agents`,
     AnalyticsAgentsPayloadV1Schema,
   );
+  // The delegation EDGES, which the rollup above cannot carry: it counts
+  // sessions per agent, and a count of two islands never recovers the arrow
+  // between them. Served on its own route for the same reason.
+  const subagentTree = useEnvelope(
+    ['analytics', 'subagent-tree'],
+    `${BASE}/subagent-tree`,
+    AnalyticsSubagentTreePayloadV1Schema,
+  );
   // The work-product graph, read once and read twice: the handoff frontier and
   // the attempt failures below both come off this single response, so the two
   // describe one graph version rather than two versions captioned as one.
+  // The token frontier is read for a session this page can actually name: the
+  // newest top of the delegation tree above. Without a session there is no
+  // question to ask, and the surface says so rather than drawing an empty
+  // frontier.
+  const frontierSession = newestTreeSession(envelopePayload(subagentTree.data) ?? null);
+  const handoffTokens = useAgentHandoffTokens(frontierSession);
+  const tokenReading = readHandoffTokens(
+    frontierSession,
+    handoffTokens.isPending ? undefined : handoffTokens.data,
+  );
   const workGraph = useAgentWorkGraph();
   const handoffFrontier = readHandoffFrontier(workGraph.isPending ? undefined : workGraph.data);
   const attemptFailures = readAttemptFailures(workGraph.isPending ? undefined : workGraph.data);
@@ -392,10 +415,37 @@ export function AgentsPage() {
                 </ReadSection>
               </OverviewCard>
 
+              <OverviewCard title="Subagent tree">
+                <ReadSection
+                  title="Delegation edges"
+                  chrome="centered"
+                  state={envelopeReadState(subagentTree.isPending, subagentTree.data, {
+                    loading: 'reading subagent tree',
+                    transport: 'subagent tree could not be read',
+                  })}
+                >
+                  {(envelope) => {
+                    const payload = envelope.payload;
+                    return payload == null || payload.available === false ? (
+                      <ReadFailure
+                        label="Subagent tree unavailable"
+                        detail={envelope.coverage.omission_reasons[0]}
+                      />
+                    ) : (
+                      <SubagentTree payload={payload} />
+                    );
+                  }}
+                </ReadSection>
+              </OverviewCard>
+
               {/* Plan 11's three remaining Agents measures. Handoffs and
                 * attempt failures come off the work-product graph read;
                 * tool activity comes off the diagnostics fold this page
                 * already pays for. */}
+              <OverviewCard title="Handoff tokens">
+                <AgentHandoffTokens reading={tokenReading} />
+              </OverviewCard>
+
               <OverviewCard title="Handoff frontier">
                 <AgentHandoffs reading={handoffFrontier} />
               </OverviewCard>

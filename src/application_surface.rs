@@ -983,7 +983,11 @@ impl RegisteredHttpOperation for HandoffOperation {
     }
 
     fn is_read_only(self) -> bool {
-        false
+        // Not a blanket `false` any more: enumeration reads the grant store
+        // without issuing or consuming anything, and treating it as a mutation
+        // here would deny a safe read the retry and replay handling a read is
+        // entitled to.
+        HandoffOperation::is_read_only(self)
     }
 
     fn problem_family(self) -> &'static str {

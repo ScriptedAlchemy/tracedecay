@@ -11,7 +11,8 @@ use tracedecay_application::{
     AdmitWorkSynthesisCommand, AuthorizedScopeSet, CancelWorkAttemptCommand, CostsReadModelV1,
     CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
     ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
-    GeneratedWorkProposal, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
+    GeneratedWorkProposal, ListTaskHandoffsRequestV1, ListTaskHandoffsResultV1,
+    MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
     MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, ObservatoryReadModelV1,
     PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
     PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand,
@@ -33,7 +34,8 @@ use tracedecay_domain::{
 
 use super::analytics_api::{
     AnalyticsAgentsPayloadV1, AnalyticsDiagnosticsPayloadV1, AnalyticsHintsPayloadV1,
-    AnalyticsOverviewPayloadV1, AnalyticsUnderusedPayloadV1, AnalyticsUsageSummaryV1,
+    AnalyticsOverviewPayloadV1, AnalyticsSubagentTreePayloadV1, AnalyticsUnderusedPayloadV1,
+    AnalyticsUsageSummaryV1,
 };
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
 use super::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
@@ -88,6 +90,13 @@ struct DashboardContractCatalogV1 {
     analytics_overview: DashboardEnvelopeV1<Option<AnalyticsOverviewPayloadV1>>,
     analytics_usage: DashboardEnvelopeV1<Option<AnalyticsUsageSummaryV1>>,
     analytics_agents: DashboardEnvelopeV1<Option<AnalyticsAgentsPayloadV1>>,
+    analytics_subagent_tree: DashboardEnvelopeV1<Option<AnalyticsSubagentTreePayloadV1>>,
+    /// The handoff-token frontier. Contracted here because the Agents surface
+    /// reads it directly off the mounted application route; the two `open_*`
+    /// operations stay uncontracted for the dashboard because it never redeems
+    /// a bearer and must not grow a client that could.
+    handoff_list_task_handoffs_request: ListTaskHandoffsRequestV1,
+    handoff_list_task_handoffs: ListTaskHandoffsResultV1,
     analytics_hints: DashboardEnvelopeV1<Option<AnalyticsHintsPayloadV1>>,
     analytics_underused: DashboardEnvelopeV1<Option<AnalyticsUnderusedPayloadV1>>,
     analytics_diagnostics: DashboardEnvelopeV1<Option<AnalyticsDiagnosticsPayloadV1>>,

@@ -3,8 +3,9 @@ use std::sync::Arc;
 use axum::response::Response;
 use tracedecay_api::HandoffOperation;
 use tracedecay_application::{
-    IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1, OpenInvestigationHandoffRequestV1,
-    OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1,
+    IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1, ListTaskHandoffsRequestV1,
+    ListTaskHandoffsResultV1, OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1,
+    OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1,
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -96,6 +97,42 @@ async fn invoke_operation(
                     } => Some((
                         scope,
                         tracedecay_application::ApplicationOutcome::Effect(outcome),
+                    )),
+                    _ => None,
+                },
+            )
+            .await
+        }
+        HandoffOperation::ListTaskHandoffs => {
+            let Ok(decoded) = serde_json::from_value::<ListTaskHandoffsRequestV1>(body) else {
+                return tracedecay_api::handoff_invalid_request_response(request_id);
+            };
+            let invocation = crate::daemon_contract::DaemonInvocationRequest::handoff_application(
+                request_id.as_str(),
+                HandoffApplicationInvocationV1::ListTaskHandoffs(decoded),
+                crate::daemon_client::invocation_now_micros(),
+                controls.deadline.clone(),
+                controls.cancellation.context(),
+            );
+            invoke_registered_http::<ListTaskHandoffsResultV1, _>(
+                executor.as_ref(),
+                operation,
+                request_id,
+                controls,
+                invocation,
+                // `Evidence`, not `Effect`: the enumeration commits nothing, so
+                // there is no effect receipt to project. Matching `Effect` here
+                // would drop every successful read on the floor.
+                |outcome| match outcome {
+                    crate::daemon_contract::DaemonInvocationOutcome::HandoffApplication {
+                        scope,
+                        outcome:
+                            HandoffApplicationOutcomeV1::ListTaskHandoffs(
+                                tracedecay_application::ApplicationOutcome::Evidence(outcome),
+                            ),
+                    } => Some((
+                        scope,
+                        tracedecay_application::ApplicationOutcome::Evidence(outcome),
                     )),
                     _ => None,
                 },

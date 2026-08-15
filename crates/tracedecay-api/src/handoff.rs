@@ -13,8 +13,9 @@ use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
     ApplicationProblem, IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1,
-    OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1,
-    OpenTaskHandoffResultV1, RequestId, RetryDirective,
+    ListTaskHandoffsRequestV1, ListTaskHandoffsResultV1, OpenInvestigationHandoffRequestV1,
+    OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1, RequestId,
+    RetryDirective,
 };
 
 use crate::http::{
@@ -29,20 +30,32 @@ fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HandoffOperation {
     IssueTaskHandoff,
+    ListTaskHandoffs,
     OpenInvestigationHandoff,
     OpenTaskHandoff,
 }
 
 impl HandoffOperation {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::IssueTaskHandoff,
+        Self::ListTaskHandoffs,
         Self::OpenInvestigationHandoff,
         Self::OpenTaskHandoff,
     ];
 
+    /// True for operations that only read the grant store.
+    ///
+    /// The three token operations issue or consume a grant. Enumeration only
+    /// looks, and the surface must know that so it does not treat a read as a
+    /// mutation for retry and replay purposes.
+    pub const fn is_read_only(self) -> bool {
+        matches!(self, Self::ListTaskHandoffs)
+    }
+
     pub const fn operation_id_str(self) -> &'static str {
         match self {
             Self::IssueTaskHandoff => "operation.handoff.issue_task_handoff",
+            Self::ListTaskHandoffs => "operation.handoff.list_task_handoffs",
             Self::OpenInvestigationHandoff => "operation.handoff.open_investigation_handoff",
             Self::OpenTaskHandoff => "operation.handoff.open_task_handoff",
         }
@@ -51,6 +64,7 @@ impl HandoffOperation {
     pub const fn route_segment(self) -> &'static str {
         match self {
             Self::IssueTaskHandoff => "issue-task",
+            Self::ListTaskHandoffs => "list-task",
             Self::OpenInvestigationHandoff => "open-investigation",
             Self::OpenTaskHandoff => "open-task",
         }
@@ -59,6 +73,7 @@ impl HandoffOperation {
     pub const fn route_path(self) -> &'static str {
         match self {
             Self::IssueTaskHandoff => "/handoff/issue-task",
+            Self::ListTaskHandoffs => "/handoff/list-task",
             Self::OpenInvestigationHandoff => "/handoff/open-investigation",
             Self::OpenTaskHandoff => "/handoff/open-task",
         }
@@ -67,6 +82,7 @@ impl HandoffOperation {
     pub const fn application_route_path(self) -> &'static str {
         match self {
             Self::IssueTaskHandoff => "/application/handoff/issue-task",
+            Self::ListTaskHandoffs => "/application/handoff/list-task",
             Self::OpenInvestigationHandoff => "/application/handoff/open-investigation",
             Self::OpenTaskHandoff => "/application/handoff/open-task",
         }
@@ -75,6 +91,7 @@ impl HandoffOperation {
     pub fn request_schema_name(self) -> Cow<'static, str> {
         match self {
             Self::IssueTaskHandoff => schema_name::<IssueTaskHandoffRequestV1>(),
+            Self::ListTaskHandoffs => schema_name::<ListTaskHandoffsRequestV1>(),
             Self::OpenInvestigationHandoff => schema_name::<OpenInvestigationHandoffRequestV1>(),
             Self::OpenTaskHandoff => schema_name::<OpenTaskHandoffRequestV1>(),
         }
@@ -83,6 +100,7 @@ impl HandoffOperation {
     pub fn result_schema_name(self) -> Cow<'static, str> {
         match self {
             Self::IssueTaskHandoff => schema_name::<IssueTaskHandoffResultV1>(),
+            Self::ListTaskHandoffs => schema_name::<ListTaskHandoffsResultV1>(),
             Self::OpenInvestigationHandoff => schema_name::<OpenInvestigationHandoffResultV1>(),
             Self::OpenTaskHandoff => schema_name::<OpenTaskHandoffResultV1>(),
         }

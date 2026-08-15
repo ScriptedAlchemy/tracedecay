@@ -9,7 +9,8 @@ use tracedecay_application::{
     HandoffAuthoritySnapshotV1, HandoffOpenAuthorityError, HandoffOpenAuthorityPort,
     HandoffOpenBindingV1, HandoffOpenError, HandoffOpenExpectationV1, HandoffOpenKindV1,
     HandoffOpenService, HandoffOpenTargetError, HandoffOpenTargetPort, HandoffOpenToken,
-    HandoffSessionId, OpenTaskHandoffRequestV1, RequestContext, RequestId, ResolvedScope,
+    HandoffSessionId, ListTaskHandoffsRequestV1, OpenTaskHandoffRequestV1, RequestContext,
+    RequestId, ResolvedScope, TaskHandoffTokenStateV1,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, TaskId, UtcMicros, WorkVersion, WorktreeId,
@@ -49,6 +50,10 @@ fn digest(fill: char) -> ManifestDigest {
 }
 
 fn context(request_id: &str) -> RequestContext {
+    context_for_actor(request_id, "actor.handoff.runtime-store")
+}
+
+fn context_for_actor(request_id: &str, actor_id: &str) -> RequestContext {
     let scope = ResolvedScope::new(
         id::<ProjectId>("project.handoff.runtime-store"),
         id::<RepositoryId>("repository.handoff.runtime-store"),
@@ -66,17 +71,19 @@ fn context(request_id: &str) -> RequestContext {
         scope.clone(),
         BTreeSet::from([
             CapabilityId::new("capability.handoff.issue_task_handoff").unwrap(),
+            CapabilityId::new("capability.handoff.list_task_handoffs").unwrap(),
             CapabilityId::new("capability.handoff.open_task_handoff").unwrap(),
         ]),
         BTreeSet::from([
             UseCaseId::new("use-case.handoff.issue_task_handoff").unwrap(),
+            UseCaseId::new("use-case.handoff.list_task_handoffs").unwrap(),
             UseCaseId::new("use-case.handoff.open_task_handoff").unwrap(),
         ]),
         DisclosureClass::Metadata,
     )
     .unwrap();
     RequestContext::new(
-        id::<ActorId>("actor.handoff.runtime-store"),
+        id::<ActorId>(actor_id),
         scope,
         grant,
         id::<RequestId>(request_id),
@@ -315,4 +322,91 @@ fn wrong_session_and_expired_grants_are_concealed_without_consuming() {
             .unwrap();
         assert_eq!(consumption, None);
     });
+}
+
+/// The frontier read, against the real durable authority and across a restart.
+///
+/// The two `open_*` operations can only redeem a bearer the caller already
+/// holds. This proves the store can answer the other question — what is
+/// outstanding — from persisted rows alone, with no bearer anywhere in it.
+#[test]
+fn enumeration_reads_the_durable_frontier_secret_free_across_a_restart() {
+    let store = RegisteredWorkflowStore::start("handoff-open-list");
+    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
+    let issue_context = context("request.handoff.issue-list");
+    let service = HandoffOpenService::new(sqlite, CurrentTarget);
+    let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
+    run(service.issue(
+        &issue_context,
+        binding(&issue_context),
+        &token,
+        UtcMicros(1_000_000),
+        UtcMicros(61_000_000),
+    ))
+    .unwrap();
+
+    let session = id::<HandoffSessionId>("lsp-session.handoff.runtime-store");
+    let request = || ListTaskHandoffsRequestV1 {
+        session_id: session.clone(),
+    };
+
+    // Survives a physical restart: the frontier is read from committed rows,
+    // not from anything the issuing process held in memory.
+    drop(service);
+    let store = store.restart("handoff-open-list-restart");
+    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
+    let service = HandoffOpenService::new(sqlite, CurrentTarget);
+
+    let live = run(service.list_task(
+        &context("request.handoff.list-open"),
+        request(),
+        UtcMicros(1_500_000),
+    ))
+    .unwrap();
+    assert_eq!(live.handoffs.len(), 1);
+    assert_eq!(live.open_count, 1);
+    assert_eq!(live.handoffs[0].state, TaskHandoffTokenStateV1::Open);
+    assert!(!live.truncated);
+
+    // No bearer anywhere in the projection, exactly as none is in the table.
+    let rendered = serde_json::to_string(&live).unwrap();
+    assert!(!rendered.contains(TOKEN_SECRET));
+    assert_eq!(live.handoffs[0].token_digest.as_str(), {
+        let expected = token.digest().unwrap();
+        expected.as_str().to_owned()
+    }
+    .as_str());
+
+    // Redeem it, then read again: consumed, not expired, and still one row.
+    run(service.open_task(
+        &context("request.handoff.open-list"),
+        OpenTaskHandoffRequestV1 {
+            token: TOKEN_SECRET.to_owned(),
+            session_id: session.clone(),
+        },
+        authority_snapshot(),
+        UtcMicros(2_000_000),
+    ))
+    .unwrap();
+    let spent = run(service.list_task(
+        &context("request.handoff.list-consumed"),
+        request(),
+        UtcMicros(61_000_000),
+    ))
+    .unwrap();
+    assert_eq!(spent.consumed_count, 1);
+    assert_eq!(spent.expired_count, 0);
+    assert_eq!(spent.handoffs[0].state, TaskHandoffTokenStateV1::Consumed);
+    assert_eq!(spent.handoffs[0].consumed_at, Some(UtcMicros(2_000_000)));
+    assert_eq!(store.count("handoff_open_grants_v1"), 1);
+
+    // Another principal in the same scope and session sees nothing, which is
+    // the same boundary redemption enforces.
+    let other = run(service.list_task(
+        &context_for_actor("request.handoff.list-other", "actor.handoff.other"),
+        request(),
+        UtcMicros(2_500_000),
+    ))
+    .unwrap();
+    assert!(other.handoffs.is_empty());
 }

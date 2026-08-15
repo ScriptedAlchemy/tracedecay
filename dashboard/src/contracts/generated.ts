@@ -237,6 +237,53 @@ export const AnalyticsRecentHookV1Schema = z.object({
 });
 export type AnalyticsRecentHookV1 = z.infer<typeof AnalyticsRecentHookV1Schema>;
 
+/** How a session is attached to the delegation tree above it.
+
+The distinction is load-bearing. A session with no parent and a session
+whose parent the store does not hold both draw at the left margin, but only
+the first one is actually a root: the second is a tree whose top was never
+ingested, and captioning it as a root would assert a delegation boundary
+that was never observed. */
+export const AnalyticsSubagentLinkV1Schema = z.union([z.literal("root"), z.literal("linked"), z.literal("missing_parent"), z.literal("cycle")]);
+export type AnalyticsSubagentLinkV1 = z.infer<typeof AnalyticsSubagentLinkV1Schema>;
+
+/** One session in the subagent delegation tree. */
+export const AnalyticsSubagentNodeV1Schema = z.object({
+  agent: z.string().nullable(),
+  depth: z.number().int().safe(),
+  descendants: z.number().int().safe(),
+  ended_at: z.number().int().safe().nullable(),
+  is_subagent: z.boolean(),
+  link: z.lazy(() => AnalyticsSubagentLinkV1Schema),
+  parent_session_id: z.string().nullable(),
+  parent_tool_use_id: z.string().nullable(),
+  provider: z.string(),
+  session_id: z.string(),
+  started_at: z.number().int().safe().nullable(),
+  title: z.string().nullable(),
+});
+export type AnalyticsSubagentNodeV1 = z.infer<typeof AnalyticsSubagentNodeV1Schema>;
+
+/** The subagent tree: parent/child session edges, not a per-agent rollup.
+
+`nodes` is a pre-order flattening — every node appears after its own parent
+and before that parent's later siblings — so a reader can draw the tree from
+`depth` alone without reassembling edges client-side. */
+export const AnalyticsSubagentTreePayloadV1Schema = z.object({
+  available: z.boolean(),
+  cycle_count: z.number().int().safe(),
+  edge_count: z.number().int().safe(),
+  error: z.string().nullable(),
+  max_depth: z.number().int().safe(),
+  missing_parent_count: z.number().int().safe(),
+  nodes: z.array(z.lazy(() => AnalyticsSubagentNodeV1Schema)),
+  root_count: z.number().int().safe(),
+  sessions_read: z.number().int().safe(),
+  source: z.string(),
+  truncated: z.boolean(),
+});
+export type AnalyticsSubagentTreePayloadV1 = z.infer<typeof AnalyticsSubagentTreePayloadV1Schema>;
+
 export const AnalyticsToolCategoryCountV1Schema = z.object({
   count: z.number().int().safe(),
   tool_category: z.string(),
@@ -2041,6 +2088,10 @@ export type FactStoreCurateRequestV1 = z.infer<typeof FactStoreCurateRequestV1Sc
 export const FeedbackCoverageV1Schema = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
 export type FeedbackCoverageV1 = z.infer<typeof FeedbackCoverageV1Schema>;
 
+/** Strongly typed canonical identity: `FeedbackFindingId`. */
+export const FeedbackFindingIdSchema = z.string();
+export type FeedbackFindingId = z.infer<typeof FeedbackFindingIdSchema>;
+
 export const FeedbackObservationDenominatorsV1Schema = z.object({
   delayed: z.number().int().safe().min(0),
   dropped: z.number().int().safe().min(0),
@@ -2271,6 +2322,21 @@ export const GraphTotalsV1Schema = z.object({
   nodes: z.number().int().safe().min(0),
 });
 export type GraphTotalsV1 = z.infer<typeof GraphTotalsV1Schema>;
+
+export const HandoffOpenKindV1Schema = z.enum(["investigation", "task"]);
+export type HandoffOpenKindV1 = z.infer<typeof HandoffOpenKindV1Schema>;
+
+export const HandoffOpenTargetV1Schema = z.discriminatedUnion("kind", [z.object({
+  finding_id: z.lazy(() => FeedbackFindingIdSchema),
+  kind: z.literal("investigation"),
+  owner_version_digest: z.lazy(() => ManifestDigestSchema),
+}), z.object({
+  kind: z.literal("task"),
+  owner_version_digest: z.lazy(() => ManifestDigestSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+  version: z.number().int().safe().min(0),
+})]);
+export type HandoffOpenTargetV1 = z.infer<typeof HandoffOpenTargetV1Schema>;
 
 export const HistoryRewritePolicyV1Schema = z.literal("forbid_force_and_rebase");
 export type HistoryRewritePolicyV1 = z.infer<typeof HistoryRewritePolicyV1Schema>;
@@ -2520,6 +2586,47 @@ export const LinkAcceptedWorkAttemptRequestV1Schema = z.object({
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 export type LinkAcceptedWorkAttemptRequestV1 = z.infer<typeof LinkAcceptedWorkAttemptRequestV1Schema>;
+
+/** One handoff token, projected for public reading.
+
+Mirrors [`IssueTaskHandoffResultV1`]'s doctrine: the complete binding stays
+inside the daemon authority, and only these identifiers cross the wire. No
+bearer secret exists to leak here — the authority never stored one — and the
+issuer's grant identity and policy digests stay concealed. */
+export const ListedTaskHandoffV1Schema = z.object({
+  consumed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
+  expires_at: z.lazy(() => UtcMicrosSchema),
+  issued_at: z.lazy(() => UtcMicrosSchema),
+  issued_request_id: z.string(),
+  kind: z.lazy(() => HandoffOpenKindV1Schema),
+  session_id: z.string(),
+  state: z.lazy(() => TaskHandoffTokenStateV1Schema),
+  target: z.lazy(() => HandoffOpenTargetV1Schema),
+  token_digest: z.lazy(() => ManifestDigestSchema),
+}).strict();
+export type ListedTaskHandoffV1 = z.infer<typeof ListedTaskHandoffV1Schema>;
+
+/** Enumerates the handoff tokens this caller could redeem in one session.
+
+The two `open_*` operations redeem a bearer the caller already holds; they
+cannot answer "what has been handed to me and not yet taken up". This one
+can, and it does so without any bearer: the request carries no token, and
+the result carries only digests. */
+export const ListTaskHandoffsRequestV1Schema = z.object({
+  session_id: z.string(),
+}).strict();
+export type ListTaskHandoffsRequestV1 = z.infer<typeof ListTaskHandoffsRequestV1Schema>;
+
+/** The handoff-token frontier for one session. */
+export const ListTaskHandoffsResultV1Schema = z.object({
+  consumed_count: z.number().int().min(0),
+  expired_count: z.number().int().min(0),
+  handoffs: z.array(z.lazy(() => ListedTaskHandoffV1Schema)),
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  open_count: z.number().int().min(0),
+  truncated: z.boolean(),
+}).strict();
+export type ListTaskHandoffsResultV1 = z.infer<typeof ListTaskHandoffsResultV1Schema>;
 
 /** Strongly typed algorithm-tagged integrity digest: `LocatorDigest`. */
 export const LocatorDigestSchema = z.string();
@@ -4387,6 +4494,10 @@ export const TaskEvidenceLinkV1Schema = z.object({
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 export type TaskEvidenceLinkV1 = z.infer<typeof TaskEvidenceLinkV1Schema>;
+
+/** Where one enumerated token stands at the observed instant. */
+export const TaskHandoffTokenStateV1Schema = z.union([z.literal("open"), z.literal("consumed"), z.literal("expired")]);
+export type TaskHandoffTokenStateV1 = z.infer<typeof TaskHandoffTokenStateV1Schema>;
 
 /** Strongly typed canonical identity: `TaskId`. */
 export const TaskIdSchema = z.string();

@@ -90,6 +90,88 @@ pub struct AnalyticsAgentsPayloadV1 {
     pub by_agent: Vec<AnalyticsAgentUsageV1>,
 }
 
+/// How a session is attached to the delegation tree above it.
+///
+/// The distinction is load-bearing. A session with no parent and a session
+/// whose parent the store does not hold both draw at the left margin, but only
+/// the first one is actually a root: the second is a tree whose top was never
+/// ingested, and captioning it as a root would assert a delegation boundary
+/// that was never observed.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalyticsSubagentLinkV1 {
+    /// The session records no parent — a genuine top of a delegation tree.
+    Root,
+    /// The parent named by the session is present in this reading.
+    Linked,
+    /// The session names a parent the session store does not hold, so its
+    /// depth is measured from a cut edge rather than from a real root.
+    MissingParent,
+    /// The parent chain closes on itself. Never reachable from a root, so it
+    /// is surfaced at the margin rather than silently dropped.
+    Cycle,
+}
+
+/// One session in the subagent delegation tree.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsSubagentNodeV1 {
+    pub provider: String,
+    pub session_id: String,
+    pub parent_session_id: Option<String>,
+    /// The managed-agent label when the session carries one, else the raw
+    /// `agent_id`. `None` is an unlabeled session, not an unnamed agent.
+    pub agent: Option<String>,
+    pub title: Option<String>,
+    /// Unix SECONDS, as the session store records them — capture parses
+    /// provider stamps with `parse_rfc3339_timestamp`, which yields seconds,
+    /// and normalizes millisecond inputs down to seconds before storing. This
+    /// is not the microsecond convention the Work contracts use, and reading
+    /// it as micros would place every session in 1970.
+    pub started_at: Option<i64>,
+    pub ended_at: Option<i64>,
+    pub is_subagent: bool,
+    /// The tool invocation that spawned this session, when the provider
+    /// recorded one. It is what makes a delegation edge attributable to a
+    /// specific call rather than merely to a parent.
+    pub parent_tool_use_id: Option<String>,
+    /// Distance from this node's tree top. Roots are 0.
+    pub depth: i64,
+    /// Sessions below this one, transitively, excluding itself.
+    pub descendants: i64,
+    pub link: AnalyticsSubagentLinkV1,
+}
+
+/// The subagent tree: parent/child session edges, not a per-agent rollup.
+///
+/// `nodes` is a pre-order flattening — every node appears after its own parent
+/// and before that parent's later siblings — so a reader can draw the tree from
+/// `depth` alone without reassembling edges client-side.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsSubagentTreePayloadV1 {
+    pub available: bool,
+    pub source: String,
+    #[serde(default)]
+    pub error: Option<String>,
+    pub nodes: Vec<AnalyticsSubagentNodeV1>,
+    /// Sessions read for this project before any tree was built. The only
+    /// honest denominator for the counts below.
+    pub sessions_read: i64,
+    /// Nodes whose `link` is `root`.
+    pub root_count: i64,
+    /// Parent/child edges actually resolved within this reading.
+    pub edge_count: i64,
+    /// Deepest `depth` present, so a caption can state the tree's reach
+    /// instead of implying one from the drawn rows.
+    pub max_depth: i64,
+    /// Sessions naming a parent this reading does not hold.
+    pub missing_parent_count: i64,
+    /// Sessions whose parent chain closes on itself.
+    pub cycle_count: i64,
+    /// True when the scan ceiling was reached, so edges may be cut and the
+    /// counts above describe a prefix of the store rather than all of it.
+    pub truncated: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct AnalyticsUnderusedFamilyV1 {
     pub family: String,
@@ -489,6 +571,305 @@ pub async fn agents(
             Json(DashboardEnvelopeV1::ready(
                 scope_from_state(&state),
                 DashboardCoverageV1::complete(count, "managed_agents"),
+                Some(payload),
+            ))
+        }
+        Err(error) => Json(DashboardEnvelopeV1::error(
+            scope_from_state(&state),
+            None,
+            error,
+        )),
+    }
+}
+
+/// Ceiling on sessions read for one subagent-tree answer. A dashboard tree is
+/// drawn, not paged, and an unbounded store would be neither drawable nor
+/// affordable. Reaching it is reported rather than hidden.
+const SUBAGENT_TREE_SESSION_CEILING: i64 = 2_000;
+
+/// One session row as the tree builder needs it, before any edge is resolved.
+struct SubagentSessionRow {
+    provider: String,
+    session_id: String,
+    parent_session_id: Option<String>,
+    agent: Option<String>,
+    title: Option<String>,
+    started_at: Option<i64>,
+    ended_at: Option<i64>,
+    is_subagent: bool,
+    parent_tool_use_id: Option<String>,
+}
+
+fn optional_text(row: &Value, key: &str) -> Option<String> {
+    let value = str_field(row, key).trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// Assemble parent/child session edges into a pre-order tree.
+///
+/// Every input row appears in the output exactly once. Sessions reachable from
+/// a top are emitted under it; sessions that are not reachable from any top —
+/// which can only happen when their parent chain closes on itself — are emitted
+/// afterwards as their own tops, marked `Cycle`, because dropping them would
+/// silently shrink a delegation count the caller is about to read.
+fn build_subagent_tree(rows: Vec<SubagentSessionRow>) -> Vec<AnalyticsSubagentNodeV1> {
+    // Sessions are keyed by (provider, session_id); `parent_session_id` carries
+    // no provider of its own, so an edge is only resolved inside one provider.
+    // Joining across providers would invent delegations between unrelated hosts
+    // that happen to have minted the same session id.
+    let index: BTreeMap<(&str, &str), usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(position, row)| {
+            (
+                (row.provider.as_str(), row.session_id.as_str()),
+                position,
+            )
+        })
+        .collect();
+
+    let mut children: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut link = vec![AnalyticsSubagentLinkV1::Root; rows.len()];
+    for (position, row) in rows.iter().enumerate() {
+        let Some(parent_id) = row.parent_session_id.as_deref() else {
+            continue;
+        };
+        match index.get(&(row.provider.as_str(), parent_id)) {
+            // A session naming itself as its parent is a one-node cycle; it can
+            // never be reached from a top, so it must not be filed as an edge.
+            Some(&parent) if parent != position => {
+                children.entry(parent).or_default().push(position);
+                link[position] = AnalyticsSubagentLinkV1::Linked;
+            }
+            Some(_) => link[position] = AnalyticsSubagentLinkV1::Cycle,
+            None => link[position] = AnalyticsSubagentLinkV1::MissingParent,
+        }
+    }
+
+    // Stable sibling order: when a session started is the reading's own
+    // ordering claim, and the id breaks ties so two reads never disagree.
+    let order_key = |position: usize| {
+        let row = &rows[position];
+        (
+            row.started_at.unwrap_or(i64::MAX),
+            row.session_id.clone(),
+            row.provider.clone(),
+        )
+    };
+    for bucket in children.values_mut() {
+        bucket.sort_by_key(|&position| order_key(position));
+    }
+
+    let mut tops: Vec<usize> = (0..rows.len())
+        .filter(|&position| {
+            matches!(
+                link[position],
+                AnalyticsSubagentLinkV1::Root | AnalyticsSubagentLinkV1::MissingParent
+            )
+        })
+        .collect();
+    tops.sort_by_key(|&position| order_key(position));
+
+    let mut visited = vec![false; rows.len()];
+    let mut preorder: Vec<(usize, i64)> = Vec::with_capacity(rows.len());
+    let walk = |top: usize, visited: &mut Vec<bool>, preorder: &mut Vec<(usize, i64)>| {
+        if visited[top] {
+            return;
+        }
+        // Explicit stack, not recursion: a delegation chain is data, and a
+        // deep one must not be able to overflow the daemon's stack.
+        let mut stack = vec![(top, 0i64)];
+        while let Some((position, depth)) = stack.pop() {
+            if visited[position] {
+                continue;
+            }
+            visited[position] = true;
+            preorder.push((position, depth));
+            if let Some(bucket) = children.get(&position) {
+                for &child in bucket.iter().rev() {
+                    stack.push((child, depth + 1));
+                }
+            }
+        }
+    };
+    for &top in &tops {
+        walk(top, &mut visited, &mut preorder);
+    }
+    // Anything still unvisited sits on a parent cycle. Surfaced at the margin.
+    let stranded: Vec<usize> = (0..rows.len())
+        .filter(|&position| !visited[position])
+        .collect();
+    for position in stranded {
+        link[position] = AnalyticsSubagentLinkV1::Cycle;
+        walk(position, &mut visited, &mut preorder);
+    }
+
+    // Subtree sizes, right to left. Pre-order makes a node's descendants
+    // contiguous behind it, so its direct children are exactly the depth+1
+    // entries sitting on top of the stack when the node is reached.
+    let mut sizes = vec![1i64; preorder.len()];
+    let mut pending: Vec<(i64, i64)> = Vec::new();
+    for slot in (0..preorder.len()).rev() {
+        let depth = preorder[slot].1;
+        let mut size = 1i64;
+        while let Some(&(child_depth, child_size)) = pending.last() {
+            if child_depth != depth + 1 {
+                break;
+            }
+            size += child_size;
+            pending.pop();
+        }
+        sizes[slot] = size;
+        pending.push((depth, size));
+    }
+
+    preorder
+        .into_iter()
+        .enumerate()
+        .map(|(slot, (position, depth))| {
+            let row = &rows[position];
+            AnalyticsSubagentNodeV1 {
+                provider: row.provider.clone(),
+                session_id: row.session_id.clone(),
+                parent_session_id: row.parent_session_id.clone(),
+                agent: row.agent.clone(),
+                title: row.title.clone(),
+                started_at: row.started_at,
+                ended_at: row.ended_at,
+                is_subagent: row.is_subagent,
+                parent_tool_use_id: row.parent_tool_use_id.clone(),
+                depth,
+                descendants: sizes[slot] - 1,
+                link: link[position],
+            }
+        })
+        .collect()
+}
+
+async fn subagent_tree_reading(
+    db: Option<&RegisteredGlobalDb>,
+    project_key: &str,
+) -> Result<AnalyticsSubagentTreePayloadV1, String> {
+    let Some(db) = db else {
+        return Ok(AnalyticsSubagentTreePayloadV1 {
+            available: false,
+            source: "session_store_unavailable".to_owned(),
+            error: None,
+            nodes: Vec::new(),
+            sessions_read: 0,
+            root_count: 0,
+            edge_count: 0,
+            max_depth: 0,
+            missing_parent_count: 0,
+            cycle_count: 0,
+            truncated: false,
+        });
+    };
+
+    let rows = query_rows(
+        db.read_connection(),
+        "SELECT provider,
+                session_id,
+                COALESCE(parent_session_id, '') AS parent_session_id,
+                COALESCE(agent_id, '') AS agent_id,
+                COALESCE(metadata_json, '') AS metadata_json,
+                COALESCE(title, '') AS title,
+                started_at,
+                ended_at,
+                is_subagent,
+                COALESCE(parent_tool_use_id, '') AS parent_tool_use_id
+         FROM sessions
+         -- Either column may carry the project: `project_key` is a provider's
+         -- own label and `project_path` the canonical root. Matching both is
+         -- the convention every scoped session read in `registered_sessions`
+         -- already uses, and matching only one silently empties the tree for
+         -- whichever provider labels its sessions the other way.
+         WHERE (project_key = ?1 OR project_path = ?1)
+         ORDER BY COALESCE(started_at, 0), provider, session_id
+         LIMIT ?2",
+        params![project_key, SUBAGENT_TREE_SESSION_CEILING],
+    )
+    .await
+    .map_err(|error| format!("analytics subagent tree query failed: {error}"))?;
+
+    let sessions_read = rows.len() as i64;
+    let session_rows: Vec<SubagentSessionRow> = rows
+        .iter()
+        .map(|row| {
+            let agent_id = str_field(row, "agent_id");
+            let agent = managed_agent_label_for_session(agent_id, str_field(row, "metadata_json"))
+                .map(str::to_owned)
+                .or_else(|| optional_text(row, "agent_id"));
+            SubagentSessionRow {
+                provider: str_field(row, "provider").to_owned(),
+                session_id: str_field(row, "session_id").to_owned(),
+                parent_session_id: optional_text(row, "parent_session_id"),
+                agent,
+                title: optional_text(row, "title"),
+                started_at: row.get("started_at").and_then(Value::as_i64),
+                ended_at: row.get("ended_at").and_then(Value::as_i64),
+                is_subagent: i64_field(row, "is_subagent") != 0,
+                parent_tool_use_id: optional_text(row, "parent_tool_use_id"),
+            }
+        })
+        .collect();
+
+    let nodes = build_subagent_tree(session_rows);
+    let count_link = |wanted: AnalyticsSubagentLinkV1| {
+        nodes.iter().filter(|node| node.link == wanted).count() as i64
+    };
+    Ok(AnalyticsSubagentTreePayloadV1 {
+        available: true,
+        source: "sessions".to_owned(),
+        error: None,
+        root_count: count_link(AnalyticsSubagentLinkV1::Root),
+        edge_count: count_link(AnalyticsSubagentLinkV1::Linked),
+        missing_parent_count: count_link(AnalyticsSubagentLinkV1::MissingParent),
+        cycle_count: count_link(AnalyticsSubagentLinkV1::Cycle),
+        max_depth: nodes.iter().map(|node| node.depth).max().unwrap_or(0),
+        sessions_read,
+        truncated: sessions_read >= SUBAGENT_TREE_SESSION_CEILING,
+        nodes,
+    })
+}
+
+/// `GET /api/plugins/analytics/subagent-tree` — parent/child session edges for
+/// this project, as a pre-order tree.
+///
+/// The sibling `/agents` route answers a different question: how many sessions
+/// each managed agent was delegated, with no edge between any two of them. This
+/// route answers who delegated to whom. A rollup cannot be folded into a tree
+/// after the fact, which is why both are served.
+pub async fn subagent_tree(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<Option<AnalyticsSubagentTreePayloadV1>>> {
+    let project_key = RegisteredGlobalDb::canonical_project_key(&state.project_root);
+    match subagent_tree_reading(state.lcm_db.as_deref(), &project_key).await {
+        Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&state),
+            Some(payload),
+            "analytics_subagent_tree_source_unavailable",
+        )),
+        Ok(payload) => {
+            let count = payload.nodes.len() as u64;
+            // A ceiling read has no denominator: the store holds an unknown
+            // number of further sessions, so `partial` — which asserts a known
+            // eligible total — would be the wrong claim. Coverage is unknown
+            // with the count actually examined and the reason stated.
+            let coverage = if payload.truncated {
+                let mut coverage = DashboardCoverageV1::unknown();
+                coverage.examined = Some(count);
+                coverage.unit = Some("subagent_sessions".to_owned());
+                coverage
+                    .omission_reasons
+                    .push("analytics_subagent_tree_scan_ceiling_reached".to_owned());
+                coverage
+            } else {
+                DashboardCoverageV1::complete(count, "subagent_sessions")
+            };
+            Json(DashboardEnvelopeV1::ready(
+                scope_from_state(&state),
+                coverage,
                 Some(payload),
             ))
         }
@@ -1701,11 +2082,156 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        AnalyticsDiagnosticsPayloadV1, HOOK_ANALYTICS_WINDOW_ROWS, HookAnalyticsRows,
-        HookAnalyticsWindow, decode_analytics_contract, diagnostics_summary_from_parts,
-        hint_efficacy_from_events, hint_summary_from_events, read_hook_analytics_file,
-        recent_hook_rows, sort_hook_analytics_rows,
+        AnalyticsDiagnosticsPayloadV1, AnalyticsSubagentLinkV1, HOOK_ANALYTICS_WINDOW_ROWS,
+        HookAnalyticsRows, HookAnalyticsWindow, SubagentSessionRow, build_subagent_tree,
+        decode_analytics_contract, diagnostics_summary_from_parts, hint_efficacy_from_events,
+        hint_summary_from_events, read_hook_analytics_file, recent_hook_rows,
+        sort_hook_analytics_rows,
     };
+
+    fn row(session_id: &str, parent: Option<&str>) -> SubagentSessionRow {
+        SubagentSessionRow {
+            provider: "codex".to_owned(),
+            session_id: session_id.to_owned(),
+            parent_session_id: parent.map(str::to_owned),
+            agent: None,
+            title: None,
+            started_at: None,
+            ended_at: None,
+            is_subagent: parent.is_some(),
+            parent_tool_use_id: None,
+        }
+    }
+
+    fn shape(nodes: &[super::AnalyticsSubagentNodeV1]) -> Vec<(&str, i64, i64)> {
+        nodes
+            .iter()
+            .map(|node| (node.session_id.as_str(), node.depth, node.descendants))
+            .collect()
+    }
+
+    #[test]
+    fn tree_nests_children_under_parents_in_preorder_with_subtree_sizes() {
+        let nodes = build_subagent_tree(vec![
+            row("root", None),
+            row("child.a", Some("root")),
+            row("grandchild", Some("child.a")),
+            row("child.b", Some("root")),
+        ]);
+
+        // Pre-order: a node precedes its whole subtree, and `descendants`
+        // counts that subtree without counting the node itself.
+        assert_eq!(
+            shape(&nodes),
+            vec![
+                ("root", 0, 3),
+                ("child.a", 1, 1),
+                ("grandchild", 2, 0),
+                ("child.b", 1, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_session_whose_parent_is_absent_is_a_cut_edge_not_a_root() {
+        let nodes = build_subagent_tree(vec![
+            row("real.root", None),
+            row("orphan", Some("never.ingested")),
+        ]);
+
+        let link = |id: &str| {
+            nodes
+                .iter()
+                .find(|node| node.session_id == id)
+                .map(|node| node.link)
+                .unwrap()
+        };
+        assert_eq!(link("real.root"), AnalyticsSubagentLinkV1::Root);
+        assert_eq!(link("orphan"), AnalyticsSubagentLinkV1::MissingParent);
+        // Both draw at the margin, which is exactly why the link kinds, not the
+        // depth, are what a caption may be built from.
+        assert!(nodes.iter().all(|node| node.depth == 0));
+    }
+
+    #[test]
+    fn cycles_are_surfaced_rather_than_dropped_from_the_count() {
+        let nodes = build_subagent_tree(vec![
+            row("a", Some("b")),
+            row("b", Some("a")),
+            row("self", Some("self")),
+        ]);
+
+        // Every input session is still present — a tree walk that silently lost
+        // them would under-report delegation.
+        assert_eq!(nodes.len(), 3);
+        assert!(
+            nodes
+                .iter()
+                .all(|node| node.link == AnalyticsSubagentLinkV1::Cycle)
+        );
+    }
+
+    #[test]
+    fn edges_never_join_two_providers_that_minted_the_same_session_id() {
+        let child = SubagentSessionRow {
+            provider: "claude".to_owned(),
+            ..row("child", Some("shared.id"))
+        };
+        let nodes = build_subagent_tree(vec![row("shared.id", None), child]);
+
+        // The Claude child names a session id the Codex store also holds. They
+        // are different sessions, so no delegation may be invented between them.
+        let claude = nodes
+            .iter()
+            .find(|node| node.provider == "claude")
+            .expect("claude session retained");
+        assert_eq!(claude.link, AnalyticsSubagentLinkV1::MissingParent);
+        assert_eq!(claude.descendants, 0);
+        assert_eq!(
+            nodes
+                .iter()
+                .find(|node| node.provider == "codex")
+                .map(|node| node.descendants),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn every_input_session_appears_exactly_once() {
+        let nodes = build_subagent_tree(vec![
+            row("root", None),
+            row("child", Some("root")),
+            row("orphan", Some("gone")),
+            row("cycle.a", Some("cycle.b")),
+            row("cycle.b", Some("cycle.a")),
+        ]);
+
+        let mut ids: Vec<&str> = nodes.iter().map(|node| node.session_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["child", "cycle.a", "cycle.b", "orphan", "root"]);
+    }
+
+    #[test]
+    fn an_empty_store_builds_an_empty_tree_without_panicking() {
+        assert!(build_subagent_tree(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn a_deep_chain_does_not_overflow_the_stack() {
+        // The walk is iterative on purpose: delegation depth is data, and a
+        // recursive walk would let a pathological store crash the daemon.
+        let depth = 10_000usize;
+        let mut rows = vec![row("session.0", None)];
+        for step in 1..depth {
+            let parent = format!("session.{}", step - 1);
+            rows.push(row(&format!("session.{step}"), Some(&parent)));
+        }
+
+        let nodes = build_subagent_tree(rows);
+        assert_eq!(nodes.len(), depth);
+        assert_eq!(nodes[0].descendants, depth as i64 - 1);
+        assert_eq!(nodes[depth - 1].depth, depth as i64 - 1);
+    }
 
     #[test]
     fn unavailable_diagnostics_value_decodes_to_the_canonical_payload() {

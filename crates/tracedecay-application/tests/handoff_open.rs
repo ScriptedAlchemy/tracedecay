@@ -7,10 +7,10 @@ use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     HandoffAuthoritySnapshotV1, HandoffOpenAuthorityError, HandoffOpenAuthorityPort,
     HandoffOpenBindingV1, HandoffOpenConsumeOutcomeV1, HandoffOpenError, HandoffOpenExpectationV1,
-    HandoffOpenGrantV1, HandoffOpenService, HandoffOpenTargetError, HandoffOpenTargetPort,
-    HandoffOpenToken, HandoffSessionId, IssueTaskHandoffRequestV1,
-    OpenInvestigationHandoffRequestV1, OpenTaskHandoffRequestV1, RequestContext, RequestId,
-    ResolvedScope,
+    HandoffOpenGrantV1, HandoffOpenListFilterV1, HandoffOpenListingV1, HandoffOpenService,
+    HandoffOpenTargetError, HandoffOpenTargetPort, HandoffOpenToken, HandoffSessionId,
+    IssueTaskHandoffRequestV1, ListTaskHandoffsRequestV1, OpenInvestigationHandoffRequestV1,
+    OpenTaskHandoffRequestV1, RequestContext, RequestId, ResolvedScope, TaskHandoffTokenStateV1,
 };
 use tracedecay_domain::feedback::FeedbackFindingId;
 use tracedecay_domain::{
@@ -48,6 +48,38 @@ impl HandoffOpenAuthorityPort for MemoryAuthority {
             .grants
             .insert(grant.token_digest().clone(), grant.clone());
         Ok(grant.clone())
+    }
+
+    fn list(
+        &self,
+        filter: &HandoffOpenListFilterV1,
+        limit: u32,
+    ) -> Result<Vec<HandoffOpenListingV1>, HandoffOpenAuthorityError> {
+        let state = self.state.lock().unwrap();
+        let mut listings: Vec<HandoffOpenListingV1> = state
+            .grants
+            .values()
+            .filter(|grant| filter.matches(grant.context()))
+            .map(|grant| HandoffOpenListingV1 {
+                grant: grant.clone(),
+                consumed_at: match state.consumptions.get(grant.token_digest()) {
+                    Some(HandoffOpenConsumeOutcomeV1::Consumed(consumption)) => {
+                        Some(*consumption.consumed_at())
+                    }
+                    _ => None,
+                },
+            })
+            .collect();
+        // Newest issuance first, matching the durable authority's ordering.
+        listings.sort_by(|left, right| {
+            right
+                .grant
+                .issued_at()
+                .cmp(left.grant.issued_at())
+                .then_with(|| left.grant.token_digest().cmp(right.grant.token_digest()))
+        });
+        listings.truncate(limit as usize);
+        Ok(listings)
     }
 
     fn resolve(
@@ -163,11 +195,13 @@ fn context_for_actor(request_id: &str, actor_id: &str) -> RequestContext {
     let scope = scope();
     let capability_ids = [
         "capability.handoff.issue_task_handoff",
+        "capability.handoff.list_task_handoffs",
         "capability.handoff.open_investigation_handoff",
         "capability.handoff.open_task_handoff",
     ];
     let use_case_ids = [
         "use-case.handoff.issue_task_handoff",
+        "use-case.handoff.list_task_handoffs",
         "use-case.handoff.open_investigation_handoff",
         "use-case.handoff.open_task_handoff",
     ];
@@ -544,4 +578,176 @@ fn token_debug_and_request_debug_never_expose_the_secret() {
     let debug = format!("{request:?}");
     assert!(!debug.contains(&"z".repeat(48)));
     assert!(debug.contains("[REDACTED]"));
+}
+
+/// The enumeration answers the question the two `open_*` operations cannot:
+/// what has been handed to me that I have not taken up.
+#[tokio::test]
+async fn enumeration_reports_open_consumed_and_expired_without_any_bearer() {
+    let issue_context = context("request.issue-for-list");
+    let binding = task_binding(&issue_context);
+    let service = HandoffOpenService::new(
+        MemoryAuthority::default(),
+        CurrentTargets::all_current(std::slice::from_ref(&binding)),
+    );
+    let session = HandoffSessionId::new("lsp-session.task").unwrap();
+
+    service
+        .issue_task(
+            &issue_context,
+            IssueTaskHandoffRequestV1 {
+                token: "p".repeat(48),
+                session_id: session.clone(),
+                task_id: TaskId::new("task.handoff").unwrap(),
+                version: WorkVersion::new(9).unwrap(),
+                recipient_actor_id: issue_context.actor().clone(),
+            },
+            authority(),
+            ISSUED_AT,
+        )
+        .await
+        .unwrap();
+
+    // Inside the window the token is live and nobody has spent it.
+    let live = service
+        .list_task(
+            &context("request.list-open"),
+            ListTaskHandoffsRequestV1 {
+                session_id: session.clone(),
+            },
+            ISSUED_AT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(live.handoffs.len(), 1);
+    assert_eq!(live.open_count, 1);
+    assert_eq!(live.consumed_count, 0);
+    assert_eq!(live.expired_count, 0);
+    assert!(!live.truncated);
+    assert_eq!(live.observed_at, ISSUED_AT);
+    assert_eq!(live.handoffs[0].state, TaskHandoffTokenStateV1::Open);
+    assert_eq!(live.handoffs[0].consumed_at, None);
+    assert_eq!(live.handoffs[0].expires_at, EXPIRES_AT);
+
+    // Past its window and still unredeemed, it is a DROPPED handoff. It must
+    // remain visible: an expiry that vanished from the frontier would read as
+    // work that was picked up.
+    let lapsed = service
+        .list_task(
+            &context("request.list-expired"),
+            ListTaskHandoffsRequestV1 {
+                session_id: session.clone(),
+            },
+            EXPIRES_AT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(lapsed.handoffs.len(), 1, "an expiry must not disappear");
+    assert_eq!(lapsed.expired_count, 1);
+    assert_eq!(lapsed.open_count, 0);
+    assert_eq!(lapsed.handoffs[0].state, TaskHandoffTokenStateV1::Expired);
+
+    // After redemption it reads as consumed, and stays consumed even when read
+    // after its window closed.
+    service
+        .open_task(
+            &context("request.open-for-list"),
+            OpenTaskHandoffRequestV1 {
+                token: "p".repeat(48),
+                session_id: session.clone(),
+            },
+            authority(),
+            UtcMicros(2_000_000),
+        )
+        .await
+        .unwrap();
+    let spent = service
+        .list_task(
+            &context("request.list-consumed"),
+            ListTaskHandoffsRequestV1 {
+                session_id: session.clone(),
+            },
+            EXPIRES_AT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(spent.consumed_count, 1);
+    assert_eq!(spent.expired_count, 0, "a redeemed token was not dropped");
+    assert_eq!(spent.handoffs[0].state, TaskHandoffTokenStateV1::Consumed);
+    assert_eq!(spent.handoffs[0].consumed_at, Some(UtcMicros(2_000_000)));
+
+    // Nothing in the projection is or contains the bearer.
+    let rendered = serde_json::to_string(&spent).unwrap();
+    assert!(
+        !rendered.contains(&"p".repeat(48)),
+        "the enumeration must never carry the bearer secret"
+    );
+}
+
+/// Listing is bounded by exactly what redemption is bounded by.
+#[tokio::test]
+async fn enumeration_conceals_grants_the_caller_could_not_have_redeemed() {
+    let issue_context = context("request.issue-scoped");
+    let binding = task_binding(&issue_context);
+    let service = HandoffOpenService::new(
+        MemoryAuthority::default(),
+        CurrentTargets::all_current(std::slice::from_ref(&binding)),
+    );
+    let session = HandoffSessionId::new("lsp-session.task").unwrap();
+
+    service
+        .issue_task(
+            &issue_context,
+            IssueTaskHandoffRequestV1 {
+                token: "q".repeat(48),
+                session_id: session.clone(),
+                task_id: TaskId::new("task.handoff").unwrap(),
+                version: WorkVersion::new(9).unwrap(),
+                recipient_actor_id: issue_context.actor().clone(),
+            },
+            authority(),
+            ISSUED_AT,
+        )
+        .await
+        .unwrap();
+
+    // A different principal in the same scope and session sees nothing. This
+    // is the same boundary `open_task` enforces, so enumeration hands out no
+    // authority the caller did not already have.
+    let other = service
+        .list_task(
+            &context_for_actor("request.list-other", "actor.other"),
+            ListTaskHandoffsRequestV1 {
+                session_id: session.clone(),
+            },
+            ISSUED_AT,
+        )
+        .await
+        .unwrap();
+    assert!(other.handoffs.is_empty());
+    assert_eq!(other.open_count, 0);
+
+    // A different session likewise sees nothing.
+    let elsewhere = service
+        .list_task(
+            &context("request.list-elsewhere"),
+            ListTaskHandoffsRequestV1 {
+                session_id: HandoffSessionId::new("lsp-session.other").unwrap(),
+            },
+            ISSUED_AT,
+        )
+        .await
+        .unwrap();
+    assert!(elsewhere.handoffs.is_empty());
+
+    // The rightful recipient still sees it.
+    let mine = service
+        .list_task(
+            &context("request.list-mine"),
+            ListTaskHandoffsRequestV1 { session_id: session },
+            ISSUED_AT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(mine.handoffs.len(), 1);
 }

@@ -1477,6 +1477,10 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route("/api/observatory", get(analytics_api::observatory))
         .route("/api/plugins/analytics/agents", get(analytics_api::agents))
+        .route(
+            "/api/plugins/analytics/subagent-tree",
+            get(analytics_api::subagent_tree),
+        )
         .route("/api/plugins/analytics/hints", get(analytics_api::hints))
         .route("/api/plugins/analytics/usage", get(analytics_api::usage))
         .route(

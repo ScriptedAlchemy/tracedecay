@@ -240,6 +240,10 @@ pub(super) async fn execute_handoff_application(
             .await
             .and_then(|grant| tracedecay_application::IssueTaskHandoffResultV1::from_grant(&grant))
             .map(HandoffApplicationResult::IssueTask),
+        HandoffApplicationInvocationV1::ListTaskHandoffs(request) => service
+            .list_task(&context, request, observed_at)
+            .await
+            .map(HandoffApplicationResult::ListTask),
         HandoffApplicationInvocationV1::OpenInvestigationHandoff(request) => service
             .open_investigation(&context, request, authority_snapshot, observed_at)
             .await
@@ -349,6 +353,7 @@ fn handoff_request_context(
 
 enum HandoffApplicationResult {
     IssueTask(tracedecay_application::IssueTaskHandoffResultV1),
+    ListTask(tracedecay_application::ListTaskHandoffsResultV1),
     Investigation(tracedecay_application::OpenInvestigationHandoffResultV1),
     Task(tracedecay_application::OpenTaskHandoffResultV1),
 }
@@ -379,6 +384,20 @@ fn complete_handoff_effect(
             deadline,
         )
         .map(HandoffApplicationOutcomeV1::IssueTaskHandoff),
+        // The read takes the evidence path, not `handoff_effect`. Minting an
+        // effect id, an idempotency key and a durable effect receipt for an
+        // operation that committed nothing would put a permanent record of a
+        // mutation that never happened into the reconciliation ledger.
+        HandoffApplicationResult::ListTask(result) => handoff_evidence(
+            registered,
+            context,
+            operation_key,
+            use_case,
+            result,
+            observed_at,
+            deadline,
+        )
+        .map(HandoffApplicationOutcomeV1::ListTaskHandoffs),
         HandoffApplicationResult::Investigation(result) => handoff_effect(
             registered,
             context,
@@ -414,6 +433,93 @@ fn complete_handoff_effect(
             outcome,
         },
     )
+}
+
+/// The read path: an evidence packet for an enumeration that commits nothing.
+///
+/// Deliberately NOT `handoff_effect`. That function mints an `EffectId`, an
+/// idempotency key and a `DurableEffect` receipt, all of which assert a
+/// committed state change. This operation reads the grant store and leaves it
+/// byte-identical, so it carries an operation receipt and a coverage claim
+/// instead — and the coverage claim is only `Complete` when the enumeration did
+/// not hit its ceiling.
+fn handoff_evidence(
+    registered: &RegisteredWorkRuntime,
+    context: &RequestContext,
+    operation_key: &str,
+    use_case: UseCaseId,
+    result: tracedecay_application::ListTaskHandoffsResultV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+) -> Result<
+    ApplicationOutcome<tracedecay_application::ListTaskHandoffsResultV1>,
+    ApplicationContractError,
+> {
+    let policy_digest = canonical_sha256(&(
+        "tracedecay.daemon.handoff-policy.v1",
+        &registered.policy_digest,
+        &registered.grant.digest,
+        operation_key,
+        &use_case,
+    ))?;
+    let policy = PolicyDecisionRef::new(
+        format!("policy.daemon.handoff.{operation_key}.v1"),
+        1,
+        policy_digest,
+        ComponentVersion::new("tracedecay.daemon.handoff-policy.v1").map_err(|_| {
+            ApplicationContractError::Inconsistent {
+                field: "handoff policy evaluator",
+            }
+        })?,
+    )?;
+    let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
+    let execution = OperationReceipt::completed(
+        observed_at,
+        current_micros(),
+        deadline,
+        OperationBudgetUsage::default(),
+    )?;
+    let returned = result.handoffs.len() as u64;
+    // A truncated read has no eligible denominator: the store holds an unknown
+    // number of further grants past the ceiling. Claiming `Complete` over the
+    // rows that happened to fit would be a coverage lie.
+    let coverage = if result.truncated {
+        EvidenceCoverage {
+            requested_domains: vec![EvidenceDomain::Operational],
+            visited: Some(returned),
+            eligible: None,
+            returned,
+            completeness: CoverageCompleteness::Partial,
+            domains: vec![CoverageDomainState {
+                domain: EvidenceDomain::Operational,
+                completeness: CoverageCompleteness::Partial,
+            }],
+        }
+    } else {
+        EvidenceCoverage::complete(vec![EvidenceDomain::Operational], returned, returned, returned)?
+    };
+    coverage.validate()?;
+    Ok(ApplicationOutcome::Evidence(EvidencePacket {
+        temporal: TemporalState::current(execution.ended_at),
+        authority,
+        evidence_authorities: Vec::new(),
+        coverage,
+        omissions: Vec::new(),
+        scores: Vec::new(),
+        contributions: Vec::new(),
+        page: PageState::first_page(
+            SortContractId::new("sort.handoff.list-task.issued-desc.v1").map_err(|_| {
+                ApplicationContractError::Inconsistent {
+                    field: "handoff list sort contract",
+                }
+            })?,
+            tracedecay_application::MAX_HANDOFF_LIST_RESULTS_V1.into(),
+            (!result.truncated).then_some(returned),
+            returned,
+        )?,
+        execution,
+        payload: Some(result),
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]

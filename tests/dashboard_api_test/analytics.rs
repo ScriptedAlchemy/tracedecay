@@ -634,6 +634,89 @@ fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
     });
 }
 
+/// The subagent tree journey: seeded parent/child sessions, through the mounted
+/// route, out as a pre-order tree with real edges.
+///
+/// This is the measure the sibling `/agents` rollup cannot make. The same store
+/// answers that route with four independent per-agent counts; here it must
+/// answer with the delegation arrows between them, or the Agents workspace is
+/// back to showing a rollup captioned as a tree.
+#[test]
+fn subagent_tree_route_answers_seeded_delegation_edges_as_a_tree() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(true).await;
+        let agent = http_agent();
+
+        let (status, response) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/analytics/subagent-tree",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(response["schema_revision"], 1);
+
+        let payload = &response["payload"];
+        assert_eq!(payload["available"], true);
+        assert_eq!(payload["source"], "sessions");
+        assert_eq!(payload["truncated"], false);
+
+        // One seeded root plus its four seeded subagents.
+        assert_eq!(payload["sessions_read"], 5);
+        assert_eq!(payload["root_count"], 1);
+        assert_eq!(payload["edge_count"], 4);
+        assert_eq!(payload["max_depth"], 1);
+        assert_eq!(payload["missing_parent_count"], 0);
+        assert_eq!(payload["cycle_count"], 0);
+
+        let nodes = payload["nodes"].as_array().expect("tree nodes");
+        assert_eq!(nodes.len(), 5);
+
+        // Pre-order: the root leads, and it owns every other session.
+        assert_eq!(nodes[0]["session_id"], "analytics-session");
+        assert_eq!(nodes[0]["depth"], 0);
+        assert_eq!(nodes[0]["link"], "root");
+        assert_eq!(
+            nodes[0]["descendants"], 4,
+            "the root must own the whole delegated subtree"
+        );
+
+        for child in &nodes[1..] {
+            assert_eq!(child["depth"], 1, "every seeded subagent is one level down");
+            assert_eq!(child["link"], "linked");
+            assert_eq!(child["parent_session_id"], "analytics-session");
+            assert_eq!(child["is_subagent"], true);
+        }
+
+        // The edge set is the point of the route: without it these five rows
+        // are the same five islands `/agents` already served.
+        let mut delegated: Vec<&str> = nodes[1..]
+            .iter()
+            .map(|child| child["session_id"].as_str().expect("session id"))
+            .collect();
+        delegated.sort_unstable();
+        assert_eq!(
+            delegated,
+            vec![
+                "subagent-code-explorer",
+                "subagent-code-health-auditor",
+                "subagent-session-historian",
+                "subagent-worker",
+            ]
+        );
+
+        // Coverage is a real denominator, not a decoration.
+        assert_eq!(response["coverage"]["completeness"], "complete");
+        assert_eq!(response["coverage"]["unit"], "subagent_sessions");
+        assert_eq!(response["coverage"]["denominator"], 5);
+    });
+}
+
 #[test]
 fn analytics_api_filters_fallback_events_to_current_project() {
     let _lock = ENV_LOCK
