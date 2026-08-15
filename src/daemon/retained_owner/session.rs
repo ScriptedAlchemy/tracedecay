@@ -54,7 +54,10 @@ mod refresh;
 mod retained_effect_tests;
 
 const MESSAGE_SEARCH_ROOT_SESSION_ID: &str = "session.message-search.root";
-const MESSAGE_SEARCH_CONTEXT_BYTES: u64 = 64 * 1024;
+/// The admitted retrieval ceiling; a larger context budget is refused rather
+/// than trimmed.
+const MESSAGE_SEARCH_CONTEXT_BYTES: u64 =
+    crate::daemon::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES;
 
 pub(super) struct ProjectRetainedSessionAuthoritiesV1 {
     pub(super) project_root: PathBuf,
@@ -383,6 +386,13 @@ impl MessageSearchInput {
                 })
                 .with_compatibility_filter_digest(filter_digest.as_str().to_owned())
                 .with_semantic_filter(semantic_filter)
+                // Without this the query carries the multi-MiB
+                // `ExecutionLimits::default()`, which the admitted binding
+                // refuses terminally — every message search would answer
+                // `Saturated` instead of searching.
+                .with_execution_limits(
+                    crate::daemon::session_retrieval::admitted_execution_limits(self.limit),
+                )
         })
     }
 

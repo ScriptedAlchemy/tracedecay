@@ -39,10 +39,11 @@ use crate::daemon::session_retrieval::{
 use crate::timeutil::SearchTimeBound;
 
 const MAX_RESULTS: usize = 100;
-// Keep this at or below APPLICATION_RETRIEVAL_MAX_BYTES in
-// session_retrieval/admitted.rs. Default ExecutionLimits are multi-MiB and
-// fail within_request_budgets as a persistent BudgetExhausted / Saturated.
-const ADMITTED_RETRIEVAL_BYTE_LIMIT: usize = 64 * 1024;
+// The admitted retrieval ceiling. Default ExecutionLimits are multi-MiB and
+// fail within_request_budgets as a persistent BudgetExhausted / Saturated, so
+// every query built here is sized against the one shared constant.
+const ADMITTED_RETRIEVAL_BYTE_LIMIT: usize =
+    crate::daemon::session_retrieval::APPLICATION_RETRIEVAL_MAX_BYTES as usize;
 const DEFAULT_CONTENT_LIMIT: usize = 4_096;
 const MAX_CONTENT_LIMIT: usize = 8_192;
 const MAX_LOAD_CONTENT_LIMIT: usize = 20_000;

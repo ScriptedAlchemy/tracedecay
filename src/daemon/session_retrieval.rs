@@ -33,7 +33,7 @@ use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use crate::tracedecay::TraceDecay;
 use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionRecord};
 use tracedecay_temporal_query::context::{TokenPolicy, VersionedTokenEstimator};
-use tracedecay_temporal_query::ports::TemporalExecutionSnapshot;
+use tracedecay_temporal_query::ports::{ExecutionLimits, TemporalExecutionSnapshot};
 use tracedecay_temporal_query::ranking::RankedCandidate;
 use tracedecay_temporal_query::{TemporalHydratedResult, TemporalKernelResult};
 
@@ -51,7 +51,32 @@ const MESSAGE_SEARCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// exceed the binding's budgets, so every query built for the admitted path
 /// must be sized against this constant rather than the multi-MiB
 /// `ExecutionLimits::default()` or [`MESSAGE_SEARCH_MAX_BYTES`].
-const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
+pub(crate) const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
+
+/// Execution limits an admitted application retrieval of `limit` items may ask
+/// for.
+///
+/// The admitted binding checks exactly four things: the three *total* byte
+/// limits against [`APPLICATION_RETRIEVAL_MAX_BYTES`], and that the hydration
+/// item count covers the requested page. The defaults are multi-MiB and are
+/// rejected outright, which reads to the caller as a terminal `Saturated`
+/// rather than a smaller answer, so those four are the ones this sizes.
+///
+/// Nothing else is narrowed. Candidate and record item counts are the pool the
+/// ranker draws from, not the page it returns: clamping them to `limit` would
+/// leave a ten-result search ranking ten candidates instead of the default
+/// 256, silently trading recall for a budget the binding never asked about.
+pub(crate) fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
+    let bytes = usize::try_from(APPLICATION_RETRIEVAL_MAX_BYTES).unwrap_or(usize::MAX);
+    let defaults = ExecutionLimits::default();
+    ExecutionLimits {
+        candidate_total_bytes: bytes.min(defaults.candidate_total_bytes),
+        record_total_bytes: bytes.min(defaults.record_total_bytes),
+        hydration_total_bytes: bytes.min(defaults.hydration_total_bytes),
+        hydration_limit: defaults.hydration_limit.max(limit),
+        ..defaults
+    }
+}
 
 mod admitted;
 mod contract;

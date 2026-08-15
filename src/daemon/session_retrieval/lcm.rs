@@ -12,7 +12,6 @@ use tracedecay_sessions::runtime::lcm::{
 };
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::ContextBudget;
-use tracedecay_temporal_query::ports::ExecutionLimits;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_usecases::session::{
     SessionDataFreshness, SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
@@ -142,7 +141,10 @@ impl DaemonSessionRetrievalService {
         )
         .ok()?
         .with_retrieval_scope(retrieval_scope)
-        .with_execution_limits(lcm_direct_execution_limits())
+        // The direct query resolves exactly one anchor and the caller then
+        // slices its content, so the multi-MiB defaults buy nothing — and the
+        // admitted binding rejects them outright.
+        .with_execution_limits(super::admitted_execution_limits(1))
         .with_compatibility_filter_digest(binding);
         Some(match direct_anchor {
             Some(anchor_id) => query.with_direct_anchor(anchor_id),
@@ -606,28 +608,6 @@ impl DaemonSessionRetrievalService {
                 retrieval,
             },
         }
-    }
-}
-
-/// Execution limits for a single-anchor LCM describe/expand retrieval.
-///
-/// The direct query resolves exactly one anchor and the caller then slices its
-/// content, so the multi-MiB `ExecutionLimits::default()` buys nothing — and it
-/// is rejected outright, because the admitted binding refuses any request whose
-/// candidate, record, or hydration byte limits exceed
-/// [`APPLICATION_RETRIEVAL_MAX_BYTES`].
-fn lcm_direct_execution_limits() -> ExecutionLimits {
-    let bytes = usize::try_from(APPLICATION_RETRIEVAL_MAX_BYTES)
-        .unwrap_or(usize::MAX)
-        .min(ExecutionLimits::default().candidate_total_bytes);
-    ExecutionLimits {
-        candidate_total_bytes: bytes,
-        candidate_item_bytes: bytes,
-        record_total_bytes: bytes,
-        record_item_bytes: bytes,
-        hydration_total_bytes: bytes,
-        hydration_payload_bytes: bytes,
-        ..ExecutionLimits::default()
     }
 }
 
