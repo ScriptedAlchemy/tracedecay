@@ -404,6 +404,22 @@ the commit as attribution evidence.
 
 ## Remaining work by lane
 
+- CERTIFICATION RECORD 2026-08-15 (serial run, clean worktree at
+  `d7c4a4c43`/`77076ea07`, isolated from in-flight working-tree edits):
+  `grafeo_restart_acceptance` PASS (1/1, 17s);
+  `daemon_suite indexing_lifecycle` FAIL —
+  `mounted_incremental_lifecycle_preserves_only_complete_compatible_generations`
+  times out waiting for a terminal generation (real at committed HEAD; its
+  daemon log shows `full_upgrade_degraded` with "Work evidence retrieval
+  scope does not match the mounted project session authority", guard from
+  `3574fa695` — under active debugging by the session that added
+  daemon-log-on-timeout diagnostics in `29a591519`);
+  `typed_terminal_restart_acceptance` CLI legs PASS (2/2, incl.
+  ResetRequired), WIP transport legs FAIL (2/2, details on the typed-terminal
+  bullet below); `daemon_suite advanced_workflow` FAIL at the 900s semantic
+  dispatch ceiling with 1801.6s wall — deterministic cost regression, see
+  the semantic bullet.
+
 ### Work and TaskSession retrieval
 
 - Already implemented at HEAD (verification, not construction): activate a
@@ -456,15 +472,21 @@ the commit as attribution evidence.
   CLI, and both SDKs. Prove the partial-effect committed receipt and reset-only
   legal action survive each boundary and physical daemon restart; unit mappers
   and synthetic SDK envelopes are necessary but not final journey evidence.
-  PARTIAL 2026-08-14: the CLI leg is proven —
-  `tests/typed_terminal_restart_acceptance.rs` (`e56fadeff`) drives a real
-  commit-barrier-induced PartialEffect through the CLI transport across a
-  physical daemon kill/respawn with the committed receipt preserved, on top of
-  `a941a058e` (an expired effect keeps its authoritative terminal) and
-  `9b92818cc` (caller deadline on `tools/call` with bounded response grace).
-  The ResetRequired leg is `#[ignore]`d with unweakened assertions — real
-  product gap: project-open never settles a reset-required store. HTTP, MCP,
-  and both SDK legs remain unbuilt.
+  PARTIAL, updated 2026-08-15: both CLI legs are proven green in a clean
+  worktree at `d7c4a4c43` — PartialEffect (`e56fadeff` lineage) AND the
+  ResetRequired leg, which was un-`#[ignore]`d by `c962cd627` after the
+  project-open settling gap was fixed; the reset-only legal action survives
+  a physical restart via CLI. The HTTP/MCP/SDK legs are in flight in
+  `tests/typed_terminal_restart_acceptance/transport_boundaries.rs`
+  (checkpoint `29a591519`; module made resolvable by `2d63021e6`). First
+  full run of those WIP legs, 2026-08-15: both fail with actionable
+  reasons — `partial_effect_survives_http_mcp_and_rust_sdk_across_restart`
+  settles without ever reaching the durable commit boundary, and
+  `reset_required_survives_http_mcp_and_rust_sdk_across_restart` gets a raw
+  JSON-RPC `-32603` whose `data` carries
+  `kind:"reset_required"`/reason/retryable instead of the typed problem
+  envelope the assertion requires (the MCP surface is not wrapping the
+  reset terminal as a problem envelope).
 - DONE 2026-08-10 (verified 2026-08-13): the ten `schema_unavailable`
   application bindings were repaired in `d2b094ca7` — the primitive-surface
   read operations gained typed schemas in
