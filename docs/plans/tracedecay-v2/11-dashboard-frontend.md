@@ -91,8 +91,14 @@ truthful rather than being replaced with fabricated values.
   frontier), and no read model attributes a subagent TREE — parent/child session
   edges — so Agents still shows subagent delegation as a per-agent session
   rollup rather than as a tree.
-- **Plan 11 owner:** `redacted` and `locked` are defined in `StateChip`
-  but no workspace currently exercises them with supplied backend state.
+- CLOSED 2026-08-15 (was Plan 11 owner): `redacted` and `locked` are
+  exercised with supplied backend state — `d1005fb6d` drives both through
+  the Sessions workspace via canonical daemon envelopes
+  (`SessionInspector.dom.test.tsx`), `c250cb434` renders server-supplied
+  `locked` and `redacted` in Observatory (`CanonicalObservations.dom.test.tsx`),
+  and `envelope.test.ts` pins the 405 read-only-scope → `locked` mapping.
+  `StateChip.dom.test.tsx` holds a compile-time exhaustiveness gate over all
+  18 `DomainStateKind` states. Verified 48/48 on 2026-08-15.
 - **Plan 16 owner:** Explorer's multi-project/repository/worktree pivots
   remain future multi-root work; the core delivery still owns the single-root time pivot.
 - **Owners: Plans 24 and 32; Plan 17 for public handoff:**
