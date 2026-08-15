@@ -9,6 +9,11 @@
 
 #[cfg(all(unix, any(test, feature = "test-transport")))]
 use super::bootstrap::set_owner_only_permissions;
+// The parent `daemon` module imports this under `cfg(test)` only, so
+// `use super::*` cannot carry it into a `test-transport` build. Import it
+// directly under the same gate the harness itself is compiled behind.
+#[cfg(any(test, feature = "test-transport"))]
+use super::project_composition::daemon_transcript_source_home;
 #[cfg(any(test, feature = "test-transport"))]
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
 #[cfg(any(test, feature = "test-transport"))]
@@ -56,8 +61,28 @@ pub struct ProductionProjectCompositionHarnessV1 {
     resources: Option<ProductionProjectHarnessResourcesV1>,
 }
 
+/// The isolated profile the composition owns inside one isolation root.
+///
+/// Resolvable before `open` so a caller can predict the composed layout.
+#[cfg(any(test, feature = "test-transport"))]
+fn composed_profile_root(isolation_root: &Path) -> PathBuf {
+    isolation_root.join("profile")
+}
+
 #[cfg(any(test, feature = "test-transport"))]
 impl ProductionProjectCompositionHarnessV1 {
+    /// Where the composed daemon reads host transcripts from, resolvable
+    /// before `open`.
+    ///
+    /// The composition pins its transcript source home to its own isolated
+    /// layout rather than reading the ambient process `HOME`, so a journey
+    /// that seeds a real transcript must write it here — a transcript written
+    /// under `$HOME` is invisible to the composition and the session lane
+    /// stays empty forever.
+    pub fn transcript_source_home(isolation_root: impl AsRef<Path>) -> Option<PathBuf> {
+        daemon_transcript_source_home(&composed_profile_root(isolation_root.as_ref()))
+    }
+
     pub async fn open(
         isolation_root: impl AsRef<Path>,
         project_roots: impl IntoIterator<Item = PathBuf>,
@@ -121,7 +146,7 @@ impl ProductionProjectCompositionHarnessV1 {
             }
         }
 
-        let profile_root = isolation_root.join("profile");
+        let profile_root = composed_profile_root(&isolation_root);
         std::fs::create_dir_all(&profile_root).map_err(|error| TraceDecayError::Config {
             message: format!(
                 "failed to create isolated production-composition profile '{}': {error}",
