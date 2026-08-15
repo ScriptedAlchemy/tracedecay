@@ -401,6 +401,21 @@ fn initialize_project(home: &Path, project: &Path) {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/managed_run_overlay"),
         project,
     );
+    // The V2 code index is Git-authority-based end to end: candidate paths come
+    // from the gix worktree classification, generations are minted from Git tree
+    // captures, and `worktree_stat_signature_for` opens the repository to prove
+    // freshness. A plain directory therefore never seats a serving generation —
+    // `mount_worktree_inner` documents that missing Git authority leaves it
+    // empty — so every code-graph-backed route reads `failed` here. Enrol the
+    // fixture as a repository before `tracedecay init`, exactly as this file's
+    // `lsp_runtime_fixture` and `git_runtime_fixture` already do; initializing
+    // Git afterwards would re-key the project onto a different worktree
+    // identity than the one the daemon already registered.
+    git(project, &["init", "--quiet"]);
+    git(project, &["config", "user.name", "TraceDecay Test"]);
+    git(project, &["config", "user.email", "tracedecay@example.com"]);
+    git(project, &["add", "."]);
+    git(project, &["commit", "--quiet", "-m", "base"]);
     common::initialize_tracedecay_cli_project(home, project);
 }
 
@@ -604,7 +619,9 @@ async fn assert_application_transport_parity(
         };
         assert_eq!(
             evidence.execution.termination,
-            OperationTermination::Completed
+            OperationTermination::Completed,
+            "case={case} op={}",
+            operation.as_str()
         );
         assert_eq!(evidence.coverage.returned, evidence.page.returned);
     }
