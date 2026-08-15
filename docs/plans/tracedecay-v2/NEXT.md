@@ -439,9 +439,13 @@ the commit as attribution evidence.
   `covered_prefix`/`load_covered_journal`
   (`crates/tracedecay-rusqlite-runtime/src/work_product.rs`), typed
   `work.selection_coverage_incomplete` refusal on prepare/submit/CreateTask.
-  Known follow-up (in flight on `codex/rc-work-history-coverage`):
-  work/history still refuses whole under partial coverage and needs the same
-  split via a `WorkHistoryCoverageV1` disclosure.
+  Follow-up landed 2026-08-15 (merge `acf9a3896`): work/history now serves
+  the covered journal prefix carrying `WorkGraphSelectionCoverageV1` as a
+  second `selection_coverage` field (orthogonal to the existing
+  `WorkHistoryCoverageV1`, which is pagination coverage); the exact-scope
+  equality guard is retained inside the prefix; empty covered slice reads as
+  an empty page with a `Partial` disclosure. Deferred: rename the shared
+  type to `WorkSelectionCoverageV1` at a quieter moment (contract churn).
 
 ### Typed terminal problem propagation
 
