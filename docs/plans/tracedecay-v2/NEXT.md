@@ -586,12 +586,16 @@ the commit as attribution evidence.
   in `semantic_evaluation_response` (the underlying `SearchEvalError` is
   swallowed by `evaluate_default_candidate`). Exact, lexical, graph, and
   ordinary session retrieval must stay available while semantic activation
-  is pending or unavailable. Measurement 2026-08-14: on a heavily contended
-  host (concurrent suites + two long-lived daemons) `evaluate-and-publish`
-  took 1811s wall — ~2.9x the quiet-host 625s — so the 900s ceiling fired
-  before the recorded `InvalidRequest` blocker could be reached. Judged
-  load-sensitivity, not regression; unconfirmed pending a quiet-host rerun.
-  Do not resize the production ceiling from a contended-host number.
+  is pending or unavailable. Measurements: 1811s wall on a heavily contended
+  host (2026-08-14), then 1801.6s on a quiet host (2026-08-15, clean worktree
+  at `d7c4a4c43`) — within 0.5% of each other despite very different load.
+  The load-sensitivity judgment is DISPROVEN: `evaluate-and-publish` now
+  deterministically costs ~1800s, ~2.9x the 625s the 900s ceiling was sized
+  from, so every semantic-activation journey dies at
+  `semantic_evaluation_deadline_exceeded` before reaching the recorded
+  `InvalidRequest` blocker. Root-cause lane in flight
+  (`codex/rc-semantic-timing`): find what tripled the work; the ceiling
+  stays 900s — do not resize it from a regressed measurement.
 - Re-run the doctor authority-audit journey and a clean Cursor agents/in-
   composer install -> version bump -> doctor lifecycle. Preserve Cursor Core
   drift versus ownership-conflict distinctions and do not add Cursor Cloud.
