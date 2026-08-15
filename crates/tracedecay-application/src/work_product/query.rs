@@ -9,8 +9,8 @@ use tracedecay_domain::{
 use crate::{OpaqueCursor, RequestAdmission, RequestContext};
 
 use super::{
-    AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkProductApplicationErrorV1,
-    WorkProductBindingV1, WorkProductOwnerAuthorizationErrorV1,
+    AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkGraphSelectionCoverageV1,
+    WorkProductApplicationErrorV1, WorkProductBindingV1, WorkProductOwnerAuthorizationErrorV1,
     WorkProductOwnerAuthorizationPortV1, WorkProductPortContextV1, WorkProductSelectionScopeV1,
 };
 
@@ -251,12 +251,29 @@ pub enum WorkHistoryCoverageV1 {
     },
 }
 
+/// One page of the owner's journal, under two independent coverages.
+///
+/// The two say different things and neither substitutes for the other.
+/// `coverage` is about this *page*: whether the caller's own limit stopped the
+/// read short of the events it could otherwise have seen, and which cursor
+/// resumes it. `selection_coverage` is about the *selection*: how much of the
+/// owner's journal lies inside the slice this read was authorized over at all.
+///
+/// A page can be partial on both axes at once — a limited page of a covered
+/// prefix — which is precisely why the selection axis is carried as its own
+/// field rather than folded into the paging vocabulary. A `Complete` paging
+/// coverage means "no further page under this selection"; only
+/// `selection_coverage` can say whether events exist beyond the selection
+/// itself.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkHistoryV1 {
     pub authorized_scope: AuthorizedWorkProductScopeV1,
     pub events: Vec<WorkProductEventV1>,
+    /// How much of the readable slice this page returned.
     pub coverage: WorkHistoryCoverageV1,
+    /// How much of the owner's journal this selection covers at all.
+    pub selection_coverage: WorkGraphSelectionCoverageV1,
 }
 
 pub trait WorkHistoryReadPortV1: Send + Sync {
@@ -314,6 +331,24 @@ where
             return Err(WorkProductApplicationErrorV1::InvalidRequest);
         }
         let result = self.history.read_history(&port_context, &request)?;
+        // A coverage disclosure that contradicts itself would make a partial
+        // history unfalsifiable, so it is re-checked here rather than trusted.
+        if result.selection_coverage.validate().is_err() {
+            return Err(WorkProductApplicationErrorV1::EventAuthorityUnavailable);
+        }
+        // The disclosure names where the selection stops covering the journal.
+        // An event returned at or after that boundary would be an event this
+        // selection never authorized, handed back under a disclosure claiming
+        // it was excluded — so the answer is checked against its own disclosure
+        // instead of taken on trust.
+        if let Some(first_excluded) = result.selection_coverage.first_excluded_sequence()
+            && result
+                .events
+                .iter()
+                .any(|event| event.sequence() >= first_excluded)
+        {
+            return Err(WorkProductApplicationErrorV1::EventAuthorityUnavailable);
+        }
         let returned = match &result.coverage {
             WorkHistoryCoverageV1::Complete { returned }
             | WorkHistoryCoverageV1::Partial { returned, .. } => *returned,

@@ -384,6 +384,63 @@ impl WorkHistoryReadPortV1 for PagingHistoryPort {
             authorized_scope: context.authorized_scope().clone(),
             events: Vec::new(),
             coverage,
+            selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 0 },
+        })
+    }
+}
+
+/// A history port that discloses a `Partial` selection coverage excluding
+/// nothing — a disclosure that contradicts itself.
+struct SelfContradictingCoverageHistoryPort;
+
+impl WorkHistoryReadPortV1 for SelfContradictingCoverageHistoryPort {
+    fn read_history(
+        &self,
+        context: &tracedecay_application::WorkProductPortContextV1,
+        _request: &WorkHistoryRequestV1,
+    ) -> Result<WorkHistoryV1, WorkProductApplicationErrorV1> {
+        Ok(WorkHistoryV1 {
+            authorized_scope: context.authorized_scope().clone(),
+            events: Vec::new(),
+            coverage: WorkHistoryCoverageV1::Complete { returned: 0 },
+            selection_coverage: WorkGraphSelectionCoverageV1::Partial {
+                covered_events: 0,
+                excluded_events: 0,
+                first_excluded_sequence: WorkProductEventSequenceV1::new(1).unwrap(),
+            },
+        })
+    }
+}
+
+/// A history port that hands back an event at the very sequence its own
+/// disclosure calls excluded.
+struct BoundaryCrossingHistoryPort;
+
+impl WorkHistoryReadPortV1 for BoundaryCrossingHistoryPort {
+    fn read_history(
+        &self,
+        context: &tracedecay_application::WorkProductPortContextV1,
+        _request: &WorkHistoryRequestV1,
+    ) -> Result<WorkHistoryV1, WorkProductApplicationErrorV1> {
+        // `event_from_draft` mints sequence 1, so this event sits exactly on
+        // the boundary the disclosure below claims to exclude.
+        let event = event_for_replay(
+            context,
+            &mutation_identity(WorkProductExpectedAuthorityV1::NoPriorGraph),
+            WorkProductEventPayloadV1::Created { graph: graph(1) },
+            digest('a'),
+        )
+        .event()
+        .clone();
+        Ok(WorkHistoryV1 {
+            authorized_scope: context.authorized_scope().clone(),
+            events: vec![event],
+            coverage: WorkHistoryCoverageV1::Complete { returned: 1 },
+            selection_coverage: WorkGraphSelectionCoverageV1::Partial {
+                covered_events: 0,
+                excluded_events: 1,
+                first_excluded_sequence: WorkProductEventSequenceV1::new(1).unwrap(),
+            },
         })
     }
 }
@@ -988,6 +1045,60 @@ fn evidence_port_must_return_the_exact_verified_generation() {
             )
             .unwrap_err(),
         WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable
+    );
+}
+
+/// A partial history is only honest if its disclosure can be falsified. A
+/// `Partial` that excludes nothing asserts a boundary that is not there, so the
+/// service rejects it rather than passing it through to a caller who would read
+/// it as a real one.
+#[test]
+fn a_history_coverage_that_contradicts_itself_is_refused() {
+    let owner = RegisteredOwner::default();
+    let service = WorkHistoryServiceV1::new(&SelfContradictingCoverageHistoryPort, &owner);
+
+    let refused = service
+        .read(
+            &context(true),
+            &binding(),
+            WorkHistoryRequestV1 {
+                selection: repository_selection(),
+                limit: 10,
+                continuation: None,
+                observed_at: UtcMicros(100),
+            },
+        )
+        .expect_err("a self-contradicting coverage disclosure must not be served");
+    assert_eq!(
+        refused,
+        WorkProductApplicationErrorV1::EventAuthorityUnavailable
+    );
+}
+
+/// The disclosure names where the selection stops covering the journal, so the
+/// events beside it are checked against it. An event returned at or past that
+/// boundary is an event this selection never authorized, handed back under a
+/// disclosure claiming it was left out.
+#[test]
+fn a_history_event_past_the_disclosed_exclusion_boundary_is_refused() {
+    let owner = RegisteredOwner::default();
+    let service = WorkHistoryServiceV1::new(&BoundaryCrossingHistoryPort, &owner);
+
+    let refused = service
+        .read(
+            &context(true),
+            &binding(),
+            WorkHistoryRequestV1 {
+                selection: repository_selection(),
+                limit: 10,
+                continuation: None,
+                observed_at: UtcMicros(100),
+            },
+        )
+        .expect_err("an event past the disclosed boundary must not be served");
+    assert_eq!(
+        refused,
+        WorkProductApplicationErrorV1::EventAuthorityUnavailable
     );
 }
 
