@@ -222,6 +222,68 @@ fn paged_synthetic_corpus_publishes_after_eval_sized_admission() {
     );
 }
 
+/// TEMPORARY scaling probe (rc-semantic-timing lane): isolates the cost of
+/// hashing the recovered generation. `prepare_publication_from_staged_native`
+/// builds an EMPTY manifest and an EMPTY write batch, so the only work inside
+/// it that scales with corpus size is
+/// `recovered_generation_digest_from_database`, which walks every entity and
+/// relation of the projection, serde_json-encodes each, and SHA256s the frames.
+/// `prepare_publication_ms` below is therefore the recovered-generation hashing
+/// cost plus O(1). Runs to real production width (43 pages / ~21.7k chunks at
+/// 768-d) so the `EVALUATION_GRAPH_OPERATION_DEADLINE` ceiling can be sized
+/// from a measurement instead of an extrapolation.
+#[test]
+#[ignore = "diagnostic probe, run explicitly"]
+fn recovered_generation_digest_cost_scaling_probe() {
+    let page = u64::try_from(MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH).unwrap();
+    for pages in [4_u64, 8, 16, 43] {
+        let chunk_count = page.checked_mul(pages).unwrap();
+        let fixture = ContractFixture::new_with_embedding_dimensions(768);
+        let mut authority = fixture.authority();
+        let plan = fixture.plan_with_chunk_count("digest", "digest", chunk_count);
+        let mut expected = plan.initial_checkpoint_digest.clone();
+        for ordinal in 0..pages {
+            let start = ordinal.checked_mul(page).unwrap();
+            let next = unique_page_checkpoint(ordinal);
+            let (batch, receipt) = fixture.page_batch_and_receipt(
+                &plan,
+                "digest",
+                ordinal,
+                start,
+                page,
+                expected.clone(),
+                next.clone(),
+                ordinal as f32,
+            );
+            if ordinal == 0 {
+                fixture.begin_and_append(&mut authority, &plan, &receipt, "digest");
+            } else {
+                fixture.append(&mut authority, &plan, &receipt, "digest");
+            }
+            fixture
+                .apply(
+                    &mut authority,
+                    &receipt,
+                    batch,
+                    &format!("digest.apply.{ordinal}"),
+                )
+                .expect("digest probe apply");
+            fixture.settle_batch(&mut authority, &receipt, &format!("digest.settle.{ordinal}"));
+            expected = next;
+        }
+        let ready_started = std::time::Instant::now();
+        fixture
+            .try_ready(&mut authority, &plan, "digest.ready")
+            .expect("digest probe ready");
+        let ready_ms = ready_started.elapsed().as_millis();
+        let per_chunk_us = (ready_ms as f64) * 1000.0 / (chunk_count as f64);
+        eprintln!(
+            "[digest-probe] dims=768 pages={pages} chunks={chunk_count} \
+             prepare_publication_ms={ready_ms} per_chunk_us={per_chunk_us:.1}"
+        );
+    }
+}
+
 /// TEMPORARY scaling probe (rc-semantic-timing lane): if per-page settle cost
 /// is flat, total time is linear in pages; if each page rehashes the recovered
 /// generation, total time grows with pages^2. Prints per-scale timings.
