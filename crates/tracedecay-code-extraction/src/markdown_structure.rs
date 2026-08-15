@@ -22,7 +22,10 @@ const INDENT_PER_LEVEL: u32 = 2;
 /// One `- [ ]` / `- [x]` task-list entry.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub struct MarkdownChecklistItem {
-    /// Zero-based line in the enclosing file.
+    /// Absolute line in the enclosing file, in whatever base the caller passed
+    /// as `start_line` to [`parse_section_structure`]. Retrieval passes 1-based
+    /// lines so published items address the same rows `tracedecay_read
+    /// mode=lines` does.
     pub line: u32,
     /// Nesting depth, zero for a top-level item.
     pub depth: u32,
@@ -105,7 +108,9 @@ struct OpenFence {
 }
 
 /// Parse the structure of `body`, whose first line is `start_line` in the
-/// enclosing file (zero-based). Reported line numbers are absolute.
+/// enclosing file. Reported line numbers are absolute in the caller's base:
+/// pass a 0-based row for extractor-native numbering, or a 1-based row so the
+/// results address the same lines a source read reports.
 pub fn parse_section_structure(body: &str, start_line: u32) -> MarkdownSectionStructure {
     let mut structure = MarkdownSectionStructure::default();
     let mut fence: Option<OpenFence> = None;
