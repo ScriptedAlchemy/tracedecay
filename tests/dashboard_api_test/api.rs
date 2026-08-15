@@ -171,8 +171,16 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         );
         assert_eq!(overview["holographic"]["facts_coverage"]["limit"], 5);
         assert_eq!(
-            overview["holographic"]["facts_coverage"]["graph"]["state"], "complete",
-            "ranked fact search must report its mounted graph-assist coverage"
+            overview["holographic"]["facts_coverage"]["graph"]["kind"], "complete",
+            "ranked fact search must report its mounted graph-assist coverage: {overview}"
+        );
+        assert!(
+            overview["holographic"]["facts_coverage"]["graph"]["root_count"].is_number()
+                && overview["holographic"]["facts_coverage"]["graph"]["relation_count"]
+                    .is_number()
+                && overview["holographic"]["facts_coverage"]["graph"]["expanded_fact_count"]
+                    .is_number(),
+            "complete graph-assist coverage carries its measured counts: {overview}"
         );
 
         let (status, entity_bounded) = get_json(
@@ -241,7 +249,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             "the mounted memory relation graph should expose canonical assertion topology"
         );
         assert_eq!(
-            overview["holographic"]["graph"]["coverage"]["state"],
+            overview["holographic"]["graph"]["coverage"]["completeness"],
             "complete"
         );
         assert_eq!(
@@ -477,9 +485,9 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
             detail["fact"].get("last_recalled_at").is_some(),
             "fact detail must surface last_recalled_at"
         );
-        let entities = detail["linked_entities"]
+        let entities = detail["fact"]["linked_entities"]
             .as_array()
-            .unwrap_or_else(|| panic!("expected linked_entities array in fact detail"));
+            .unwrap_or_else(|| panic!("expected linked_entities array in fact detail: {detail}"));
         let entity_names: Vec<&str> = entities
             .iter()
             .filter_map(|entity| entity["name"].as_str())
@@ -650,7 +658,10 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["payload"]["exists"], true);
+        assert_eq!(
+            overview["payload"]["exists"], true,
+            "seeded LCM overview must serve a ready payload: {overview}"
+        );
         assert_eq!(
             overview["payload"]["storage_scope"], "profile_sharded",
             "LCM serves the resolved project session store even when TRACEDECAY_GLOBAL_DB is set for accounting"
@@ -819,7 +830,10 @@ fn lcm_serves_project_session_store_without_global_override() {
             &format!("{base_url}/api/plugins/hermes-lcm/overview?limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["payload"]["storage_scope"], "profile_sharded");
+        assert_eq!(
+            overview["payload"]["storage_scope"], "profile_sharded",
+            "project-store LCM overview must serve a ready payload: {overview}"
+        );
         assert_eq!(overview["payload"]["exists"], true);
         assert_eq!(overview["payload"]["overview"]["messages_total"], 3);
         assert_eq!(overview["payload"]["overview"]["sessions_total"], 1);
@@ -892,7 +906,10 @@ fn lcm_project_store_wins_over_global_accounting_override() {
             &format!("{base_url}/api/plugins/hermes-lcm/overview?limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["payload"]["storage_scope"], "profile_sharded");
+        assert_eq!(
+            overview["payload"]["storage_scope"], "profile_sharded",
+            "override-pinned LCM overview must serve a ready payload: {overview}"
+        );
         assert_eq!(overview["payload"]["exists"], true);
         assert_eq!(
             overview["payload"]["overview"]["messages_total"], 3,

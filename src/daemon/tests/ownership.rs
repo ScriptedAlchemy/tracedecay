@@ -162,9 +162,6 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     let client_identity = test_client_identity_for(profile_root.clone());
     eprintln!("[cache-test] phase=init start");
     initialize_test_project(&project, &client_identity).await;
-    let mut config = crate::config::load_config(&project).expect("load project config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(&project, &config).expect("disable unrelated startup catch-up");
     eprintln!("[cache-test] phase=init done");
 
     let direct = DaemonHandshake {

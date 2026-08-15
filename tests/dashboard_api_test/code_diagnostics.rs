@@ -13,7 +13,7 @@ fn code_diagnostics_dashboard_api_exposes_engines_and_applies_settings() {
         let url = format!("{}/api/plugins/code-diagnostics", fixture.base_url);
 
         let (status, initial) = get_json(&agent, &url);
-        assert_eq!(status, 200);
+        assert_eq!(status, 200, "code-diagnostics read failed: {initial}");
         assert_eq!(initial["settings"]["idle_backfill"], "idle");
         assert!(
             engines(&initial)

@@ -252,6 +252,9 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_qualified_name", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_session_lookup", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_session_refresh", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_session_refresh_begin", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_session_refresh_status", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_session_refresh_cancel", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_sessions_for", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_source_body", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_source_lines", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -335,6 +338,8 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_fact_store_remove"
         | "tracedecay_fact_feedback"
         | "tracedecay_session_refresh"
+        | "tracedecay_session_refresh_begin"
+        | "tracedecay_session_refresh_cancel"
         | "tracedecay_run_affected_tests" => EffectClass::Administrative,
         _ => EffectClass::Read,
     }
@@ -508,6 +513,8 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_fact_store_remove"
             | "tracedecay_fact_feedback"
             | "tracedecay_session_refresh"
+            | "tracedecay_session_refresh_begin"
+            | "tracedecay_session_refresh_cancel"
             | "tracedecay_run_affected_tests"
             | "tracedecay_configuration_set"
             | "tracedecay_configuration_unset"

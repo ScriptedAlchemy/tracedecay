@@ -30,6 +30,18 @@ use crate::common::{
 
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(45);
 
+fn daemon_log_for_failure() -> String {
+    let Some(path) = std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG") else {
+        return "daemon log path unavailable".to_owned();
+    };
+    fs::read_to_string(&path).unwrap_or_else(|error| {
+        format!(
+            "failed to read daemon log '{}': {error}",
+            Path::new(&path).display()
+        )
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExactIndexIdentity {
     project_id: String,
@@ -461,7 +473,8 @@ async fn wait_for_terminal_generation(
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "timed out waiting for terminal generation for {query}; status={last_status}; search={last_search}"
+            "timed out waiting for terminal generation for {query}; status={last_status}; search={last_search}; daemon_log={}",
+            daemon_log_for_failure()
         )
     })
 }

@@ -340,7 +340,7 @@ for line in sys.stdin:
         write_file(&release_backend, "release\n");
         assert!(
             started,
-            "user-job backend must reach admitted execution"
+            "user-job backend must reach admitted execution; ledger state: {unsettled:?}"
         );
         assert!(
             unsettled

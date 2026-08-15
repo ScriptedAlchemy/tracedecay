@@ -246,7 +246,7 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
             "Target daemon project selector fact"
         );
         assert_eq!(
-            selected_payload["payload"]["holographic"]["graph"]["coverage"]["state"],
+            selected_payload["payload"]["holographic"]["graph"]["coverage"]["completeness"],
             "complete",
             "mounted selected-project graph must report explicit complete coverage: {selected_payload}"
         );

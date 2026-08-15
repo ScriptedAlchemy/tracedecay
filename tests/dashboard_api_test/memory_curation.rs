@@ -419,7 +419,10 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
         );
         let (status, listed) = get_json(&agent, &format!("{endpoint}?state=applied"));
         assert_eq!(status, 200, "automatic receipt list failed: {listed}");
-        assert_eq!(listed["count"], 1);
+        assert_eq!(
+            listed["count"], 1,
+            "state=applied must exclude the quarantined receipt: {listed}"
+        );
         assert_eq!(listed["limit"], 50);
         assert_eq!(listed["error"], "");
         let receipts = listed["receipts"]

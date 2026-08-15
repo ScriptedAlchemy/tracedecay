@@ -569,6 +569,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 },
             )
             .map_err(map_code_graph_error)?;
+        eprintln!("[republish-phase] graph=manifest_complete");
         let relational_projection = GraphProjectionIdentityV1 {
             shard_id: self.authority.binding().shard_id.clone(),
             namespace: tracedecay_store::GraphNamespaceV1::new(self.authority.namespace().as_str())
@@ -594,6 +595,7 @@ impl RetainedCodeGraphRuntimeV1 {
             .project_database
             .graph_publication_storage()
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        eprintln!("[republish-phase] graph=storage_complete");
         let idempotency_key = tracedecay_code_index::graph_projection::code_graph_idempotency_key(
             &self.generation_id,
             &source.projector_revision,
@@ -765,8 +767,10 @@ impl RetainedCodeGraphRuntimeV1 {
                 return Err(GraphDbError::Conflict);
             }
         }
+        eprintln!("[republish-phase] graph=replay_complete");
         drop(replay_pool_lock);
         let publication = publish(&mut storage, &replay.key)?;
+        eprintln!("[republish-phase] graph=verified_publish_complete");
         Ok(publication.snapshot)
     }
 

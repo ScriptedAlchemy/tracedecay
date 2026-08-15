@@ -482,3 +482,127 @@ async fn partial_discovery_suppresses_removals() {
     );
     assert!(data_root.path().join("branches/pr_5.db").exists());
 }
+
+fn init_manual_branch_repo(repo: &Path, branch: &str) {
+    git(repo, &["init", "-q", "-b", "main"]);
+    git(repo, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        repo,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/lib.rs"), "pub fn on_main() {}\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-qm", "initial"]);
+    git(repo, &["checkout", "-q", "-b", branch, "main"]);
+    std::fs::write(repo.join("src/feature.rs"), "pub fn on_feature() {}\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-qm", "feature content"]);
+    git(repo, &["checkout", "-q", "main"]);
+}
+
+fn git_ref_exists(repo: &Path, reference: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--end-of-options", reference])
+        .current_dir(repo)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_activates_when_scheduler_is_injected() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature-manual");
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .expect("open project graph"),
+    );
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let activation =
+        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature-manual")
+            .await
+            .expect("manual branch activation");
+
+    assert_eq!(activation.branch, "feature-manual");
+    assert_eq!(activation.outcome, crate::branch::BranchAddOutcome::Added);
+    assert!(
+        activation.worktree.is_dir(),
+        "branch head must be checked out"
+    );
+    assert!(
+        schedulers.is_worktree_mounted(&activation.worktree).await,
+        "scheduler must mount the registered branch worktree"
+    );
+    assert!(git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/feature-manual"
+    ));
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_fails_closed_without_scheduler_before_git_or_state_mutation() {
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature-denied");
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .expect("open project graph"),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let error = activate_manual_branch_head(repo.path(), &graph, None, "feature-denied")
+        .await
+        .expect_err("missing scheduler must deny activation");
+
+    assert!(matches!(
+        error,
+        ManualBranchActivationError::SchedulerUnavailable { .. }
+    ));
+    assert_eq!(error.reason_code(), "code_index_scheduler_unavailable");
+    assert!(!data_root.join("branch-worktrees").exists());
+    assert!(!git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/feature-denied"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_missing_ref_is_typed_failure() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature-present");
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .expect("open project graph"),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let error = activate_manual_branch_head(
+        repo.path(),
+        &graph,
+        Some(&schedulers),
+        "definitely-missing-branch",
+    )
+    .await
+    .expect_err("missing branch ref must be a typed failure");
+
+    assert!(matches!(
+        error,
+        ManualBranchActivationError::InvalidBranchRef { .. }
+    ));
+    assert_eq!(error.reason_code(), "invalid_branch_ref");
+    assert!(!data_root.join("branch-worktrees").exists());
+    assert!(!git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/definitely-missing-branch"
+    ));
+    schedulers.shutdown().await;
+}

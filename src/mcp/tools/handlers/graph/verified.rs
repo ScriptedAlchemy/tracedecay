@@ -17,7 +17,17 @@ use crate::types::{EdgeKind, NodeKind};
 
 pub(super) const GRAPH_RELATION_READ_LIMIT: usize = 50_000;
 
+/// Admits a caller-supplied node id as a graph occurrence id. Every graph
+/// handler that takes a node id funnels through this one guard, so a blank
+/// value is rejected as a typed argument error naming the parameter before
+/// canonicality parsing ever sees it — including handlers that decode a
+/// typed request DTO and therefore bypass `require_node_id`.
 pub(super) fn graph_occurrence_id(raw: &str) -> Result<SymbolOccurrenceId> {
+    if raw.trim().is_empty() {
+        return Err(TraceDecayError::Config {
+            message: "invalid parameter: node_id must not be empty".to_string(),
+        });
+    }
     SymbolOccurrenceId::new(raw.to_owned()).map_err(|error| TraceDecayError::Config {
         message: format!("invalid graph symbol occurrence: {error}"),
     })

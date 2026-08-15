@@ -825,9 +825,11 @@ pub fn runtime_configuration_for_layout(
 /// the daemon owns the durable configuration store, so a registered project that
 /// simply has not been opened in this process (a first operation, or the first
 /// after a daemon restart) is resolved and pinned rather than rejected. It never
-/// consults legacy `config.json` input and never migrates or writes the store; a
-/// genuinely uninitialized or unopenable configuration store still yields a
-/// typed error rather than a fabricated default authority.
+/// consults legacy `config.json` input. A cold cache adopts the durable current
+/// revision through the same canonical open path as project open, so a fresh
+/// store mints the sole canonical initial revision instead of failing; an
+/// initialized-but-unreadable store still yields a typed authority error rather
+/// than a fabricated default authority.
 pub(crate) async fn resolve_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
@@ -843,12 +845,16 @@ pub(crate) async fn resolve_runtime_configuration_for_registered_database(
         runtime_configuration_cache().insert(configuration.clone())?;
         return Ok(configuration);
     }
-    // Cold cache: resolve the durable current revision (read-only, no legacy
-    // input, no store mutation) and publish it. A store that was never made
-    // writable resolves to registry defaults in memory; an initialized-but-
-    // unreadable store surfaces a typed authority error.
-    load_runtime_configuration_for_registered_database_read_only(project_root, layout, database)
-        .await
+    // Cold cache: adopt the durable current revision through the canonical
+    // open path and publish it. A fresh store mints the canonical initial
+    // revision — the daemon owns this store, and branch administration must
+    // run for a registered project it has not opened yet — while an
+    // initialized-but-unreadable store surfaces a typed authority error.
+    Ok(
+        open_runtime_configuration_for_registered_database(project_root, layout, database)
+            .await?
+            .configuration,
+    )
 }
 
 /// Retained store handle paired with the exact revision resolved at project

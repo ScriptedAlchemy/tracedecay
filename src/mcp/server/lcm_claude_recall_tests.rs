@@ -67,7 +67,13 @@ async fn server_with_authorities() -> (Arc<McpServer>, TempDir, crate::config::P
     let context = runtime
         .into_mcp_server_context_for_test(graph, None)
         .expect("registered MCP server context");
-    (McpServer::new_with_context(context).await, dir, pin)
+    let server =
+        crate::daemon::retained_test_support::mcp_server_with_project_retained_owner_for_test(
+            context,
+        )
+        .await
+        .expect("retained-owner MCP test server");
+    (server, dir, pin)
 }
 
 async fn call_tool(server: &McpServer, name: &str, arguments: Value) -> Value {

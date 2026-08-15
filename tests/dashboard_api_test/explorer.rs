@@ -63,7 +63,10 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
                 .find(|source| source["source_id"] == source_id)
                 .unwrap_or_else(|| panic!("missing {source_id} source: {completed}"));
             assert_eq!(source["phase"], "completed");
-            assert_eq!(source["outcome"], "ready");
+            assert_eq!(
+                source["outcome"], "ready",
+                "{source_id} source must be ready: {source}"
+            );
             assert!(
                 source["page"]["rows"].is_array(),
                 "{source_id} must expose its real source-local page: {source}"
@@ -125,7 +128,10 @@ fn explorer_session_routes_reuse_lcm_size_and_read_context_authority() {
         );
         assert_eq!(status, 200, "session size should resolve: {size}");
         assert_eq!(size["schema_revision"], 1);
-        assert_eq!(size["domain_state"], "ready");
+        assert_eq!(
+            size["domain_state"], "ready",
+            "session size read must be ready: {size}"
+        );
         assert_eq!(size["payload"]["session_id"], "sess-dashboard-1");
         assert_eq!(size["payload"]["counts"]["message_count"], 3);
         assert!(

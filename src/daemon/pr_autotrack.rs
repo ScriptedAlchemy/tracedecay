@@ -5,10 +5,13 @@
 //! When a project enables `sync.auto_track_pr_branches`, a daemon poll loop
 //! discovers the open pull requests on the repo's `origin` remote and activates
 //! each same-repo PR head as a registered linked worktree through the daemon's
-//! retained code-index scheduler. Public `reconcile_project` stays fail-closed:
-//! it has no scheduler to inject. The poll runtime receives that authority at
-//! spawn and still refuses Git or durable-state mutation when Git discovery
-//! cannot name a worktree root.
+//! retained code-index scheduler. Manual `activate_manual_branch` uses that
+//! same mount path for an operator-requested branch head. Public
+//! `reconcile_project` and the no-scheduler manual entry stay fail-closed:
+//! those APIs have no scheduler to inject. The poll runtime and the daemon
+//! branch-add handler receive that authority and still refuse Git or
+//! durable-state mutation when identity or Git discovery cannot name a
+//! worktree root.
 //!
 //! # Why worktrees
 //!
@@ -43,10 +46,102 @@ use tracedecay_domain::ProjectId;
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
+const GIT_AUTHORITY_UNAVAILABLE: &str = "git_authority_unavailable";
+const INVALID_BRANCH_REF: &str = "invalid_branch_ref";
+const BRANCH_ACTIVATION_FAILED: &str = "branch_activation_failed";
 
 fn scheduler_unavailable(detail: &str) -> String {
     format!("{CODE_INDEX_SCHEDULER_UNAVAILABLE}: {detail}")
 }
+
+/// Outcome of a successful manual branch-head activation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualBranchActivation {
+    /// Operator-requested branch name.
+    pub branch: String,
+    /// Resolved commit of that branch at activation time.
+    pub head_sha: String,
+    /// Linked worktree checked out for the code-index scheduler.
+    pub worktree: PathBuf,
+    /// CLI/MCP outcome for the activation.
+    pub outcome: crate::branch::BranchAddOutcome,
+}
+
+/// Typed failure for manual branch-head activation. Missing scheduler or
+/// identity is a project-route state, not a transport error or empty success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManualBranchActivationError {
+    /// No injected code-index scheduler, retained graph, or project identity.
+    SchedulerUnavailable { detail: String },
+    /// Git cannot name a worktree root for the requested project.
+    GitAuthorityUnavailable { detail: String },
+    /// The requested name is not a resolvable local or origin branch ref.
+    InvalidBranchRef { detail: String },
+    /// Worktree preparation or scheduler mount failed after admission.
+    ActivationFailed { detail: String },
+}
+
+impl ManualBranchActivationError {
+    /// Stable reason code for JSON-RPC / project-route mapping.
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::SchedulerUnavailable { .. } => CODE_INDEX_SCHEDULER_UNAVAILABLE,
+            Self::GitAuthorityUnavailable { .. } => GIT_AUTHORITY_UNAVAILABLE,
+            Self::InvalidBranchRef { .. } => INVALID_BRANCH_REF,
+            Self::ActivationFailed { .. } => BRANCH_ACTIVATION_FAILED,
+        }
+    }
+
+    /// Whether a later retry with the same arguments can succeed.
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::SchedulerUnavailable { .. } | Self::ActivationFailed { .. } => true,
+            Self::GitAuthorityUnavailable { .. } | Self::InvalidBranchRef { .. } => false,
+        }
+    }
+
+    /// Human-readable detail carried beside [`Self::reason_code`].
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::SchedulerUnavailable { detail }
+            | Self::GitAuthorityUnavailable { detail }
+            | Self::InvalidBranchRef { detail }
+            | Self::ActivationFailed { detail } => detail,
+        }
+    }
+
+    fn scheduler_unavailable(detail: impl Into<String>) -> Self {
+        Self::SchedulerUnavailable {
+            detail: detail.into(),
+        }
+    }
+
+    fn git_unavailable(detail: impl Into<String>) -> Self {
+        Self::GitAuthorityUnavailable {
+            detail: detail.into(),
+        }
+    }
+
+    fn invalid_ref(detail: impl Into<String>) -> Self {
+        Self::InvalidBranchRef {
+            detail: detail.into(),
+        }
+    }
+
+    fn activation_failed(detail: impl Into<String>) -> Self {
+        Self::ActivationFailed {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ManualBranchActivationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.reason_code(), self.detail())
+    }
+}
+
+impl std::error::Error for ManualBranchActivationError {}
 
 #[cfg(test)]
 use super::branch_admin::StoreAdministration;
@@ -583,6 +678,310 @@ pub async fn reconcile_project(
     }
 }
 
+/// Public manual branch-add entry with no scheduler to inject. Fails closed
+/// before Git or durable-state mutation, matching [`reconcile_project`].
+pub async fn activate_manual_branch(
+    _graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
+    _repo_root: &Path,
+    _branch: &str,
+) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
+    Err(ManualBranchActivationError::scheduler_unavailable(
+        "code-index scheduler authority is unavailable for branch activation",
+    ))
+}
+
+/// Deterministic linked-worktree path for a manually activated branch head.
+pub fn manual_branch_worktree_path(data_root: &Path, branch: &str) -> PathBuf {
+    data_root
+        .join("branch-worktrees")
+        .join(crate::branch::sanitize_branch_name(branch))
+}
+
+/// Activates an operator-requested branch head through the same worktree
+/// prep + scheduler mount path as [`track_pr`].
+pub(crate) async fn activate_manual_branch_head(
+    repo_root: &Path,
+    graph: &Arc<crate::tracedecay::TraceDecay>,
+    schedulers: Option<&CodeIndexSchedulerRegistryV1>,
+    branch: &str,
+) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
+    let command_control = default_pr_command_control();
+    let administration = match schedulers {
+        Some(schedulers) => PrStoreAdministration::with_control(schedulers, graph, command_control),
+        None => PrStoreAdministration {
+            schedulers: None,
+            graph: Some(graph),
+            command_control,
+        },
+    };
+    activate_manual_branch_with_administration(
+        repo_root,
+        &graph.store_layout().data_root,
+        branch,
+        administration,
+    )
+    .await
+}
+
+async fn activate_manual_branch_with_administration(
+    repo_root: &Path,
+    data_root: &Path,
+    branch: &str,
+    administration: PrStoreAdministration<'_>,
+) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
+    let Some(schedulers) = administration.schedulers else {
+        return Err(ManualBranchActivationError::scheduler_unavailable(
+            "code-index scheduler authority is unavailable for branch activation",
+        ));
+    };
+    let Some(graph) = administration.graph else {
+        return Err(ManualBranchActivationError::scheduler_unavailable(
+            "code-index scheduler authority is unavailable for branch activation",
+        ));
+    };
+    if crate::worktree::git_worktree_root(repo_root).is_none() {
+        return Err(ManualBranchActivationError::git_unavailable(
+            "git authority is unavailable for branch activation",
+        ));
+    }
+
+    let sanitized = crate::branch::sanitize_branch_name(branch);
+    if sanitized.is_empty() || branch.starts_with('-') {
+        return Err(ManualBranchActivationError::invalid_ref(format!(
+            "branch '{branch}' is not a valid branch name"
+        )));
+    }
+
+    let command_control = administration.command_control.clone();
+    let repo = repo_root.to_path_buf();
+    let branch_name = branch.to_string();
+    let head_sha = match tokio::task::spawn_blocking(move || {
+        resolve_branch_head(&repo, &branch_name, &command_control)
+    })
+    .await
+    {
+        Ok(Ok(sha)) => sha,
+        Ok(Err(error)) => return Err(error),
+        Err(error) => {
+            return Err(ManualBranchActivationError::activation_failed(format!(
+                "branch resolution join error: {error}"
+            )));
+        }
+    };
+
+    let worktree = manual_branch_worktree_path(data_root, branch);
+    if worktree.is_dir() && schedulers.is_worktree_mounted(&worktree).await {
+        return Ok(ManualBranchActivation {
+            branch: branch.to_string(),
+            head_sha,
+            worktree,
+            outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
+        });
+    }
+
+    let tracking_ref = manual_branch_tracking_ref(&sanitized);
+    let label = manual_branch_label(branch);
+    let repo = repo_root.to_path_buf();
+    let wt = worktree.clone();
+    let tref = tracking_ref.clone();
+    let label_for_prep = label.clone();
+    let expected_head = head_sha.clone();
+    let command_control = administration.command_control.clone();
+    match tokio::task::spawn_blocking(move || {
+        prepare_manual_branch_worktree(
+            &repo,
+            &wt,
+            &tref,
+            &label_for_prep,
+            &expected_head,
+            &command_control,
+        )
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => {
+            return cleanup_failed_manual_track(
+                repo_root,
+                &worktree,
+                &tracking_ref,
+                &label,
+                &head_sha,
+                administration,
+                ManualBranchActivationError::activation_failed(reason),
+            )
+            .await;
+        }
+        Err(error) => {
+            return cleanup_failed_manual_track(
+                repo_root,
+                &worktree,
+                &tracking_ref,
+                &label,
+                &head_sha,
+                administration,
+                ManualBranchActivationError::activation_failed(format!(
+                    "worktree preparation join error: {error}"
+                )),
+            )
+            .await;
+        }
+    }
+
+    match activate_linked_worktree(schedulers, graph, &worktree).await {
+        Ok(()) => Ok(ManualBranchActivation {
+            branch: branch.to_string(),
+            head_sha,
+            worktree,
+            outcome: crate::branch::BranchAddOutcome::Added,
+        }),
+        Err(reason) => {
+            cleanup_failed_manual_track(
+                repo_root,
+                &worktree,
+                &tracking_ref,
+                &label,
+                &head_sha,
+                administration,
+                ManualBranchActivationError::activation_failed(reason),
+            )
+            .await
+        }
+    }
+}
+
+fn manual_branch_label(branch: &str) -> String {
+    format!("tracedecay/track/{branch}")
+}
+
+fn manual_branch_tracking_ref(sanitized: &str) -> String {
+    format!("refs/tracedecay/branch/{sanitized}")
+}
+
+fn resolve_branch_head(
+    repo_root: &Path,
+    branch: &str,
+    command_control: &PrCommandControl,
+) -> std::result::Result<String, ManualBranchActivationError> {
+    let candidates = [
+        format!("refs/heads/{branch}"),
+        branch.to_string(),
+        format!("refs/remotes/origin/{branch}"),
+    ];
+    for reference in candidates {
+        if let Some(sha) = resolve_git_ref(repo_root, &reference, command_control) {
+            return Ok(sha);
+        }
+    }
+    Err(ManualBranchActivationError::invalid_ref(format!(
+        "branch '{branch}' does not resolve to a git ref"
+    )))
+}
+
+fn resolve_git_ref(
+    repo_root: &Path,
+    reference: &str,
+    command_control: &PrCommandControl,
+) -> Option<String> {
+    successful_git_with_control(
+        repo_root,
+        &["rev-parse", "--verify", "--end-of-options", reference],
+        command_control,
+    )
+    .and_then(|output| String::from_utf8(output.stdout).ok())
+    .map(|sha| sha.trim().to_string())
+    .filter(|sha| !sha.is_empty())
+}
+
+fn prepare_manual_branch_worktree(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    expected_head: &str,
+    command_control: &PrCommandControl,
+) -> std::result::Result<(), String> {
+    let update = successful_git_with_control(
+        repo_root,
+        &["update-ref", tracking_ref, expected_head],
+        command_control,
+    );
+    if update.is_none() {
+        return Err("failed to publish branch tracking ref".to_string());
+    }
+    checkout_linked_worktree(repo_root, worktree, tracking_ref, label, command_control)
+}
+
+async fn cleanup_failed_manual_track(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    head_sha: &str,
+    administration: PrStoreAdministration<'_>,
+    original: ManualBranchActivationError,
+) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
+    match retire_worktree_mount(administration.schedulers, worktree).await {
+        Ok(()) => {
+            cleanup_owned_worktree(
+                repo_root,
+                worktree,
+                tracking_ref,
+                label,
+                head_sha,
+                administration.command_control,
+            );
+            Err(original)
+        }
+        Err(cleanup_reason) => Err(ManualBranchActivationError::activation_failed(format!(
+            "{original}; failed to remove incomplete branch store: {cleanup_reason}"
+        ))),
+    }
+}
+
+async fn retire_worktree_mount(
+    schedulers: Option<&CodeIndexSchedulerRegistryV1>,
+    worktree: &Path,
+) -> std::result::Result<(), String> {
+    let Some(schedulers) = schedulers else {
+        return Err(scheduler_unavailable(
+            "code-index scheduler authority is unavailable for worktree retirement",
+        ));
+    };
+    let root = worktree
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.to_path_buf());
+    let roots = BTreeSet::from([root]);
+    if !schedulers.retire_project_roots(&roots).await {
+        return Err(scheduler_unavailable(
+            "code-index scheduler did not finish worktree retirement",
+        ));
+    }
+    Ok(())
+}
+
+fn cleanup_owned_worktree(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    expected_head: &str,
+    command_control: &PrCommandControl,
+) {
+    remove_worktree(repo_root, worktree, command_control);
+    let branch_ref = format!("refs/heads/{label}");
+    if ref_points_to(repo_root, &branch_ref, expected_head, command_control) {
+        let _ = successful_git_with_control(repo_root, &["branch", "-D", label], command_control);
+    }
+    if ref_points_to(repo_root, tracking_ref, expected_head, command_control) {
+        let _ = successful_git_with_control(
+            repo_root,
+            &["update-ref", "-d", tracking_ref],
+            command_control,
+        );
+    }
+}
+
 async fn reconcile_project_with_administration(
     repo_root: &Path,
     data_root: &Path,
@@ -849,7 +1248,7 @@ async fn track_pr(
         }
     }
 
-    match activate_pr_worktree(schedulers, graph, &worktree).await {
+    match activate_linked_worktree(schedulers, graph, &worktree).await {
         Ok(()) => Ok(ManagedPr {
             pr: pr.number,
             head_branch: pr.head_branch.clone(),
@@ -872,7 +1271,7 @@ async fn track_pr(
     }
 }
 
-async fn activate_pr_worktree(
+async fn activate_linked_worktree(
     schedulers: &CodeIndexSchedulerRegistryV1,
     graph: &crate::tracedecay::TraceDecay,
     worktree: &Path,
@@ -883,11 +1282,11 @@ async fn activate_pr_worktree(
         .project_id
         .as_deref()
         .ok_or_else(|| {
-            scheduler_unavailable("project identity is unavailable for PR worktree activation")
+            scheduler_unavailable("project identity is unavailable for worktree activation")
         })?;
     let project_id = ProjectId::new(project_id.to_owned()).map_err(|error| {
         scheduler_unavailable(&format!(
-            "invalid project identity for PR worktree activation: {error}"
+            "invalid project identity for worktree activation: {error}"
         ))
     })?;
     let store_root = graph.store_layout().data_root.join("code-index-v1");
@@ -906,7 +1305,7 @@ async fn activate_pr_worktree(
         .map(|_| ())
         .map_err(|error| {
             scheduler_unavailable(&format!(
-                "code-index scheduler rejected PR worktree activation: {error}"
+                "code-index scheduler rejected worktree activation: {error}"
             ))
         })
 }
@@ -1008,6 +1407,16 @@ fn prepare_pr_worktree(
         return Err("PR head changed during reconciliation".to_string());
     }
 
+    checkout_linked_worktree(repo_root, worktree, tracking_ref, label, command_control)
+}
+
+fn checkout_linked_worktree(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    command_control: &PrCommandControl,
+) -> std::result::Result<(), String> {
     if let Some(parent) = worktree.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

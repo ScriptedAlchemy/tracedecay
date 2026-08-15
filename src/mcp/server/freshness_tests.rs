@@ -268,16 +268,17 @@ fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
 
 // ---- ledger settle is bounded when a recorder task wedges ---------
 
-// A dedicated multi-thread runtime keeps the timer driver off the same worker
-// that runs the server's startup catch-up sync, so the bound is honored
-// promptly regardless of machine load.
+// A dedicated multi-thread runtime keeps the timer driver off the worker that
+// parks the wedged ledger write, so the bound is honored promptly regardless
+// of machine load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ledger_writes_settled_is_bounded_when_a_write_wedges() {
     let (cg, _dir, _pin) = init_indexed_repo().await;
-    let mut config = crate::config::load_config(cg.project_root()).expect("load config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(cg.project_root(), &config).expect("disable unrelated catch-up");
-    let server = McpServer::new(cg, None).await;
+    // Startup catch-up is unrelated to ledger settlement; keep its admission
+    // work out of the bound being measured.
+    let mut context = McpServerConstructionContext::direct(cg, None);
+    context.startup_catch_up_enabled = false;
+    let server = McpServer::new_with_context(context).await;
 
     // Inject a never-completing observed ledger write via the same accounting
     // the production path uses. Without a bound, awaiting settlement would hang
@@ -306,10 +307,11 @@ async fn ledger_writes_settled_is_bounded_when_a_write_wedges() {
 async fn read_refresh_is_non_blocking_and_single_flighted() {
     let (cg, dir, _pin) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
-    let mut config = crate::config::load_config(&root).expect("load config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(&root, &config).expect("save config");
-    let server = McpServer::new(cg, None).await;
+    // Startup catch-up drives the same background-refresh boundary this test
+    // times; disable it so the explicit read refresh is the only claimant.
+    let mut context = McpServerConstructionContext::direct(cg, None);
+    context.startup_catch_up_enabled = false;
+    let server = McpServer::new_with_context(context).await;
     // Reset the read cooldown so the next spawn is eligible regardless of
     // any startup timing.
     server

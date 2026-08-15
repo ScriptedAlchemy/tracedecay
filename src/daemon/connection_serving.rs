@@ -742,7 +742,13 @@ async fn serve_broker_socket_client(
         .await
         {
             Ok(Some(_)) => {
-                branch_add_response(&engine.store_administration, &handshake, &request).await
+                branch_add_response(
+                    &engine.store_administration,
+                    Some(&engine.invocation.code_index_schedulers),
+                    &handshake,
+                    &request,
+                )
+                .await
             }
             Ok(None) => return Ok(()),
             Err(error) => JsonRpcResponse::error(
@@ -1325,7 +1331,15 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         )
         .await
         {
-            Ok(Some(_)) => branch_add_response(&store_administration, &handshake, &request).await,
+            Ok(Some(_)) => {
+                branch_add_response(
+                    &store_administration,
+                    Some(&invocation.code_index_schedulers),
+                    &handshake,
+                    &request,
+                )
+                .await
+            }
             Ok(None) => return Ok(()),
             Err(error) => JsonRpcResponse::error(
                 request.id.clone(),

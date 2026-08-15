@@ -363,16 +363,27 @@ fn graph_reader_selector_dispatch_policy_is_allowlisted() {
                 assert!(properties.get(alias).is_none());
             }
             let selector = &properties["project_selector"];
-            assert_eq!(selector["required"], json!(["project_id"]));
-            assert_eq!(selector["additionalProperties"], false);
+            assert_eq!(
+                selector["required"],
+                json!(["project_id"]),
+                "{} selector must require project_id",
+                tool.name
+            );
+            assert_eq!(
+                selector["additionalProperties"], false,
+                "{} selector must be a closed object",
+                tool.name
+            );
             assert_eq!(
                 selector["properties"]
                     .as_object()
-                    .expect("closed selector properties")
+                    .unwrap_or_else(|| panic!("{} closed selector properties", tool.name))
                     .keys()
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
-                vec!["project_id"]
+                vec!["project_id"],
+                "{} selector must expose exactly project_id",
+                tool.name
             );
         }
     }

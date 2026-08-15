@@ -51,7 +51,10 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay::application_surface::resolve_catalog_tool_binding;
 use tracedecay::catalog_composition::build_application_catalog_snapshot;
-use tracedecay_api::{HttpApplicationOperation, WorkOperation, WorkflowOperation};
+use tracedecay_api::{
+    HttpApplicationOperation, WorkOperation, WorkflowOperation, retained_application_route_path,
+};
+use tracedecay_application::retained_surfaces::RetainedSurfaceOperation;
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityManifestV1, CatalogSnapshotV1, FeatureId, SurfaceOperationName,
 };
@@ -591,9 +594,24 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
                 Some(http) if http.is_http_exposed() => {
                     http_route_is_mounted(&agent, &fixture, &http.application_route_path())
                 }
-                // A catalog HTTP binding with no HTTP operation, or one the
-                // router deliberately withholds, is an absence like any other.
-                Some(_) | None => false,
+                // An operation the router deliberately withholds from HTTP is
+                // an absence like any other.
+                Some(_) => false,
+                // Retained memory/session/workflow operations are the second
+                // HTTP route family, addressed exactly as production route
+                // documentation addresses them (`http_route_documents`): the
+                // callable retained operation's canonical route. A catalog
+                // HTTP binding naming neither family is an absence.
+                None => match RetainedSurfaceOperation::from_operation_name(operation)
+                    .filter(|retained| retained.is_callable())
+                {
+                    Some(retained) => http_route_is_mounted(
+                        &agent,
+                        &fixture,
+                        &retained_application_route_path(retained),
+                    ),
+                    None => false,
+                },
             },
             BindingSurface::Mcp => mcp_tools.contains(&format!("tracedecay_{operation}")),
             BindingSurface::Cli => cli_tools.contains(operation.as_str()),

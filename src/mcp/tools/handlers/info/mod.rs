@@ -71,6 +71,52 @@ fn display_path(path: &std::path::Path) -> String {
     path.display().to_string()
 }
 
+/// Adds the section lane — title, truncated preview, full-body retrieval
+/// handle, line span, and parsed section structure — to every markdown section
+/// symbol in a `{"symbols": [...]}` container.
+///
+/// This is an enrichment of a surface that already answered: a file that cannot
+/// be read, or a container with no symbol array, leaves the payload exactly as
+/// it was rather than failing the outline or read that carries it.
+fn enrich_markdown_sections(
+    project_root: &Path,
+    absolute_path: &Path,
+    display_file: &str,
+    container: &mut Value,
+) {
+    use crate::context::markdown_sections::{SectionEnrichment, is_markdown_file};
+
+    if !is_markdown_file(display_file) {
+        return;
+    }
+    let Some(symbols) = container
+        .get_mut("symbols")
+        .and_then(Value::as_array_mut)
+        .filter(|symbols| !symbols.is_empty())
+    else {
+        return;
+    };
+    let Ok(source) = crate::sync::read_source_file(absolute_path) else {
+        return;
+    };
+    SectionEnrichment::new(Some(project_root), crate::tracedecay::current_timestamp())
+        .enrich_symbol_array(symbols, &source);
+}
+
+/// Emits one symbol's markdown-section lane under its outline/read bullet.
+///
+/// The summary lines themselves are composed in
+/// `tracedecay-usecases::context::markdown_sections`; this adapter only owns
+/// the markdown builder and the two-space bullet continuation indent.
+fn render_section_md(md: &mut Md, section: Option<&Value>) {
+    let Some(section) = section else {
+        return;
+    };
+    for line in crate::context::markdown_sections::section_summary_lines(section) {
+        md.line(&format!("  {line}"));
+    }
+}
+
 /// Default node kinds for port comparisons.
 const PORT_DEFAULT_KINDS: &[&str] = &[
     "function",

@@ -131,10 +131,7 @@ pub(super) fn parse_invocation_with_stdin(
             flag if flag.starts_with("--") => {
                 let key = flag.trim_start_matches('-').replace('-', "_");
                 let prop_schema = schema_properties.get(&key);
-                let is_boolean = prop_schema
-                    .and_then(|p| p.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("boolean");
+                let is_boolean = prop_schema.and_then(schema_primary_type) == Some("boolean");
                 // A boolean flag's value is optional: `--helpful` alone means
                 // `true`. The following token is its value only when the token
                 // is not itself a flag, so `--helpful --note x` binds
@@ -267,8 +264,10 @@ fn validate_tool_args(def: &ToolDefinition, args: &Map<String, Value>) -> Result
             });
         }
 
-        if let Some(expected) = schema.get("type").and_then(Value::as_str) {
-            if !value_matches_type(value, expected) {
+        if let Some(expected) = schema_primary_type(schema) {
+            if !(value_matches_type(value, expected)
+                || (value.is_null() && schema_allows_null(schema)))
+            {
                 let flag = key.replace('_', "-");
                 let hint = if matches!(expected, "array" | "object") {
                     format!(
@@ -313,14 +312,10 @@ fn heredoc_hint(short: &str) -> String {
 }
 
 fn check_array_elements(key: &str, short: &str, schema: &Value, value: &Value) -> Result<()> {
-    if schema.get("type").and_then(Value::as_str) != Some("array") {
+    if schema_primary_type(schema) != Some("array") {
         return Ok(());
     }
-    let Some(items_type) = schema
-        .get("items")
-        .and_then(|items| items.get("type"))
-        .and_then(Value::as_str)
-    else {
+    let Some(items_type) = schema.get("items").and_then(schema_primary_type) else {
         return Ok(());
     };
     if !matches!(items_type, "array" | "object") {
@@ -374,6 +369,40 @@ fn unknown_key_error(
             valid.join(", ")
         ),
     }
+}
+
+/// The declared primary schema type, accepting both the plain string form
+/// (`"type": "boolean"`) and the nullable array form schemars emits for
+/// `Option<T>` (`"type": ["boolean", "null"]`). Returns `None` for unions of
+/// two or more non-null types, which have no single primary type.
+fn schema_primary_type(schema: &Value) -> Option<&str> {
+    match schema.get("type")? {
+        Value::String(ty) => Some(ty.as_str()),
+        Value::Array(types) => {
+            let mut primary = None;
+            for ty in types {
+                let ty = ty.as_str()?;
+                if ty == "null" {
+                    continue;
+                }
+                if primary.is_some() {
+                    return None;
+                }
+                primary = Some(ty);
+            }
+            primary
+        }
+        _ => None,
+    }
+}
+
+/// True when the schema `type` is the nullable array form and includes
+/// `"null"`, so an explicit JSON `null` in an `--args` payload is valid.
+fn schema_allows_null(schema: &Value) -> bool {
+    matches!(
+        schema.get("type"),
+        Some(Value::Array(types)) if types.iter().any(|t| t.as_str() == Some("null"))
+    )
 }
 
 /// True when a JSON value is acceptable for a schema `type` string. `number`
@@ -478,10 +507,7 @@ fn single_dash_flag_typo(raw: &str, props: &Map<String, Value>) -> Option<String
 /// Corrective error for a flag with no following value, stating the exact fix
 /// (booleans get the `true`/`false` example verbatim).
 fn missing_flag_value_error(flag: &str, prop_schema: Option<&Value>) -> TraceDecayError {
-    let is_boolean = prop_schema
-        .and_then(|p| p.get("type"))
-        .and_then(Value::as_str)
-        == Some("boolean");
+    let is_boolean = prop_schema.and_then(schema_primary_type) == Some("boolean");
     let message = if is_boolean {
         format!("flag `{flag}` requires a value — pass `{flag} true` or `{flag} false`")
     } else {
@@ -555,10 +581,7 @@ fn resolve_args_payload(
 /// Falls back to a JSON string when the schema is absent or specifies an
 /// unknown type.
 fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Value> {
-    let ty = prop_schema
-        .and_then(|p| p.get("type"))
-        .and_then(Value::as_str)
-        .unwrap_or("string");
+    let ty = prop_schema.and_then(schema_primary_type).unwrap_or("string");
 
     match ty {
         "string" => Ok(Value::String(raw.to_string())),
@@ -651,7 +674,7 @@ pub(super) fn finalize_arrays(def: &ToolDefinition, map: &mut Map<String, Value>
         return;
     };
     for (key, schema) in props {
-        let is_array = schema.get("type").and_then(Value::as_str) == Some("array");
+        let is_array = schema_primary_type(schema) == Some("array");
         if !is_array {
             continue;
         }

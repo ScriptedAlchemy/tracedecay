@@ -72,7 +72,15 @@ pub(crate) async fn handle_read(
     if let Some(body) = output.body {
         payload["body"] = Value::String(body);
     }
-    if let Some(context) = output.context {
+    if let Some(mut context) = output.context {
+        // `display_file` is the repository-relative logical path the read
+        // resolved to, so this is the same file the symbol context describes.
+        enrich_markdown_sections(
+            cg.project_root(),
+            &cg.project_root().join(&display_file),
+            &display_file,
+            &mut context,
+        );
         payload["context"] = context;
     }
     Ok(rendered_tool_result(
@@ -148,6 +156,7 @@ fn render_read_context_md(md: &mut Md, context: Option<&Value>) {
         } else {
             md.bullet(&format!("{kind} {name} {span}: `{signature}`"));
         }
+        render_section_md(md, symbol.get("section"));
     }
     if context
         .get("truncated")

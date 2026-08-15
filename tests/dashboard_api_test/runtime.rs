@@ -54,8 +54,14 @@ impl DashboardTestRuntimeV1 {
         let project_database = graph
             .project_sessions(project_root, project_id.clone())
             .await?;
+        // Graph databases stay isolated under `dashboard-test-graphs`, but the
+        // profile root handed to the automation/skills authority must be the
+        // real resolved user profile root: production gates managed-skill
+        // exports on `uses_default_user_profile`, and the outcomes/skills
+        // endpoints read the same root fixtures write through
+        // `default_profile_root()`.
         Ok(Self {
-            profile_root: graph_profile_root,
+            profile_root: profile_root.to_path_buf(),
             profile_database,
             project_database,
             graph,

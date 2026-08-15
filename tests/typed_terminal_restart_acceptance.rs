@@ -36,6 +36,8 @@
 //!   final shape this binary creates, returning `ResetRequired` with a
 //!   `Reset`-only legal action for every subsequent open of that store.
 mod common;
+/// The HTTP, MCP-host, and Rust SDK legs of this same journey.
+mod transport_boundaries;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

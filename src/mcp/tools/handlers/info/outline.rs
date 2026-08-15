@@ -38,6 +38,7 @@ pub(crate) async fn handle_outline(
         &display_file,
         kinds_slice,
     )?;
+    enrich_markdown_sections(cg.project_root(), &abs_path, &display_file, &mut value);
     match ast_grep_outline(&abs_path) {
         Ok(outline) => {
             value["ast_grep_outline"] = outline;
@@ -135,6 +136,7 @@ fn render_outline_md(value: &Value) -> String {
                 if !signature.is_empty() {
                     md.line(&format!("  `{signature}`"));
                 }
+                render_section_md(&mut md, symbol.get("section"));
             }
         }
         _ => {

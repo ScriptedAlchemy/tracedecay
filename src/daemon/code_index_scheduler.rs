@@ -22,11 +22,10 @@ use tracedecay_application::{DirectorySyncPolicy, now_micros};
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
-    PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
-    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1,
-    WorktreeId, canonical_sha256,
+    PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    ScoreDomainId, SnapshotFileDispositionV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_usecases::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
@@ -51,7 +50,7 @@ use crate::{
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
-            build_batch_receipt,
+            ProjectionReceiptBuilderV1, ProjectionSinkReceiptV1,
         },
     },
     privacy::CODE_SOURCE_SANITIZER_VERSION_V1,
@@ -1140,8 +1139,9 @@ struct DaemonProjectionSinkV1;
 impl CodeChunkProjectionSink for DaemonProjectionSinkV1 {
     fn project_changed_chunks(
         &mut self,
-        request: ProjectionBatchRequestV1,
-    ) -> Result<ProjectionBatchReceiptV1, ProjectionSinkErrorV1> {
+        request: &ProjectionBatchRequestV1,
+        receipt_builder: ProjectionReceiptBuilderV1<'_>,
+    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
         let mut decisions = request
             .changes
             .added_or_changed
@@ -1188,7 +1188,8 @@ impl CodeChunkProjectionSink for DaemonProjectionSinkV1 {
                 }),
         );
         decisions.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
-        build_batch_receipt(&request, &decisions)
+        receipt_builder
+            .build(&decisions)
             .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
     }
 }

@@ -184,6 +184,8 @@ pub(crate) mod project_open_owners;
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_configuration_test_runtime::dashboard_configuration_runtime_for_test;
 pub(crate) mod query_authority_provider;
+#[cfg(any(test, feature = "test-transport"))]
+pub(crate) mod retained_test_support;
 mod semantic_activation_reconciler;
 mod semantic_evaluation;
 mod shutdown_coordination;

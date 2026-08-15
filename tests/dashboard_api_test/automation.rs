@@ -168,10 +168,18 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         );
         wait_for_dashboard(&agent, &base_url).await;
 
+        let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
+        let (status, current_config) = get_json(&agent, &config_url);
+        assert_eq!(status, 200, "config read should succeed: {current_config}");
+        let expected_revision_id = current_config["configuration_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("config read must return the pinned revision: {current_config}"));
         let (status, config) = patch_json_body(
             &agent,
-            &format!("{base_url}/api/plugins/holographic/curation/config"),
+            &config_url,
             &serde_json::json!({
+                "expected_revision_id": expected_revision_id,
+                "idempotency_key": "dashboard-final-self-improvement-smoke",
                 "enabled": true,
                 "backend": "codex_app_server",
                 "host_mode": "standalone",
@@ -409,6 +417,9 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let run_id = "artifact_api_run";
         let created_at = "2026-06-24T00:00:00Z";
+        // Schema-v2 ledger rows carry nonnegative Unix seconds; the RFC3339
+        // form above stays for the schema-v1 artifact sidecar only.
+        let ledger_unix_seconds = "1782259200";
         let artifact = tracedecay_agent_hosts::automation::run_ledger::write_run_artifact(
             &dashboard_root,
             run_id,
@@ -465,8 +476,8 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                 fallback_status: None,
                 report_ref: None,
                 artifacts: vec![artifact],
-                started_at: created_at.to_string(),
-                completed_at: created_at.to_string(),
+                started_at: ledger_unix_seconds.to_string(),
+                completed_at: ledger_unix_seconds.to_string(),
                 completed_at_micros: Some(1_782_259_200_000_000),
             },
         )

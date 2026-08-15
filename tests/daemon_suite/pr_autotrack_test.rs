@@ -1,9 +1,10 @@
 //! Production-boundary tests for PR discovery and scheduler admission.
 //!
-//! PR worktree activation is owned by the retained daemon code-index scheduler.
-//! The public reconciliation boundary therefore fails closed until that
-//! scheduler is injected; it must not fall back to the retired per-branch
-//! SQLite graph implementation or mutate Git state before admission.
+//! PR and manual-branch worktree activation is owned by the retained daemon
+//! code-index scheduler. The public reconciliation and `activate_manual_branch`
+//! boundaries therefore fail closed until that scheduler is injected; they
+//! must not fall back to the retired per-branch SQLite graph implementation
+//! or mutate Git state before admission.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -150,6 +151,37 @@ async fn reconciliation_without_scheduler_fails_before_git_or_state_mutation() {
         !fixture
             .repo
             .output(&["rev-parse", "--verify", "refs/tracedecay/pr/7"])
+            .status
+            .success()
+    );
+}
+
+#[tokio::test]
+async fn manual_branch_without_scheduler_fails_before_git_or_state_mutation() {
+    let fixture = PrProject::enrolled_with_origin().await;
+    fixture.git(&["checkout", "-b", "feature-manual", "main"]);
+    fixture.git(&["checkout", "main"]);
+
+    let result = pr_autotrack::activate_manual_branch(
+        Arc::clone(fixture.graph()),
+        fixture.root(),
+        "feature-manual",
+    )
+    .await;
+
+    match result {
+        Err(pr_autotrack::ManualBranchActivationError::SchedulerUnavailable { .. }) => {}
+        other => panic!("expected SchedulerUnavailable, got {other:?}"),
+    }
+    assert!(!fixture.data_root().join("branch-worktrees").exists());
+    assert!(
+        !fixture
+            .repo
+            .output(&[
+                "rev-parse",
+                "--verify",
+                "refs/tracedecay/branch/feature-manual"
+            ])
             .status
             .success()
     );

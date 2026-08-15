@@ -362,6 +362,95 @@ async fn outline_markdown_uses_context_style_bullets_not_table() {
     close_test_graph(cg).await;
 }
 
+/// A markdown plan is a work ledger. Outlining one must answer "what is under
+/// this heading, and which of its checklist items are still open" without a
+/// second read, and must hand back a retrieval id for the full section body
+/// through the existing `tracedecay_retrieve` handle cache — not a new tool.
+#[tokio::test]
+async fn outline_markdown_section_carries_preview_handle_and_checklist_state() {
+    if !tracedecay::mcp::tools::ast_grep_outline_available() {
+        return;
+    }
+
+    let dir = test_temp_dir();
+    let project = dir.path().join("project");
+    crate::fixture::write_indexed_fixture_sources(&project);
+    fs::create_dir_all(project.join("docs")).unwrap();
+    let filler = "Body prose that pushes this section past the inline preview budget. ".repeat(12);
+    fs::write(
+        project.join("docs/plan.md"),
+        format!(
+            "# Plan\n\n## Remaining work\n\n{filler}\n\n- [x] land the extractor\n- [ ] mint the section handle\n  - [ ] nested follow-up\n- plain bullet\n\n```rust\nfn probe() {{}}\n```\n\n## Done\n\nNothing left.\n"
+        ),
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(&project).await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_outline",
+        json!({"file": "docs/plan.md"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let section = payload["symbols"]
+        .as_array()
+        .expect("outline symbols")
+        .iter()
+        .find(|symbol| symbol["name"] == "Remaining work")
+        .map(|symbol| symbol["section"].clone())
+        .unwrap_or(Value::Null);
+    assert!(
+        section.is_object(),
+        "markdown heading should carry a section lane: {payload}"
+    );
+
+    assert_eq!(section["title"], "Remaining work");
+    assert_eq!(section["preview_truncated"], true);
+    assert!(
+        section["read_lines"].as_str().is_some_and(|lines| lines.contains('-')),
+        "the section must publish a read span even when a handle exists: {section}"
+    );
+
+    let handle = section["body_handle"]
+        .as_str()
+        .unwrap_or_else(|| panic!("section should mint a retrieval handle: {section}"))
+        .to_owned();
+    assert!(handle.starts_with("rh_"), "{section}");
+    assert_eq!(section["retrieve_with"], "tracedecay_retrieve");
+
+    let checklist = &section["structure"]["checklist"];
+    assert_eq!(checklist["total"], 3, "{section}");
+    assert_eq!(checklist["checked"], 1, "{section}");
+    assert_eq!(checklist["unchecked"], 2, "{section}");
+    assert_eq!(
+        section["structure"]["code_blocks"][0]["language"], "rust",
+        "{section}"
+    );
+
+    // The handle is the existing response-handle cache, so the existing
+    // retrieval tool returns the full section body.
+    let retrieved = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({"handle": handle}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let retrieved_text = extract_text(&retrieved.value);
+    assert!(
+        retrieved_text.contains("nested follow-up") && retrieved_text.contains("fn probe()"),
+        "retrieve should return the whole section body: {retrieved_text}"
+    );
+
+    close_test_graph(cg).await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn path_containment_config_rejects_symlink_escape_before_serving_config() {

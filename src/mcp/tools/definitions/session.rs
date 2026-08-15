@@ -208,6 +208,33 @@ pub(super) fn def_session_refresh() -> ToolDefinition {
     )
 }
 
+pub(super) fn def_session_refresh_begin(input_schema: Value) -> ToolDefinition {
+    def_rw(
+        "tracedecay_session_refresh_begin",
+        "Session Refresh Begin",
+        "Begin or join one exact daemon-owned durable session-temporal refresh. The operation is idempotent: repeating it joins the running refresh instead of starting a second one, and the typed started or joined outcome reports what occurred. Returns an opaque handle for tracedecay_session_refresh_status and tracedecay_session_refresh_cancel. Every call is bound to explicit session, source, target, and project scope selectors; unavailable authority fails closed without opening stores or ingesting transcripts.",
+        input_schema,
+    )
+}
+
+pub(super) fn def_session_refresh_status(input_schema: Value) -> ToolDefinition {
+    def(
+        "tracedecay_session_refresh_status",
+        "Session Refresh Status",
+        "Inspect one exact daemon-owned durable session-temporal refresh using the opaque handle returned by tracedecay_session_refresh_begin. Read-only: returns progress or the terminal receipt and never begins, resumes, or cancels a refresh.",
+        input_schema,
+    )
+}
+
+pub(super) fn def_session_refresh_cancel(input_schema: Value) -> ToolDefinition {
+    def_rw(
+        "tracedecay_session_refresh_cancel",
+        "Session Refresh Cancel",
+        "Request durable cancellation of one exact daemon-owned session-temporal refresh using the opaque handle returned by tracedecay_session_refresh_begin. Success is receipt-backed; request abort or deadline outcomes never imply durable cancellation.",
+        input_schema,
+    )
+}
+
 pub(super) fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
