@@ -8,6 +8,8 @@ use crate::{
     load_candidate_workload,
 };
 
+const BASELINE_REPORT_RESOURCE_CHILD_ENV: &str = "TRACEDECAY_BASELINE_REPORT_RESOURCE_CHILD";
+
 fn direct_fixture_scope(_repo_root: &Path) -> Option<tracedecay_application::ResolvedScope> {
     tracedecay_application::ResolvedScope::new(
         tracedecay_domain::ProjectId::new("project.search-eval-direct-report").ok()?,
@@ -99,6 +101,27 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
 
 #[test]
 fn baseline_report_is_self_validating_but_not_activation_evidence() {
+    if std::env::var_os(BASELINE_REPORT_RESOURCE_CHILD_ENV).is_none() {
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("report test binary has a current executable"),
+        )
+        .args([
+            "--exact",
+            "report_tests::baseline_report_is_self_validating_but_not_activation_evidence",
+            "--nocapture",
+        ])
+        .env(BASELINE_REPORT_RESOURCE_CHILD_ENV, "1")
+        .output()
+        .expect("run baseline report in a dedicated process");
+        assert!(
+            output.status.success(),
+            "dedicated baseline report failed:\\nstdout:\\n{}\\nstderr:\\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let repo_root = checked_in_fixture_root();
     let workload = load_candidate_workload(
         &repo_root.join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
