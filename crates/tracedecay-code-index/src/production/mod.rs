@@ -72,7 +72,10 @@ pub use generation_attribution::PublishedGenerationTestAttributionAuthorityV1;
 mod generation_statistics;
 pub use generation_statistics::CodeIndexGenerationStatisticsV1;
 mod sealed_codec;
-pub use sealed_codec::{MAX_SEALED_CODE_GENERATION_BYTES_V1, SEALED_GENERATION_FORMAT_REVISION_V1};
+pub use sealed_codec::{
+    MAX_SEALED_CODE_GENERATION_BYTES_V1, SEALED_GENERATION_FORMAT_REVISION_V1,
+    sealed_generation_format_revision_is_compatible, sealed_generation_payload_digest,
+};
 
 /// Immutable configuration retained by one production index owner.
 #[derive(Clone, Debug)]
@@ -781,7 +784,7 @@ impl CodeIndexPublishedGenerationV1 {
             .iter()
             .map(|candidate| (&candidate.file_occurrence_id, candidate))
             .collect::<HashMap<_, _>>();
-        for file in &files {
+        collect_bounded_ordered(&files, |file| {
             file.artifacts
                 .validate()
                 .map_err(CodeIndexProductionErrorV1::Chunk)?;
@@ -814,7 +817,8 @@ impl CodeIndexPublishedGenerationV1 {
             file.exact_authority
                 .validate_all(&file.artifacts.chunks.chunks)
                 .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        }
+            Ok(())
+        })?;
         validate_import_evidence(&files, &self.imports)?;
         let mut chunks = files
             .iter()
@@ -1017,6 +1021,7 @@ where
         request: CodeIndexBuildRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
+        eprintln!("[republish-phase] build=start");
         Self::checkpoint(control)?;
         let ignored_source_roster = IgnoredSourceRosterV1::admit(
             &request.snapshot,
@@ -1026,6 +1031,7 @@ where
         let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
         let active = self.active_generation(&scope)?;
         Self::checkpoint(control)?;
+        eprintln!("[republish-phase] build=active_loaded");
 
         let intake = self.intake_at(request.sealed_at, registry_for_snapshot(&request.snapshot)?);
         let capability = intake
@@ -1034,6 +1040,7 @@ where
         let validated = capability.snapshot().clone();
         let captured_files = captured_files(&validated.snapshot, request.captured_files)?;
         Self::checkpoint(control)?;
+        eprintln!("[republish-phase] build=intake_complete");
 
         let planner = GenerationPlanner::new(
             self.config.project_id.clone(),
@@ -1087,6 +1094,7 @@ where
             ),
         };
         Self::checkpoint(control)?;
+        eprintln!("[republish-phase] build=plan_complete");
 
         let parser_registry = Arc::new(tracedecay_code_extraction::LanguageRegistry::new());
         let extractor = TreeSitterExtractor::from_shared_registry(Arc::clone(&parser_registry));
@@ -1129,8 +1137,10 @@ where
             }
         };
         Self::checkpoint(control)?;
+        eprintln!("[republish-phase] build=materialize_complete");
 
         let coverage = coverage_summary(&validated.snapshot, &staged.files);
+        eprintln!("[republish-phase] build=coverage_complete");
         let capability = BaseCapabilityEmitter::new(
             registry_for_snapshot(&validated.snapshot)?,
             coverage,
@@ -1138,19 +1148,23 @@ where
         )
         .emit(&manifest)
         .map_err(CodeIndexProductionErrorV1::Capability)?;
+        eprintln!("[republish-phase] build=capability_complete");
         let changes =
             plan_chunk_increment(active.as_ref().map(|active| &active.chunks), &staged.chunks)
                 .map_err(CodeIndexProductionErrorV1::Increment)?;
+        eprintln!("[republish-phase] build=chunk_increment_complete");
         let projection_request = projection_request(
             active.as_ref(),
             increment.as_ref(),
             request.target_projection_key,
             changes,
         )?;
+        eprintln!("[republish-phase] build=projection_request_complete");
         Self::checkpoint(control)?;
         let projection = project_for_publication(&mut self.projection, projection_request)
             .map_err(CodeIndexProductionErrorV1::Projection)?;
         Self::checkpoint(control)?;
+        eprintln!("[republish-phase] build=projection_complete");
 
         let imports = derive_import_evidence(&staged.files);
         let (edges, edge_abstentions) = collect_edge_evidence(&staged.files);
@@ -1174,12 +1188,14 @@ where
             attribution: OnceLock::new(),
         };
         candidate.validate()?;
+        eprintln!("[republish-phase] build=validation_complete");
 
         let expected = active
             .as_ref()
             .map(|generation| generation.manifest.generation_id.clone());
         self.publication
             .publish_atomically(&scope, expected.as_ref(), candidate.clone())?;
+        eprintln!("[republish-phase] build=publication_complete");
         Ok(candidate)
     }
 

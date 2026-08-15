@@ -514,8 +514,13 @@ fn prepare_message(
     message: &SessionMessageRecord,
     externalizer: &mut PayloadExternalizer<'_>,
 ) -> Result<PreparedMessage, LcmError> {
-    let initial = sanitize_lcm_payload_text(&message.text)
-        .map_err(|error| LcmError::Db(format!("LCM privacy sanitization failed: {error}")))?;
+    let initial = sanitize_lcm_payload_text(&message.text).map_err(|error| {
+        eprintln!(
+            "TRACEDEBUG prepare_message sanitize failed: {error}; text={:?}",
+            message.text
+        );
+        LcmError::Db(format!("LCM privacy sanitization failed: {error}"))
+    })?;
     let mut text = initial.sanitized_text().to_owned();
     let quarantine_reason =
         security::quarantine_reason(&message.role, message.kind.as_deref(), &text)

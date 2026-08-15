@@ -14,22 +14,22 @@ use tracedecay_code_index::{
         CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-        CodeIndexRepositoryParseIdentityV1,
+        CodeIndexRepositoryParseIdentityV1, SEALED_GENERATION_FORMAT_REVISION_V1,
+        sealed_generation_payload_digest,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
-        build_batch_receipt,
+        ProjectionReceiptBuilderV1, ProjectionSinkReceiptV1,
     },
     provider::GenerationTestAttributionJoinReadPort,
 };
 use tracedecay_domain::{
     BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, FileOccurrenceId, LanguageId,
-    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId, RepositoryDirtyStateV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SnapshotFileDispositionV1, StackNodeId, TestAttributionEvidenceClassV1, TreeId, UtcMicros,
-    WorktreeId, canonical_sha256,
+    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1,
+    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
+    ProviderEvaluationStateV1, RefId, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    StackNodeId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
 };
 use tracedecay_graph_db::{GraphNamespace, GraphProjectorRevision};
 
@@ -91,8 +91,9 @@ pub(super) struct ApplyingProjectionSink;
 impl CodeChunkProjectionSink for ApplyingProjectionSink {
     fn project_changed_chunks(
         &mut self,
-        request: ProjectionBatchRequestV1,
-    ) -> Result<ProjectionBatchReceiptV1, ProjectionSinkErrorV1> {
+        request: &ProjectionBatchRequestV1,
+        receipt_builder: ProjectionReceiptBuilderV1<'_>,
+    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
         let mut decisions: Vec<ChunkProjectionDecisionV1> = request
             .changes
             .added_or_changed
@@ -143,7 +144,8 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
                     output_digest: None,
                 }),
         );
-        build_batch_receipt(&request, &decisions)
+        receipt_builder
+            .build(&decisions)
             .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
     }
 }
@@ -153,8 +155,9 @@ struct RejectingProjectionSink;
 impl CodeChunkProjectionSink for RejectingProjectionSink {
     fn project_changed_chunks(
         &mut self,
-        _request: ProjectionBatchRequestV1,
-    ) -> Result<ProjectionBatchReceiptV1, ProjectionSinkErrorV1> {
+        _request: &ProjectionBatchRequestV1,
+        _receipt_builder: ProjectionReceiptBuilderV1<'_>,
+    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
         Err(ProjectionSinkErrorV1::Rejected(
             "projection is intentionally unavailable".to_owned(),
         ))
@@ -567,8 +570,11 @@ fn sealed_generation_validation_is_memoized_but_decode_stays_fail_closed() {
         serde_json::from_slice(&sealed).expect("sealed generation JSON");
     envelope["generation"]["files"][0]["authority"]["project_id"] =
         serde_json::Value::String("project.foreign".to_owned());
-    let state_digest =
-        canonical_sha256(&envelope["generation"]).expect("forged payload has canonical digest");
+        let state_digest = sealed_generation_payload_digest(
+            SEALED_GENERATION_FORMAT_REVISION_V1,
+            &envelope["generation"],
+        )
+        .expect("forged payload has a state digest");
     envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
     let forged = serde_json::to_vec(&envelope).expect("forged sealed generation JSON");
 
@@ -692,8 +698,11 @@ fn corrupted_chunk_evidence_fails_the_first_validation_of_a_restored_generation(
     // membership its file artifact claims.
     chunk["id"] = serde_json::Value::String("chunk.tampered".to_owned());
     // Re-seal the envelope so the outer state digest cannot be what rejects it.
-    let state_digest =
-        canonical_sha256(&envelope["generation"]).expect("forged payload has canonical digest");
+    let state_digest = sealed_generation_payload_digest(
+        SEALED_GENERATION_FORMAT_REVISION_V1,
+        &envelope["generation"],
+    )
+    .expect("forged payload has a state digest");
     envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
     let forged = serde_json::to_vec(&envelope).expect("forged sealed generation JSON");
 

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{self, Write};
 
 use grafeo_engine::GrafeoDB;
@@ -439,7 +439,7 @@ impl GraphGenerationManifest {
                 ));
             }
         }
-        let mut entity_ids = BTreeSet::new();
+        let mut entity_ids = HashSet::with_capacity(self.entities.len());
         for entity in &self.entities {
             check()?;
             entity.validate()?;
@@ -455,7 +455,7 @@ impl GraphGenerationManifest {
             .map(|dependency| dependency.projection.clone())
             .chain(std::iter::once(self.projection.clone()))
             .collect::<BTreeSet<_>>();
-        let mut relation_ids = BTreeSet::new();
+        let mut relation_ids = HashSet::with_capacity(self.relations.len());
         for relation in &self.relations {
             check()?;
             relation.validate()?;

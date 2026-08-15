@@ -1,5 +1,10 @@
+use std::io::Read;
+
+#[cfg(test)]
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
+use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -7,8 +12,32 @@ use super::*;
 ///
 /// Every reader that gates on the sealed format — the publication store, the
 /// worker probe, and code-generation retention — must gate on this one value.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 5;
+const LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION: u32 = 5;
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 6;
 pub const MAX_SEALED_CODE_GENERATION_BYTES_V1: u64 = 1024 * 1024 * 1024;
+
+pub const fn sealed_generation_format_revision_is_compatible(revision: u32) -> bool {
+    matches!(
+        revision,
+        LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION
+            | SEALED_GENERATION_FORMAT_REVISION_V1
+    )
+}
+
+pub fn sealed_generation_payload_digest<T: Serialize>(
+    format_revision: u32,
+    generation: &T,
+) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
+    match format_revision {
+        LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => canonical_sha256(generation)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string())),
+        SEALED_GENERATION_FORMAT_REVISION_V1 => json_generation_bytes_and_digest(generation)
+            .map(|(_, digest)| digest),
+        _ => Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation format revision is incompatible".to_owned(),
+        )),
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,14 +72,14 @@ struct PersistedPublishedGenerationV1 {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct CompatibleSealedFormatRevisionV1;
+struct CompatibleSealedFormatRevisionV1(u32);
 
 impl Serialize for CompatibleSealedFormatRevisionV1 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        serializer.serialize_u32(SEALED_GENERATION_FORMAT_REVISION_V1)
+        serializer.serialize_u32(self.0)
     }
 }
 
@@ -59,12 +88,13 @@ impl<'de> Deserialize<'de> for CompatibleSealedFormatRevisionV1 {
     where
         D: serde::Deserializer<'de>,
     {
-        if u32::deserialize(deserializer)? != SEALED_GENERATION_FORMAT_REVISION_V1 {
+        let revision = u32::deserialize(deserializer)?;
+        if !sealed_generation_format_revision_is_compatible(revision) {
             return Err(serde::de::Error::custom(
                 "sealed generation format revision is incompatible",
             ));
         }
-        Ok(Self)
+        Ok(Self(revision))
     }
 }
 
@@ -92,6 +122,12 @@ struct SealedPublishedGenerationEnvelopeV1 {
 }
 
 #[derive(Deserialize)]
+struct SealedPublishedGenerationRawEnvelopeV1 {
+    state_digest: ManifestDigest,
+    generation: Box<RawValue>,
+}
+
+#[derive(Deserialize)]
 struct SealedPublishedGenerationFormatProbeV1 {
     generation: PersistedPublishedGenerationFormatProbeV1,
 }
@@ -101,16 +137,23 @@ struct PersistedPublishedGenerationFormatProbeV1 {
     format_revision: u32,
 }
 
-#[derive(Serialize)]
-struct SealedPublishedGenerationEnvelopeRefV1<'a> {
-    state_digest: &'a ManifestDigest,
-    generation: PersistedPublishedGenerationRefV1<'a>,
-}
-
+#[cfg(test)]
 fn decode_admitted_json<T: DeserializeOwned, R: std::io::Read>(
     reader: R,
     admitted_len: u64,
 ) -> Result<T, CodeIndexProductionErrorV1> {
+    let bytes = read_admitted_bytes(reader, admitted_len)?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation decoding failed: {error}"
+        ))
+    })
+}
+
+fn read_admitted_bytes<R: std::io::Read>(
+    reader: R,
+    admitted_len: u64,
+) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
     if admitted_len > MAX_SEALED_CODE_GENERATION_BYTES_V1 {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation exceeds the canonical byte limit".to_owned(),
@@ -120,7 +163,8 @@ fn decode_admitted_json<T: DeserializeOwned, R: std::io::Read>(
         CodeIndexProductionErrorV1::Contract("sealed generation length overflowed".to_owned())
     })?;
     let mut reader = reader.take(read_limit);
-    let decoded = serde_json::from_reader(&mut reader).map_err(|error| {
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!("sealed generation decoding failed: {error}"))
     })?;
     if read_limit - reader.limit() != admitted_len {
@@ -128,7 +172,51 @@ fn decode_admitted_json<T: DeserializeOwned, R: std::io::Read>(
             "sealed generation length does not match its admitted length".to_owned(),
         ));
     }
-    Ok(decoded)
+    Ok(bytes)
+}
+
+fn encode_sealed_envelope_bytes(
+    state_digest: &ManifestDigest,
+    generation_bytes: &[u8],
+) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+    let mut sealed = Vec::with_capacity(
+        generation_bytes
+            .len()
+            .saturating_add(state_digest.as_str().len())
+            .saturating_add(36),
+    );
+    sealed.extend_from_slice(b"{\"state_digest\":");
+    serde_json::to_writer(&mut sealed, state_digest).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation digest serialization failed: {error}"
+        ))
+    })?;
+    sealed.extend_from_slice(b",\"generation\":");
+    sealed.extend_from_slice(generation_bytes);
+    sealed.push(b'}');
+    Ok(sealed)
+}
+
+fn json_generation_digest(
+    generation_bytes: &[u8],
+) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
+    ManifestDigest::new(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(generation_bytes))
+    ))
+    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+}
+
+fn json_generation_bytes_and_digest<T: Serialize>(
+    generation: &T,
+) -> Result<(Vec<u8>, ManifestDigest), CodeIndexProductionErrorV1> {
+    let generation_bytes = serde_json::to_vec(generation).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation serialization failed: {error}"
+        ))
+    })?;
+    let state_digest = json_generation_digest(&generation_bytes)?;
+    Ok((generation_bytes, state_digest))
 }
 
 impl CodeIndexPublishedGenerationV1 {
@@ -157,17 +245,8 @@ impl CodeIndexPublishedGenerationV1 {
             projection_request: self.projection.request(),
             projection_receipt: self.projection.receipt(),
         };
-        let state_digest = canonical_sha256(&generation)
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        serde_json::to_vec(&SealedPublishedGenerationEnvelopeRefV1 {
-            state_digest: &state_digest,
-            generation,
-        })
-        .map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation serialization failed: {error}"
-            ))
-        })
+        let (generation_bytes, state_digest) = json_generation_bytes_and_digest(&generation)?;
+        encode_sealed_envelope_bytes(&state_digest, &generation_bytes)
     }
 
     /// Restore and revalidate a complete sealed generation.
@@ -182,10 +261,72 @@ impl CodeIndexPublishedGenerationV1 {
         reader: R,
         admitted_len: u64,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let envelope: SealedPublishedGenerationEnvelopeV1 =
-            decode_admitted_json(reader, admitted_len)?;
-        let expected_digest = canonical_sha256(&envelope.generation)
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let bytes = read_admitted_bytes(reader, admitted_len)?;
+        let probe: SealedPublishedGenerationFormatProbeV1 =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation format probe failed: {error}"
+                ))
+            })?;
+        let envelope = match probe.generation.format_revision {
+            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => {
+                serde_json::from_slice::<SealedPublishedGenerationEnvelopeV1>(&bytes).map_err(
+                    |error| {
+                        CodeIndexProductionErrorV1::Contract(format!(
+                            "sealed generation decoding failed: {error}"
+                        ))
+                    },
+                )?
+            }
+            SEALED_GENERATION_FORMAT_REVISION_V1 => {
+                let raw: SealedPublishedGenerationRawEnvelopeV1 =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        CodeIndexProductionErrorV1::Contract(format!(
+                            "sealed generation decoding failed: {error}"
+                        ))
+                    })?;
+                let expected_digest = json_generation_digest(raw.generation.get().as_bytes())?;
+                if expected_digest != raw.state_digest {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed generation state digest does not match its payload".to_owned(),
+                    ));
+                }
+                let generation: PersistedPublishedGenerationV1 =
+                    serde_json::from_str(raw.generation.get()).map_err(|error| {
+                        CodeIndexProductionErrorV1::Contract(format!(
+                            "sealed generation payload decoding failed: {error}"
+                        ))
+                    })?;
+                if generation.format_revision.0 != SEALED_GENERATION_FORMAT_REVISION_V1 {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed generation format revision is incompatible".to_owned(),
+                    ));
+                }
+                SealedPublishedGenerationEnvelopeV1 {
+                    state_digest: raw.state_digest,
+                    generation,
+                }
+            }
+            _ => {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed generation format revision is incompatible".to_owned(),
+                ));
+            }
+        };
+        let expected_digest = match envelope.generation.format_revision.0 {
+            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => {
+                sealed_generation_payload_digest(
+                    LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION,
+                    &envelope.generation,
+                )?
+            }
+            SEALED_GENERATION_FORMAT_REVISION_V1 => envelope.state_digest.clone(),
+            _ => {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed generation format revision is incompatible".to_owned(),
+                ));
+            }
+        };
         if expected_digest != envelope.state_digest {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed generation state digest does not match its payload".to_owned(),
@@ -264,13 +405,42 @@ impl CodeIndexPublishedGenerationV1 {
                     "sealed generation format probe failed: {error}"
                 ))
             })?;
-        Ok(probe.generation.format_revision == SEALED_GENERATION_FORMAT_REVISION_V1)
+        Ok(sealed_generation_format_revision_is_compatible(
+            probe.generation.format_revision,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Serialize)]
+    struct EnvelopeParityFixture<'a> {
+        state_digest: &'a ManifestDigest,
+        generation: &'a serde_json::Value,
+    }
+
+    #[test]
+    fn assembled_envelope_matches_serde_struct_bytes() {
+        let state_digest =
+            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("state digest");
+        let generation = serde_json::json!({
+            "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
+            "manifest": {"generation_id": "generation.parity"}
+        });
+        let generation_bytes =
+            serde_json::to_vec(&generation).expect("generation fixture serialization");
+        let assembled = encode_sealed_envelope_bytes(&state_digest, &generation_bytes)
+            .expect("assemble sealed envelope");
+        let prior = serde_json::to_vec(&EnvelopeParityFixture {
+            state_digest: &state_digest,
+            generation: &generation,
+        })
+        .expect("serde envelope serialization");
+
+        assert_eq!(assembled, prior);
+    }
 
     #[test]
     fn admitted_json_rejects_extra_and_missing_bytes() {

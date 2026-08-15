@@ -4,17 +4,16 @@ use std::future::Future;
 use std::pin::Pin;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, Extension, Path, State};
+use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::response::Response;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::Value;
+use tracedecay_application::RequestId;
 use tracedecay_application::retained_surfaces::RetainedSurfaceOperation;
-use tracedecay_application::{ApplicationProblem, RequestId, RetryDirective};
 
 use crate::http::{
-    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem_response,
-    invalid_request_response,
+    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, invalid_request_response,
 };
 
 pub fn retained_operation_id(operation: RetainedSurfaceOperation) -> String {
@@ -53,32 +52,44 @@ where
     }
 }
 
+/// Registers one explicit `POST` route per callable retained operation, so
+/// the routing table itself is the per-binding mount authority: a callable
+/// operation's path answers method-mismatch (`405`) probes, and an unknown or
+/// non-callable segment answers the router's own `404` instead of a handler's
+/// concealed problem envelope.
 pub fn retained_application_router<O>(owner: O) -> Router
 where
     O: RetainedApplicationOwner,
 {
-    Router::new()
-        .route("/retained/{operation}", post(operation::<O>))
+    let mut router = Router::new();
+    for operation in RetainedSurfaceOperation::CALLABLE {
+        router = router.route(
+            &retained_route_path(operation),
+            post(
+                move |State(owner): State<O>,
+                      Extension(request_id): Extension<RequestId>,
+                      Extension(controls): Extension<HttpApplicationControls>,
+                      body: Result<Json<Value>, JsonRejection>| {
+                    invoke(operation, owner, request_id, controls, body)
+                },
+            ),
+        );
+    }
+    router
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owner)
 }
 
-async fn operation<O>(
-    Path(segment): Path<String>,
-    State(owner): State<O>,
-    Extension(request_id): Extension<RequestId>,
-    Extension(controls): Extension<HttpApplicationControls>,
+async fn invoke<O>(
+    operation: RetainedSurfaceOperation,
+    owner: O,
+    request_id: RequestId,
+    controls: HttpApplicationControls,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response
 where
     O: RetainedApplicationOwner,
 {
-    let Some(operation) = retained_http_operation(&segment) else {
-        return adapter_problem_response(
-            request_id,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        );
-    };
     let Ok(Json(body)) = body else {
         return invalid_request_response(
             request_id,
@@ -94,11 +105,6 @@ where
             body,
         })
         .await
-}
-
-fn retained_http_operation(segment: &str) -> Option<RetainedSurfaceOperation> {
-    RetainedSurfaceOperation::from_operation_name(segment)
-        .filter(|operation| operation.is_callable())
 }
 
 pub fn retained_invalid_request_response(request_id: RequestId) -> Response {
@@ -130,17 +136,5 @@ mod tests {
     #[test]
     fn broad_translator_names_are_not_callable_routes() {
         assert!(!RetainedSurfaceOperation::SessionRefresh.is_callable());
-    }
-
-    #[test]
-    fn http_operation_segments_accept_only_the_bare_canonical_name() {
-        assert_eq!(
-            retained_http_operation("fact_store_search"),
-            Some(RetainedSurfaceOperation::FactStoreSearch)
-        );
-        assert_eq!(
-            retained_http_operation("tracedecay_fact_store_search"),
-            None
-        );
     }
 }

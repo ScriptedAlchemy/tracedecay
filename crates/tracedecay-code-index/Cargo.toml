@@ -65,7 +65,7 @@ ignore = "0.4"
 rayon = "1"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.11"
 thiserror = "2"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }

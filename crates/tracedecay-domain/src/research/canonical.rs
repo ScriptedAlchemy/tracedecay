@@ -36,6 +36,24 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<ManifestDigest, Domai
     let mut sink = BufferedSink::new(Sha256::new());
     canonical_serializer::serialize_canonical(value, &mut sink)?;
     let digest = sink.finish().finalize();
+    manifest_digest_from_sha256(&digest)
+}
+
+/// Serialize once to canonical JSON and return those bytes with their canonical
+/// manifest digest.
+///
+/// Callers that must persist the canonical bytes avoid traversing large values
+/// a second time solely to compute the same digest.
+pub fn canonical_json_bytes_and_sha256<T: Serialize>(
+    value: &T,
+) -> Result<(Vec<u8>, ManifestDigest), DomainError> {
+    let bytes = canonical_json_bytes(value)?;
+    let digest_bytes = Sha256::digest(&bytes);
+    let digest = manifest_digest_from_sha256(&digest_bytes)?;
+    Ok((bytes, digest))
+}
+
+fn manifest_digest_from_sha256(digest: &[u8]) -> Result<ManifestDigest, DomainError> {
     let mut encoded = String::with_capacity("sha256:".len() + digest.len() * 2);
     encoded.push_str("sha256:");
     for byte in digest {

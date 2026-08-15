@@ -44,7 +44,8 @@ use tracedecay_code_index::production::{
     CodeIndexRepositoryParseIdentityV1,
 };
 use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1, build_batch_receipt,
+    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
+    ProjectionReceiptBuilderV1, ProjectionSinkReceiptV1,
 };
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
@@ -52,8 +53,8 @@ use tracedecay_domain::{
     ComponentRevision, DiversityPolicy, DiversityPolicyId, EphemeralSanitizedQueryViewV1,
     ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId, FusionProfile, FusionProfileId,
     HydrationReceipt, HydrationRevision, LanguageId, ManifestDigest, PolicyRevisionId, PrincipalId,
-    PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
+    PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
+    ProjectionOperationV1, ProjectionOutcomeV1,
     PublicRetrieverStatus, QueryFallbackSubpayload, QueryNormalizationRevision, RelationEdgeKindV1,
     RepositoryDirtyStateV1, RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget,
     RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
@@ -521,8 +522,9 @@ struct ApplyingProjectionSink;
 impl CodeChunkProjectionSink for ApplyingProjectionSink {
     fn project_changed_chunks(
         &mut self,
-        request: ProjectionBatchRequestV1,
-    ) -> Result<ProjectionBatchReceiptV1, ProjectionSinkErrorV1> {
+        request: &ProjectionBatchRequestV1,
+        receipt_builder: ProjectionReceiptBuilderV1<'_>,
+    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
         let mut decisions: Vec<ChunkProjectionDecisionV1> = request
             .changes
             .added_or_changed
@@ -569,7 +571,8 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
                 }),
         );
         decisions.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
-        build_batch_receipt(&request, &decisions)
+        receipt_builder
+            .build(&decisions)
             .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
     }
 }

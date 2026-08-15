@@ -401,6 +401,7 @@ fn verify_batch_receipt_with(
         };
         check_decision(*partition, change, &decision, reembed_reused)?;
     }
+    eprintln!("[republish-phase] verification=receipts_checked");
     for chunk_id in partitions.keys() {
         if !seen.contains(chunk_id) {
             return Err(ProjectionReceiptErrorV1::MissingChunkReceipt(
@@ -408,6 +409,7 @@ fn verify_batch_receipt_with(
             ));
         }
     }
+    eprintln!("[republish-phase] verification=partitions_checked");
 
     let reused_count = batch
         .receipts
@@ -418,8 +420,10 @@ fn verify_batch_receipt_with(
         return Err(ProjectionReceiptErrorV1::DigestMismatch);
     }
     if publication == PublicationDigestTrustV1::Unverified {
+        eprintln!("[republish-phase] verification=digest_start");
         let expected_publication = expected_publication_digest(batch)
             .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+        eprintln!("[republish-phase] verification=digest_complete");
         if batch.publication_digest != expected_publication {
             return Err(ProjectionReceiptErrorV1::DigestMismatch);
         }

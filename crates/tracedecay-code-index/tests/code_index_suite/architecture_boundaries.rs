@@ -1,14 +1,15 @@
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_code_index::projection::{
-    CodeChunkProjectionSink, ProjectionSinkErrorV1, batch_proves_zero_work,
-    expected_request_digest, project_for_publication,
+    CodeChunkProjectionSink, ProjectionReceiptBuilderV1, ProjectionSinkErrorV1,
+    ProjectionSinkReceiptV1, batch_proves_zero_work, expected_request_digest,
+    project_for_publication,
 };
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, CodeGenerationId, CodeSearchChunkId, CommitId, ContentDigest,
-    FileOccurrenceId, LanguageId, ManifestDigest, ProjectionBatchReceiptV1,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionReplayReasonV1, RefId,
-    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeSnapshotV1, WorktreeId,
+    FileOccurrenceId, LanguageId, ManifestDigest, ProjectionBatchRequestV1, ProjectionKeyV1,
+    ProjectionKindV1, ProjectionReplayReasonV1, RefId, RepositoryId, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    UtcMicros, ValidatedCodeSnapshotV1, WorktreeId,
 };
 
 use crate::support::{id, registry};
@@ -18,8 +19,9 @@ struct RejectingSink;
 impl CodeChunkProjectionSink for RejectingSink {
     fn project_changed_chunks(
         &mut self,
-        _request: ProjectionBatchRequestV1,
-    ) -> Result<ProjectionBatchReceiptV1, ProjectionSinkErrorV1> {
+        _request: &ProjectionBatchRequestV1,
+        _receipt_builder: ProjectionReceiptBuilderV1<'_>,
+    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
         Err(ProjectionSinkErrorV1::Rejected(
             "no-op must bypass the publication adapter".to_owned(),
         ))

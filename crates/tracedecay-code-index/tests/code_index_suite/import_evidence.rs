@@ -8,7 +8,7 @@ use tracedecay_code_index::{
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
         CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
-        SEALED_GENERATION_FORMAT_REVISION_V1,
+        SEALED_GENERATION_FORMAT_REVISION_V1, sealed_generation_payload_digest,
     },
 };
 use tracedecay_domain::{
@@ -117,14 +117,24 @@ fn assert_serialized_artifact_has_no_self_digest(envelope: &Value, file_index: u
     );
 }
 
+fn reseal_import_envelope(mut envelope: Value) -> Vec<u8> {
+    let format_revision = u32::try_from(
+        envelope["generation"]["format_revision"]
+            .as_u64()
+            .expect("forged payload format revision"),
+    )
+    .expect("format revision fits u32");
+    let state_digest = sealed_generation_payload_digest(format_revision, &envelope["generation"])
+        .expect("forged payload state digest");
+    envelope["state_digest"] = Value::String(state_digest.as_str().to_owned());
+    serde_json::to_vec(&envelope).expect("forged sealed generation JSON")
+}
+
 fn resealed_import_payload_error(
-    mut envelope: Value,
+    envelope: Value,
     mutation: &str,
 ) -> CodeIndexProductionErrorV1 {
-    let state_digest =
-        canonical_sha256(&envelope["generation"]).expect("forged payload canonical digest");
-    envelope["state_digest"] = Value::String(state_digest.as_str().to_owned());
-    let bytes = serde_json::to_vec(&envelope).expect("forged sealed generation JSON");
+    let bytes = reseal_import_envelope(envelope);
 
     match CodeIndexPublishedGenerationV1::decode_sealed(&bytes) {
         Ok(_) => panic!("{mutation} restored after the outer state digest was recomputed"),
@@ -137,10 +147,8 @@ fn assert_resealed_import_payload_is_rejected(envelope: Value, mutation: &str) {
 }
 
 fn assert_sealed_envelope_restores(envelope: &Value) {
-    CodeIndexPublishedGenerationV1::decode_sealed(
-        &serde_json::to_vec(envelope).expect("baseline sealed JSON"),
-    )
-    .expect("baseline generation restores");
+    CodeIndexPublishedGenerationV1::decode_sealed(&reseal_import_envelope(envelope.clone()))
+        .expect("baseline generation restores");
 }
 
 #[test]
@@ -420,8 +428,8 @@ fn import_generation_pins_extractor_rows_and_chunker_revision_axes() {
 }
 
 #[test]
-fn sealed_revision_five_import_generation_round_trips_to_identical_bytes() {
-    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 5);
+fn sealed_revision_six_import_generation_round_trips_to_identical_bytes() {
+    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 6);
     let first = published_import_generation();
     let first_sealed = first.encode_sealed().expect("first generation seals");
     let second_sealed = published_import_generation()
@@ -430,9 +438,9 @@ fn sealed_revision_five_import_generation_round_trips_to_identical_bytes() {
     assert_eq!(first_sealed, second_sealed);
 
     let envelope: Value = serde_json::from_slice(&first_sealed).expect("sealed generation JSON");
-    assert_eq!(envelope["generation"]["format_revision"], 5);
+    assert_eq!(envelope["generation"]["format_revision"], 6);
     let restored =
-        CodeIndexPublishedGenerationV1::decode_sealed(&first_sealed).expect("rev5 restores");
+        CodeIndexPublishedGenerationV1::decode_sealed(&first_sealed).expect("rev6 restores");
     assert_eq!(restored.imports(), first.imports());
     assert_eq!(
         restored.encode_sealed().expect("restored generation seals"),

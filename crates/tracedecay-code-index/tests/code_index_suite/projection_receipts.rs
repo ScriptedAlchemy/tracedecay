@@ -2,8 +2,9 @@ use std::fmt::Debug;
 
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionPublicationErrorV1,
-    ProjectionReceiptErrorV1, ProjectionSinkErrorV1, batch_proves_zero_work, build_batch_receipt,
-    expected_request_digest, project_for_publication, verify_batch_receipt,
+    ProjectionReceiptBuilderV1, ProjectionReceiptErrorV1, ProjectionSinkErrorV1,
+    ProjectionSinkReceiptV1, batch_proves_zero_work, build_batch_receipt, expected_request_digest,
+    project_for_publication, verify_batch_receipt,
 };
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkId, ContentDigest,
@@ -109,10 +110,11 @@ struct FixedSink {
 impl CodeChunkProjectionSink for FixedSink {
     fn project_changed_chunks(
         &mut self,
-        request: ProjectionBatchRequestV1,
-    ) -> Result<ProjectionBatchReceiptV1, ProjectionSinkErrorV1> {
-        self.seen_request = Some(request);
-        Ok(self.receipt.clone())
+        request: &ProjectionBatchRequestV1,
+        _receipt_builder: ProjectionReceiptBuilderV1<'_>,
+    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
+        self.seen_request = Some(request.clone());
+        Ok(ProjectionSinkReceiptV1::unverified(self.receipt.clone()))
     }
 }
 
@@ -124,8 +126,9 @@ struct ApplyingReplaySink {
 impl CodeChunkProjectionSink for ApplyingReplaySink {
     fn project_changed_chunks(
         &mut self,
-        request: ProjectionBatchRequestV1,
-    ) -> Result<ProjectionBatchReceiptV1, ProjectionSinkErrorV1> {
+        request: &ProjectionBatchRequestV1,
+        receipt_builder: ProjectionReceiptBuilderV1<'_>,
+    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
         self.seen_request = Some(request.clone());
         let decisions = request
             .changes
@@ -144,7 +147,8 @@ impl CodeChunkProjectionSink for ApplyingReplaySink {
                 output_digest: Some(digest::<ContentDigest>('d')),
             })
             .collect::<Vec<_>>();
-        build_batch_receipt(&request, &decisions)
+        receipt_builder
+            .build(&decisions)
             .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
     }
 }

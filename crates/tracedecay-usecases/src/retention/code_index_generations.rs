@@ -23,6 +23,8 @@ use tracedecay_application::{DirectorySyncPolicy, atomic_write};
 // that number here let the writer be versioned to 3 while retention still
 // demanded 1: every real sealed file was refused as "incompatible" and the store
 // became uncollectable.
+use tracedecay_code_index::production::sealed_generation_format_revision_is_compatible;
+#[cfg(test)]
 use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256};
 
@@ -446,7 +448,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
                 path.display()
             )));
         }
-        if format_revision != SEALED_GENERATION_FORMAT_REVISION_V1 {
+        if !sealed_generation_format_revision_is_compatible(format_revision) {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "generation file '{}' has an incompatible format revision",
                 path.display()

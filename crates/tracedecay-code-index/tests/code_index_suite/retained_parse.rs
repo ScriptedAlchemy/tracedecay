@@ -1,13 +1,16 @@
 use std::{
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, mpsc},
     thread,
     time::Duration,
 };
 
+use tree_sitter::Tree;
 use tracedecay_code_extraction::{
     AstroExtractor, LanguageExtractor, RustExtractor,
     incremental::{ParseDocumentIdentity, ParseLimits, ParseReuse},
-    parsed_extraction::ParsedExtractionDisposition,
+    parsed_extraction::{
+        ParsedExtraction, ParsedExtractionDisposition, ParsedExtractionScope,
+    },
 };
 use tracedecay_code_index::retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool};
 use tracedecay_domain::{
@@ -36,6 +39,35 @@ fn identity_at(
         tree: Some(id::<TreeId>(tree)),
         dirty: RepositoryDirtyStateV1::Dirty,
         logical_path: logical_path.to_owned(),
+    }
+}
+
+struct RendezvousRustExtractor {
+    rendezvous: Arc<Barrier>,
+}
+
+impl LanguageExtractor for RendezvousRustExtractor {
+    fn extensions(&self) -> &[&str] {
+        RustExtractor.extensions()
+    }
+
+    fn language_name(&self) -> &str {
+        RustExtractor.language_name()
+    }
+
+    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
+        RustExtractor.extract(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: ParsedExtractionScope<'_>,
+    ) -> ParsedExtraction {
+        self.rendezvous.wait();
+        RustExtractor.extract_parsed(file_path, source, tree, scope)
     }
 }
 
@@ -224,6 +256,84 @@ fn retained_pool_eviction_and_failure_preserve_truthful_bounded_state() {
     assert_eq!(stats.failed_parses, 1);
     assert_eq!(stats.retained_documents, 1);
     assert!(stats.retained_source_bytes <= 64);
+}
+
+#[test]
+fn first_admission_failure_releases_the_pool_state_lock() {
+    let pool = SharedRetainedParsePool::new(RetainedParsePoolLimits {
+        max_documents: 1,
+        max_total_source_bytes: 64,
+        document: ParseLimits {
+            max_source_bytes: 32,
+            max_changed_ranges: 8,
+            max_parse_time: Duration::from_millis(250),
+        },
+    })
+    .expect("valid pool limits");
+    let worker_pool = pool.clone();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let failed = worker_pool
+            .parse(
+                identity("worktree.first-failure", "commit-a", "tree-a"),
+                "rust",
+                "fn first_failure() { let value = 12345678901234567890; }\n",
+            )
+            .is_err();
+        let _ = finished_tx.send(failed);
+    });
+
+    assert_eq!(
+        finished_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(true),
+        "first-admission parse failure re-entered the retained pool state lock"
+    );
+    assert_eq!(pool.stats().failed_parses, 1);
+    assert_eq!(pool.stats().retained_documents, 0);
+}
+
+#[test]
+fn distinct_first_admissions_extract_concurrently() {
+    let pool = SharedRetainedParsePool::default();
+    let rendezvous = Arc::new(Barrier::new(2));
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let handles = (0..2)
+        .map(|ordinal| {
+            let pool = pool.clone();
+            let rendezvous = Arc::clone(&rendezvous);
+            let finished_tx = finished_tx.clone();
+            thread::spawn(move || {
+                let extractor = RendezvousRustExtractor { rendezvous };
+                let result = pool.parse_and_extract(
+                    identity_at(
+                        &format!("worktree.distinct-{ordinal}"),
+                        "commit-a",
+                        "tree-a",
+                        &format!("src/distinct_{ordinal}.rs"),
+                    ),
+                    "rust",
+                    &format!("fn distinct_{ordinal}() -> u32 {{ {ordinal} }}\n"),
+                    &extractor,
+                );
+                let _ = finished_tx.send(result.is_ok());
+            })
+        })
+        .collect::<Vec<_>>();
+    drop(finished_tx);
+
+    for _ in 0..2 {
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(true),
+            "distinct first admissions serialized behind the pool state lock"
+        );
+    }
+    for handle in handles {
+        handle.join().expect("parse worker");
+    }
+    let stats = pool.stats();
+    assert_eq!(stats.initial_parses, 2);
+    assert_eq!(stats.retained_documents, 2);
 }
 
 #[test]

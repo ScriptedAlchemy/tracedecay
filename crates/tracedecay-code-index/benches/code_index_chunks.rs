@@ -17,8 +17,9 @@ use tracedecay_code_index::incremental::{GenerationChunkManifestV1, plan_chunk_i
 use tracedecay_code_index::intake::{CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1, build_batch_receipt,
-    expected_request_digest, project_for_publication,
+    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
+    ProjectionReceiptBuilderV1, ProjectionSinkReceiptV1, expected_request_digest,
+    project_for_publication,
 };
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, ExtractionBatchV1, FileOccurrenceId,
@@ -398,11 +399,13 @@ struct CountingSink {
 impl CodeChunkProjectionSink for CountingSink {
     fn project_changed_chunks(
         &mut self,
-        request: ProjectionBatchRequestV1,
-    ) -> Result<ProjectionBatchReceiptV1, ProjectionSinkErrorV1> {
+        request: &ProjectionBatchRequestV1,
+        receipt_builder: ProjectionReceiptBuilderV1<'_>,
+    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
         self.calls += 1;
         let decisions = projection_decisions(&request.changes);
-        build_batch_receipt(&request, &decisions)
+        receipt_builder
+            .build(&decisions)
             .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
     }
 }

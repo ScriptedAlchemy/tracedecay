@@ -5,11 +5,12 @@ use tracedecay_code_index::{
         CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
         CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexProductionOwnerV1,
         CodeIndexPublishedGenerationV1, SEALED_GENERATION_FORMAT_REVISION_V1,
+        sealed_generation_payload_digest,
     },
 };
 use tracedecay_domain::{
     CommitId, FileOccurrenceId, LanguageId, RepositoryDirtyStateV1, SanitizedCodeFileV1,
-    SensitivityLevelV1, SnapshotFileDispositionV1, canonical_sha256,
+    SensitivityLevelV1, SnapshotFileDispositionV1,
 };
 
 use crate::{
@@ -135,8 +136,14 @@ fn sealed_envelope(generation: &CodeIndexPublishedGenerationV1) -> Value {
 }
 
 fn reseal_outer_state(mut envelope: Value) -> Vec<u8> {
-    let state_digest =
-        canonical_sha256(&envelope["generation"]).expect("forged generation has a digest");
+    let format_revision = u32::try_from(
+        envelope["generation"]["format_revision"]
+            .as_u64()
+            .expect("forged generation format revision"),
+    )
+    .expect("format revision fits u32");
+    let state_digest = sealed_generation_payload_digest(format_revision, &envelope["generation"])
+        .expect("forged generation has a digest");
     envelope["state_digest"] = Value::String(state_digest.as_str().to_owned());
     serde_json::to_vec(&envelope).expect("forged sealed-generation JSON")
 }
@@ -441,23 +448,34 @@ fn sealed_state_digest_changes_when_ignored_source_roster_changes() {
 }
 
 #[test]
-fn sealed_format_remains_revision_five_and_rejects_adjacent_revisions() {
-    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 5);
+fn sealed_format_writes_revision_six_reads_five_and_rejects_adjacent_revisions() {
+    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 6);
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
     )]));
     let sealed = generation
         .encode_sealed()
-        .expect("revision-five generation seals");
+        .expect("revision-six generation seals");
     assert!(
         CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&sealed)
-            .expect("revision-five compatibility probe")
+            .expect("revision-six compatibility probe")
     );
 
-    for incompatible_revision in [4, 6] {
+    let mut legacy = sealed_envelope(&generation);
+    legacy["generation"]["format_revision"] = Value::from(5);
+    let legacy = reseal_outer_state(legacy);
+    assert!(
+        CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&legacy)
+            .expect("revision-five compatibility probe")
+    );
+    CodeIndexPublishedGenerationV1::decode_sealed(&legacy)
+        .expect("revision-five generation remains readable");
+
+    for incompatible_revision in [4, 7] {
         let mut incompatible = sealed_envelope(&generation);
         incompatible["generation"]["format_revision"] = Value::from(incompatible_revision);
-        let incompatible = reseal_outer_state(incompatible);
+        let incompatible =
+            serde_json::to_vec(&incompatible).expect("incompatible sealed-generation JSON");
         assert!(
             !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&incompatible)
                 .expect("incompatible revision compatibility probe")

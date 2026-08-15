@@ -7,7 +7,7 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 use thiserror::Error;
@@ -124,6 +124,7 @@ struct RetainedParsePoolState {
     source_bytes: BTreeMap<ParseDocumentKey, usize>,
     lru: VecDeque<ParseDocumentKey>,
     stats: RetainedParsePoolStats,
+    clear_epoch: u64,
 }
 
 /// Cloneable production pool. Documents parse concurrently under per-document
@@ -132,6 +133,7 @@ struct RetainedParsePoolState {
 pub struct SharedRetainedParsePool {
     limits: RetainedParsePoolLimits,
     state: Arc<Mutex<RetainedParsePoolState>>,
+    first_admissions: Arc<Mutex<BTreeMap<ParseDocumentKey, Weak<Mutex<()>>>>>,
 }
 
 impl Default for SharedRetainedParsePool {
@@ -139,6 +141,7 @@ impl Default for SharedRetainedParsePool {
         Self {
             limits: RetainedParsePoolLimits::default(),
             state: Arc::new(Mutex::new(RetainedParsePoolState::default())),
+            first_admissions: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -154,6 +157,7 @@ impl SharedRetainedParsePool {
         Ok(Self {
             limits,
             state: Arc::new(Mutex::new(RetainedParsePoolState::default())),
+            first_admissions: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -230,13 +234,13 @@ impl SharedRetainedParsePool {
             });
         }
         let key = ParseDocumentKey::for_identity(&identity);
-        let existing = {
+        let (existing, admission_epoch) = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             touch(&mut state.lru, &key);
-            state.documents.get(&key).cloned()
+            (state.documents.get(&key).cloned(), state.clear_epoch)
         };
 
         match existing {
@@ -251,9 +255,13 @@ impl SharedRetainedParsePool {
                 extractor,
             ),
             None => {
-                // Serialize only first admission. The second lookup closes the
-                // race between the optimistic lookup above and this bounded
-                // parse, so one document can never acquire two retained trees.
+                // Serialize first admission per document. Unrelated documents
+                // parse concurrently; a second lookup after acquiring this
+                // key's gate keeps one retained tree for duplicate callers.
+                let first_admission = self.first_admission(&key);
+                let _first_admission_guard = first_admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let mut state = self
                     .state
                     .lock()
@@ -272,6 +280,7 @@ impl SharedRetainedParsePool {
                         extractor,
                     );
                 }
+                drop(state);
                 let opened = match grammar_key {
                     Some(grammar_key) => RetainedParseDocument::open_prepared(
                         identity,
@@ -291,7 +300,7 @@ impl SharedRetainedParsePool {
                 let (document, report) = match opened {
                     Ok(parsed) => parsed,
                     Err(error) => {
-                        self.record_failure();
+                        self.record_failure_at(admission_epoch);
                         return Err(error);
                     }
                 };
@@ -300,8 +309,7 @@ impl SharedRetainedParsePool {
                         match document.extract_canonical_artifact(extractor, &report, None) {
                             Ok(extraction) => Some(extraction),
                             Err(error) => {
-                                state.stats.failed_parses =
-                                    state.stats.failed_parses.saturating_add(1);
+                                self.record_failure_at(admission_epoch);
                                 return Err(error);
                             }
                         }
@@ -314,6 +322,13 @@ impl SharedRetainedParsePool {
                     document,
                     artifact: retained_artifact,
                 }));
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.clear_epoch != admission_epoch {
+                    return Ok((report, extraction));
+                }
                 state.documents.insert(key.clone(), Arc::clone(&entry));
                 state.source_bytes.insert(key.clone(), current_size);
                 touch(&mut state.lru, &key);
@@ -440,6 +455,7 @@ impl SharedRetainedParsePool {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.clear_epoch = state.clear_epoch.wrapping_add(1);
         state.documents.clear();
         state.source_bytes.clear();
         state.lru.clear();
@@ -453,6 +469,30 @@ impl SharedRetainedParsePool {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.stats.failed_parses = state.stats.failed_parses.saturating_add(1);
+    }
+
+    fn record_failure_at(&self, admission_epoch: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.clear_epoch == admission_epoch {
+            state.stats.failed_parses = state.stats.failed_parses.saturating_add(1);
+        }
+    }
+
+    fn first_admission(&self, key: &ParseDocumentKey) -> Arc<Mutex<()>> {
+        let mut first_admissions = self
+            .first_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(admission) = first_admissions.get(key).and_then(Weak::upgrade) {
+            return admission;
+        }
+        first_admissions.retain(|_, admission| admission.strong_count() != 0);
+        let admission = Arc::new(Mutex::new(()));
+        first_admissions.insert(key.clone(), Arc::downgrade(&admission));
+        admission
     }
 }
 

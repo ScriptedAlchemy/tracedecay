@@ -6202,6 +6202,7 @@ dependencies = [
  "toml",
  "tracedecay-application",
  "tracedecay-automation",
+ "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-global-db",

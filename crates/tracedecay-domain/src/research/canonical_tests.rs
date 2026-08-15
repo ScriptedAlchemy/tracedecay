@@ -6,7 +6,9 @@ use super::super::canonical_sink::{
     BufferedSink, CanonicalSink, SINK_BUFFER_CAPACITY, write_json_number, write_json_string,
 };
 use super::super::canonical_value::{keys_are_canonically_ordered, write_canonical};
-use super::{canonical_json_bytes, canonical_json_value, canonical_sha256};
+use super::{
+    canonical_json_bytes, canonical_json_bytes_and_sha256, canonical_json_value, canonical_sha256,
+};
 
 use serde_json::json;
 
@@ -57,6 +59,9 @@ fn streaming_digest_matches_digest_of_canonical_bytes() {
     }
 
     assert_eq!(canonical_sha256(&value).unwrap().as_str(), expected);
+    let (combined_bytes, combined_digest) = canonical_json_bytes_and_sha256(&value).unwrap();
+    assert_eq!(combined_bytes, bytes);
+    assert_eq!(combined_digest.as_str(), expected);
 }
 
 /// The streamed string writer must stay byte-identical to the allocating
