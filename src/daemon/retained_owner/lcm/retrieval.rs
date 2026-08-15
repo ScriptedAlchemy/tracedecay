@@ -772,13 +772,7 @@ async fn expand_query_from_search(
         cursor,
         TemporalModeV1::Current,
         max_results,
-        ContextBudget {
-            max_bytes: u64::try_from(context_max_tokens.saturating_mul(4))
-                .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-            max_tokens: u64::try_from(context_max_tokens)
-                .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
-            estimator_version: "words-v1".to_owned(),
-        },
+        admitted_context_budget(context_max_tokens),
         SessionRetrievalScope::Session(session_id.clone()),
         SessionSearchScope::All,
         SessionMessageType::All,
@@ -917,12 +911,30 @@ async fn expand_query_from_nodes(
     Ok((response, status, omitted, temporal))
 }
 
-fn default_context_budget() -> ContextBudget {
+/// The retrieval-side context budget for a request that asked for
+/// `requested_tokens` of assembled context.
+///
+/// The admitted daemon retrieval service rejects any query whose
+/// `ContextBudget::max_bytes` exceeds `APPLICATION_RETRIEVAL_MAX_BYTES`, and
+/// that rejection is terminal (`BudgetExhausted` -> `Saturated`), not a partial
+/// answer. A caller-supplied assembly budget therefore must not be forwarded to
+/// retrieval unclamped: `context_max_tokens` defaults to 32_000 tokens, which
+/// is 128_000 estimated bytes and twice the admitted ceiling, so every default
+/// `lcm_expand_query` would be refused before it read a single message. The
+/// assembly budget stays whole; only the retrieval window is bounded here.
+fn admitted_context_budget(requested_tokens: usize) -> ContextBudget {
+    let max_bytes = requested_tokens
+        .saturating_mul(4)
+        .min(ADMITTED_RETRIEVAL_BYTE_LIMIT);
     ContextBudget {
-        max_bytes: 64 * 1_024,
-        max_tokens: 16 * 1_024,
+        max_bytes: max_bytes as u64,
+        max_tokens: (max_bytes / 4) as u64,
         estimator_version: "words-v1".to_owned(),
     }
+}
+
+fn default_context_budget() -> ContextBudget {
+    admitted_context_budget(ADMITTED_RETRIEVAL_BYTE_LIMIT / 4)
 }
 
 fn bounded_value(

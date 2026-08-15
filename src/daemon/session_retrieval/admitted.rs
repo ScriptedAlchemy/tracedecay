@@ -31,8 +31,9 @@ use super::{
     requires_refresh_worker,
 };
 
+use super::APPLICATION_RETRIEVAL_MAX_BYTES;
+
 const APPLICATION_RETRIEVAL_MAX_RESULTS: u64 = 100;
-const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
 const APPLICATION_RETRIEVAL_MAX_WORK_UNITS: u64 = 100_000;
 
 impl DaemonSessionRetrievalService {

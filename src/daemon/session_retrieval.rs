@@ -44,6 +44,15 @@ const MESSAGE_SEARCH_RANKING_VERSION: u32 = 1;
 mod serving_status;
 const MESSAGE_SEARCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Byte ceiling every admitted application retrieval request is bound by.
+///
+/// `SessionRetrievalService::retrieve` refuses — terminally, as
+/// `BudgetExhausted` — any query whose context budget or execution limits
+/// exceed the binding's budgets, so every query built for the admitted path
+/// must be sized against this constant rather than the multi-MiB
+/// `ExecutionLimits::default()` or [`MESSAGE_SEARCH_MAX_BYTES`].
+const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
+
 mod admitted;
 mod contract;
 mod primitive;

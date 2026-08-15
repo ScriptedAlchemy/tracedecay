@@ -12,6 +12,7 @@ use tracedecay_sessions::runtime::lcm::{
 };
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::ports::ExecutionLimits;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_usecases::session::{
     SessionDataFreshness, SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
@@ -24,7 +25,10 @@ use super::contract::{
     SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
     SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
-use super::{DaemonSessionRetrievalService, MESSAGE_SEARCH_MAX_BYTES, message_search_digest};
+use super::{
+    APPLICATION_RETRIEVAL_MAX_BYTES, DaemonSessionRetrievalService, MESSAGE_SEARCH_MAX_BYTES,
+    message_search_digest,
+};
 
 impl DaemonSessionRetrievalService {
     fn lcm_authorization_binding(&self, provider: &str) -> String {
@@ -131,13 +135,14 @@ impl DaemonSessionRetrievalService {
             1,
             DiversityLimits::unbounded(),
             ContextBudget {
-                max_bytes: MESSAGE_SEARCH_MAX_BYTES,
-                max_tokens: MESSAGE_SEARCH_MAX_BYTES / 4,
+                max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+                max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
                 estimator_version: "words-v1".to_string(),
             },
         )
         .ok()?
         .with_retrieval_scope(retrieval_scope)
+        .with_execution_limits(lcm_direct_execution_limits())
         .with_compatibility_filter_digest(binding);
         Some(match direct_anchor {
             Some(anchor_id) => query.with_direct_anchor(anchor_id),
@@ -601,6 +606,28 @@ impl DaemonSessionRetrievalService {
                 retrieval,
             },
         }
+    }
+}
+
+/// Execution limits for a single-anchor LCM describe/expand retrieval.
+///
+/// The direct query resolves exactly one anchor and the caller then slices its
+/// content, so the multi-MiB `ExecutionLimits::default()` buys nothing — and it
+/// is rejected outright, because the admitted binding refuses any request whose
+/// candidate, record, or hydration byte limits exceed
+/// [`APPLICATION_RETRIEVAL_MAX_BYTES`].
+fn lcm_direct_execution_limits() -> ExecutionLimits {
+    let bytes = usize::try_from(APPLICATION_RETRIEVAL_MAX_BYTES)
+        .unwrap_or(usize::MAX)
+        .min(ExecutionLimits::default().candidate_total_bytes);
+    ExecutionLimits {
+        candidate_total_bytes: bytes,
+        candidate_item_bytes: bytes,
+        record_total_bytes: bytes,
+        record_item_bytes: bytes,
+        hydration_total_bytes: bytes,
+        hydration_payload_bytes: bytes,
+        ..ExecutionLimits::default()
     }
 }
 

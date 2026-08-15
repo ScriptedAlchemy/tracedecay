@@ -76,6 +76,14 @@ async fn server_with_authorities() -> (Arc<McpServer>, TempDir, crate::config::P
     (server, dir, pin)
 }
 
+/// Calls one retained MCP tool and returns its evidence value.
+///
+/// Retained application tools answer with the versioned
+/// `schema.application.retained.*` envelope: the served answer lives at
+/// `outcome.value`, with the tool's own result under `payload` and any
+/// unresolved anchors under `omissions`. A `problem` envelope is a refusal, not
+/// an empty answer, so it panics here rather than silently reading as zero
+/// hits.
 async fn call_tool(server: &McpServer, name: &str, arguments: Value) -> Value {
     let request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -90,13 +98,24 @@ async fn call_tool(server: &McpServer, name: &str, arguments: Value) -> Value {
     let result = response
         .result
         .unwrap_or_else(|| panic!("{name} JSON-RPC error: {:?}", response.error));
-    result["content"]
+    let envelope: Value = result["content"]
         .as_array()
         .expect("tool content")
         .iter()
         .filter_map(|item| item["text"].as_str())
         .find_map(|text| serde_json::from_str(text).ok())
-        .unwrap_or_else(|| panic!("{name} JSON content: {result}"))
+        .unwrap_or_else(|| panic!("{name} JSON content: {result}"));
+    assert_eq!(
+        envelope["outcome"]["outcome"],
+        json!("evidence"),
+        "{name} must answer with retained evidence, not a refusal: {envelope}"
+    );
+    envelope["outcome"]["value"].clone()
+}
+
+/// The tool-owned result inside a retained evidence value.
+fn payload(evidence: &Value) -> &Value {
+    &evidence["payload"]
 }
 
 /// Four conversational Claude records (two user, two assistant) whose text all
@@ -226,8 +245,8 @@ async fn ingested_server() -> (
     (server, dir, home, pin)
 }
 
-fn omission_reasons(payload: &Value) -> Vec<String> {
-    payload["omissions"]
+fn omission_reasons(evidence: &Value) -> Vec<String> {
+    evidence["omissions"]
         .as_array()
         .map(|omissions| {
             omissions
@@ -242,7 +261,7 @@ fn omission_reasons(payload: &Value) -> Vec<String> {
 async fn lcm_grep_returns_every_matching_claude_message() {
     let (server, _dir, _home, _pin) = ingested_server().await;
 
-    let payload = call_tool(
+    let evidence = call_tool(
         &server,
         "tracedecay_lcm_grep",
         json!({
@@ -256,6 +275,7 @@ async fn lcm_grep_returns_every_matching_claude_message() {
     )
     .await;
 
+    let payload = payload(&evidence);
     let hits = payload["hits"].as_array().cloned().unwrap_or_default();
     assert_eq!(
         hits.len(),
@@ -263,8 +283,8 @@ async fn lcm_grep_returns_every_matching_claude_message() {
         "every stored message containing the term must surface: {payload}"
     );
     assert!(
-        omission_reasons(&payload).is_empty(),
-        "resolvable anchors must never be reported as omissions: {payload}"
+        omission_reasons(&evidence).is_empty(),
+        "resolvable anchors must never be reported as omissions: {evidence}"
     );
     server.shutdown().await;
 }
@@ -273,7 +293,7 @@ async fn lcm_grep_returns_every_matching_claude_message() {
 async fn lcm_grep_finds_a_term_stored_in_exactly_one_message() {
     let (server, _dir, _home, _pin) = ingested_server().await;
 
-    let payload = call_tool(
+    let evidence = call_tool(
         &server,
         "tracedecay_lcm_grep",
         json!({
@@ -287,6 +307,7 @@ async fn lcm_grep_finds_a_term_stored_in_exactly_one_message() {
     )
     .await;
 
+    let payload = payload(&evidence);
     let hits = payload["hits"].as_array().cloned().unwrap_or_default();
     assert_eq!(
         hits.len(),
@@ -300,8 +321,8 @@ async fn lcm_grep_finds_a_term_stored_in_exactly_one_message() {
         "the returned hit must be the matching message: {payload}"
     );
     assert!(
-        omission_reasons(&payload).is_empty(),
-        "resolvable anchors must never be reported as omissions: {payload}"
+        omission_reasons(&evidence).is_empty(),
+        "resolvable anchors must never be reported as omissions: {evidence}"
     );
     server.shutdown().await;
 }
@@ -310,7 +331,7 @@ async fn lcm_grep_finds_a_term_stored_in_exactly_one_message() {
 async fn lcm_expand_query_returns_every_matching_claude_message() {
     let (server, _dir, _home, _pin) = ingested_server().await;
 
-    let payload = call_tool(
+    let evidence = call_tool(
         &server,
         "tracedecay_lcm_expand_query",
         json!({
@@ -324,6 +345,7 @@ async fn lcm_expand_query_returns_every_matching_claude_message() {
     )
     .await;
 
+    let payload = payload(&evidence);
     let blocks = payload["context_blocks"]
         .as_array()
         .cloned()
@@ -338,8 +360,8 @@ async fn lcm_expand_query_returns_every_matching_claude_message() {
         "resolvable anchors must never be omitted: {payload}"
     );
     assert!(
-        omission_reasons(&payload).is_empty(),
-        "resolvable anchors must never be reported as omissions: {payload}"
+        omission_reasons(&evidence).is_empty(),
+        "resolvable anchors must never be reported as omissions: {evidence}"
     );
     server.shutdown().await;
 }
@@ -359,6 +381,7 @@ async fn lcm_expand_reads_every_live_raw_message_store_id() {
         }),
     )
     .await;
+    let loaded = payload(&loaded);
     let messages = loaded["messages"].as_array().cloned().unwrap_or_default();
     assert_eq!(
         messages.len(),
@@ -380,7 +403,7 @@ async fn lcm_expand_reads_every_live_raw_message_store_id() {
     );
 
     for store_id in store_ids {
-        let payload = call_tool(
+        let evidence = call_tool(
             &server,
             "tracedecay_lcm_expand",
             json!({
@@ -391,6 +414,7 @@ async fn lcm_expand_reads_every_live_raw_message_store_id() {
             }),
         )
         .await;
+        let payload = payload(&evidence);
         assert_eq!(
             payload["status"], "ok",
             "a live raw message must expand, not report deletion: {payload}"

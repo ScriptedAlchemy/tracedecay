@@ -269,6 +269,29 @@ impl RetainedSurfaceEvidenceFactsV1 {
         }
         self.unattributed_omitted = omitted;
     }
+
+    /// Supplies the counts the evidence contract demands of complete coverage.
+    ///
+    /// `EvidenceCoverage::validate` rejects `Complete` unless both `visited`
+    /// and `eligible` are present, so a lower authority that reports a
+    /// complete retrieval without them would be projected into an envelope the
+    /// transport refuses — the answer is lost as
+    /// `application.retained.authority-unavailable`. Nothing is invented here:
+    /// "complete" is that authority's own claim that every eligible item was
+    /// returned and none omitted, which fixes `eligible` at `returned`, and a
+    /// retrieval that returned `n` items visited at least `n`. Counts a real
+    /// authority did report are never overwritten.
+    fn settle_complete_coverage(&mut self) {
+        if self.completeness != CoverageCompleteness::Complete {
+            return;
+        }
+        if self.eligible.is_none() {
+            self.eligible = Some(self.returned);
+        }
+        if self.visited.is_none() {
+            self.visited = self.eligible;
+        }
+    }
 }
 
 impl RetainedSurfaceResultV1 {
@@ -451,6 +474,7 @@ fn lcm_facts(
     if let Some(temporal) = temporal {
         facts.apply_lcm_temporal(temporal)?;
     }
+    facts.settle_complete_coverage();
     Ok(facts)
 }
 
