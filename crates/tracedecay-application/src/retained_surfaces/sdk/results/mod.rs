@@ -150,23 +150,28 @@ mod tests {
     use serde_json::json;
 
     use super::RetainedSurfaceResultV1;
+    use super::automation::tests::{automation_request, with_request_digest};
+    use crate::retained_surfaces::AutomationTaskV1;
 
     #[test]
     fn automation_terminal_selects_only_its_exact_result_variant() {
-        let result = serde_json::from_value::<RetainedSurfaceResultV1>(json!({
-            "run_id": "run.memory.zero",
-            "task": "memory_curator",
-            "terminal": {
-                "status": "completed",
-                "summary": {
-                    "reviewed_count": 0,
-                    "accepted_count": 0,
-                    "rejected_count": 0,
-                    "skipped_count": 0
-                }
-            },
-            "committed_receipts": []
-        }))
+        let result = serde_json::from_value::<RetainedSurfaceResultV1>(with_request_digest(
+            json!({
+                "run_id": "run.memory.zero",
+                "task": "memory_curator",
+                "terminal": {
+                    "status": "completed",
+                    "summary": {
+                        "reviewed_count": 0,
+                        "accepted_count": 0,
+                        "rejected_count": 0,
+                        "skipped_count": 0
+                    }
+                },
+                "committed_receipts": []
+            }),
+            &automation_request("run.memory.zero", AutomationTaskV1::MemoryCurator),
+        ))
         .expect("canonical automation terminal");
 
         assert!(matches!(

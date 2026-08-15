@@ -937,4 +937,4 @@ fn valid_text(value: &str, max_bytes: usize) -> bool {
 
 #[cfg(test)]
 #[path = "automation/tests.rs"]
-mod tests;
+pub(crate) mod tests;

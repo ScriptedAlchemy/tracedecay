@@ -1,9 +1,10 @@
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ManifestDigest, ProjectId,
-    ProvenanceId, RunId,
+    FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ProjectId, ProvenanceId,
+    RunId,
 };
 
+use super::super::tests::automation_request;
 use super::{
     MemoryAutomationCurationOperationEffectV1, MemoryAutomationCurationReceiptV1,
     curation_receipt_matches,
@@ -137,7 +138,9 @@ fn all_noop_receipt_retains_acceptance_without_fabricating_mutations_or_anchors(
     let result = AutomationRunResultV1 {
         run_id: RunId::new("run.memory.curation").expect("run id"),
         task: AutomationTaskV1::MemoryCurator,
-        request_digest: ManifestDigest::new("a".repeat(64)).expect("request digest"),
+        request_digest: automation_request("run.memory.curation", AutomationTaskV1::MemoryCurator)
+            .input_digest()
+            .expect("request digest"),
         terminal: AutomationRunTerminalV1::Completed {
             summary: AutomationRunSummaryV1 {
                 reviewed_count: 2,
