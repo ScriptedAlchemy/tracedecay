@@ -611,17 +611,27 @@ the commit as attribution evidence.
   is pending or unavailable. Measurements: 1811s wall on a heavily contended
   host (2026-08-14), then 1801.6s on a quiet host (2026-08-15, clean worktree
   at `d7c4a4c43`) — within 0.5% of each other despite very different load.
-  The load-sensitivity judgment is DISPROVEN, and so is "the work tripled":
-  both walls ≈ exactly 2×900s — the time is CEILING-CLAMPED, not
-  work-clamped. Diagnosis (probe-backed, `37b7e5be2`): paging/commit/publish
-  are exonerated (~33s extrapolated at 43-page/21700-chunk scale);
-  `8120f4e9e` raised `EVALUATION_GRAPH_OPERATION_DEADLINE` 30s→900s to
-  survive registration "hashing the recovered generation" (its own test
-  comment) instead of fixing that cost, and the two evaluation passes
-  (1x+10x) each clamp there. Fix lane in flight
-  (`codex/rc-semantic-timing`): cache/incrementalize the generation digest,
-  then lower the eval-op ceiling back from the fixed cost. Both ceilings
-  stay un-raised by owner ruling.
+  Measured diagnosis (probes `37b7e5be2`, `c55a4da7e`, `64bfeef39` on
+  `codex/rc-semantic-timing` — supersedes two earlier wrong theories, "work
+  tripled" and "2×900s ceiling-clamp"): the wall matches
+  `SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS` = 1800s
+  (`src/daemon_client.rs:417`, used by `tracedecay-search-eval-direct`) hit
+  ONCE. Under it: the driver runs 12 isolated passes (3 profiles × 2
+  partitions × 2 scales, `crates/tracedecay-search-eval/src/lib.rs:196`),
+  each with a fresh TempDir+registry
+  (`semantic_runtime/production.rs:541`) that defeats a digest memo which
+  otherwise works (`recover_verified_snapshot` short-circuits, O(1)); each
+  pass publishes 4 generations with 2 unconditional full-corpus digests
+  (`recovered_generation_digest_from_database`, linear at 682µs/chunk —
+  5.5s per full 768-d digest at 22k chunks, NOT a 900s clamp) ≈ ~990s of
+  digest+publish plus ~96 DB close/reopen cycles; FastEmbed inference is
+  the unmeasured remainder. Levers approved by owner (verification-first):
+  (a) eliminate the redundant pre-reopen prepare digest IF the post-reopen
+  digest is proven to subsume its integrity role, or make it incremental at
+  page-commit; (b) build/share the immutable evaluation corpus once across
+  the 12 passes; (c) measure inference — if identical content is re-embedded
+  across passes, cache embeddings. No ceiling may be raised or lowered from
+  unfixed measurements.
 - Re-run the doctor authority-audit journey and a clean Cursor agents/in-
   composer install -> version bump -> doctor lifecycle. Preserve Cursor Core
   drift versus ownership-conflict distinctions and do not add Cursor Cloud.
