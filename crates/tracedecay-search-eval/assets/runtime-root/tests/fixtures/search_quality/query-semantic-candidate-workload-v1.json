@@ -133,8 +133,8 @@
     "required_offline": "no_network_and_query_fallback_available"
   },
   "expected_query_fallback_digests": {
-    "train": "sha256:7644f636d51249ed0d901ed64917163ceeb9b2e7fa4335a42923658390f7b520",
-    "validation": "sha256:024e7ceb6346adb87144479508b8f35bb7d5b790b7e56276c9e2f0711451c884"
+    "train": "sha256:ba4226316948e4a9bdca4b0b7f7714e635622abfb84efa6f0e6e92c602a5b6b6",
+    "validation": "sha256:1d722233d3fd68be4b39f558b49f309da242337ac6142994be0f16c49b0006e1"
   },
   "profile_matrix": [
     {
