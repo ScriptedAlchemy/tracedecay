@@ -19,8 +19,9 @@ use crate::search_eval::semantic_native::{
 };
 use crate::search_eval::{
     CandidateOutputError, ProductionCandidateNativeExecutionAuthorityV1,
-    ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
-    ProductionCandidateNativeResourceContextV1, evaluate_default_activation_candidate,
+    ProductionCandidateNativeGenerationResourcesV1, ProductionCandidateNativeQueryContextV1,
+    ProductionCandidateNativeQueryInputsV1, ProductionCandidateNativeResourceContextV1,
+    evaluate_default_activation_candidate,
 };
 use tracedecay_usecases::semantic_runtime::{
     SemanticActivationCoordinationErrorV1, SemanticEvaluationAuthorityPublicationV1,
@@ -360,6 +361,12 @@ type SemanticProjectionCaseKeyV1 = (
     CodeGenerationId,
 );
 
+/// Identity of an incremental projection measurement: the clean generation it
+/// is prepared from plus the incremental generation it rebuilds into. Like the
+/// projection-case measurement, it is a pure function of exactly these two
+/// generations and never reads the profile or the partition.
+type SemanticIncrementalProjectionKeyV1 = (CodeGenerationId, CodeGenerationId);
+
 #[derive(Clone)]
 pub(super) struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
     project_root: PathBuf,
@@ -383,6 +390,14 @@ pub(super) struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
             >,
         >,
     >,
+    incremental_projections: Arc<
+        Mutex<
+            BTreeMap<
+                SemanticIncrementalProjectionKeyV1,
+                ProductionCandidateNativeGenerationResourcesV1,
+            >,
+        >,
+    >,
 }
 
 impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
@@ -401,6 +416,7 @@ impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
             control,
             prepared_native: Arc::new(Mutex::new(BTreeMap::new())),
             projection_cases: Arc::new(Mutex::new(BTreeMap::new())),
+            incremental_projections: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -572,9 +588,55 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                         "production semantic runtime is unavailable".to_owned(),
                     )
                 })?;
-            let mut resources = runtime
-                .measure_incremental_evaluation_projection(prepared, context.incremental_code)
-                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+            // The incremental projection measurement reloads the semantic
+            // artifact and re-projects the incremental generation's changed
+            // chunks. Like the projection-case measurement below it reads only
+            // generations — never the profile or the partition — so the six
+            // passes that share a scale were each rebuilding the identical
+            // observation. Every field it produces is a property of that
+            // generation pair (model bytes, thread and batch ceilings, cold
+            // load, clean build, incremental rebuild), and each pass records
+            // them as its own single-element sample vectors with no averaging
+            // across passes, so sharing one observation changes no reported
+            // quantity's meaning.
+            let incremental_key: SemanticIncrementalProjectionKeyV1 = (
+                context.code_generation.clone(),
+                context.incremental_code.manifest().generation_id.clone(),
+            );
+            let cached_incremental = self
+                .incremental_projections
+                .lock()
+                .map_err(|_| {
+                    CandidateOutputError::Contract(
+                        "semantic incremental projection cache is unavailable".to_owned(),
+                    )
+                })?
+                .get(&incremental_key)
+                .cloned();
+            let mut resources = match cached_incremental {
+                Some(resources) => resources,
+                None => {
+                    // Measured without the cache lock held, for the same
+                    // reason as the projection cases: long, idempotent work
+                    // where a race should duplicate once rather than block.
+                    let measured = runtime
+                        .measure_incremental_evaluation_projection(
+                            prepared,
+                            context.incremental_code,
+                        )
+                        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+                    self.incremental_projections
+                        .lock()
+                        .map_err(|_| {
+                            CandidateOutputError::Contract(
+                                "semantic incremental projection cache is unavailable".to_owned(),
+                            )
+                        })?
+                        .entry(incremental_key)
+                        .or_insert(measured)
+                        .clone()
+                }
+            };
             // The isolated projection-case measurement stands up a fresh
             // TempDir, graph, and metadata store and re-projects the whole
             // corpus, so it is the most expensive term in a pass. It depends
