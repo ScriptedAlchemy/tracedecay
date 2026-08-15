@@ -32,6 +32,16 @@ pub const OPEN_INVESTIGATION_HANDOFF_USE_CASE_ID_V1: &str =
     "use-case.handoff.open_investigation_handoff";
 pub const OPEN_TASK_HANDOFF_CAPABILITY_ID_V1: &str = "capability.handoff.open_task_handoff";
 pub const OPEN_TASK_HANDOFF_USE_CASE_ID_V1: &str = "use-case.handoff.open_task_handoff";
+pub const LIST_TASK_HANDOFFS_CAPABILITY_ID_V1: &str = "capability.handoff.list_task_handoffs";
+pub const LIST_TASK_HANDOFFS_USE_CASE_ID_V1: &str = "use-case.handoff.list_task_handoffs";
+
+/// Ceiling on grants returned by one enumeration.
+///
+/// A frontier is read, not paged, and an unbounded answer would be neither
+/// readable nor affordable. Reaching the ceiling is reported on the result
+/// rather than hidden, so a truncated frontier can never be mistaken for a
+/// complete one.
+pub const MAX_HANDOFF_LIST_RESULTS_V1: u32 = 200;
 
 application_identifier!(
     HandoffSessionId => ("handoff session id", 512),
@@ -78,6 +88,17 @@ pub fn open_task_handoff_input_digest(
     canonical_sha256(&(
         "tracedecay.handoff.application-input.v1",
         "open_task_handoff",
+        request,
+    ))
+    .map_err(Into::into)
+}
+
+pub fn list_task_handoffs_input_digest(
+    request: &ListTaskHandoffsRequestV1,
+) -> Result<ManifestDigest, ApplicationContractError> {
+    canonical_sha256(&(
+        "tracedecay.handoff.application-input.v1",
+        "list_task_handoffs",
         request,
     ))
     .map_err(Into::into)
@@ -498,6 +519,12 @@ impl HandoffOpenConsumptionV1 {
         &self.input_digest
     }
 
+    /// When the single use was spent. Read by enumeration to tell a redeemed
+    /// token apart from one that merely lapsed.
+    pub const fn consumed_at(&self) -> &UtcMicros {
+        &self.consumed_at
+    }
+
     fn receipt(&self) -> HandoffOpenReceiptV1 {
         HandoffOpenReceiptV1 {
             binding_digest: self.binding_digest.clone(),
@@ -563,6 +590,69 @@ pub enum HandoffOpenAuthorityError {
     Unavailable,
 }
 
+/// The recipient-owned scoping for an enumeration.
+///
+/// Deliberately the same three fields [`HandoffOpenExpectationV1`] matches on,
+/// minus the kind: a caller may enumerate EXACTLY the grants it could redeem,
+/// across both kinds. That equivalence is the whole safety argument for the
+/// operation — listing hands out no authority the caller did not already hold,
+/// because every row returned is a token it could already have consumed had it
+/// held the bearer. It is not an issuer view: an issuer that could enumerate by
+/// its own identity would be reading tokens addressed to other principals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandoffOpenListFilterV1 {
+    session_id: HandoffSessionId,
+    scope_digest: ManifestDigest,
+    recipient_actor_id: ActorId,
+}
+
+impl HandoffOpenListFilterV1 {
+    pub fn from_request(
+        request: &RequestContext,
+        session_id: HandoffSessionId,
+    ) -> Result<Self, HandoffOpenError> {
+        request
+            .validate()
+            .map_err(|_| HandoffOpenError::NotFoundOrNotAuthorized)?;
+        Ok(Self {
+            session_id,
+            scope_digest: request.scope().scope_digest.clone(),
+            recipient_actor_id: request.actor().clone(),
+        })
+    }
+
+    pub fn session_id(&self) -> &HandoffSessionId {
+        &self.session_id
+    }
+
+    pub fn scope_digest(&self) -> &ManifestDigest {
+        &self.scope_digest
+    }
+
+    pub fn recipient_actor_id(&self) -> &ActorId {
+        &self.recipient_actor_id
+    }
+
+    /// True when this grant's context is one the filtering caller may see.
+    pub fn matches(&self, context: &HandoffOpenContextV1) -> bool {
+        self.session_id == context.session_id
+            && self.scope_digest == context.scope_digest
+            && self.recipient_actor_id == context.recipient_actor_id
+    }
+}
+
+/// One enumerated grant, with the consumption instant when it has one.
+///
+/// The grant itself never holds a bearer secret, and consumption is kept beside
+/// it rather than folded into a boolean: a token that was redeemed and a token
+/// that expired unredeemed are different outcomes, and a frontier that showed
+/// them alike would hide every dropped handoff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandoffOpenListingV1 {
+    pub grant: HandoffOpenGrantV1,
+    pub consumed_at: Option<UtcMicros>,
+}
+
 pub trait HandoffOpenAuthorityPort: Send + Sync {
     /// Commits a grant or returns the byte-authoritative grant already
     /// committed for the same request identity.
@@ -570,6 +660,19 @@ pub trait HandoffOpenAuthorityPort: Send + Sync {
         &self,
         grant: &HandoffOpenGrantV1,
     ) -> Result<HandoffOpenGrantV1, HandoffOpenAuthorityError>;
+
+    /// Enumerates the grants matching `filter`, newest issuance first, capped
+    /// at `limit`.
+    ///
+    /// Unlike [`Self::resolve`], expired grants are RETAINED and reported: an
+    /// expiry that vanished from the frontier would read as a handoff that was
+    /// completed rather than one that lapsed. Callers get at most `limit` rows
+    /// and are told separately whether more existed.
+    fn list(
+        &self,
+        filter: &HandoffOpenListFilterV1,
+        limit: u32,
+    ) -> Result<Vec<HandoffOpenListingV1>, HandoffOpenAuthorityError>;
 
     fn resolve(
         &self,
@@ -654,6 +757,118 @@ pub struct IssueTaskHandoffRequestV1 {
     pub task_id: TaskId,
     pub version: WorkVersion,
     pub recipient_actor_id: ActorId,
+}
+
+/// Enumerates the handoff tokens this caller could redeem in one session.
+///
+/// The two `open_*` operations redeem a bearer the caller already holds; they
+/// cannot answer "what has been handed to me and not yet taken up". This one
+/// can, and it does so without any bearer: the request carries no token, and
+/// the result carries only digests.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ListTaskHandoffsRequestV1 {
+    pub session_id: HandoffSessionId,
+}
+
+/// Where one enumerated token stands at the observed instant.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskHandoffTokenStateV1 {
+    /// Not yet redeemed, and not yet expired — the live frontier.
+    Open,
+    /// Redeemed. Single-use, so it can never be redeemed again.
+    Consumed,
+    /// Its window closed with no redemption. A dropped handoff, which is
+    /// exactly the fact a frontier exists to surface.
+    Expired,
+}
+
+/// One handoff token, projected for public reading.
+///
+/// Mirrors [`IssueTaskHandoffResultV1`]'s doctrine: the complete binding stays
+/// inside the daemon authority, and only these identifiers cross the wire. No
+/// bearer secret exists to leak here — the authority never stored one — and the
+/// issuer's grant identity and policy digests stay concealed.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ListedTaskHandoffV1 {
+    pub token_digest: ManifestDigest,
+    pub issued_request_id: RequestId,
+    pub session_id: HandoffSessionId,
+    pub kind: HandoffOpenKindV1,
+    pub target: HandoffOpenTargetV1,
+    pub issued_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub state: TaskHandoffTokenStateV1,
+    /// Set only when `state` is `consumed`.
+    pub consumed_at: Option<UtcMicros>,
+}
+
+impl ListedTaskHandoffV1 {
+    pub fn from_listing(listing: &HandoffOpenListingV1, observed_at: UtcMicros) -> Self {
+        let grant = &listing.grant;
+        // Consumption is checked before expiry: a token redeemed inside its
+        // window and then read after it lapsed was taken up, not dropped.
+        let state = match listing.consumed_at {
+            Some(_) => TaskHandoffTokenStateV1::Consumed,
+            None if observed_at >= *grant.expires_at() => TaskHandoffTokenStateV1::Expired,
+            None => TaskHandoffTokenStateV1::Open,
+        };
+        Self {
+            token_digest: grant.token_digest().clone(),
+            issued_request_id: grant.issued_request_id().clone(),
+            session_id: grant.context().session_id().clone(),
+            kind: grant.context().kind(),
+            target: grant.target().clone(),
+            issued_at: *grant.issued_at(),
+            expires_at: *grant.expires_at(),
+            state,
+            consumed_at: listing.consumed_at,
+        }
+    }
+}
+
+/// The handoff-token frontier for one session.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ListTaskHandoffsResultV1 {
+    /// The instant the states below were decided at. Without it, `open` and
+    /// `expired` are claims with no clock behind them.
+    pub observed_at: UtcMicros,
+    pub handoffs: Vec<ListedTaskHandoffV1>,
+    pub open_count: u32,
+    pub consumed_count: u32,
+    pub expired_count: u32,
+    /// True when the enumeration ceiling was reached, so the counts describe a
+    /// prefix of the frontier rather than all of it.
+    pub truncated: bool,
+}
+
+impl ListTaskHandoffsResultV1 {
+    pub fn from_listings(listings: &[HandoffOpenListingV1], observed_at: UtcMicros) -> Self {
+        let handoffs: Vec<ListedTaskHandoffV1> = listings
+            .iter()
+            .map(|listing| ListedTaskHandoffV1::from_listing(listing, observed_at))
+            .collect();
+        let count = |wanted: TaskHandoffTokenStateV1| {
+            u32::try_from(
+                handoffs
+                    .iter()
+                    .filter(|handoff| handoff.state == wanted)
+                    .count(),
+            )
+            .unwrap_or(u32::MAX)
+        };
+        Self {
+            open_count: count(TaskHandoffTokenStateV1::Open),
+            consumed_count: count(TaskHandoffTokenStateV1::Consumed),
+            expired_count: count(TaskHandoffTokenStateV1::Expired),
+            truncated: handoffs.len() as u32 >= MAX_HANDOFF_LIST_RESULTS_V1,
+            handoffs,
+            observed_at,
+        }
+    }
 }
 
 /// Flat public receipt for a committed task-handoff issue.
@@ -862,6 +1077,35 @@ where
             expires_at,
         )?;
         self.authority.issue(&grant).map_err(authority_error)
+    }
+
+    /// Enumerates the handoff tokens this caller could redeem.
+    ///
+    /// A pure read: nothing is issued, consumed, or otherwise mutated, so it
+    /// mints no effect and no token is spent by looking. The authority applies
+    /// the same recipient/session/scope match that redemption applies, so a
+    /// caller can see exactly the set it could act on and nothing else.
+    pub async fn list_task(
+        &self,
+        context: &RequestContext,
+        request: ListTaskHandoffsRequestV1,
+        observed_at: UtcMicros,
+    ) -> Result<ListTaskHandoffsResultV1, HandoffOpenError> {
+        admit(
+            context,
+            LIST_TASK_HANDOFFS_CAPABILITY_ID_V1,
+            LIST_TASK_HANDOFFS_USE_CASE_ID_V1,
+            observed_at,
+        )?;
+        let filter = HandoffOpenListFilterV1::from_request(context, request.session_id)?;
+        let listings = self
+            .authority
+            .list(&filter, MAX_HANDOFF_LIST_RESULTS_V1)
+            .map_err(authority_error)?;
+        Ok(ListTaskHandoffsResultV1::from_listings(
+            &listings,
+            observed_at,
+        ))
     }
 
     pub async fn open_investigation(

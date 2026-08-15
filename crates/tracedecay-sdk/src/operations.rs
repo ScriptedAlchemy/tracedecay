@@ -4840,6 +4840,38 @@ typed_operation!(
     1
 );
 
+pub mod handoff_list_task_handoffs {
+    pub type Request = tracedecay_application::handoff::ListTaskHandoffsRequestV1;
+    pub type Result = tracedecay_application::handoff::ListTaskHandoffsResultV1;
+}
+typed_operation!(
+    HandoffListTaskHandoffs,
+    handoff_list_task_handoffs,
+    "operation.handoff.list_task_handoffs",
+    OperationTransport::Http {
+        route: "/application/handoff/list-task"
+    },
+    "binding.http.handoff.list_task_handoffs",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
+    false,
+    &[],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.handoff.list_task_handoffs.result",
+    1
+);
+
 pub mod handoff_open_investigation_handoff {
     pub type Request = tracedecay_application::handoff::OpenInvestigationHandoffRequestV1;
     pub type Result = tracedecay_application::handoff::OpenInvestigationHandoffResultV1;
