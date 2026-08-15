@@ -237,6 +237,53 @@ export const AnalyticsRecentHookV1Schema = z.object({
 });
 export type AnalyticsRecentHookV1 = z.infer<typeof AnalyticsRecentHookV1Schema>;
 
+/** How a session is attached to the delegation tree above it.
+
+The distinction is load-bearing. A session with no parent and a session
+whose parent the store does not hold both draw at the left margin, but only
+the first one is actually a root: the second is a tree whose top was never
+ingested, and captioning it as a root would assert a delegation boundary
+that was never observed. */
+export const AnalyticsSubagentLinkV1Schema = z.union([z.literal("root"), z.literal("linked"), z.literal("missing_parent"), z.literal("cycle")]);
+export type AnalyticsSubagentLinkV1 = z.infer<typeof AnalyticsSubagentLinkV1Schema>;
+
+/** One session in the subagent delegation tree. */
+export const AnalyticsSubagentNodeV1Schema = z.object({
+  agent: z.string().nullable(),
+  depth: z.number().int().safe(),
+  descendants: z.number().int().safe(),
+  ended_at: z.number().int().safe().nullable(),
+  is_subagent: z.boolean(),
+  link: z.lazy(() => AnalyticsSubagentLinkV1Schema),
+  parent_session_id: z.string().nullable(),
+  parent_tool_use_id: z.string().nullable(),
+  provider: z.string(),
+  session_id: z.string(),
+  started_at: z.number().int().safe().nullable(),
+  title: z.string().nullable(),
+});
+export type AnalyticsSubagentNodeV1 = z.infer<typeof AnalyticsSubagentNodeV1Schema>;
+
+/** The subagent tree: parent/child session edges, not a per-agent rollup.
+
+`nodes` is a pre-order flattening — every node appears after its own parent
+and before that parent's later siblings — so a reader can draw the tree from
+`depth` alone without reassembling edges client-side. */
+export const AnalyticsSubagentTreePayloadV1Schema = z.object({
+  available: z.boolean(),
+  cycle_count: z.number().int().safe(),
+  edge_count: z.number().int().safe(),
+  error: z.string().nullable(),
+  max_depth: z.number().int().safe(),
+  missing_parent_count: z.number().int().safe(),
+  nodes: z.array(z.lazy(() => AnalyticsSubagentNodeV1Schema)),
+  root_count: z.number().int().safe(),
+  sessions_read: z.number().int().safe(),
+  source: z.string(),
+  truncated: z.boolean(),
+});
+export type AnalyticsSubagentTreePayloadV1 = z.infer<typeof AnalyticsSubagentTreePayloadV1Schema>;
+
 export const AnalyticsToolCategoryCountV1Schema = z.object({
   count: z.number().int().safe(),
   tool_category: z.string(),

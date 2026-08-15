@@ -33,7 +33,8 @@ use tracedecay_domain::{
 
 use super::analytics_api::{
     AnalyticsAgentsPayloadV1, AnalyticsDiagnosticsPayloadV1, AnalyticsHintsPayloadV1,
-    AnalyticsOverviewPayloadV1, AnalyticsUnderusedPayloadV1, AnalyticsUsageSummaryV1,
+    AnalyticsOverviewPayloadV1, AnalyticsSubagentTreePayloadV1, AnalyticsUnderusedPayloadV1,
+    AnalyticsUsageSummaryV1,
 };
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
 use super::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
@@ -88,6 +89,7 @@ struct DashboardContractCatalogV1 {
     analytics_overview: DashboardEnvelopeV1<Option<AnalyticsOverviewPayloadV1>>,
     analytics_usage: DashboardEnvelopeV1<Option<AnalyticsUsageSummaryV1>>,
     analytics_agents: DashboardEnvelopeV1<Option<AnalyticsAgentsPayloadV1>>,
+    analytics_subagent_tree: DashboardEnvelopeV1<Option<AnalyticsSubagentTreePayloadV1>>,
     analytics_hints: DashboardEnvelopeV1<Option<AnalyticsHintsPayloadV1>>,
     analytics_underused: DashboardEnvelopeV1<Option<AnalyticsUnderusedPayloadV1>>,
     analytics_diagnostics: DashboardEnvelopeV1<Option<AnalyticsDiagnosticsPayloadV1>>,

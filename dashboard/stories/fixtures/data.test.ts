@@ -31,6 +31,7 @@ import { fixtureServer } from './handlers.ts';
 import {
   AnalyticsOverviewPayloadV1Schema,
   AnalyticsAgentsPayloadV1Schema,
+  AnalyticsSubagentTreePayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
   AutomationSchedulerStatusV1Schema,
   CodeIndexFreshnessPayloadV1Schema,
@@ -104,6 +105,9 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/plugins/analytics/overview': DashboardEnvelopeV1Schema(AnalyticsOverviewPayloadV1Schema),
   '/api/plugins/analytics/usage': DashboardEnvelopeV1Schema(AnalyticsUsageSummaryV1Schema),
   '/api/plugins/analytics/agents': DashboardEnvelopeV1Schema(AnalyticsAgentsPayloadV1Schema),
+  '/api/plugins/analytics/subagent-tree': DashboardEnvelopeV1Schema(
+    AnalyticsSubagentTreePayloadV1Schema,
+  ),
   '/api/automation/scheduler/status': AutomationSchedulerStatusV1Schema,
   '/api/application/retained/fact_store_curate': z.object({
     kind: z.literal('success'),

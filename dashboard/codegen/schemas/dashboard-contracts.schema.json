@@ -800,6 +800,186 @@
       ],
       "type": "object"
     },
+    "AnalyticsSubagentLinkV1": {
+      "description": "How a session is attached to the delegation tree above it.\n\nThe distinction is load-bearing. A session with no parent and a session\nwhose parent the store does not hold both draw at the left margin, but only\nthe first one is actually a root: the second is a tree whose top was never\ningested, and captioning it as a root would assert a delegation boundary\nthat was never observed.",
+      "oneOf": [
+        {
+          "const": "root",
+          "description": "The session records no parent — a genuine top of a delegation tree.",
+          "type": "string"
+        },
+        {
+          "const": "linked",
+          "description": "The parent named by the session is present in this reading.",
+          "type": "string"
+        },
+        {
+          "const": "missing_parent",
+          "description": "The session names a parent the session store does not hold, so its\ndepth is measured from a cut edge rather than from a real root.",
+          "type": "string"
+        },
+        {
+          "const": "cycle",
+          "description": "The parent chain closes on itself. Never reachable from a root, so it\nis surfaced at the margin rather than silently dropped.",
+          "type": "string"
+        }
+      ]
+    },
+    "AnalyticsSubagentNodeV1": {
+      "description": "One session in the subagent delegation tree.",
+      "properties": {
+        "agent": {
+          "description": "The managed-agent label when the session carries one, else the raw\n`agent_id`. `None` is an unlabeled session, not an unnamed agent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depth": {
+          "description": "Distance from this node's tree top. Roots are 0.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "descendants": {
+          "description": "Sessions below this one, transitively, excluding itself.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "ended_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "is_subagent": {
+          "type": "boolean"
+        },
+        "link": {
+          "$ref": "#/$defs/AnalyticsSubagentLinkV1"
+        },
+        "parent_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_tool_use_id": {
+          "description": "The tool invocation that spawned this session, when the provider\nrecorded one. It is what makes a delegation edge attributable to a\nspecific call rather than merely to a parent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "description": "Epoch micros, as the session store records them.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "session_id",
+        "parent_session_id",
+        "agent",
+        "title",
+        "started_at",
+        "ended_at",
+        "is_subagent",
+        "parent_tool_use_id",
+        "depth",
+        "descendants",
+        "link"
+      ],
+      "type": "object"
+    },
+    "AnalyticsSubagentTreePayloadV1": {
+      "description": "The subagent tree: parent/child session edges, not a per-agent rollup.\n\n`nodes` is a pre-order flattening — every node appears after its own parent\nand before that parent's later siblings — so a reader can draw the tree from\n`depth` alone without reassembling edges client-side.",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "cycle_count": {
+          "description": "Sessions whose parent chain closes on itself.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "edge_count": {
+          "description": "Parent/child edges actually resolved within this reading.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_depth": {
+          "description": "Deepest `depth` present, so a caption can state the tree's reach\ninstead of implying one from the drawn rows.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "missing_parent_count": {
+          "description": "Sessions naming a parent this reading does not hold.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsSubagentNodeV1"
+          },
+          "type": "array"
+        },
+        "root_count": {
+          "description": "Nodes whose `link` is `root`.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "sessions_read": {
+          "description": "Sessions read for this project before any tree was built. The only\nhonest denominator for the counts below.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "truncated": {
+          "description": "True when the scan ceiling was reached, so edges may be cut and the\ncounts above describe a prefix of the store rather than all of it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "available",
+        "source",
+        "error",
+        "nodes",
+        "sessions_read",
+        "root_count",
+        "edge_count",
+        "max_depth",
+        "missing_parent_count",
+        "cycle_count",
+        "truncated"
+      ],
+      "type": "object"
+    },
     "AnalyticsToolCategoryCountV1": {
       "properties": {
         "count": {
@@ -3182,7 +3362,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsHintsPayloadV1"
+              "$ref": "#/$defs/AnalyticsSubagentTreePayloadV1"
             },
             {
               "type": "null"
@@ -3253,7 +3433,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsUnderusedPayloadV1"
+              "$ref": "#/$defs/AnalyticsHintsPayloadV1"
             },
             {
               "type": "null"
@@ -3395,7 +3575,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AnalyticsDiagnosticsPayloadV1"
+              "$ref": "#/$defs/AnalyticsUnderusedPayloadV1"
             },
             {
               "type": "null"
@@ -3466,7 +3646,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/SavingsOverviewPayloadV1"
+              "$ref": "#/$defs/AnalyticsDiagnosticsPayloadV1"
             },
             {
               "type": "null"
@@ -3537,7 +3717,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmSessionPayloadV1"
+              "$ref": "#/$defs/SavingsOverviewPayloadV1"
             },
             {
               "type": "null"
@@ -3608,7 +3788,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmTimelinePayloadV1"
+              "$ref": "#/$defs/LcmSessionPayloadV1"
             },
             {
               "type": "null"
@@ -3679,7 +3859,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmOverviewPayloadV1"
+              "$ref": "#/$defs/LcmTimelinePayloadV1"
             },
             {
               "type": "null"
@@ -3750,7 +3930,7 @@
         "payload": {
           "anyOf": [
             {
-              "$ref": "#/$defs/LcmSearchPayloadV1"
+              "$ref": "#/$defs/LcmOverviewPayloadV1"
             },
             {
               "type": "null"
@@ -3798,6 +3978,77 @@
       "type": "object"
     },
     "DashboardEnvelopeV126": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LcmSearchPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV127": {
       "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
       "properties": {
         "authorization": {
@@ -26517,16 +26768,19 @@
       "$ref": "#/$defs/DashboardEnvelopeV117"
     },
     "analytics_diagnostics": {
-      "$ref": "#/$defs/DashboardEnvelopeV120"
+      "$ref": "#/$defs/DashboardEnvelopeV121"
     },
     "analytics_hints": {
-      "$ref": "#/$defs/DashboardEnvelopeV118"
+      "$ref": "#/$defs/DashboardEnvelopeV119"
     },
     "analytics_overview": {
       "$ref": "#/$defs/DashboardEnvelopeV115"
     },
+    "analytics_subagent_tree": {
+      "$ref": "#/$defs/DashboardEnvelopeV118"
+    },
     "analytics_underused": {
-      "$ref": "#/$defs/DashboardEnvelopeV119"
+      "$ref": "#/$defs/DashboardEnvelopeV120"
     },
     "analytics_usage": {
       "$ref": "#/$defs/DashboardEnvelopeV116"
@@ -26569,7 +26823,7 @@
       "$ref": "#/$defs/FactStoreCurateRequestV1"
     },
     "feedback_status": {
-      "$ref": "#/$defs/DashboardEnvelopeV126"
+      "$ref": "#/$defs/DashboardEnvelopeV127"
     },
     "graph_call_chain": {
       "$ref": "#/$defs/StructureReadV1"
@@ -26605,16 +26859,16 @@
       "$ref": "#/$defs/StructureReadV14"
     },
     "lcm_overview": {
-      "$ref": "#/$defs/DashboardEnvelopeV124"
-    },
-    "lcm_search": {
       "$ref": "#/$defs/DashboardEnvelopeV125"
     },
+    "lcm_search": {
+      "$ref": "#/$defs/DashboardEnvelopeV126"
+    },
     "lcm_session": {
-      "$ref": "#/$defs/DashboardEnvelopeV122"
+      "$ref": "#/$defs/DashboardEnvelopeV123"
     },
     "lcm_timeline": {
-      "$ref": "#/$defs/DashboardEnvelopeV123"
+      "$ref": "#/$defs/DashboardEnvelopeV124"
     },
     "loom_temporal": {
       "$ref": "#/$defs/LoomTemporalPayloadV1"
@@ -26666,7 +26920,7 @@
       "$ref": "#/$defs/DashboardEnvelopeV14"
     },
     "savings_overview": {
-      "$ref": "#/$defs/DashboardEnvelopeV121"
+      "$ref": "#/$defs/DashboardEnvelopeV122"
     },
     "savings_sessions": {
       "$ref": "#/$defs/SavingsSessionsPayloadV1"
@@ -26865,6 +27119,7 @@
     "analytics_overview",
     "analytics_usage",
     "analytics_agents",
+    "analytics_subagent_tree",
     "analytics_hints",
     "analytics_underused",
     "analytics_diagnostics",

@@ -1421,6 +1421,101 @@ function analyticsAgentsPayload(): Record<string, unknown> {
   };
 }
 
+/**
+ * GET /api/plugins/analytics/subagent-tree (analytics_api::subagent_tree).
+ *
+ * Pre-order, exactly as the daemon serves it: a two-level Codex tree, a Claude
+ * session whose parent was never ingested, and one flat session. The abnormal
+ * links are in the fixture on purpose — they are the states the surface has to
+ * keep apart, and a fixture holding only clean edges would never exercise them.
+ */
+function analyticsSubagentTreePayload(): Record<string, unknown> {
+  return {
+    available: true,
+    source: 'sessions',
+    error: null,
+    nodes: [
+      {
+        provider: 'codex',
+        session_id: 'session.codex.root',
+        parent_session_id: null,
+        agent: 'Codex',
+        title: 'RC dashboard sweep',
+        started_at: 1_760_000_000,
+        ended_at: 1_760_003_600,
+        is_subagent: false,
+        parent_tool_use_id: null,
+        depth: 0,
+        descendants: 2,
+        link: 'root',
+      },
+      {
+        provider: 'codex',
+        session_id: 'session.codex.child',
+        parent_session_id: 'session.codex.root',
+        agent: 'Codex',
+        title: 'contract regeneration',
+        started_at: 1_760_000_600,
+        ended_at: 1_760_002_000,
+        is_subagent: true,
+        parent_tool_use_id: 'toolu_codex_01',
+        depth: 1,
+        descendants: 1,
+        link: 'linked',
+      },
+      {
+        provider: 'codex',
+        session_id: 'session.codex.grandchild',
+        parent_session_id: 'session.codex.child',
+        agent: 'Codex',
+        title: null,
+        started_at: 1_760_000_900,
+        ended_at: null,
+        is_subagent: true,
+        parent_tool_use_id: 'toolu_codex_02',
+        depth: 2,
+        descendants: 0,
+        link: 'linked',
+      },
+      {
+        provider: 'claude',
+        session_id: 'session.claude.orphan',
+        parent_session_id: 'session.claude.never-ingested',
+        agent: 'Claude',
+        title: 'subagent sweep',
+        started_at: 1_760_001_000,
+        ended_at: 1_760_001_500,
+        is_subagent: true,
+        parent_tool_use_id: 'toolu_claude_07',
+        depth: 0,
+        descendants: 0,
+        link: 'missing_parent',
+      },
+      {
+        provider: 'cursor',
+        session_id: 'session.cursor.solo',
+        parent_session_id: null,
+        agent: 'Cursor',
+        title: null,
+        started_at: 1_760_002_400,
+        ended_at: 1_760_002_500,
+        is_subagent: false,
+        parent_tool_use_id: null,
+        depth: 0,
+        descendants: 0,
+        link: 'root',
+      },
+    ],
+    sessions_read: 5,
+    root_count: 2,
+    edge_count: 2,
+    max_depth: 2,
+    missing_parent_count: 1,
+    cycle_count: 0,
+    truncated: false,
+  };
+}
+
 function analyticsHintsPayload(): Record<string, unknown> {
   return {
     available: true,
@@ -2571,6 +2666,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/plugins/analytics/overview': envelope(analyticsOverviewPayload()),
   '/api/plugins/analytics/usage': envelope(analyticsUsagePayload()),
   '/api/plugins/analytics/agents': envelope(analyticsAgentsPayload()),
+  '/api/plugins/analytics/subagent-tree': envelope(analyticsSubagentTreePayload()),
   '/api/plugins/analytics/hints': envelope(analyticsHintsPayload()),
   '/api/plugins/analytics/underused': envelope(analyticsUnderusedPayload()),
   '/api/plugins/analytics/diagnostics': envelope(analyticsDiagnosticsPayload()),

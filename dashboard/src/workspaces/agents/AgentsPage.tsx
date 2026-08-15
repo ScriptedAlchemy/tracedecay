@@ -6,6 +6,7 @@ import { MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import {
   AnalyticsAgentsPayloadV1Schema,
+  AnalyticsSubagentTreePayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
   type AnalyticsAgentUsageV1,
 } from '../../contracts/generated.ts';
@@ -26,6 +27,7 @@ import {
 import { AgentFailureContext } from './AgentFailureContext.tsx';
 import { AgentHandoffs } from './AgentHandoffs.tsx';
 import { AgentToolActivity } from './AgentToolActivity.tsx';
+import { SubagentTree } from './SubagentTree.tsx';
 import { useAgentWorkGraph } from './agentWorkQuery.ts';
 import { readAttemptFailures } from './failure.ts';
 import { readHandoffFrontier } from './handoff.ts';
@@ -154,6 +156,14 @@ export function AgentsPage() {
     ['analytics', 'agents'],
     `${BASE}/agents`,
     AnalyticsAgentsPayloadV1Schema,
+  );
+  // The delegation EDGES, which the rollup above cannot carry: it counts
+  // sessions per agent, and a count of two islands never recovers the arrow
+  // between them. Served on its own route for the same reason.
+  const subagentTree = useEnvelope(
+    ['analytics', 'subagent-tree'],
+    `${BASE}/subagent-tree`,
+    AnalyticsSubagentTreePayloadV1Schema,
   );
   // The work-product graph, read once and read twice: the handoff frontier and
   // the attempt failures below both come off this single response, so the two
@@ -387,6 +397,29 @@ export function AgentsPage() {
                       />
                     ) : (
                       <SubagentSessions rows={payload.by_agent} source={payload.source} />
+                    );
+                  }}
+                </ReadSection>
+              </OverviewCard>
+
+              <OverviewCard title="Subagent tree">
+                <ReadSection
+                  title="Delegation edges"
+                  chrome="centered"
+                  state={envelopeReadState(subagentTree.isPending, subagentTree.data, {
+                    loading: 'reading subagent tree',
+                    transport: 'subagent tree could not be read',
+                  })}
+                >
+                  {(envelope) => {
+                    const payload = envelope.payload;
+                    return payload == null || payload.available === false ? (
+                      <ReadFailure
+                        label="Subagent tree unavailable"
+                        detail={envelope.coverage.omission_reasons[0]}
+                      />
+                    ) : (
+                      <SubagentTree payload={payload} />
                     );
                   }}
                 </ReadSection>
