@@ -2848,6 +2848,9 @@ function workGraphViewsPayload(): Record<string, unknown> {
       selection: { selection: 'profile_owned_no_git' },
     },
     mode: 'current',
+    // The whole journal is inside this selection, so the reading withholds
+    // nothing.
+    selection_coverage: { coverage: 'complete', covered_events: 6 },
     snapshot: {
       graph: {
         evidence: [],

@@ -6,9 +6,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{TaskId, WorkProductGraphV1, WorkProductRelationV1};
 
-use super::{
-    fold_graph, load_journal, load_published_versions, selection_covers, verified_version,
-};
+use super::{fold_graph, load_covered_journal, verified_version};
 use crate::work::WorkSqliteStorage;
 
 impl WorkEvidenceRootReadPortV1 for WorkSqliteStorage {
@@ -67,16 +65,12 @@ fn verified_graph(
     requested: &VerifiedWorkGraphVersionV1,
 ) -> Result<(VerifiedWorkGraphVersionV1, WorkProductGraphV1), WorkEvidenceRootReadErrorV1> {
     let scope = context.authorized_scope();
-    let journal =
-        load_journal(&storage.handle, scope).ok_or(WorkEvidenceRootReadErrorV1::Unavailable)?;
-    if journal
-        .iter()
-        .any(|entry| !selection_covers(scope.selection(), &entry.event))
-    {
-        return Err(WorkEvidenceRootReadErrorV1::NotFoundOrNotAuthorized);
-    }
-    let published = load_published_versions(&storage.handle, scope)
+    // Bounded to the slice the selection covers, exactly as the graph read is:
+    // a version folded across an event outside the selection never existed
+    // under it, while a version inside the covered prefix stays readable.
+    let covered = load_covered_journal(&storage.handle, scope)
         .ok_or(WorkEvidenceRootReadErrorV1::Unavailable)?;
+    let (journal, published) = (covered.journal, covered.published);
     let Some(version) = published
         .iter()
         .find(|version| version.graph_version == requested.graph_version())

@@ -65,6 +65,23 @@ pub(super) fn work_product_problem(
             retry: RetryDirective::Never,
             legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
         },
+        // A read under this selection succeeds and discloses what it left out;
+        // a mutation cannot, because the head it would pin is the covered
+        // slice's, not the journal's. The refusal therefore names the cause and
+        // the remedy instead of hiding behind the concealed not-found answer
+        // the old fail-closed refusal produced.
+        Error::SelectionCoverageIncomplete => ApplicationProblem::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: "work.selection_coverage_incomplete".to_owned(),
+                message: "The Work selection covers only part of the owner's journal, so no \
+                          graph mutation can be prepared or submitted against it; widen the \
+                          selection to the relation scopes the excluded events were admitted \
+                          under"
+                    .to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
+        },
         Error::VersionConflict => ApplicationProblem::stale(SafeDiagnostic {
             code: "work.graph_version_conflict".to_owned(),
             message: "The Work graph version does not match the request".to_owned(),

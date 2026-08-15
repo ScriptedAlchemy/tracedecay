@@ -5,6 +5,7 @@ use std::sync::{
 };
 
 use tracedecay_application::{
+    WorkGraphSelectionCoverageV1,
     AcceptWorkTaskRequestV1, AuthorizedWorkProductScopeV1, CancellationContext,
     CapabilityGrantSnapshot, CreateWorkProductRequestV1, Deadline, DisclosureClass, OpaqueCursor,
     RequestContext, RequestId, ResolvedScope, SelectedWorkEvidenceV1,
@@ -437,10 +438,12 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
         Ok(match request.mode {
             WorkGraphReadModeV1::Current => WorkGraphReadV1::Current {
                 authorized_scope: scope,
+                selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 1 },
                 snapshot: entry(1, UtcMicros(-10), UtcMicros(0), request.observed_at),
             },
             WorkGraphReadModeV1::AsOf { valid_at } => WorkGraphReadV1::AsOf {
                 authorized_scope: scope,
+                selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 1 },
                 snapshot: entry(1, UtcMicros(valid_at.0 - 1), valid_at, request.observed_at),
             },
             WorkGraphReadModeV1::Evolution {
@@ -448,6 +451,7 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
                 through_valid_at,
             } => WorkGraphReadV1::Evolution {
                 authorized_scope: scope,
+                selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 2 },
                 timeline: if self.paginate.load(Ordering::Relaxed) && request.continuation.is_none()
                 {
                     WorkGraphTimelineV1::partial(
@@ -468,6 +472,7 @@ impl WorkGraphReadPortV1 for RecordingGraphPort {
                 through_observed_at,
             } => WorkGraphReadV1::Forensic {
                 authorized_scope: scope,
+                selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 2 },
                 timeline: WorkGraphTimelineV1::complete(vec![
                     entry(
                         1,

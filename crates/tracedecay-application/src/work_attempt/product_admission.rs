@@ -118,6 +118,13 @@ where
         .map_err(|error| product_problem(WorkProductApplicationErrorV1::from(error)))?;
     crate::work_product::validate_result(&request, product_context.authorized_scope(), &read)
         .map_err(product_problem)?;
+    // Admission appends to the journal, so it needs the journal's head — not
+    // the head of whatever slice this selection covers.
+    if read.selection_coverage().is_partial() {
+        return Err(product_problem(
+            WorkProductApplicationErrorV1::SelectionCoverageIncomplete,
+        ));
+    }
     let WorkGraphReadV1::Current { snapshot, .. } = read else {
         return Err(ApplicationProblem::unavailable(crate::SafeDiagnostic {
             code: "application.work-attempt.product-read-unavailable".to_owned(),
@@ -470,6 +477,23 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
             "The canonical Work product admission identity conflicts.",
         ),
         WorkProductApplicationErrorV1::InvalidRequest => invalid_start_problem(),
+        // Named separately from a generic invalid command because the cause
+        // and the remedy are both specific: the selection covers a slice of
+        // the journal, and widening it is what makes admission possible.
+        WorkProductApplicationErrorV1::SelectionCoverageIncomplete => {
+            ApplicationProblem::InvalidRequest {
+                diagnostic: crate::SafeDiagnostic {
+                    code: "application.work-attempt.product-selection-coverage-incomplete"
+                        .to_owned(),
+                    message: "The Work selection covers only part of the owner's journal, so \
+                              no attempt can be admitted against it; widen the selection to \
+                              the relation scopes the excluded events were admitted under."
+                        .to_owned(),
+                },
+                retry: crate::RetryDirective::Never,
+                legal_actions: vec![crate::LegalAction::CorrectRequest],
+            }
+        }
         WorkProductApplicationErrorV1::EventAuthorityUnavailable
         | WorkProductApplicationErrorV1::GraphAuthorityUnavailable
         | WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable

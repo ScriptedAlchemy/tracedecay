@@ -119,6 +119,15 @@ where
                     port_context.authorized_scope(),
                     &read,
                 )?;
+                // Reads answer over the covered slice and disclose the rest.
+                // A mutation cannot: the head it would pin is the slice's
+                // head, not the journal's, so the change would be formed
+                // against a graph that is not current. Refused by name, with
+                // the selection remedy, rather than left to surface later as a
+                // version conflict that blames the wrong thing.
+                if read.selection_coverage().is_partial() {
+                    return Err(WorkProductApplicationErrorV1::SelectionCoverageIncomplete);
+                }
                 let WorkGraphReadV1::Current { snapshot, .. } = read else {
                     return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
                 };
@@ -141,6 +150,13 @@ where
                     port_context.authorized_scope(),
                     &empty_read,
                 )?;
+                // An empty covered slice is not the same fact as an empty
+                // journal. Under partial coverage a graph exists outside this
+                // selection, and creating a second root over it would append a
+                // `Created` event to a journal that already has one.
+                if empty_read.selection_coverage().is_partial() {
+                    return Err(WorkProductApplicationErrorV1::SelectionCoverageIncomplete);
+                }
                 let WorkGraphReadV1::Forensic { timeline, .. } = empty_read else {
                     return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
                 };
@@ -546,6 +562,12 @@ where
         let read_request = WorkGraphReadRequestV1::current(selection.clone(), mutation.occurred_at);
         let read = self.graph.read_graph(&port_context, &read_request)?;
         super::read::validate_result(&read_request, port_context.authorized_scope(), &read)?;
+        // The same rule the prepare enforces: a covered slice has a head, but
+        // not the journal's head, so a submit against it is refused by name
+        // instead of failing its compare-and-swap for the wrong reason.
+        if read.selection_coverage().is_partial() {
+            return Err(WorkProductApplicationErrorV1::SelectionCoverageIncomplete);
+        }
         let WorkGraphReadV1::Current { snapshot, .. } = read else {
             return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
         };

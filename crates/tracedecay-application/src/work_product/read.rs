@@ -2,7 +2,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    UtcMicros, WorkProductGraphV1, WorkProductProjectionBundleV1, WorkRuntimeProjectionV1,
+    UtcMicros, WorkProductEventSequenceV1, WorkProductGraphV1, WorkProductProjectionBundleV1,
+    WorkRuntimeProjectionV1,
 };
 
 use crate::{OpaqueCursor, RequestAdmission, RequestContext};
@@ -229,6 +230,92 @@ pub enum WorkGraphTimelineCoverageV1 {
     },
 }
 
+/// How much of the owner's journal the read's selection actually covers.
+///
+/// A selection names a slice of the owner's work, not the whole journal: an
+/// event records the relation scopes it was admitted under, and a selection
+/// that does not name them puts that event *outside* the slice. The events
+/// outside a selection do not poison the ones inside it, but they must never be
+/// concealed either — a caller who is shown the covered slice with no way to
+/// learn that more exists is reading a silently incomplete graph.
+///
+/// So the read answers over the covered slice and says so, in the same
+/// `Complete`/`Partial` vocabulary [`WorkGraphTimelineCoverageV1`] and
+/// [`WorkHistoryCoverageV1`](crate::WorkHistoryCoverageV1) already use.
+///
+/// The covered slice is always a *prefix* of the journal, and that is a
+/// property of folding rather than a simplification. A graph version is folded
+/// from every event up to its own sequence, so the first event a selection does
+/// not cover ends the readable slice: every later version, whatever scopes its
+/// own event named, would have to be folded across that event to exist at all.
+/// `excluded_events` therefore counts every event from the first uncovered one
+/// onward.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "coverage", rename_all = "snake_case")]
+pub enum WorkGraphSelectionCoverageV1 {
+    /// The selection covers the owner's whole journal. Nothing was withheld.
+    Complete { covered_events: u32 },
+    /// The selection covers `covered_events` events and `excluded_events`
+    /// events lie outside it, starting at `first_excluded_sequence`. Every
+    /// entry this read returned was folded from covered events alone.
+    Partial {
+        covered_events: u32,
+        excluded_events: u32,
+        first_excluded_sequence: WorkProductEventSequenceV1,
+    },
+}
+
+impl WorkGraphSelectionCoverageV1 {
+    pub const fn is_partial(&self) -> bool {
+        matches!(self, Self::Partial { .. })
+    }
+
+    pub const fn covered_events(&self) -> u32 {
+        match self {
+            Self::Complete { covered_events } | Self::Partial { covered_events, .. } => {
+                *covered_events
+            }
+        }
+    }
+
+    /// The first journal sequence outside the selection, when one exists.
+    pub const fn first_excluded_sequence(&self) -> Option<WorkProductEventSequenceV1> {
+        match self {
+            Self::Complete { .. } => None,
+            Self::Partial {
+                first_excluded_sequence,
+                ..
+            } => Some(*first_excluded_sequence),
+        }
+    }
+
+    /// A `Partial` disclosure that excludes nothing is a false disclosure, and
+    /// a covered prefix cannot extend past the sequence it stops before. Both
+    /// are rejected rather than normalised, the same way
+    /// [`WorkTaskEvidenceCoverageV1`](tracedecay_domain::WorkTaskEvidenceCoverageV1)
+    /// refuses a `Partial` reading with nothing unknown.
+    pub fn validate(&self) -> Result<(), WorkProductApplicationErrorV1> {
+        let valid = match self {
+            Self::Complete { .. } => true,
+            Self::Partial {
+                covered_events,
+                excluded_events,
+                first_excluded_sequence,
+            } => {
+                // Sequences are monotonic, so the event after `covered_events`
+                // covered ones always carries a strictly greater sequence.
+                *excluded_events > 0
+                    && u64::from(*covered_events) < first_excluded_sequence.get()
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(WorkProductApplicationErrorV1::InvalidRequest)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkGraphTimelineV1 {
@@ -322,18 +409,22 @@ impl WorkGraphTimelineV1 {
 pub enum WorkGraphReadV1 {
     Current {
         authorized_scope: AuthorizedWorkProductScopeV1,
+        selection_coverage: WorkGraphSelectionCoverageV1,
         snapshot: WorkGraphVersionEntryV1,
     },
     AsOf {
         authorized_scope: AuthorizedWorkProductScopeV1,
+        selection_coverage: WorkGraphSelectionCoverageV1,
         snapshot: WorkGraphVersionEntryV1,
     },
     Evolution {
         authorized_scope: AuthorizedWorkProductScopeV1,
+        selection_coverage: WorkGraphSelectionCoverageV1,
         timeline: WorkGraphTimelineV1,
     },
     Forensic {
         authorized_scope: AuthorizedWorkProductScopeV1,
+        selection_coverage: WorkGraphSelectionCoverageV1,
         timeline: WorkGraphTimelineV1,
     },
 }
@@ -353,6 +444,26 @@ impl WorkGraphReadV1 {
             | Self::Forensic {
                 authorized_scope, ..
             } => authorized_scope,
+        }
+    }
+
+    /// How much of the owner's journal this selection covered. `Partial` means
+    /// the entries below are the covered slice and scoped events exist outside
+    /// it — never that the graph is broken.
+    pub const fn selection_coverage(&self) -> &WorkGraphSelectionCoverageV1 {
+        match self {
+            Self::Current {
+                selection_coverage, ..
+            }
+            | Self::AsOf {
+                selection_coverage, ..
+            }
+            | Self::Evolution {
+                selection_coverage, ..
+            }
+            | Self::Forensic {
+                selection_coverage, ..
+            } => selection_coverage,
         }
     }
 
@@ -481,6 +592,22 @@ pub(crate) fn validate_result(
     result: &WorkGraphReadV1,
 ) -> Result<(), WorkProductApplicationErrorV1> {
     if result.authorized_scope() != authorized_scope {
+        return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+    }
+    // A coverage disclosure that contradicts itself would make partial reads
+    // unfalsifiable, so it is re-checked here rather than trusted.
+    if result.selection_coverage().validate().is_err() {
+        return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+    }
+    // An entry folded across the exclusion boundary would be a graph that never
+    // existed under this selection. The disclosure names where the boundary is,
+    // so the answer can be checked against it here instead of taken on trust.
+    if let Some(first_excluded) = result.selection_coverage().first_excluded_sequence()
+        && result
+            .entries()
+            .iter()
+            .any(|entry| entry.verified_version().event_sequence() >= first_excluded)
+    {
         return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
     }
     let mode_matches = matches!(

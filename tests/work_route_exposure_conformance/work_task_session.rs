@@ -103,8 +103,13 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
     fixture.restart();
 
     // -- The task root itself, through the prepared-mutation handoff. --------
+    // Created under the profile-owned no-Git selection, which is how a profile
+    // owner's work actually begins: no repository relation is named until an
+    // authority that can only act under one — attempt admission, below —
+    // appends beside it. That sequence is what the no-Git coverage assertion
+    // after settlement grades.
     let mut create_draft = super::product_task_create_draft();
-    create_draft["selection"] = repository_selection(fixture);
+    create_draft["selection"] = super::product_selection();
     let (status, prepared) =
         super::poll_past_warming("daemon work/prepare-graph-mutation", &mut || {
             post_envelope(
@@ -241,6 +246,9 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
         "the reads must pin the exact published graph identity: {verified_version}"
     );
 
+    // -- The no-Git selection, now that scoped events exist beside it. -------
+    assert_no_git_selection_reads_its_covered_slice(agent, fixture);
+
     // -- Import the provider transcript. -------------------------------------
     // Without this the session named on the receipt would not exist at all,
     // and the `unavailable` verdict below could be read as "no such session"
@@ -300,6 +308,142 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
         &verified_version,
         &identity,
         "after physical daemon restart",
+    );
+}
+
+/// The no-Git selection, graded live once repository-scoped events exist.
+///
+/// This journey used to record a defect here rather than a contract: the task
+/// had to be created under the repository selection because a settled provider
+/// attempt publishes repository-scoped events onto the same owner journal, and
+/// the no-Git selection then refused *every* read of it. `work/views` answered
+/// `200` before start-attempt and a permanent `404` after — work the caller was
+/// plainly authorized for became unreachable because of an event admitted
+/// beside it.
+///
+/// The ruled contract, driven here on the real mounted surface:
+///
+/// * the read succeeds over the slice the selection covers, and
+/// * it carries a truthful typed disclosure that scoped events exist outside
+///   that slice, so the caller can never mistake the slice for the whole, and
+/// * a mutation is still refused — a prepared change pins the head it read, and
+///   a covered slice's head is not the journal's — but now by a refusal that
+///   names the cause and the selection remedy instead of concealing it as an
+///   absence.
+fn assert_no_git_selection_reads_its_covered_slice(
+    agent: &ureq::Agent,
+    fixture: &ProductionDaemon,
+) {
+    let graph = payload(
+        agent,
+        fixture,
+        "daemon work/views (no-Git selection)",
+        "/application/work/views",
+        &super::current_product_graph_request(now_micros()),
+    );
+    assert_eq!(graph["mode"], "current", "{graph}");
+
+    // The disclosure, at full strength: partial, with the excluded events
+    // counted and the boundary named. A `complete` answer here would mean the
+    // repository-scoped events had been silently folded into a no-Git reading.
+    let coverage = &graph["selection_coverage"];
+    assert_eq!(
+        coverage["coverage"], "partial",
+        "the no-Git read must disclose the scoped events outside its selection: {graph}"
+    );
+    let covered = coverage["covered_events"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the disclosure must count the covered events: {graph}"));
+    let excluded = coverage["excluded_events"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the disclosure must count the excluded events: {graph}"));
+    assert!(
+        covered > 0,
+        "the covered slice must be the no-Git work that was really created: {graph}"
+    );
+    assert!(
+        excluded > 0,
+        "a partial disclosure that excludes nothing is a false disclosure: {graph}"
+    );
+    assert_eq!(
+        coverage["first_excluded_sequence"].as_u64(),
+        Some(covered + 1),
+        "the disclosure must name the exact journal sequence the slice stops before: {graph}"
+    );
+
+    // The slice is answered as itself: the no-Git create's own version, folded
+    // from covered events alone. The accepted-attempt relation lives in a
+    // repository-scoped event, so it must NOT appear here — that would be the
+    // partial fold this contract exists to prevent.
+    assert_eq!(
+        graph["snapshot"]["verified_version"]["graph_version"].as_u64(),
+        Some(covered),
+        "the covered slice's head must be the last version folded from it: {graph}"
+    );
+    assert!(
+        !accepted_attempts(
+            &graph,
+            &json!({
+                "task_id": TASK_ID,
+                "run_id": RUN_ID,
+                "attempt_id": ATTEMPT_ID,
+            }),
+        ),
+        "a scoped relation must not be folded into the no-Git slice: {graph}"
+    );
+
+    // The write half of the split. The change is legal in every other respect;
+    // only the coverage refuses it, and the refusal must say so by name.
+    let (status, refused) = post_envelope(
+        agent,
+        &fixture.external_url("/application/work/prepare-graph-mutation"),
+        fixture,
+        &json!({
+            "selection": super::product_selection(),
+            "causation_event_id": Value::Null,
+            "evidence": [],
+            "change": { "change": "admit_execution", "task_id": TASK_ID },
+        }),
+    );
+    let label = "daemon work/prepare-graph-mutation (no-Git selection)";
+    assert_canonical_envelope(label, status, &refused);
+    assert_eq!(
+        refused["kind"], "problem",
+        "{label} must refuse a mutation over a covered slice: {refused}"
+    );
+    let problem = &refused["value"]["problem"];
+    // Named, not concealed: the old behaviour was `not_found_or_not_authorized`,
+    // which told the caller nothing and pointed nowhere.
+    assert_ne!(
+        problem["kind"], "not_found_or_not_authorized",
+        "{label} must not conceal the coverage cause as an absence: {refused}"
+    );
+    let diagnostic = problem["diagnostic"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label} must carry a safe diagnostic: {refused}"));
+    assert!(
+        diagnostic.contains("covers only part") && diagnostic.contains("widen the selection"),
+        "{label} must name the cause and the selection remedy: {refused}"
+    );
+
+    // The remedy actually works: the widened selection reads the same journal
+    // whole, with the accepted-attempt relation the no-Git slice could not
+    // carry.
+    let whole = current_graph(agent, fixture);
+    assert_eq!(
+        whole["selection_coverage"]["coverage"], "complete",
+        "the widened selection must cover the whole journal: {whole}"
+    );
+    assert!(
+        accepted_attempts(
+            &whole,
+            &json!({
+                "task_id": TASK_ID,
+                "run_id": RUN_ID,
+                "attempt_id": ATTEMPT_ID,
+            }),
+        ),
+        "the widened selection must carry the scoped relation the slice omitted: {whole}"
     );
 }
 
@@ -784,15 +928,14 @@ fn accepted_attempts(graph: &Value, identity: &Value) -> bool {
         .is_some_and(|attempts| attempts.iter().any(|attempt| attempt == identity))
 }
 
-/// The repository-relation selection this journey admits every Work event
-/// under.
+/// The repository-relation selection this journey reads and mutates under.
 ///
-/// `profile_owned_no_git` cannot be used here: it covers exactly the events
-/// that named no relation scope, and a settled provider attempt publishes
-/// repository-scoped Work events. Reading a journal that mixes both under the
-/// no-Git selection is refused outright — a partially folded graph is a
-/// falsified graph — so the selection has to be the one the whole journey's
-/// events are actually admitted under.
+/// A settled provider attempt can only be admitted under a repository relation
+/// scope, so it publishes repository-scoped Work events onto the same owner
+/// journal the no-Git create started. This selection names those scopes, and a
+/// `relations` selection also covers the scope-free events beside them, so it
+/// is the one selection that reads this journey's journal whole — which is
+/// exactly the remedy the coverage disclosure points a no-Git caller at.
 fn repository_selection(fixture: &ProductionDaemon) -> Value {
     let common_dir =
         tracedecay::worktree::git_common_dir(&fixture.project).expect("Git common directory");
