@@ -32,7 +32,7 @@ fn zero_terminal(status: &str) -> Value {
     )
 }
 
-fn automation_request(run_id: &str, task: AutomationTaskV1) -> AutomationRunRequestV1 {
+pub(crate) fn automation_request(run_id: &str, task: AutomationTaskV1) -> AutomationRunRequestV1 {
     let reflector = json!({
         "provider":"codex","query":"canonical evidence","scope":"all","session_id":null,
         "include_summaries":true,"evidence_limit":10,"include_recent_sessions":true,
@@ -66,7 +66,7 @@ fn automation_request(run_id: &str, task: AutomationTaskV1) -> AutomationRunRequ
     .expect("automation request fixture")
 }
 
-fn with_request_digest(mut value: Value, request: &AutomationRunRequestV1) -> Value {
+pub(crate) fn with_request_digest(mut value: Value, request: &AutomationRunRequestV1) -> Value {
     value["request_digest"] = json!(request.input_digest().expect("request digest").as_str());
     value
 }

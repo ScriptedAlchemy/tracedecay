@@ -345,14 +345,19 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
     .await
     .unwrap();
 
-    // Planner-scale rows are seeded in chunks so no single exact-SQL batch
-    // approaches the statement time guard under load; the total row count and
-    // value distribution stay identical to a single 100k insert.
+    // Planner-scale seeding is bulk-write work: it legitimately outlives the
+    // ordinary per-statement deadline. Chunking alone still raced that
+    // deadline, so under CPU contention the guard interrupted the fixture
+    // itself (SQLITE_INTERRUPT) before a single asserted query ever ran.
+    // Seed through the authorized long-lease path the production bulk writers
+    // use, which drops the ordinary statement deadline and renews the lease on
+    // each committed chunk. Row count and value distribution are unchanged.
     const FIXTURE_ROWS: usize = 100_000;
     const FIXTURE_CHUNK: usize = 20_000;
+    let seed = conn.authorized_long_lease_transaction().await.unwrap();
     for start in (0..FIXTURE_ROWS).step_by(FIXTURE_CHUNK) {
         let end = start + FIXTURE_CHUNK - 1;
-        conn.execute_batch(&format!(
+        seed.execute_authority_revalidated_batch(&format!(
             "WITH RECURSIVE sequence(value) AS (
                 VALUES({start})
                 UNION ALL
@@ -388,7 +393,7 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
     }
     for start in (0..FIXTURE_ROWS).step_by(FIXTURE_CHUNK) {
         let end = start + FIXTURE_CHUNK - 1;
-        conn.execute_batch(&format!(
+        seed.execute_authority_revalidated_batch(&format!(
             "WITH RECURSIVE sequence(value) AS (
                 VALUES({start})
                 UNION ALL
@@ -411,7 +416,10 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
         .await
         .unwrap();
     }
-    conn.execute_batch("ANALYZE;").await.unwrap();
+    seed.execute_authority_revalidated_batch("ANALYZE;")
+        .await
+        .unwrap();
+    seed.commit().await.unwrap();
 
     for table in ["session_occurrences", "session_summary_nodes"] {
         let mut rows = conn
