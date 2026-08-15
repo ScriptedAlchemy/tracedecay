@@ -27,10 +27,11 @@ mod work_registered_store;
 use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_application::{
-    AcceptWorkTaskRequestV1, CancellationContext, CapabilityGrantSnapshot,
+    AcceptWorkTaskRequestV1, AddWorkTaskRequestV1, CancellationContext, CapabilityGrantSnapshot,
     CreateWorkProductRequestV1, Deadline, DisclosureClass, OpaqueCursor, RequestContext, RequestId,
     ResolvedScope, SelectedWorkEvidenceV1, VerifiedWorkGraphVersionV1, WorkEvidenceExpandRequestV1,
-    WorkEvidenceSelectRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkHistoryCoverageV1,
+    WorkEvidenceSelectRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
+    WorkGraphSelectionCoverageV1, WorkHistoryCoverageV1,
     WorkHistoryRequestV1, WorkHistoryServiceV1, WorkHistoryV1, WorkProductApplicationErrorV1,
     WorkProductBindingV1, WorkProductEvidenceServiceV1, WorkProductExpectedAuthorityV1,
     WorkProductMutationIdentityV1, WorkProductMutationReceiptV1, WorkProductMutationServiceV1,
@@ -42,8 +43,8 @@ use tracedecay_domain::{
     ManifestDigest, MilestoneId, PolicyRevisionId, ProjectId, RepositoryId, RetrievalAnchorId,
     TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros, WorkAcceptanceCriterionV1,
     WorkCommandId, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
-    WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProductGraphV1,
-    WorkTaskEvidenceCoverageV1, WorktreeId,
+    WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProductEventSequenceV1,
+    WorkProductGraphV1, WorkTaskEvidenceCoverageV1, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -590,6 +591,12 @@ fn history_returns_the_journaled_events_in_durable_sequence_order() {
         history.coverage,
         WorkHistoryCoverageV1::Complete { returned: 2 }
     );
+    // The selection this journal was written under covers all of it, so nothing
+    // is withheld and the disclosure says so outright.
+    assert_eq!(
+        history.selection_coverage,
+        WorkGraphSelectionCoverageV1::Complete { covered_events: 2 }
+    );
     assert_eq!(history.events.len(), 2);
     // The events are the stored ones, identical to the receipts the mutations
     // returned — not a summary of them.
@@ -637,6 +644,13 @@ fn an_owner_with_no_journal_has_an_explicitly_empty_history() {
         history.coverage,
         WorkHistoryCoverageV1::Complete { returned: 0 }
     );
+    // An owner with no journal and an owner whose every event lies outside the
+    // selection both read empty, and only the selection coverage tells them
+    // apart: this one has nothing, rather than nothing *it may see*.
+    assert_eq!(
+        history.selection_coverage,
+        WorkGraphSelectionCoverageV1::Complete { covered_events: 0 }
+    );
     assert!(history.events.is_empty());
 }
 
@@ -657,15 +671,20 @@ fn a_history_cursor_this_authority_did_not_mint_is_refused() {
     );
 }
 
+/// A selection that covers no event at all still has a representable answer:
+/// an empty page, qualified by a disclosure that says every event lies outside
+/// it. This is the empty-covered-slice case, not the poisoning one below.
 #[test]
-fn a_selection_that_does_not_match_the_journal_is_refused_rather_than_filtered() {
+fn a_selection_covering_no_event_reads_empty_with_a_partial_disclosure() {
     let store = RegisteredWorkStore::start("work-product-history-scope");
     create(&store, &[alpha()]);
 
-    // The journal was written under a repository relation scope. A no-Git
-    // selection matches none of it, and returning the empty subset it does
-    // match would present a hole as a complete history.
-    let refused = history_service(&store)
+    // The journal was written under a repository relation scope from its very
+    // first event, so a no-Git selection covers none of it. The empty answer is
+    // honest only because the disclosure beside it says so — an unqualified
+    // empty history would present a hole as a complete record, which is exactly
+    // what the old outright refusal was guarding against.
+    let history = history_service(&store)
         .read(
             &context(),
             &binding(),
@@ -676,10 +695,107 @@ fn a_selection_that_does_not_match_the_journal_is_refused_rather_than_filtered()
                 observed_at: OBSERVED_AT,
             },
         )
-        .expect_err("a selection that does not match the journal must be refused");
+        .expect("an empty covered slice is representable, not a refusal");
+
+    assert!(history.events.is_empty());
     assert_eq!(
-        refused,
-        WorkProductApplicationErrorV1::NotFoundOrNotAuthorized
+        history.coverage,
+        WorkHistoryCoverageV1::Complete { returned: 0 },
+        "the page is exhausted; there is no further page under this selection"
+    );
+    assert_eq!(
+        history.selection_coverage,
+        WorkGraphSelectionCoverageV1::Partial {
+            covered_events: 0,
+            excluded_events: 1,
+            first_excluded_sequence: WorkProductEventSequenceV1::new(1).unwrap(),
+        },
+        "an empty page must never be reported as a complete history"
+    );
+}
+
+/// The no-Git poisoning defect on the history surface, stated as the contract
+/// that replaced it.
+///
+/// A profile owner creates work with no Git relation, and later an authority
+/// that can only act under a repository scope appends a repository-scoped event
+/// to the same owner journal. The old rule refused the entire no-Git history
+/// from that moment on, permanently, so events the caller was plainly
+/// authorized for became unreadable because of an event appended beside them.
+///
+/// The ruled contract: the covered prefix is served, and the answer says what
+/// it left out.
+#[test]
+fn a_scoped_event_beside_no_git_work_does_not_poison_the_no_git_history() {
+    let store = RegisteredWorkStore::start("work-product-history-no-git-prefix");
+    let created = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph_declaring(&[alpha()]),
+                mutation: mutation(
+                    "command.work-product-query.no-git",
+                    UtcMicros(100),
+                    WorkProductExpectedAuthorityV1::NoPriorGraph,
+                ),
+            },
+        )
+        .expect("create profile-owned work with no Git relation");
+
+    // The event beside it: admitted under a repository relation scope, on the
+    // same owner journal. This is what a settled provider attempt publishes.
+    mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.repository-scoped"),
+                mutation: mutation(
+                    "command.work-product-query.repository",
+                    UtcMicros(200),
+                    WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                ),
+            },
+        )
+        .expect("publish a repository-scoped event beside the no-Git work");
+
+    let history = history_service(&store)
+        .read(
+            &context(),
+            &binding(),
+            WorkHistoryRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                limit: 16,
+                continuation: None,
+                observed_at: OBSERVED_AT,
+            },
+        )
+        .expect("the covered prefix is readable, not poisoned by the event beside it");
+
+    // The disclosure is the whole point: the caller is told where this
+    // selection stops covering the journal and how much lies past it.
+    assert_eq!(
+        history.selection_coverage,
+        WorkGraphSelectionCoverageV1::Partial {
+            covered_events: 1,
+            excluded_events: 1,
+            first_excluded_sequence: WorkProductEventSequenceV1::new(2).unwrap(),
+        },
+        "the read must disclose the scoped event outside this selection"
+    );
+    // The answer is exactly the covered prefix: the owner's own no-Git event,
+    // and nothing at or past the boundary the disclosure names.
+    assert_eq!(history.events.len(), 1);
+    assert_eq!(&history.events[0], created.event());
+    assert_eq!(
+        history.coverage,
+        WorkHistoryCoverageV1::Complete { returned: 1 },
+        "the covered prefix was returned whole; paging is a separate axis"
     );
 }
 
