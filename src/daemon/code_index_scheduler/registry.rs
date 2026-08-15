@@ -76,6 +76,20 @@ fn bounded_daemon_admission_permits() -> usize {
     })
 }
 
+#[cfg(test)]
+fn cold_mount_admission_barriers() -> &'static Mutex<BTreeMap<PathBuf, Arc<tokio::sync::Barrier>>> {
+    static BARRIERS: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, Arc<tokio::sync::Barrier>>>> =
+        std::sync::OnceLock::new();
+    BARRIERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+fn query_admission_barriers() -> &'static Mutex<BTreeMap<WorktreeId, Arc<tokio::sync::Barrier>>> {
+    static BARRIERS: std::sync::OnceLock<Mutex<BTreeMap<WorktreeId, Arc<tokio::sync::Barrier>>>> =
+        std::sync::OnceLock::new();
+    BARRIERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 /// One mounted worktree's code scope identity and serving generation, read
 /// without touching the scheduler mutex.
 pub(in crate::daemon) struct CodeIndexServingScopeV1 {
@@ -267,6 +281,60 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
     pub(super) fn background_reconcile_admission(&self) -> Arc<tokio::sync::Semaphore> {
         Arc::clone(&self.background_reconcile_admission)
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_cold_mount_admission_barrier(&self, project_root: &Path, callers: usize) {
+        let project_root = project_root
+            .canonicalize()
+            .expect("canonical test project root");
+        let barrier = Arc::new(tokio::sync::Barrier::new(callers));
+        let replaced = cold_mount_admission_barriers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root, barrier);
+        assert!(replaced.is_none(), "cold-mount barrier already installed");
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_query_admission_barrier(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+        callers: usize,
+    ) {
+        let barrier = Arc::new(tokio::sync::Barrier::new(callers));
+        let replaced = query_admission_barriers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(scope.worktree_id.clone(), barrier);
+        assert!(
+            replaced.is_none(),
+            "query-admission barrier already installed"
+        );
+    }
+
+    #[cfg(test)]
+    async fn pause_cold_mount_admission_for_test(project_root: &Path) {
+        let barrier = cold_mount_admission_barriers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .cloned();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_query_admission_for_test(scope: &tracedecay_application::ResolvedScope) {
+        let barrier = query_admission_barriers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&scope.worktree_id)
+            .cloned();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
     }
 
     /// The pending-wake slot for one exact scope's worktree, in unix micros;
@@ -719,6 +787,8 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         drop(mounted);
         drop(retiring);
+        #[cfg(test)]
+        Self::pause_cold_mount_admission_for_test(&project_root).await;
         // Keep CPU-bound cold-open identity setup off runtime workers.
         let scoped_store_root = super::scoped_code_index_store_root(&store_root, &project_root);
         let open_project_id = project_id.clone();
@@ -2302,6 +2372,8 @@ impl CodeIndexSchedulerRegistryV1 {
         if pending_wake_micros.load(Ordering::Acquire) != 0 {
             return false;
         }
+        #[cfg(test)]
+        Self::pause_query_admission_for_test(scope).await;
         tokio::task::spawn_blocking(move || {
             let mut scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,

@@ -3436,6 +3436,126 @@ async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_cold_mounts_admit_exactly_one_worktree_owner() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn race() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    // Keep both newly-created workers parked at their dequeue point. The test
+    // counts mount admissions before either worker can coalesce its initial
+    // wake, so a duplicate cold owner cannot hide behind worker scheduling.
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(2, 0);
+    let callers = 2;
+    registry.install_cold_mount_admission_barrier(fixture.path(), callers);
+    let start = Arc::new(tokio::sync::Barrier::new(callers + 1));
+    let mounts = (0..callers)
+        .map(|_| {
+            let registry = registry.clone();
+            let project_root = fixture.path().to_path_buf();
+            let store_root = store.path().to_path_buf();
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                registry
+                    .mount_worktree(test_project_id(), &project_root, store_root, None)
+                    .await
+                    .expect("cold mount")
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait().await;
+
+    let mut created_owners = 0;
+    for mount in mounts {
+        if mount.await.expect("mount task joins") {
+            created_owners += 1;
+        }
+    }
+    let mounted_worktrees = registry.memory_stats().await.mounted_worktrees;
+
+    // Close the shared admission and join the retained owner before asserting,
+    // so a failing run cannot leave a detached worker behind the test.
+    registry.shutdown().await;
+
+    assert_eq!(
+        created_owners, 1,
+        "one root must admit one cold owner; a second true result creates a detached runtime"
+    );
+    assert_eq!(
+        mounted_worktrees, 1,
+        "the retained mount table must contain the one owner that was admitted"
+    );
+}
+
+// Each caller begins from the same empty pending slot. Holding the scheduler
+// lock forces every request onto the BusyFollowUp path, where the registry—not
+// the worker's later wake coalescing—is solely responsible for one admission.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coalescing() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("background reconcile admission");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    registry.clear_serving_generation_for_scope(&scope).await;
+    registry.clear_pending_wake_for_scope(&scope).await;
+    let held = scheduler
+        .lock()
+        .expect("hold the scheduler as a rebuild would");
+
+    let callers = 8;
+    registry.install_query_admission_barrier(&scope, callers);
+    let start = Arc::new(tokio::sync::Barrier::new(callers + 1));
+    let requests = (0..callers)
+        .map(|_| {
+            let registry = registry.clone();
+            let scope = scope.clone();
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                registry.request_query_background_reconcile(&scope).await
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait().await;
+
+    let mut admitted = 0;
+    for request in requests {
+        if request.await.expect("query admission task joins") {
+            admitted += 1;
+        }
+    }
+    let stamped = registry
+        .pending_wake_micros_for_scope(&scope)
+        .await
+        .expect("mounted worktree");
+
+    drop(held);
+    drop(admission);
+    registry.shutdown().await;
+
+    assert_ne!(
+        stamped, 0,
+        "the one winning admission records its pending wake"
+    );
+    assert_eq!(
+        admitted, 1,
+        "the registry must atomically claim one query admission before worker wake coalescing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_reconciles_respect_a_single_admission_permit() {
     // A bound of ONE serializes all worktrees: while the first worker holds the
     // sole permit (blocked on its scheduler lock), the second cannot start.
