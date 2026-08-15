@@ -426,15 +426,22 @@ the commit as attribution evidence.
   `src/daemon/invocation_state.rs:831`); the `Anchor` continuation variant is
   unconditionally `Unavailable`
   (`src/daemon/work_evidence_retrieval.rs:225-230`).
-- OPEN (owner decision required): `ProfileOwnedNoGit` selection poisoning.
-  `selection_covers`
-  (`crates/tracedecay-rusqlite-runtime/src/work_product.rs:95-108`) covers
-  only events with no relation scopes and refuses the whole read on a miss.
-  Once a settled provider attempt publishes repository-scoped events, every
-  `work/views` and prepare-graph-mutation under a no-Git selection
-  permanently returns `not_found_or_not_authorized` (proven live: 200 before
-  start-attempt, permanent 404 after). Do not fabricate a fix; decide
-  intended no-Git selection semantics first.
+- DONE 2026-08-15: `ProfileOwnedNoGit` selection poisoning resolved by owner
+  ruling (split semantics): reads succeed over the covered slice with a typed
+  disclosure; mutations keep a fail-closed refusal typed by its actual cause.
+  The covered subset is structurally the journal's covered *prefix* —
+  `fold_graph` requires canonical progression, so coverage cannot skip
+  events. Landed via merge `75ec80fc7` (`ead7860f4` runtime + application,
+  `3fe7344f5` dashboard contracts, `22f054481` unit tests, `b188a4407`
+  journey flip): `WorkGraphSelectionCoverageV1::{Complete, Partial}` on all
+  four `WorkGraphReadV1` variants
+  (`crates/tracedecay-application/src/work_product/read.rs`),
+  `covered_prefix`/`load_covered_journal`
+  (`crates/tracedecay-rusqlite-runtime/src/work_product.rs`), typed
+  `work.selection_coverage_incomplete` refusal on prepare/submit/CreateTask.
+  Known follow-up (in flight on `codex/rc-work-history-coverage`):
+  work/history still refuses whole under partial coverage and needs the same
+  split via a `WorkHistoryCoverageV1` disclosure.
 
 ### Typed terminal problem propagation
 
@@ -568,7 +575,12 @@ the commit as attribution evidence.
   in `semantic_evaluation_response` (the underlying `SearchEvalError` is
   swallowed by `evaluate_default_candidate`). Exact, lexical, graph, and
   ordinary session retrieval must stay available while semantic activation
-  is pending or unavailable.
+  is pending or unavailable. Measurement 2026-08-14: on a heavily contended
+  host (concurrent suites + two long-lived daemons) `evaluate-and-publish`
+  took 1811s wall — ~2.9x the quiet-host 625s — so the 900s ceiling fired
+  before the recorded `InvalidRequest` blocker could be reached. Judged
+  load-sensitivity, not regression; unconfirmed pending a quiet-host rerun.
+  Do not resize the production ceiling from a contended-host number.
 - Re-run the doctor authority-audit journey and a clean Cursor agents/in-
   composer install -> version bump -> doctor lifecycle. Preserve Cursor Core
   drift versus ownership-conflict distinctions and do not add Cursor Cloud.
