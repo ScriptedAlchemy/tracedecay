@@ -1204,6 +1204,12 @@ fn reserve_capacity_eviction(
                     | RegistryEntry::Ready { .. }
                     | RegistryEntry::Closing { .. }
                     | RegistryEntry::Retiring { .. }
+                    // A terminal fault can still retain the native Grafeo
+                    // runtime; it consumes the same physical capacity until
+                    // an external recovery authority resolves that identity.
+                    | RegistryEntry::Faulted {
+                        owner: Some(_), ..
+                    }
             )
         })
         .count();
@@ -1291,7 +1297,7 @@ mod tests {
         CloseReservation, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
         GraphDbRegistryStatus, GraphDbRetirementOutcome, GraphDbRetirementTarget,
     };
-    use crate::{GraphDbError, NeverCancelled};
+    use crate::{GraphBudgetKind, GraphDbError, NeverCancelled};
 
     #[derive(Debug)]
     struct TestLease {
@@ -1315,11 +1321,15 @@ mod tests {
     }
 
     fn registration(root: &std::path::Path) -> GraphDbRegistration {
+        registration_for(root, "project.registry-retirement")
+    }
+
+    fn registration_for(root: &std::path::Path, project: &str) -> GraphDbRegistration {
         let binding = StoreRuntimeBindingV1::new(
             StoreShardIdV1::project(
                 BrainId::try_from("brain.registry-retirement".to_owned()).unwrap(),
                 UserProfileId::try_from("profile.registry-retirement".to_owned()).unwrap(),
-                ProjectId::try_from("project.registry-retirement".to_owned()).unwrap(),
+                ProjectId::try_from(project.to_owned()).unwrap(),
             ),
             StoreIncarnationV1::new(1).unwrap(),
             StoreAuthorityEpochV1::new(1).unwrap(),
@@ -1380,6 +1390,37 @@ mod tests {
             registry.resolve(registration),
             Err(GraphDbError::DurabilityUncertain { .. })
         ));
+    }
+
+    #[test]
+    fn faulted_owner_consumes_capacity_and_cannot_be_evicted_for_a_second_shard() {
+        let first_root = TempDir::new().unwrap();
+        let second_root = TempDir::new().unwrap();
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        let first = registration_for(first_root.path(), "project.faulted-first");
+        let second = registration_for(second_root.path(), "project.blocked-second");
+
+        let lease = registry.resolve(first.clone()).unwrap();
+        lease.inner.poisoned.store(true, Ordering::Release);
+        drop(lease);
+        assert!(matches!(
+            registry.resolve(first.clone()),
+            Err(GraphDbError::DurabilityUncertain { .. })
+        ));
+
+        assert_eq!(
+            registry.resolve(second.clone()).unwrap_err(),
+            GraphDbError::BudgetExhausted {
+                kind: GraphBudgetKind::Capacity,
+                limit: 1,
+            }
+        );
+        assert_eq!(
+            registry.status(&first).unwrap(),
+            Some(GraphDbRegistryStatus::DurabilityUncertain)
+        );
+        assert_eq!(registry.status(&second).unwrap(), None);
+        assert!(!second_root.path().join("graph.grafeo").exists());
     }
 
     #[test]
