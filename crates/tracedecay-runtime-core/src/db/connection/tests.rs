@@ -126,10 +126,11 @@ async fn read_only_preflight_and_writable_mount_share_one_registered_runtime() {
     .await
     .unwrap();
 
-    assert!(Arc::ptr_eq(
-        writer.retained_runtime().runtime(),
-        reader.retained_runtime().runtime()
-    ));
+    assert!(
+        writer
+            .retained_runtime()
+            .shares_runtime_with(reader.retained_runtime())
+    );
     assert_eq!(writer.opened_file_identity(), reader.opened_file_identity());
     assert!(Arc::ptr_eq(&writer.inner, &remounted_writer.inner));
 }

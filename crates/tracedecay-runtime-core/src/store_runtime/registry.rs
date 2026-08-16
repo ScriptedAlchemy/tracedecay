@@ -107,6 +107,13 @@ pub struct StoreRuntimeClientLease {
     inner: Arc<StoreRuntimeClientLeaseToken>,
 }
 
+/// Opaque identity for the lifecycle allocation behind one client lease.
+///
+/// It can compare runtime allocations without retaining or exposing the
+/// registry's `Arc<ShardRuntime>` ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StoreRuntimeLeaseIdentity(u64);
+
 struct StoreRuntimeClientLeaseToken {
     source: Arc<StoreRuntimeLeaseSource>,
     _lifetime: super::shard::ShardRuntimeClientLifetimeLease,
@@ -242,6 +249,16 @@ impl StoreRuntimeOwnerAttachment {
 }
 
 impl StoreRuntimeClientLease {
+    #[must_use]
+    pub fn shares_runtime_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner.runtime, &other.inner.runtime)
+    }
+
+    #[must_use]
+    pub fn runtime_identity(&self) -> StoreRuntimeLeaseIdentity {
+        StoreRuntimeLeaseIdentity(self.inner.runtime.instance_id())
+    }
+
     pub fn begin_operation(
         &self,
     ) -> Result<StoreRuntimeOperationLease, StoreRuntimeRegistryFailure> {
@@ -402,10 +419,6 @@ impl StoreRuntimeClientLease {
         &self.inner.publication.binding
     }
 
-    pub(super) fn runtime(&self) -> &ShardRuntime {
-        &self.inner.runtime
-    }
-
     pub fn locator(&self) -> &RuntimeLocatorRecord {
         &self.inner.locator
     }
@@ -423,15 +436,6 @@ impl StoreRuntimeClientLease {
     /// Whether the physical attachment currently holds a writer.
     pub fn writer_present(&self) -> bool {
         self.physical_snapshot().writer_present
-    }
-
-    /// Stable identity of the underlying physical runtime, so two facades can
-    /// be compared for attachment sharing. A monotonic instance number rather
-    /// than the `Arc` address: once the old runtime is dropped, the allocator
-    /// can hand its address to the replacement, so pointer identity cannot
-    /// distinguish a rebuilt runtime from its predecessor.
-    pub fn runtime_identity(&self) -> usize {
-        self.runtime().instance_id() as usize
     }
 
     pub fn opened_file_identity(&self) -> Option<u64> {
@@ -853,6 +857,7 @@ pub enum StoreRuntimeRegistryFailure {
     RetirementReservationLost {
         key: Box<StoreRuntimeKey>,
     },
+    RetirementReservationConsumed,
     GraphLocatorConflict {
         key: Box<StoreRuntimeKey>,
         retained_path: PathBuf,

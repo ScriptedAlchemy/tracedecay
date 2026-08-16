@@ -128,7 +128,7 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
             let admission = AdmissionConfigV1::default();
             let pinned_profile =
                 matches!(request.binding.shard_id.scope, StoreShardScopeV1::Profile);
-            let runtime = Arc::new(ShardRuntime::new(request.binding.clone(), pinned_profile));
+            let runtime = ShardRuntime::new(request.binding.clone(), pinned_profile);
             runtime
                 .transition(RuntimeMaintenanceStateV1::Opening)
                 .map_err(runtime_lifecycle_failure)?;
@@ -142,7 +142,7 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
 
 async fn publish_lifecycle_runtime(
     request: ShardRuntimeBuildRequest,
-    runtime: Arc<ShardRuntime>,
+    runtime: ShardRuntime,
     attachment: LifecyclePhysicalAttachment,
 ) -> Result<PublishedShardRuntime, StoreRuntimeRegistryFailure> {
     if request.mode == StoreRuntimeOpenMode::Initialize

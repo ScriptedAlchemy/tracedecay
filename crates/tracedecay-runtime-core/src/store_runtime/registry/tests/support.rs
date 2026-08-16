@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracedecay_domain::{
@@ -130,20 +130,7 @@ pub(super) struct TestPublisher {
     pub(super) block: AtomicBool,
     pub(super) mode: AtomicU8,
     pub(super) release: tokio::sync::Notify,
-    runtimes: Mutex<Vec<Weak<ShardRuntime>>>,
     pub(super) bindings: Mutex<Vec<StoreRuntimeBindingV1>>,
-}
-
-impl TestPublisher {
-    pub(super) fn runtime(&self, index: usize) -> Arc<ShardRuntime> {
-        self.runtimes
-            .lock()
-            .unwrap()
-            .get(index)
-            .unwrap()
-            .upgrade()
-            .unwrap()
-    }
 }
 
 impl ShardRuntimePublisher for TestPublisher {
@@ -164,23 +151,38 @@ impl ShardRuntimePublisher for TestPublisher {
                     message: "publisher failed".to_owned(),
                 });
             }
-            let runtime = Arc::new(ShardRuntime::new(
+            let runtime = ShardRuntime::new(
                 request.binding.clone(),
                 matches!(request.binding.shard_id.scope, StoreShardScopeV1::Profile),
-            ));
+            );
             runtime
                 .transition(RuntimeMaintenanceStateV1::Opening)
                 .unwrap();
             runtime
                 .transition(RuntimeMaintenanceStateV1::Ready)
                 .unwrap();
-            self.runtimes.lock().unwrap().push(Arc::downgrade(&runtime));
             Ok(PublishedShardRuntime::new(
                 runtime,
                 Arc::new(EmptyPhysicalRuntimeAttachment),
             ))
         })
     }
+}
+
+pub(super) fn force_ready_runtime_state(
+    registry: &StoreRuntimeRegistry,
+    binding: &StoreRuntimeBindingV1,
+    state: RuntimeMaintenanceStateV1,
+) {
+    let key = StoreRuntimeKey::from_binding(binding);
+    let owner = {
+        let registry_state = registry.lock_state();
+        let Some(RegistryEntry::Ready(ready)) = registry_state.entries.get(&key) else {
+            panic!("expected ready runtime for forced lifecycle state");
+        };
+        Arc::clone(&ready.owner)
+    };
+    owner.runtime().transition(state).unwrap();
 }
 
 pub(super) fn registry(

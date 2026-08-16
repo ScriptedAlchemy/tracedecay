@@ -141,10 +141,10 @@ impl ShardRuntimePublisher for AttachmentPublisher {
     {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
-            let runtime = Arc::new(ShardRuntime::new(
+            let runtime = ShardRuntime::new(
                 request.binding().clone(),
                 matches!(request.binding().shard_id.scope, StoreShardScopeV1::Profile),
-            ));
+            );
             runtime
                 .transition(RuntimeMaintenanceStateV1::Opening)
                 .unwrap();
@@ -365,7 +365,7 @@ async fn blocking_join_releases_registry_lock_and_reserves_evicted_and_opening_k
     else {
         panic!("reserved open was not published to both joiners");
     };
-    assert!(Arc::ptr_eq(initial.runtime(), duplicate.runtime()));
+    assert!(initial.shares_runtime_with(&duplicate));
     assert_eq!(attachment.drain_calls.load(Ordering::SeqCst), 1);
     assert_eq!(attachment.close_calls.load(Ordering::SeqCst), 1);
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tracedecay_store::{
     CommitSequenceV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestProbeV1,
-    RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
+    RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, StoreRuntimeBindingV1,
 };
 
 use super::StoreRuntimeRegistryFailure;
@@ -253,13 +253,13 @@ impl PhysicalRuntimeAttachment for EmptyPhysicalRuntimeAttachment {
 
 /// The publisher's atomic result: logical lifecycle plus physical lifetime.
 pub struct PublishedShardRuntime {
-    runtime: Arc<crate::store_runtime::shard::ShardRuntime>,
+    runtime: crate::store_runtime::shard::ShardRuntime,
     attachment: Arc<dyn PhysicalRuntimeAttachment>,
 }
 
 impl PublishedShardRuntime {
     pub fn new(
-        runtime: Arc<crate::store_runtime::shard::ShardRuntime>,
+        runtime: crate::store_runtime::shard::ShardRuntime,
         attachment: Arc<dyn PhysicalRuntimeAttachment>,
     ) -> Self {
         Self {
@@ -268,8 +268,8 @@ impl PublishedShardRuntime {
         }
     }
 
-    pub fn logical(&self) -> &Arc<crate::store_runtime::shard::ShardRuntime> {
-        &self.runtime
+    pub(super) fn binding(&self) -> &StoreRuntimeBindingV1 {
+        self.runtime.binding()
     }
 
     pub fn opened_file_identity(&self) -> Result<u64, String> {
@@ -282,7 +282,7 @@ impl PublishedShardRuntime {
         Arc<crate::store_runtime::shard::ShardRuntime>,
         Arc<dyn PhysicalRuntimeAttachment>,
     ) {
-        (self.runtime, self.attachment)
+        (Arc::new(self.runtime), self.attachment)
     }
 }
 
