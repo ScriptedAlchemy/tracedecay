@@ -467,6 +467,7 @@ impl PendingWakeClaimV1 {
         let owner = state.next_owner();
         state.micros = claimed_micros;
         state.owner = owner;
+        drop(state);
         Some(Self {
             pending_wake,
             claimed_micros,
