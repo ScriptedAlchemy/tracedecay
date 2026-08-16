@@ -103,8 +103,39 @@ fn http_mount(home: &Path) -> HttpMount {
     }
 }
 
-fn project_id(project: &Path) -> String {
-    tracedecay::storage::default_profile_project_id(project)
+/// Opens the exact project through the same daemon-owned route as a production
+/// CLI client and returns the identity the daemon admitted. HTTP cannot infer
+/// this identity locally: its route accepts only the daemon's public ID.
+fn admitted_project_id(home: &Path, project: &Path) -> String {
+    let project_arg = project.to_string_lossy().into_owned();
+    let output = tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "storage_status",
+            "--args",
+            r#"{"include_details":false}"#,
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("read daemon-admitted project identity");
+    assert!(
+        output.status.success(),
+        "storage_status failed while admitting the fixture project\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: Value =
+        serde_json::from_slice(&output.stdout).expect("storage status application envelope");
+    envelope["scope"]["project_id"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("storage status omitted the daemon-admitted project identity: {envelope}")
+        })
+        .to_owned()
 }
 
 fn now_micros() -> i64 {
@@ -388,7 +419,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
 
     let mut daemon = crate::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     crate::initialize_project(&home_path, &project_path, "partial-effect-boundaries");
-    let identity = project_id(&project_path);
+    let identity = admitted_project_id(&home_path, &project_path);
     let mount = http_mount(&home_path);
 
     // HTTP: the daemon's own bound application mount, over real TCP, with the
@@ -484,6 +515,11 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
         "restart reused the physical daemon process"
     );
     let mount = http_mount(&home_path);
+    assert_eq!(
+        admitted_project_id(&home_path, &project_path),
+        identity,
+        "the post-restart daemon must re-admit the same physical project identity"
+    );
 
     // Every committed part of every partial effect is still durably present:
     // the committed half of each committed_receipt outlived the process that
@@ -543,7 +579,7 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
 
     let mut daemon = crate::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     crate::initialize_project(&home_path, &project_path, "reset-required-boundaries");
-    let identity = project_id(&project_path);
+    let identity = admitted_project_id(&home_path, &project_path);
 
     // Tamper the store. `tracedecay init` is daemon-owned, so this daemon holds
     // a verified handle already; the refused shape is what the *next* process
