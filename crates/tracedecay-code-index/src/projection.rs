@@ -178,9 +178,7 @@ pub fn project_for_publication<S: CodeChunkProjectionSink>(
     request: ProjectionBatchRequestV1,
 ) -> Result<ProjectionPublicationHandoffV1, ProjectionPublicationErrorV1> {
     let (request, request_digest) = expand_projection_key_replay(request)?;
-    eprintln!("[republish-phase] projection=key_replay_complete");
     let evidence = ProjectionRequestEvidenceV1::recorded(request_digest, &request.changes);
-    eprintln!("[republish-phase] projection=evidence_complete");
     let sink_receipt = if request_is_true_noop(&request) {
         ProjectionSinkReceiptV1::sealed(build_batch_receipt_verified(
             &request,
@@ -197,9 +195,7 @@ pub fn project_for_publication<S: CodeChunkProjectionSink>(
         )?
     };
     let (receipt, publication) = sink_receipt.into_parts();
-    eprintln!("[republish-phase] projection=sink_complete");
     verify_batch_receipt_verified(&request, &evidence, &receipt, publication)?;
-    eprintln!("[republish-phase] projection=verification_complete");
     if !batch_can_activate(&receipt) {
         return Err(ProjectionPublicationErrorV1::NotActivatable);
     }
