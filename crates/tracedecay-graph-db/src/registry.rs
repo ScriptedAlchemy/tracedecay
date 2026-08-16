@@ -217,7 +217,7 @@ enum RegistryEntry {
         owner: Arc<GraphDbOwner>,
     },
     Faulted {
-        authority_lease: Arc<dyn RetainedGraphStoreLeaseV1>,
+        _authority_lease: Arc<dyn RetainedGraphStoreLeaseV1>,
         binding: StoreRuntimeBindingV1,
         verified_locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -421,7 +421,7 @@ impl GraphDbRegistry {
                         GraphDbRuntimeState::Closed => {
                             let error = GraphDbError::Closed;
                             let faulted = RegistryEntry::Faulted {
-                                authority_lease: Arc::clone(registered_authority_lease),
+                                _authority_lease: Arc::clone(registered_authority_lease),
                                 binding: registered_binding.clone(),
                                 verified_locator: registered_locator.clone(),
                                 path: registered_path.clone(),
@@ -439,7 +439,7 @@ impl GraphDbRegistry {
                                     .to_owned(),
                             };
                             let faulted = RegistryEntry::Faulted {
-                                authority_lease: Arc::clone(registered_authority_lease),
+                                _authority_lease: Arc::clone(registered_authority_lease),
                                 binding: registered_binding.clone(),
                                 verified_locator: registered_locator.clone(),
                                 path: registered_path.clone(),
@@ -597,7 +597,7 @@ impl GraphDbRegistry {
                     state.entries.insert(
                         shard_id,
                         RegistryEntry::Faulted {
-                            authority_lease,
+                            _authority_lease: authority_lease,
                             binding,
                             verified_locator,
                             path,
@@ -649,7 +649,7 @@ impl GraphDbRegistry {
             ),
         )?;
         let faulted = RegistryEntry::Faulted {
-            authority_lease: Arc::clone(authority_lease),
+            _authority_lease: Arc::clone(authority_lease),
             binding: binding.clone(),
             verified_locator: verified_locator.clone(),
             path: path.clone(),
@@ -1082,7 +1082,7 @@ impl GraphDbRegistry {
                 state.entries.insert(
                     reservation.binding.shard_id.clone(),
                     RegistryEntry::Faulted {
-                        authority_lease: reservation.authority_lease,
+                        _authority_lease: reservation.authority_lease,
                         binding: reservation.binding,
                         verified_locator: reservation.verified_locator,
                         path: reservation.path,
@@ -1139,7 +1139,7 @@ impl GraphDbRegistry {
                 state.entries.insert(
                     reservation.binding.shard_id.clone(),
                     RegistryEntry::Faulted {
-                        authority_lease: reservation.authority_lease,
+                        _authority_lease: reservation.authority_lease,
                         binding: reservation.binding,
                         verified_locator: reservation.verified_locator,
                         path: reservation.path,
