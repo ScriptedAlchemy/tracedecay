@@ -150,6 +150,55 @@ pub(super) async fn wait_for_semantic_generation(
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             }
+            // A serving generation is deliberately available before the
+            // scheduler seals it. Native profile evaluation is stricter: its
+            // snapshot authority accepts only the exact complete-and-fresh
+            // generation. Wait for the public status of that authority rather
+            // than racing an evaluation against publication settlement.
+            let freshness = tool_payload(
+                &harness
+                    .call_tool(
+                        project,
+                        "tracedecay_status",
+                        json!({
+                            "format": "json",
+                            "include_branch_diagnostics": false,
+                            "include_storage_health": false,
+                            "include_session_ingest": false,
+                            "include_staleness": false,
+                        }),
+                    )
+                    .await
+                    .expect("public code-index readiness status"),
+            );
+            if freshness["code_index_freshness"]["status"] != json!("current")
+                || freshness["code_index_freshness"]["worktree"]["latest_generation_id"]
+                    != json!(expected_source)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
+            // Complete status alone is not enough: a sealed generation must
+            // be paired with a live code-index query authority before an
+            // evaluator may consume it. This ordinary public query is the
+            // authority preflight; an unavailable outcome keeps waiting and
+            // is never treated as a successful evaluation precondition.
+            let query_readiness = tool_payload(
+                &harness
+                    .call_tool(
+                        project,
+                        "tracedecay_search",
+                        json!({"query": "fn", "limit": 1, "format": "json"}),
+                    )
+                    .await
+                    .expect("public code-index query-authority readiness"),
+            );
+            if query_readiness["status"] == json!("unavailable")
+                || query_readiness["code_generation"] != json!(expected_source)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
             let vector_id =
                 match tracedecay_usecases::semantic_runtime::project_semantic_application_status(
                     project, None,
