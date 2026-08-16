@@ -1770,6 +1770,127 @@ async fn concurrent_same_root_mounts_keep_one_canonical_owner() {
     registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paused_cold_mount_rejects_a_root_retiring_before_final_commit() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    let root = fixture.path().canonicalize().expect("canonical root");
+    let (cold_commit_entered, release_cold_commit) = registry
+        .pause_next_cold_mount_before_final_commit(root.clone())
+        .await;
+    let cold_registry = registry.clone();
+    let cold_root = fixture.path().to_path_buf();
+    let cold_store = store.path().to_path_buf();
+    let cold_mount = tokio::spawn(async move {
+        cold_registry
+            .mount_worktree(test_project_id(), &cold_root, cold_store, None)
+            .await
+    });
+
+    cold_commit_entered
+        .await
+        .expect("first cold mount must pause before its final owner commit");
+
+    assert!(
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("second cold mount installs the current owner")
+    );
+    let scheduler = registry
+        .scheduler_handle(&root)
+        .await
+        .expect("installed owner scheduler");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let lock_scheduler = Arc::clone(&scheduler);
+    let lock_thread = std::thread::spawn(move || {
+        let scheduler = lock_scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let wake = Arc::clone(&scheduler.wake);
+        held_tx.send(wake).expect("signal held scheduler");
+        release_rx.recv().expect("release held scheduler");
+    });
+    let wake = held_rx.recv().expect("scheduler lock must be held");
+    wake.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let reconciling = registry
+                .mounted
+                .lock()
+                .await
+                .get(&root)
+                .is_some_and(|worktree| {
+                    worktree
+                        .reconcile_in_progress
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        != 0
+                });
+            if reconciling {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("installed worker must block in its reconcile pass");
+
+    let roots = BTreeSet::from([root.clone()]);
+    assert!(
+        !registry
+            .retire_project_roots_with_deadline(&roots, Duration::from_millis(25))
+            .await,
+        "the blocked current owner must remain retained for a later drain"
+    );
+    assert_eq!(registry.retiring_owner_count().await, 1);
+
+    release_cold_commit
+        .send(())
+        .expect("release paused cold mount final commit");
+    let cold_error = cold_mount
+        .await
+        .expect("paused cold mount joins")
+        .expect_err("a retiring root must reject a stale cold mount final commit");
+    assert!(matches!(
+        cold_error,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("still retiring")
+    ));
+    let retiring = registry.retiring.lock().await;
+    let mounted = registry.mounted.lock().await;
+    assert!(retiring.contains_key(&root));
+    assert!(!mounted.contains_key(&root));
+    assert!(
+        !(retiring.contains_key(&root) && mounted.contains_key(&root)),
+        "a root must never have both a draining and a newly mounted worker"
+    );
+    drop(mounted);
+    drop(retiring);
+
+    release_tx.send(()).expect("release retained worker");
+    lock_thread.join().expect("held scheduler thread joins");
+    assert!(
+        registry
+            .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
+            .await,
+        "the one retained worker must drain after its scheduler lock releases"
+    );
+    assert_eq!(registry.retiring_owner_count().await, 0);
+    assert!(
+        !registry.mounted.lock().await.contains_key(&root),
+        "the rejected cold mount must not leave a replacement worker"
+    );
+
+    registry.shutdown().await;
+}
+
 #[test]
 fn empty_generation_restart_preserves_project_identity() {
     // A file with a compiled language descriptor (so the snapshot has something
