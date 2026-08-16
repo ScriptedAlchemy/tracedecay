@@ -105,6 +105,7 @@ pub enum ProjectMemoryGraphReconciliationScheduleV1 {
     NotMounted,
     Scheduled,
     AlreadyScheduled,
+    Retiring,
     LifecycleClosed,
 }
 

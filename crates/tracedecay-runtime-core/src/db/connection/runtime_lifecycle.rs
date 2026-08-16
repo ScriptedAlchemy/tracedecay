@@ -3,9 +3,9 @@ use super::memory_graph_reconciliation::{
     ProjectMemoryReconciliationTelemetryV1,
 };
 use super::{
-    Arc, Connection, Database, DatabaseAccessMode, DatabaseAuthority, DatabaseInner, Path, Result,
-    StoreRuntimeClientLease, TraceDecayError, database_slot, integrity,
-    registered_attachment_required,
+    Arc, Connection, Database, DatabaseAccessMode, DatabaseAuthority, DatabaseInner,
+    MemoryGraphReconciliationRuntimeErrorV1, Path, Result, StoreRuntimeClientLease,
+    TraceDecayError, database_slot, integrity, registered_attachment_required,
 };
 
 impl Database {
@@ -61,14 +61,28 @@ impl Database {
         &self,
     ) -> Option<super::MemoryGraphReconciliationTaskOwnerV1> {
         let runtime = self.memory_graph_runtime()?;
-        let cancel_runtime = Arc::clone(&runtime);
-        let close_runtime = Arc::clone(&runtime);
+        // The retained task owner may outlive the database facade while a
+        // coordinated capacity retirement fences the exact graph/store pair.
+        // It must therefore not keep the verified graph port (and its graph
+        // or store lease) alive. Commit upgrades these references explicitly
+        // and reports a typed unavailable outcome if an external close won.
+        let cancel_runtime = Arc::downgrade(&runtime);
+        let close_runtime = Arc::downgrade(&runtime);
         Some(self.inner.memory_graph_reconciliation.task_owner(
-            Arc::new(move || cancel_runtime.cancel_reconciliation()),
             Arc::new(move || {
-                close_runtime
-                    .close_reconciliation()
-                    .map_err(|error| error.to_string())
+                let runtime = cancel_runtime
+                    .upgrade()
+                    .ok_or(MemoryGraphReconciliationRuntimeErrorV1::RuntimeUnavailable)?;
+                runtime.cancel_reconciliation();
+                Ok(())
+            }),
+            Arc::new(move || {
+                let runtime = close_runtime
+                    .upgrade()
+                    .ok_or(MemoryGraphReconciliationRuntimeErrorV1::RuntimeUnavailable)?;
+                runtime.close_reconciliation().map_err(|error| {
+                    MemoryGraphReconciliationRuntimeErrorV1::CloseFailed(error.to_string())
+                })
             }),
         ))
     }

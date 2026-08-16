@@ -1265,12 +1265,38 @@ async fn retired_lifecycle_refuses_new_reconciliation_work() {
     database
         .memory_graph_reconciliation_task_owner()
         .expect("bound runtime has reconciliation owner")
-        .cancel();
+        .cancel()
+        .expect("cancel bound reconciler");
 
     assert_eq!(
         super::schedule_project_memory_graph_reconciliation(database),
         ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
     );
+}
+
+#[tokio::test]
+async fn retirement_reservation_reports_a_distinct_schedule_outcome_and_drops_cleanly() {
+    let (_directory, database) = database("reserved-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let owner = database
+        .memory_graph_reconciliation_task_owner()
+        .expect("bound runtime has reconciliation owner");
+
+    let reservation = owner
+        .reserve_retirement()
+        .expect("idle reconciler retirement reservation");
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        ProjectMemoryGraphReconciliationScheduleV1::Retiring
+    );
+    drop(reservation);
+
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database),
+        ProjectMemoryGraphReconciliationScheduleV1::Scheduled
+    );
+    wait_for_reconciliation(&runtime).await;
+    owner.shutdown().await.expect("join reconciler worker");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

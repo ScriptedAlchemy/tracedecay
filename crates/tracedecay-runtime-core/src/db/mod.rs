@@ -29,11 +29,14 @@ pub use access::{
     WriterOwnership, enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
 pub use connection::Database;
-pub use connection::MemoryGraphReconciliationTaskOwnerV1;
 pub(crate) use connection::MemoryGraphReconciliationTaskScheduleV1;
 pub use connection::{
     DatabaseAccessMode, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
     DatabaseMemoryTransaction, DatabaseWriteTransaction,
+};
+pub use connection::{
+    MemoryGraphReconciliationRetirementBlockerV1, MemoryGraphReconciliationRetirementReservationV1,
+    MemoryGraphReconciliationRuntimeErrorV1, MemoryGraphReconciliationTaskOwnerV1,
 };
 pub use connection::{
     ProjectMemoryReconciliationTelemetryObserverV1, ProjectMemoryReconciliationTelemetrySnapshotV1,

@@ -545,7 +545,7 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
         .await
         .expect("idempotent project sessions");
 
-    assert!(Arc::ptr_eq(&first, &second));
+    assert!(first.shares_runtime_with(&second));
     assert_eq!(
         &first.binding().shard_id,
         &StoreShardIdV1::project_sessions(
@@ -632,7 +632,7 @@ async fn duplicate_project_attaches_schedule_one_historical_convergence() {
         .await
         .expect("duplicate project session attach");
 
-    assert!(Arc::ptr_eq(&first, &second));
+    assert!(first.shares_runtime_with(&second));
     assert_eq!(
         registry.registered_schema_convergence_schedule_count_for_test(),
         1,

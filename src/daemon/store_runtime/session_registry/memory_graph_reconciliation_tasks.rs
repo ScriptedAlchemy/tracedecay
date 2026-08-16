@@ -68,7 +68,7 @@ impl RetainedMemoryGraphReconciliationTasksV1 {
             state.tasks.values().cloned().collect::<Vec<_>>()
         };
         for task in tasks {
-            task.cancel();
+            let _ = task.cancel();
         }
     }
 
@@ -109,7 +109,6 @@ impl RetainedMemoryGraphReconciliationTasksV1 {
         let Some(owner) = owner else {
             return Ok(());
         };
-        owner.cancel();
         owner.shutdown().await?;
         let mut state = self
             .state

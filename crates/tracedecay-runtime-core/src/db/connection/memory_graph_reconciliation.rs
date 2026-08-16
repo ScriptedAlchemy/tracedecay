@@ -15,7 +15,38 @@ const AUTOMATIC_RETRY_BASE: Duration = Duration::from_millis(25);
 pub(crate) enum MemoryGraphReconciliationTaskScheduleV1 {
     Scheduled,
     AlreadyScheduled,
+    Retiring,
     Closed,
+}
+
+/// The reconciliation worker has not entered a state that can safely be
+/// fenced for coordinated runtime retirement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemoryGraphReconciliationRetirementBlockerV1 {
+    Pending,
+    Running,
+    RetainedJoinWork,
+    Retiring,
+    Closed,
+}
+
+/// The verified graph runtime disappeared after the coordinator was attached.
+/// This remains typed so a retirement caller cannot mistake a vanished runtime
+/// for a completed cancellation or close.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemoryGraphReconciliationRuntimeErrorV1 {
+    RuntimeUnavailable,
+    CloseFailed(String),
+}
+
+/// A non-destructive fence over an idle reconciliation coordinator.
+///
+/// While held, new schedules receive [`MemoryGraphReconciliationTaskScheduleV1::Retiring`].
+/// Dropping an uncommitted fence restores ordinary scheduling; [`Self::commit`]
+/// is the only path that cancels and joins the coordinator.
+pub struct MemoryGraphReconciliationRetirementReservationV1 {
+    owner: MemoryGraphReconciliationTaskOwnerV1,
+    armed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,6 +179,7 @@ fn decrement_counter(counter: &AtomicU64, counter_name: &'static str) -> Result<
 #[derive(Default)]
 struct MemoryGraphReconciliationTaskStateV1 {
     accepting: bool,
+    retirement_reserved: bool,
     pending: bool,
     running: bool,
     current_identity: Option<Arc<()>>,
@@ -199,15 +231,21 @@ pub(super) struct MemoryGraphReconciliationCoordinatorV1 {
 #[derive(Clone)]
 pub struct MemoryGraphReconciliationTaskOwnerV1 {
     shared: Arc<MemoryGraphReconciliationSharedV1>,
-    cancel_reconciliation: Arc<dyn Fn() + Send + Sync>,
-    close_reconciliation: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    cancel_reconciliation:
+        Arc<dyn Fn() -> Result<(), MemoryGraphReconciliationRuntimeErrorV1> + Send + Sync>,
+    close_reconciliation:
+        Arc<dyn Fn() -> Result<(), MemoryGraphReconciliationRuntimeErrorV1> + Send + Sync>,
 }
 
 impl MemoryGraphReconciliationCoordinatorV1 {
     pub(super) fn task_owner(
         &self,
-        cancel_reconciliation: Arc<dyn Fn() + Send + Sync>,
-        close_reconciliation: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+        cancel_reconciliation: Arc<
+            dyn Fn() -> Result<(), MemoryGraphReconciliationRuntimeErrorV1> + Send + Sync,
+        >,
+        close_reconciliation: Arc<
+            dyn Fn() -> Result<(), MemoryGraphReconciliationRuntimeErrorV1> + Send + Sync,
+        >,
     ) -> MemoryGraphReconciliationTaskOwnerV1 {
         MemoryGraphReconciliationTaskOwnerV1 {
             shared: Arc::clone(&self.shared),
@@ -244,6 +282,9 @@ impl MemoryGraphReconciliationCoordinatorV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !state.accepting {
             return MemoryGraphReconciliationTaskScheduleV1::Closed;
+        }
+        if state.retirement_reserved {
+            return MemoryGraphReconciliationTaskScheduleV1::Retiring;
         }
         state.pending = true;
         if state
@@ -419,8 +460,8 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
 
-    pub fn cancel(&self) {
-        (self.cancel_reconciliation)();
+    pub fn cancel(&self) -> Result<(), MemoryGraphReconciliationRuntimeErrorV1> {
+        let cancellation = (self.cancel_reconciliation)();
         let mut state = self
             .shared
             .state
@@ -429,10 +470,48 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
         state.accepting = false;
         state.pending = false;
         self.shared.wake.notify_waiters();
+        cancellation
+    }
+
+    /// Fences an idle coordinator before a caller attempts the external graph
+    /// and store-runtime retirement reservations. The fence does not cancel a
+    /// task or close a graph; that remains deferred to [`Self::shutdown`] at
+    /// the coordinated commit boundary.
+    pub fn reserve_retirement(
+        &self,
+    ) -> Result<
+        MemoryGraphReconciliationRetirementReservationV1,
+        MemoryGraphReconciliationRetirementBlockerV1,
+    > {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting {
+            return Err(MemoryGraphReconciliationRetirementBlockerV1::Closed);
+        }
+        if state.retirement_reserved {
+            return Err(MemoryGraphReconciliationRetirementBlockerV1::Retiring);
+        }
+        if state.pending {
+            return Err(MemoryGraphReconciliationRetirementBlockerV1::Pending);
+        }
+        if state.running {
+            return Err(MemoryGraphReconciliationRetirementBlockerV1::Running);
+        }
+        if state.joining || !state.retired.is_empty() || state.joining_task_count != 0 {
+            return Err(MemoryGraphReconciliationRetirementBlockerV1::RetainedJoinWork);
+        }
+        state.retirement_reserved = true;
+        Ok(MemoryGraphReconciliationRetirementReservationV1 {
+            owner: self.clone(),
+            armed: true,
+        })
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
-        self.cancel();
+        let cancellation_error = self.cancel().err();
         loop {
             let joined = self.shared.joined.notified();
             let tasks = {
@@ -457,7 +536,14 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
                 joined.await;
                 continue;
             };
-            return self.join_and_close(tasks).await;
+            let close = self.join_and_close(tasks).await;
+            return match (cancellation_error, close) {
+                (None, result) => result,
+                (Some(error), Ok(())) => Err(format!("cancel reconciliation: {error:?}")),
+                (Some(error), Err(close_error)) => Err(format!(
+                    "cancel reconciliation: {error:?}; close reconciliation: {close_error}"
+                )),
+            };
         }
     }
 
@@ -482,7 +568,7 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
             }
         }
         if let Err(error) = (self.close_reconciliation)() {
-            failures.push(error);
+            failures.push(format!("{error:?}"));
         }
         drop(lease);
         if failures.is_empty() {
@@ -506,6 +592,38 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .running
+    }
+}
+
+impl MemoryGraphReconciliationRetirementReservationV1 {
+    /// Cancels, joins, and closes the reconciler after every external runtime
+    /// reservation has entered its own irreversible commit phase.
+    pub async fn commit(mut self) -> Result<(), String> {
+        if !self.armed {
+            return Err(
+                "memory graph reconciliation retirement reservation was consumed".to_owned(),
+            );
+        }
+        self.armed = false;
+        self.owner.shutdown().await
+    }
+}
+
+impl Drop for MemoryGraphReconciliationRetirementReservationV1 {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut state = self
+            .owner
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.accepting {
+            state.retirement_reserved = false;
+            self.owner.shared.wake.notify_waiters();
+        }
     }
 }
 
@@ -568,6 +686,7 @@ mod tests {
         let owner = coordinator.task_owner(
             Arc::new(move || {
                 task_cancelled.store(true, Ordering::Release);
+                Ok(())
             }),
             Arc::new(|| Ok(())),
         );
@@ -589,7 +708,7 @@ mod tests {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, cancelled) = task_owner(&coordinator);
         let calls = Arc::new(AtomicUsize::new(0));
-        owner.cancel();
+        owner.cancel().expect("cancel reconciliation");
         assert!(cancelled.load(Ordering::Acquire));
 
         let task_calls = Arc::clone(&calls);
@@ -783,7 +902,7 @@ mod tests {
         );
         second_started.notified().await;
 
-        owner.cancel();
+        owner.cancel().expect("cancel reconciliation");
         assert!(cancelled.load(Ordering::Acquire));
         let shutdown_owner = owner.clone();
         let shutdown = tokio::spawn(async move { shutdown_owner.shutdown().await });
@@ -795,5 +914,62 @@ mod tests {
             .expect("join shutdown task")
             .expect("cancel and join current persistent worker");
         assert!(!owner.running());
+    }
+
+    #[tokio::test]
+    async fn idle_retirement_reservation_fences_new_schedules_and_drop_restores_them() {
+        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
+        let (owner, _) = task_owner(&coordinator);
+
+        let reservation = owner
+            .reserve_retirement()
+            .expect("an idle reconciler can reserve retirement");
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), |_| async { true }),
+            MemoryGraphReconciliationTaskScheduleV1::Retiring
+        );
+
+        drop(reservation);
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), |_| async { true }),
+            MemoryGraphReconciliationTaskScheduleV1::Scheduled
+        );
+        owner.shutdown().await.expect("join reconciler worker");
+    }
+
+    #[tokio::test]
+    async fn active_reconciliation_refuses_retirement_without_mutating_admission() {
+        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
+        let (owner, _) = task_owner(&coordinator);
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let task_started = Arc::clone(&started);
+        let task_release = Arc::clone(&release);
+
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), move |_| {
+                let task_started = Arc::clone(&task_started);
+                let task_release = Arc::clone(&task_release);
+                async move {
+                    task_started.notify_one();
+                    task_release.notified().await;
+                    true
+                }
+            }),
+            MemoryGraphReconciliationTaskScheduleV1::Scheduled
+        );
+        started.notified().await;
+
+        assert_eq!(
+            owner.reserve_retirement(),
+            Err(MemoryGraphReconciliationRetirementBlockerV1::Running)
+        );
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), |_| async { true }),
+            MemoryGraphReconciliationTaskScheduleV1::AlreadyScheduled
+        );
+
+        release.notify_one();
+        owner.shutdown().await.expect("join reconciler worker");
     }
 }

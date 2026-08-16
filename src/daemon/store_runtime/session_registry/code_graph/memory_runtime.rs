@@ -39,6 +39,10 @@ pub(in crate::daemon::store_runtime::session_registry) fn schedule_bound_memory_
     match schedule_project_memory_graph_reconciliation(database.clone()) {
         ProjectMemoryGraphReconciliationScheduleV1::Scheduled
         | ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled => Ok(()),
+        ProjectMemoryGraphReconciliationScheduleV1::Retiring => Err(session_registry_error(
+            "schedule verified memory graph reconciliation",
+            "memory graph reconciliation is fenced for coordinated retirement".to_owned(),
+        )),
         ProjectMemoryGraphReconciliationScheduleV1::NotMounted => Err(session_registry_error(
             "schedule verified memory graph reconciliation",
             "writable memory database has no bound verified graph runtime".to_owned(),

@@ -283,6 +283,9 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
         crate::db::MemoryGraphReconciliationTaskScheduleV1::AlreadyScheduled => {
             super::ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled
         }
+        crate::db::MemoryGraphReconciliationTaskScheduleV1::Retiring => {
+            super::ProjectMemoryGraphReconciliationScheduleV1::Retiring
+        }
         crate::db::MemoryGraphReconciliationTaskScheduleV1::Closed => {
             super::ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
         }
