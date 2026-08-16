@@ -219,7 +219,10 @@ where
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-pub use test_runtime::{TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
+pub use test_runtime::{
+    RegisteredTestRuntimeFixtureV1, RegisteredTestRuntimeRetirementControlV1,
+    TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+};
 
 #[cfg(test)]
 mod tests;

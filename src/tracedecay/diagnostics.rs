@@ -79,7 +79,7 @@ impl TraceDecay {
             self.open_options.clone(),
             self.store_layout.clone(),
             self.configuration_runtime.registered_database(),
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             Arc::clone(&self.store_runtime_registry),
         )
         .await

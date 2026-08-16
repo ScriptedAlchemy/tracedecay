@@ -1,7 +1,5 @@
 //! Mounted V2 Git-topology anchor authority over the canonical anchor table.
 
-use std::sync::Arc;
-
 use tracedecay_application::retrieval::{
     GitTopologyAnchorAuthorityErrorV2, GitTopologyAnchorAuthorityV2, GitTopologyAnchorFutureV2,
     GitTopologyAnchorPublicationOutcomeV2, GitTopologyAnchorPublicationV2,

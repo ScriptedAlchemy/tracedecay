@@ -1,7 +1,5 @@
 //! `SQLite` persistence behind the final configuration control plane.
 
-use std::sync::Arc;
-
 use super::contracts::{
     ActivationDriftV1, AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT,
     ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,

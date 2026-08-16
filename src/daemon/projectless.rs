@@ -253,7 +253,7 @@ async fn projectless_tools_call_response_with_connection(
             .session_temporal_refresh_schedulers()
             .ensure_profile(
                 user_session_db.db_path().to_path_buf(),
-                Arc::clone(&user_session_db),
+                user_session_db.clone(),
             )
             .await;
         return match crate::mcp::tools::handle_projectless_hook_runtime(

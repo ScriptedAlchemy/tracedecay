@@ -17,6 +17,87 @@ pub struct RegisteredGlobalDbHarness {
     _scope: Option<DaemonDatabaseScope>,
 }
 
+#[cfg(test)]
+pub(crate) struct RegisteredGlobalDbRetirementHarnessV1 {
+    registered: RegisteredGlobalDbLeaseV1,
+    database: tracedecay_runtime_core::db::Database,
+    retirement: tracedecay_runtime_core::db::RegisteredTestRuntimeRetirementControlV1,
+    directory: TempDir,
+    scope: DaemonDatabaseScope,
+}
+
+#[cfg(test)]
+impl RegisteredGlobalDbRetirementHarnessV1 {
+    pub(crate) async fn open(label: &str) -> Self {
+        crate::register_test_schema_installer();
+        let directory = tempfile::tempdir().expect("temporary registered global database");
+        let profile_root = directory.path().join("profile");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root)
+            .expect("create registered global-db profile root");
+        let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
+        let scope =
+            tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, nonce, label)
+                .expect("daemon database scope");
+        let path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let source_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            &path,
+            "open registered global-db retirement test runtime",
+        )
+        .expect("registered retirement test authority");
+        let fixture = tracedecay_runtime_core::db::Database::publish_registered_test_runtime_with_retirement_control(
+            &path,
+            &source_authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .expect("publish registered retirement test runtime");
+        let (database, runtime, retirement) = fixture.into_parts();
+        let expected_binding = runtime.binding().clone();
+        let expected_locator = runtime.locator().verified().clone();
+        let registered_authority =
+            tracedecay_runtime_core::db::DatabaseAuthority::for_owned_runtime(
+                &path,
+                "attach registered global-db retirement test runtime",
+            )
+            .expect("registered retirement daemon authority");
+        let registered = RegisteredGlobalDb::migrate_and_attach(
+            runtime,
+            expected_binding,
+            expected_locator,
+            registered_authority,
+        )
+        .await
+        .expect("attach registered retirement test runtime");
+        Self {
+            registered,
+            database,
+            retirement,
+            directory,
+            scope,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        RegisteredGlobalDbLeaseV1,
+        tracedecay_runtime_core::db::Database,
+        tracedecay_runtime_core::db::RegisteredTestRuntimeRetirementControlV1,
+        TempDir,
+        DaemonDatabaseScope,
+    ) {
+        let Self {
+            registered,
+            database,
+            retirement,
+            directory,
+            scope,
+        } = self;
+        (registered, database, retirement, directory, scope)
+    }
+}
+
 /// Which write authority a registered test fixture attaches to the database.
 ///
 /// `Fixture` keeps the unconditional Test-role escape hatch for fixtures whose

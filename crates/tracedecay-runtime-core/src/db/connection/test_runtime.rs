@@ -5,17 +5,19 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{BrainId, RepositoryId, UserProfileId, WorktreeId};
 use tracedecay_store::{
-    CodeShardScopeV1, LocatorDigest, ProjectId, StoreIncarnationV1, StoreShardIdV1,
-    VerifiedStoreLocatorV1,
+    CodeShardScopeV1, LocatorDigest, ProjectId, StoreIncarnationV1, StoreRuntimeBindingV1,
+    StoreShardIdV1, VerifiedStoreLocatorV1,
 };
 
-use super::{Database, DatabaseAccessMode, DatabaseAuthority, database_slot};
+use super::{
+    Database, DatabaseAccessMode, DatabaseAuthority, StoreRuntimeClientLease, database_slot,
+};
 use crate::errors::{Result, TraceDecayError};
 use crate::store_runtime::registry::{
     LifecycleShardRuntimePublisher, ProfileAuthorityPinResult, ResolvedStoreLocator,
     StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
-    StoreRuntimeResolver,
+    StoreRuntimeResolver, StoreRuntimeRetirementTarget,
 };
 
 #[doc(hidden)]
@@ -35,6 +37,106 @@ pub enum TestDatabaseRuntimeScope {
     Profile,
     ProfileSessions,
     ProjectSessions { project_id: ProjectId },
+}
+
+/// Test-only control for retiring and reopening one exact registered fixture
+/// through the registry that originally published it.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+pub struct RegisteredTestRuntimeRetirementControlV1 {
+    registry: StoreRuntimeRegistry,
+    authority: DatabaseAuthority,
+    binding: StoreRuntimeBindingV1,
+    locator: VerifiedStoreLocatorV1,
+}
+
+impl RegisteredTestRuntimeRetirementControlV1 {
+    #[must_use]
+    pub fn registry(&self) -> &StoreRuntimeRegistry {
+        &self.registry
+    }
+
+    #[must_use]
+    pub fn retirement_target(&self) -> StoreRuntimeRetirementTarget {
+        StoreRuntimeRetirementTarget::new(self.binding.clone(), self.authority.clone())
+    }
+
+    #[must_use]
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.locator
+    }
+
+    /// Reopens the exact retired fixture binding through its original resolver.
+    pub async fn reopen(&self) -> Result<StoreRuntimeClientLease> {
+        let target_shard = self.binding.shard_id.clone();
+        let profile_shard = StoreShardIdV1::profile(
+            target_shard.brain_id.clone(),
+            target_shard.profile_id.clone(),
+        );
+        let profile_pin = if target_shard == profile_shard {
+            None
+        } else {
+            match self.registry.profile_authority_pin(&profile_shard) {
+                ProfileAuthorityPinResult::Pinned(pin) => Some(pin),
+                outcome => {
+                    return Err(test_runtime_error(
+                        "pin reopened registered test runtime profile",
+                        format!("{outcome:?}"),
+                    ));
+                }
+            }
+        };
+        let request = StoreRuntimeOpenRequest::new_authorized(
+            target_shard,
+            self.binding.incarnation.clone(),
+            profile_pin,
+            self.authority.clone(),
+        );
+        match self.registry.open(request).await {
+            StoreRuntimeOpenResult::Published(runtime) => Ok(runtime),
+            StoreRuntimeOpenResult::Failed(failure) => Err(test_runtime_open_failure(
+                "reopen registered test runtime",
+                failure,
+            )),
+        }
+    }
+}
+
+/// Published registered fixture plus its exact retirement control.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+pub struct RegisteredTestRuntimeFixtureV1 {
+    database: Database,
+    runtime: StoreRuntimeClientLease,
+    retirement: RegisteredTestRuntimeRetirementControlV1,
+}
+
+impl RegisteredTestRuntimeFixtureV1 {
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        Database,
+        StoreRuntimeClientLease,
+        RegisteredTestRuntimeRetirementControlV1,
+    ) {
+        (self.database, self.runtime, self.retirement)
+    }
+}
+
+enum FixtureRuntimePublication {
+    Existing(Database),
+    Published {
+        database: Database,
+        runtime: StoreRuntimeClientLease,
+        registry: StoreRuntimeRegistry,
+        authority: DatabaseAuthority,
+    },
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -173,6 +275,56 @@ impl Database {
         Self::publish_fixture_runtime(db_path, authority, mode, test_registered_shard(scope)?).await
     }
 
+    /// Publishes a fresh registered fixture while retaining only the exact
+    /// registry control required to test typed client-lease retirement.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    pub async fn publish_registered_test_runtime_with_retirement_control(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        scope: TestDatabaseRuntimeScope,
+    ) -> Result<RegisteredTestRuntimeFixtureV1> {
+        if authority.role() != super::DatabaseAuthorityRole::Test {
+            return Err(TraceDecayError::Database {
+                message: "registered test runtime requires explicit test authority".to_owned(),
+                operation: "publish registered test runtime".to_owned(),
+            });
+        }
+        match Self::publish_fixture_runtime_publication(
+            db_path,
+            authority,
+            mode,
+            test_registered_shard(scope)?,
+        )
+        .await?
+        {
+            FixtureRuntimePublication::Published {
+                database,
+                runtime,
+                registry,
+                authority,
+            } => {
+                let binding = runtime.binding().clone();
+                let locator = runtime.locator().verified().clone();
+                Ok(RegisteredTestRuntimeFixtureV1 {
+                    database,
+                    runtime,
+                    retirement: RegisteredTestRuntimeRetirementControlV1 {
+                        registry,
+                        authority,
+                        binding,
+                        locator,
+                    },
+                })
+            }
+            FixtureRuntimePublication::Existing(_) => Err(test_runtime_error(
+                "publish registered test runtime with retirement control",
+                "retirement fixtures require a fresh runtime publication".to_owned(),
+            )),
+        }
+    }
+
     /// Publishes an isolated integration-test fixture with the retained
     /// exclusive-maintenance authority whose scope the test controls.
     ///
@@ -214,6 +366,21 @@ impl Database {
         mode: TestDatabaseRuntimeMode,
         target_shard: StoreShardIdV1,
     ) -> Result<(Self, bool)> {
+        match Self::publish_fixture_runtime_publication(db_path, authority, mode, target_shard)
+            .await?
+        {
+            FixtureRuntimePublication::Existing(database)
+            | FixtureRuntimePublication::Published { database, .. } => Ok((database, false)),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    async fn publish_fixture_runtime_publication(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        target_shard: StoreShardIdV1,
+    ) -> Result<FixtureRuntimePublication> {
         let graph_shard_check = target_shard == test_code_shard()?;
         let authority = authority.hold_for(db_path, "publish test database runtime")?;
         authority.require_active_write_scope("publish test database runtime")?;
@@ -224,9 +391,9 @@ impl Database {
                 let database =
                     Self::publish_runtime(inner._runtime.clone(), DatabaseAccessMode::ReadOnly)
                         .await?;
-                return Ok((database, false));
+                return Ok(FixtureRuntimePublication::Existing(database));
             }
-            return Ok((Self { inner }, false));
+            return Ok(FixtureRuntimePublication::Existing(Self { inner }));
         }
         let profile_shard = StoreShardIdV1::profile(
             target_shard.brain_id.clone(),
@@ -338,6 +505,7 @@ impl Database {
         } else {
             DatabaseAccessMode::ReadWrite
         };
+        let retained_runtime = runtime.clone();
         let database = Self::publish_runtime(runtime, access).await?;
         // Writable GRAPH test runtimes assert the store already carries the
         // schema this binary creates; there is no ladder to step, so nothing
@@ -354,7 +522,12 @@ impl Database {
             }
             _ => {}
         }
-        Ok((database, false))
+        Ok(FixtureRuntimePublication::Published {
+            database,
+            runtime: retained_runtime,
+            registry,
+            authority,
+        })
     }
 }
 

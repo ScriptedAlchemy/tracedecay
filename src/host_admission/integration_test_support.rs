@@ -32,7 +32,7 @@ impl HostAdmissionTestRuntimeV1 {
         scope_prefix: Option<&str>,
     ) -> Result<crate::mcp::ToolResult> {
         let project_registry_reads = crate::mcp::server::DaemonProjectRegistryReadService::new(
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
         );
         crate::mcp::tools::handle_tool_call_with_registry_options(
             cg,
@@ -45,7 +45,7 @@ impl HostAdmissionTestRuntimeV1 {
                 project_registry_reads: Some(&project_registry_reads),
                 accounting_db: Some(self.profile_database.as_ref()),
                 registered_project_session_db: self.project_registered.clone(),
-                registered_savings_db: Some(Arc::clone(&self.profile_database)),
+                registered_savings_db: Some(self.profile_database.clone()),
                 profile_root: Some(&self.profile_root),
                 session_authorities: self.mcp_session_authorities(),
                 ..Default::default()
