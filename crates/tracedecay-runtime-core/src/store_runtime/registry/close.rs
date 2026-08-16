@@ -291,8 +291,14 @@ impl StoreRuntimeRegistry {
         // including database facades that retain a client lease.
         let external_handles = 0;
         let external_runtime_references = 0;
-        let client_leases = ready.owner.runtime().health_snapshot().client_leases;
-        if external_handles != 0 || external_runtime_references != 0 || client_leases != 0 {
+        let leases = ready.owner.runtime().health_snapshot();
+        let client_leases = leases.client_leases;
+        let operation_leases = leases.operation_leases;
+        if external_handles != 0
+            || external_runtime_references != 0
+            || client_leases != 0
+            || operation_leases != 0
+        {
             let binding = ready.owner.binding().clone();
             state.entries.insert(key, RegistryEntry::Ready(ready));
             return Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
@@ -300,6 +306,7 @@ impl StoreRuntimeRegistry {
                 external_handles,
                 external_runtime_references,
                 client_leases,
+                operation_leases,
             });
         }
         let Some(attempt) = state.next_eviction_attempt.checked_add(1) else {
@@ -564,6 +571,7 @@ mod tests {
                 external_handles: 0,
                 external_runtime_references: 0,
                 client_leases: 1,
+                operation_leases: 0,
                 ..
             })
         ));
@@ -584,6 +592,7 @@ mod tests {
                 external_handles: 0,
                 external_runtime_references: 0,
                 client_leases: 1,
+                operation_leases: 0,
                 ..
             })
         ));
@@ -597,6 +606,45 @@ mod tests {
             crate::db::sqlite_generation_identity(proof.path()).unwrap()
         );
         assert_eq!(proof.verified_locator().shard_id, binding.shard_id);
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Missing { .. }
+        ));
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn exact_close_refuses_an_operation_token_after_the_client_drops() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, authority) = mount_code_runtime(path).await;
+        let binding = code.binding().clone();
+        let operation = code.begin_operation().unwrap();
+        drop(code);
+
+        assert!(matches!(
+            registry.close_exact(&binding, &authority).await,
+            Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
+                external_handles: 0,
+                external_runtime_references: 0,
+                client_leases: 0,
+                operation_leases: 1,
+                ..
+            })
+        ));
+        let StoreRuntimeLookup::Ready(retained) = registry.lookup(&binding) else {
+            panic!("an operation-blocked exact close must leave the runtime ready");
+        };
+        assert_eq!(
+            retained.health_snapshot().state,
+            RuntimeMaintenanceStateV1::Ready
+        );
+        assert_eq!(retained.health_snapshot().operation_leases, 1);
+        drop(retained);
+
+        drop(operation);
+        let proof = registry.close_exact(&binding, &authority).await.unwrap();
+        assert_eq!(proof.binding(), &binding);
         assert!(matches!(
             registry.lookup(&binding),
             StoreRuntimeLookup::Missing { .. }
@@ -736,7 +784,10 @@ mod tests {
         assert!(matches!(
             registry.begin_destructive_maintenance(target.clone()).await,
             Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
-                external_handles: 1,
+                external_handles: 0,
+                external_runtime_references: 0,
+                client_leases: 1,
+                operation_leases: 0,
                 ..
             })
         ));
@@ -843,7 +894,7 @@ mod tests {
                     crate::db::sqlite_generation_identity(request.locator().path()).unwrap();
                 Ok(PublishedShardRuntime::new(
                     runtime,
-                    Arc::new(FailingAttachment {
+                    Box::new(FailingAttachment {
                         opened_file_identity,
                     }),
                 ))

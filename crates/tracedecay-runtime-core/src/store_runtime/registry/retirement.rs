@@ -689,7 +689,7 @@ mod tests {
         registry: &StoreRuntimeRegistry,
         shard_id: StoreShardIdV1,
         authority: DatabaseAuthority,
-        attachment: Arc<dyn PhysicalRuntimeAttachment>,
+        attachment: Box<dyn PhysicalRuntimeAttachment>,
     ) -> (StoreRuntimeBindingV1, Arc<StoreRuntimeOwnerAttachment>) {
         let binding = StoreRuntimeBindingV1::new(
             shard_id,
@@ -722,7 +722,7 @@ mod tests {
                 published_at: super::super::utc_now(),
             },
             runtime,
-            attachment,
+            attachment: Arc::from(attachment),
             locator,
             opened_file_identity: crate::db::sqlite_generation_identity(
                 authority.canonical_database_path(),
@@ -779,7 +779,7 @@ mod tests {
             &registry,
             profile_shard("profile.first"),
             initial_authority,
-            Arc::new(EmptyPhysicalRuntimeAttachment),
+            Box::new(EmptyPhysicalRuntimeAttachment),
         );
         let foreign = StoreRuntimeBindingV1::new(
             binding.shard_id.clone(),
@@ -821,7 +821,7 @@ mod tests {
             &registry,
             profile_shard("profile.client-and-direct"),
             authority,
-            Arc::new(EmptyPhysicalRuntimeAttachment),
+            Box::new(EmptyPhysicalRuntimeAttachment),
         );
         let first = owner.issue_client_lease().unwrap();
         let first_clone = first.clone();
@@ -866,7 +866,7 @@ mod tests {
             &registry,
             profile_shard("profile.database-facade"),
             authority,
-            Arc::new(EmptyPhysicalRuntimeAttachment),
+            Box::new(EmptyPhysicalRuntimeAttachment),
         );
         let facade = owner
             .issue_client_lease()
@@ -901,7 +901,7 @@ mod tests {
             &registry,
             profile_shard("profile.operation-profile-graph"),
             authority,
-            Arc::new(EmptyPhysicalRuntimeAttachment),
+            Box::new(EmptyPhysicalRuntimeAttachment),
         );
         let pin = match registry.profile_authority_pin(&binding.shard_id) {
             super::super::ProfileAuthorityPinResult::Pinned(pin) => pin,
@@ -909,6 +909,7 @@ mod tests {
         };
         let client = owner.issue_client_lease().unwrap();
         let operation = client.begin_operation().unwrap();
+        drop(client);
         {
             let mut state = registry.lock_state();
             state.graph_publications.insert(
@@ -934,11 +935,13 @@ mod tests {
                 )) && blockers.iter().any(|blocker| matches!(
                     blocker,
                     StoreRuntimeRetirementBlocker::RetainedGraphLeases { count: 1, .. }
+                )) && !blockers.iter().any(|blocker| matches!(
+                    blocker,
+                    StoreRuntimeRetirementBlocker::ClientLeases { .. }
                 ))
         ));
 
         drop(operation);
-        drop(client);
         drop(pin);
         registry.lock_state().graph_publications.clear();
         let StoreRuntimeRetirementResult::Reserved(reservation) =
@@ -982,7 +985,7 @@ mod tests {
             &registry,
             profile_shard("profile.fault"),
             authority,
-            Arc::new(DrainFailure),
+            Box::new(DrainFailure),
         );
         let StoreRuntimeRetirementResult::Reserved(mut reservation) =
             registry.reserve_retirement_batch(vec![target(&binding, &owner)])
@@ -1009,7 +1012,7 @@ mod tests {
             &registry,
             profile_shard("profile.close-fault"),
             authority,
-            Arc::new(CloseFailure),
+            Box::new(CloseFailure),
         );
         let StoreRuntimeRetirementResult::Reserved(mut reservation) =
             registry.reserve_retirement_batch(vec![target(&binding, &owner)])
@@ -1037,7 +1040,7 @@ mod tests {
             &committed_registry,
             profile_shard("profile.committed-once"),
             committed_authority,
-            Arc::new(EmptyPhysicalRuntimeAttachment),
+            Box::new(EmptyPhysicalRuntimeAttachment),
         );
         let StoreRuntimeRetirementResult::Reserved(mut committed) = committed_registry
             .reserve_retirement_batch(vec![target(&committed_binding, &committed_owner)])
@@ -1059,7 +1062,7 @@ mod tests {
             &cancelled_registry,
             profile_shard("profile.cancelled-once"),
             cancelled_authority,
-            Arc::new(EmptyPhysicalRuntimeAttachment),
+            Box::new(EmptyPhysicalRuntimeAttachment),
         );
         let StoreRuntimeRetirementResult::Reserved(mut cancelled) = cancelled_registry
             .reserve_retirement_batch(vec![target(&cancelled_binding, &cancelled_owner)])
@@ -1090,7 +1093,7 @@ mod tests {
             &registry,
             project_shard("project.retiring"),
             authority,
-            Arc::new(EmptyPhysicalRuntimeAttachment),
+            Box::new(EmptyPhysicalRuntimeAttachment),
         );
         let key = StoreRuntimeKey::from_binding(&binding);
         let StoreRuntimeRetirementResult::Reserved(reservation) =

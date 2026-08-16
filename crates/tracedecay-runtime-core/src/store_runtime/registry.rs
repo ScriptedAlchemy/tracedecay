@@ -825,6 +825,7 @@ pub enum StoreRuntimeRegistryFailure {
         external_handles: usize,
         external_runtime_references: usize,
         client_leases: u32,
+        operation_leases: u32,
     },
     AuthorityEpochExhausted,
     OpenAttemptExhausted,
