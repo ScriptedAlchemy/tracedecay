@@ -83,6 +83,12 @@ fn fixture_request(document: &str, identity: &str) -> Vec<u8> {
     serde_json::to_vec(&event["request"]).unwrap()
 }
 
+fn payload_with_enrolled_cwd(payload: &[u8], project: &Path) -> Vec<u8> {
+    let mut payload: serde_json::Value = serde_json::from_slice(payload).unwrap();
+    payload["cwd"] = serde_json::Value::String(project.to_string_lossy().into_owned());
+    serde_json::to_vec(&payload).unwrap()
+}
+
 fn run_hook(home: &Path, hook: &str, input: Option<&[u8]>) -> Output {
     run_hook_at(home, home, hook, input)
 }
@@ -420,6 +426,13 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         })
         .unwrap();
 
+        // Claude's response-capable PostToolUse handler resolves its project
+        // identity from the payload CWD rather than the process CWD. The
+        // recorded host fixture intentionally uses a portable workspace path,
+        // so bind this production-shaped payload to this test's enrollment.
+        let payload = (hook == "hook-claude-post-tool-use")
+            .then(|| payload_with_enrolled_cwd(&payload, &project))
+            .unwrap_or(payload);
         let output = run_hook_at(&home, &project, hook, Some(&payload));
 
         assert!(output.status.success(), "{hook}: {output:?}");
@@ -430,6 +443,12 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         };
         assert_eq!(output.stdout, expected_stdout, "{hook}: {output:?}");
         assert!(output.stderr.is_empty(), "{hook}: {output:?}");
+        if hook == "hook-claude-post-tool-use" {
+            let replay = run_hook_at(&home, &project, hook, Some(&payload));
+            assert!(replay.status.success(), "{hook} replay: {replay:?}");
+            assert_eq!(replay.stdout, expected_stdout, "{hook} replay: {replay:?}");
+            assert!(replay.stderr.is_empty(), "{hook} replay: {replay:?}");
+        }
         assert!(!home.join(".tracedecay/lifecycle.lock").exists());
         assert!(!home.join(".tracedecay/global.db").exists());
         assert!(!data_root.join("tracedecay.db").exists());
