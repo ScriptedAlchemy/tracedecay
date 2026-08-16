@@ -1427,6 +1427,7 @@ impl CodeIndexSchedulerRegistryV1 {
             return ServingGenerationInstallationOutcomeV1::NoMatch;
         }
         *active_installation = Some(claim.clone());
+        drop(active_installation);
         ServingGenerationInstallationOutcomeV1::Installed(ServingGenerationInstallationV1 {
             claim,
             active_installation: installation_slot,
