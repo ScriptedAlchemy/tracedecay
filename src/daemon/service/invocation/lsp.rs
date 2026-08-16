@@ -1,6 +1,7 @@
 //! LSP session lifecycle: registered-owner lookup, session admission, frame relay, and expiry.
 
 use super::*;
+use tracedecay_lsp::LspRuntimeFailure;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 mod project_lifecycle;
@@ -44,11 +45,11 @@ pub(super) fn canonicalize_lsp_roots(
         .any(|pair| pair[0].2.scope_digest == pair[1].2.scope_digest)
 }
 
-pub(super) fn runtime_lsp_actor(
+pub(super) async fn runtime_lsp_actor(
     workspace: AuthorizedLspWorkspace,
     factories: Vec<(AdmittedRoot, Arc<DaemonLspSessionFactory>)>,
-) -> Option<RuntimeLspActor> {
-    DaemonLspSessionFactory::open_federated_workspace_session(workspace, factories)
+) -> std::result::Result<Option<RuntimeLspActor>, LspRuntimeFailure> {
+    DaemonLspSessionFactory::open_federated_workspace_session(workspace, factories).await
 }
 
 impl DaemonInvocationService {
@@ -413,6 +414,36 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         };
+        let (actor, scope_set_id, scope_set_digest) = match workspace_authority {
+            CurrentLspWorkspaceAuthorityV1::Federated(authorized) => {
+                let Ok(Some(actor)) =
+                    runtime_lsp_actor(workspace.clone(), authorized.factories).await
+                else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                };
+                (
+                    actor,
+                    Some(authorized.scope_set.scope_set_id().clone()),
+                    Some(authorized.scope_set.digest().clone()),
+                )
+            }
+            CurrentLspWorkspaceAuthorityV1::Single => {
+                let Ok(actor) = lsp_owner
+                    .factory
+                    .open_workspace_session(workspace.clone())
+                    .await
+                else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                };
+                (actor, None, None)
+            }
+        };
         let request = LspSessionOpenRequest {
             requested_root_uri,
             workspace_folders,
@@ -440,26 +471,6 @@ impl DaemonInvocationService {
         let expires_at_ms = now_ms.saturating_add(LSP_SESSION_TTL_MS);
         let session_id = access.session_id().clone();
         let project_identity = lsp_owner.project_identity.clone();
-        let (actor, scope_set_id, scope_set_digest) = match workspace_authority {
-            CurrentLspWorkspaceAuthorityV1::Federated(authorized) => {
-                let Some(actor) = runtime_lsp_actor(workspace, authorized.factories) else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
-                };
-                (
-                    actor,
-                    Some(authorized.scope_set.scope_set_id().clone()),
-                    Some(authorized.scope_set.digest().clone()),
-                )
-            }
-            CurrentLspWorkspaceAuthorityV1::Single => (
-                lsp_owner.factory.open_workspace_session(workspace),
-                None,
-                None,
-            ),
-        };
         self.lsp_sessions.lock().await.insert(
             session_id,
             RuntimeLspSession {

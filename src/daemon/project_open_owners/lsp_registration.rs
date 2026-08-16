@@ -1,7 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
-use tracedecay_lsp::{ContextProjectionKind, GatewayCapabilities, TRACEDECAY_CONTEXT_REVISION};
+use tracedecay_lsp::{
+    ContextProjectionKind, GatewayCapabilities, SemanticCapability, TRACEDECAY_CONTEXT_REVISION,
+};
 
 pub(super) fn production_lsp_registration(
     admitted_providers: &[AdmittedLspProvider],
@@ -15,10 +17,10 @@ pub(super) fn production_lsp_registration(
         // Multi-root admission is enabled only after the registrar mounts the
         // exact authorized scope-set storage.
         supports_workspace_folders: false,
-        // Analyzer admission does not prove support for any semantic method.
-        // A current application query port must publish those capabilities;
-        // until then the gateway exposes typed unavailable semantics.
-        semantic: BTreeSet::new(),
+        // The gateway implements the complete request protocol. The upstream
+        // initialize response remains the authority for which methods can be
+        // advertised to a particular session.
+        semantic: SemanticCapability::ALL.into_iter().collect(),
         context_projections: BTreeMap::from([
             (ContextProjectionKind::diagnostics(), revision),
             (ContextProjectionKind::post_edit_impact(), revision),
