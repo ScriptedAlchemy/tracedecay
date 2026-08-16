@@ -251,16 +251,18 @@ impl PhysicalRuntimeAttachment for EmptyPhysicalRuntimeAttachment {
     }
 }
 
-/// The publisher's atomic result: logical lifecycle plus physical lifetime.
+/// The publisher's atomic, non-cloneable transfer of logical lifecycle plus
+/// physical lifetime. The registry is the first code allowed to retain either
+/// resource behind an `Arc`.
 pub struct PublishedShardRuntime {
     runtime: crate::store_runtime::shard::ShardRuntime,
-    attachment: Arc<dyn PhysicalRuntimeAttachment>,
+    attachment: Box<dyn PhysicalRuntimeAttachment>,
 }
 
 impl PublishedShardRuntime {
     pub fn new(
         runtime: crate::store_runtime::shard::ShardRuntime,
-        attachment: Arc<dyn PhysicalRuntimeAttachment>,
+        attachment: Box<dyn PhysicalRuntimeAttachment>,
     ) -> Self {
         Self {
             runtime,
@@ -282,7 +284,7 @@ impl PublishedShardRuntime {
         Arc<crate::store_runtime::shard::ShardRuntime>,
         Arc<dyn PhysicalRuntimeAttachment>,
     ) {
-        (Arc::new(self.runtime), self.attachment)
+        (Arc::new(self.runtime), Arc::from(self.attachment))
     }
 }
 

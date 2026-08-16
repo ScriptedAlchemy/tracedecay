@@ -163,7 +163,7 @@ impl ShardRuntimePublisher for TestPublisher {
                 .unwrap();
             Ok(PublishedShardRuntime::new(
                 runtime,
-                Arc::new(EmptyPhysicalRuntimeAttachment),
+                Box::new(EmptyPhysicalRuntimeAttachment),
             ))
         })
     }

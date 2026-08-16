@@ -174,7 +174,7 @@ async fn publish_lifecycle_runtime(
             message: error,
         });
     }
-    Ok(PublishedShardRuntime::new(runtime, attachment.into_arc()))
+    Ok(PublishedShardRuntime::new(runtime, attachment.into_box()))
 }
 
 fn runtime_core_final_schema_applies(scope: &StoreShardScopeV1) -> bool {
@@ -289,8 +289,8 @@ impl LifecyclePhysicalAttachment {
         }
     }
 
-    fn into_arc(self) -> Arc<dyn PhysicalRuntimeAttachment> {
-        Arc::new(self.0)
+    fn into_box(self) -> Box<dyn PhysicalRuntimeAttachment> {
+        Box::new(self.0)
     }
 }
 
