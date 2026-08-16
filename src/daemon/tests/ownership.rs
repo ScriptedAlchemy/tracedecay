@@ -612,8 +612,12 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
     assert!(was_inserted);
     assert_eq!(*server, 3);
     assert_eq!(retired.len(), 1, "bounded admission must return one victim");
+    assert_eq!(
+        &retired[0].0, &idle,
+        "retirement must retain the exact victim identity"
+    );
     assert!(
-        Arc::ptr_eq(&retired[0], &idle_server),
+        Arc::ptr_eq(&retired[0].1, &idle_server),
         "the caller must receive the exact idle server for canonical retirement"
     );
     assert!(registry.get(&idle).is_none());
@@ -668,6 +672,10 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
         "reopen must bind the replacement for the exact evicted identity"
     );
     assert_eq!(retired.len(), 1, "reopen must return its own idle victim");
+    assert_eq!(
+        &retired[0].0, &oldest,
+        "reopen must return the next exact idle identity for retirement"
+    );
     assert!(
         Arc::ptr_eq(
             registry
@@ -700,11 +708,15 @@ fn database_owner_registry_hides_bounded_insert_until_core_publication() {
     };
     let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
 
-    let (_, inserted) = registry
+    let (_, inserted, retired) = registry
         .bind_or_insert_route_bounded(route.clone(), key.clone(), Arc::new(1), 1, |_| false)
         .expect("pending owner should fit");
 
     assert!(inserted);
+    assert!(
+        retired.is_empty(),
+        "a non-evicting insert has no retirement"
+    );
     assert!(
         registry.get_route_and_touch(&route).is_none(),
         "a route must remain hidden until its core server is constructed"
