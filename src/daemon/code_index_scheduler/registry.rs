@@ -179,6 +179,85 @@ pub(in crate::daemon) struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
+/// A cold-mount reservation publishes no runtime. Its sole authority is to
+/// make one caller open a canonical root while followers wait to re-read the
+/// mounted runtime that caller may publish.
+struct ColdMountReservationSlotV1 {
+    completion: tokio::sync::watch::Sender<()>,
+}
+
+struct ColdMountReservationV1 {
+    project_root: PathBuf,
+    slot: Arc<ColdMountReservationSlotV1>,
+    reservations: Arc<Mutex<BTreeMap<PathBuf, Arc<ColdMountReservationSlotV1>>>>,
+}
+
+impl Drop for ColdMountReservationV1 {
+    fn drop(&mut self) {
+        let mut reservations = self
+            .reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owns_reservation = reservations
+            .get(&self.project_root)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.slot));
+        if owns_reservation {
+            reservations.remove(&self.project_root);
+            self.slot.completion.send_replace(());
+        }
+    }
+}
+
+enum ColdMountAdmissionV1 {
+    Owner(ColdMountReservationV1),
+    Follower(tokio::sync::watch::Receiver<()>),
+}
+
+/// Owns one exact pending wake marker until worker dispatch succeeds or the
+/// request is cancelled/rejected. The compare-and-swap in `Drop` cannot erase
+/// another caller's marker.
+struct PendingWakeClaimV1 {
+    pending_wake_micros: Arc<AtomicU64>,
+    pending_wake_trigger: Arc<AtomicU64>,
+    claimed_micros: u64,
+    settled: bool,
+}
+
+impl PendingWakeClaimV1 {
+    fn claim(
+        pending_wake_micros: Arc<AtomicU64>,
+        pending_wake_trigger: Arc<AtomicU64>,
+    ) -> Option<Self> {
+        let claimed_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
+        pending_wake_micros
+            .compare_exchange(0, claimed_micros, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(Self {
+            pending_wake_micros,
+            pending_wake_trigger,
+            claimed_micros,
+            settled: false,
+        })
+    }
+
+    fn settle(mut self) {
+        self.settled = true;
+    }
+}
+
+impl Drop for PendingWakeClaimV1 {
+    fn drop(&mut self) {
+        if !self.settled
+            && self
+                .pending_wake_micros
+                .compare_exchange(self.claimed_micros, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            self.pending_wake_trigger.store(0, Ordering::Release);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
@@ -189,6 +268,9 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
     /// reconcile task has not finished draining. A root parked here must never
     /// re-mount: a fresh owner would race the dying one over the same store.
     pub(super) retiring: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
+    /// Exact roots currently opening a scheduler. This contains no runtime;
+    /// followers wake and resolve through `mounted` after the owner settles.
+    cold_mount_reservations: Arc<Mutex<BTreeMap<PathBuf, Arc<ColdMountReservationSlotV1>>>>,
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
     generation_publications: tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
@@ -322,6 +404,27 @@ impl CodeIndexSchedulerRegistryV1 {
             replaced.is_none(),
             "query-admission barrier already installed"
         );
+    }
+
+    /// Reserve one cold open for an exact canonical root. A follower must
+    /// re-resolve `mounted` after completion because a failed or cancelled
+    /// owner publishes no runtime.
+    fn admit_cold_mount(&self, project_root: &Path) -> ColdMountAdmissionV1 {
+        let mut reservations = self
+            .cold_mount_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(slot) = reservations.get(project_root) {
+            return ColdMountAdmissionV1::Follower(slot.completion.subscribe());
+        }
+        let (completion, _) = tokio::sync::watch::channel(());
+        let slot = Arc::new(ColdMountReservationSlotV1 { completion });
+        reservations.insert(project_root.to_path_buf(), Arc::clone(&slot));
+        ColdMountAdmissionV1::Owner(ColdMountReservationV1 {
+            project_root: project_root.to_path_buf(),
+            slot,
+            reservations: Arc::clone(&self.cold_mount_reservations),
+        })
     }
 
     #[cfg(test)]
@@ -747,58 +850,66 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_activation: CodeGraphActivationAuthorityV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
-        // A retiring owner still holds the store: admitting a fresh mount here
-        // would race the dying reconcile task over the same physical shard.
-        // Upstream took this check after mount admission; that permit no longer
-        // exists at this tip, so the guard sits at the head of the mount path.
-        let retiring = self.retiring.lock().await;
-        if retiring.contains_key(&project_root) {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler owner is still retiring".to_owned(),
-            ));
-        }
-        let mounted = self.mounted.lock().await;
-        if let Some(existing) = mounted.get(&project_root) {
-            let scheduler = Arc::clone(&existing.scheduler);
-            let serving_generation = Arc::clone(&existing.serving_generation);
+        let _cold_mount_reservation = loop {
+            // A retiring owner still holds the store: admitting a fresh mount
+            // here would race the dying reconcile task over the same physical
+            // shard.
+            let retiring = self.retiring.lock().await;
+            if retiring.contains_key(&project_root) {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "code-index scheduler owner is still retiring".to_owned(),
+                ));
+            }
+            let mounted = self.mounted.lock().await;
+            if let Some(existing) = mounted.get(&project_root) {
+                let scheduler = Arc::clone(&existing.scheduler);
+                let serving_generation = Arc::clone(&existing.serving_generation);
+                drop(mounted);
+                drop(retiring);
+                // Reconcile holds this mutex; wait in the blocking pool so
+                // remount never parks a runtime worker or admission for other
+                // lanes.
+                tokio::task::spawn_blocking(move || {
+                    let mut scheduler = scheduler
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if scheduler.project_id() != &project_id {
+                        return Err(CodeIndexSchedulerErrorV1::Identity(
+                            "mounted worktree belongs to a different project identity".to_owned(),
+                        ));
+                    }
+                    scheduler.replace_semantic_schedule_hook(semantic_schedule);
+                    if let Some(latest) = serving_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                    {
+                        let _ = scheduler.schedule_semantic_generation(latest.generation());
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(|_error| {
+                    CodeIndexSchedulerErrorV1::SemanticSchedule("hook task failed".to_owned())
+                })??;
+                return Ok(false);
+            }
+            if mounted.len() >= self.max_worktrees {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "code-index scheduler capacity is exhausted".to_owned(),
+                ));
+            }
             drop(mounted);
             drop(retiring);
-            // Reconcile holds this mutex; wait in the blocking pool so remount
-            // never parks a runtime worker or admission for other lanes.
-            tokio::task::spawn_blocking(move || {
-                let mut scheduler = scheduler
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if scheduler.project_id() != &project_id {
-                    return Err(CodeIndexSchedulerErrorV1::Identity(
-                        "mounted worktree belongs to a different project identity".to_owned(),
-                    ));
+            #[cfg(test)]
+            Self::pause_cold_mount_admission_for_test(&project_root).await;
+            match self.admit_cold_mount(&project_root) {
+                ColdMountAdmissionV1::Owner(reservation) => break reservation,
+                ColdMountAdmissionV1::Follower(mut completion) => {
+                    let _ = completion.changed().await;
                 }
-                scheduler.replace_semantic_schedule_hook(semantic_schedule);
-                if let Some(latest) = serving_generation
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                {
-                    let _ = scheduler.schedule_semantic_generation(latest.generation());
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|_error| {
-                CodeIndexSchedulerErrorV1::SemanticSchedule("hook task failed".to_owned())
-            })??;
-            return Ok(false);
-        }
-        if mounted.len() >= self.max_worktrees {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler capacity is exhausted".to_owned(),
-            ));
-        }
-        drop(mounted);
-        drop(retiring);
-        #[cfg(test)]
-        Self::pause_cold_mount_admission_for_test(&project_root).await;
+            }
+        };
         // Keep CPU-bound cold-open identity setup off runtime workers.
         let scoped_store_root = super::scoped_code_index_store_root(&store_root, &project_root);
         let open_project_id = project_id.clone();
@@ -853,6 +964,15 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_repository_id = repository_id.clone();
         let worker_worktree_id = worktree_id.clone();
         let worker_graph_activation = graph_activation.clone();
+        // Hold the final publication lock before creating the worker. From the
+        // spawn through insertion there is no await, so cancellation cannot
+        // leave a detached worker that was never made canonical.
+        let mut mounted = self.mounted.lock().await;
+        if mounted.len() >= self.max_worktrees {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler capacity is exhausted".to_owned(),
+            ));
+        }
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;
@@ -1077,12 +1197,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _ = result;
             }
         });
-        let mut mounted = self.mounted.lock().await;
-        if mounted.len() >= self.max_worktrees {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler capacity is exhausted".to_owned(),
-            ));
-        }
         mounted.insert(
             project_root,
             MountedCodeIndexWorktreeV1 {
@@ -2387,15 +2501,19 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         #[cfg(test)]
         drop(lookup_guard);
-        // Debounce on the existing pending-wake slot: a wake already posted and
-        // not yet claimed by the worker covers this admission too.
-        if pending_wake_micros.load(Ordering::Acquire) != 0 {
-            return false;
-        }
         #[cfg(test)]
         if let Some(test_control) = test_control {
             test_control.rendezvous.wait().await;
         }
+        // Atomically reserve the existing pending-wake slot before scheduling
+        // the blocking freshness probe. A pending or concurrently claimed wake
+        // already supplies this query's remedy.
+        let Some(wake_claim) = PendingWakeClaimV1::claim(
+            Arc::clone(&pending_wake_micros),
+            Arc::clone(&pending_wake_trigger),
+        ) else {
+            return false;
+        };
         tokio::task::spawn_blocking(move || {
             let mut scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
@@ -2411,6 +2529,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         &wake,
                         CodeIndexCadenceTriggerV1::BusyFollowUp,
                     );
+                    wake_claim.settle();
                     return true;
                 }
             };
@@ -2432,6 +2551,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 &wake,
                 CodeIndexCadenceTriggerV1::QueryAdmission,
             );
+            wake_claim.settle();
             true
         })
         .await
