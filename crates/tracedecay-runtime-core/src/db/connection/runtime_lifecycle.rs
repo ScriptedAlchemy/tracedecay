@@ -1,5 +1,6 @@
 use super::memory_graph_reconciliation::{
-    ProjectMemoryReconciliationTelemetryObserverV1, ProjectMemoryReconciliationTelemetryV1,
+    ProjectMemoryReconciliationPassLeaseV1, ProjectMemoryReconciliationTelemetryObserverV1,
+    ProjectMemoryReconciliationTelemetryV1,
 };
 use super::{
     Arc, Connection, Database, DatabaseAccessMode, DatabaseAuthority, DatabaseInner, Path, Result,
@@ -47,6 +48,12 @@ impl Database {
         &self,
     ) -> &ProjectMemoryReconciliationTelemetryV1 {
         &self.inner.memory_graph_reconciliation_telemetry
+    }
+
+    pub(crate) fn begin_project_memory_reconciliation_pass(
+        &self,
+    ) -> std::result::Result<ProjectMemoryReconciliationPassLeaseV1, &'static str> {
+        Arc::clone(&self.inner.memory_graph_reconciliation_telemetry).begin_reconciliation_pass()
     }
 
     pub fn memory_graph_reconciliation_task_owner(

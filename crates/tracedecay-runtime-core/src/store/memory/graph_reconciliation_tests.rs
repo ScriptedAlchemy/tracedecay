@@ -30,7 +30,10 @@ use tracedecay_store::{
     VerifiedStoreLocatorV1, derive_project_memory_fact_curation_child_operation_id,
 };
 
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use crate::db::{
+    Database, DatabaseAuthority, ProjectMemoryReconciliationTelemetryObserverV1,
+    TestDatabaseRuntimeMode,
+};
 use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use crate::store::memory::automatic_facts::project_memory_record_automatic_fact_receipt_tx;
 use crate::store::memory::crud::{initial_batch, sanitize_payload};
@@ -219,6 +222,22 @@ async fn wait_for_reconciliation(runtime: &RecordingGraphRuntime) {
     );
 }
 
+async fn wait_for_completed_reconciliation_pass(
+    observer: &ProjectMemoryReconciliationTelemetryObserverV1,
+    expected_reconciliation_passes: u64,
+) {
+    for _ in 0..256 {
+        let snapshot = observer.snapshot();
+        if snapshot.reconciliation_passes == expected_reconciliation_passes
+            && snapshot.active_reconciliation_pass_count == 0
+        {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("project memory reconciliation did not complete its full pass");
+}
+
 fn non_graph_write_fixture_batch(label: &str) -> FactWriteBatch {
     let content = format!("canonical {label} fact without a graph source change");
     let sanitized = sanitize_payload(
@@ -324,9 +343,8 @@ fn assert_no_reconciliation(runtime: &RecordingGraphRuntime) {
     assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
 }
 
-async fn seed_high_level_fact(
+async fn add_high_level_source_fact(
     store: &DatabaseFactStore<'_>,
-    runtime: &RecordingGraphRuntime,
     label: &str,
     content: &str,
 ) -> HighLevelFactSeed {
@@ -347,14 +365,24 @@ async fn seed_high_level_fact(
         .expect("seed graph reconciliation source fact commit receipt");
     let target = ProjectMemoryFactIdV1::new(FactOwnerV1::Profile, outcome.fact().fact_id().clone())
         .expect("seed graph reconciliation source target");
-    wait_for_reconciliation(runtime).await;
-    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
-    reset_reconciliation(runtime);
     HighLevelFactSeed {
         target,
         last_event_id: receipt.last_event_id().clone(),
         content: content.to_owned(),
     }
+}
+
+async fn seed_high_level_fact(
+    store: &DatabaseFactStore<'_>,
+    runtime: &RecordingGraphRuntime,
+    label: &str,
+    content: &str,
+) -> HighLevelFactSeed {
+    let seed = add_high_level_source_fact(store, label, content).await;
+    wait_for_reconciliation(runtime).await;
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    reset_reconciliation(runtime);
+    seed
 }
 
 fn curation_add_batch(
@@ -980,17 +1008,19 @@ async fn feedback_telemetry_does_not_reconcile_unchanged_memory_graph() {
 #[tokio::test]
 async fn settled_workload_telemetry_stays_flat_until_exact_source_mutation() {
     let (_directory, database) = database("settled-workload-telemetry").await;
-    let runtime = bind_runtime(&database);
+    let _runtime = bind_runtime(&database);
     let store = DatabaseFactStore::new(&database);
     let observer = database.project_memory_reconciliation_telemetry_observer();
-    let seed = seed_high_level_fact(
+    let expected_seed_passes = observer.snapshot().reconciliation_passes + 1;
+    let seed = add_high_level_source_fact(
         &store,
-        &runtime,
         "settled-workload",
         "A settled memory graph must not reconcile for retrieval or feedback telemetry.",
     )
     .await;
+    wait_for_completed_reconciliation_pass(&observer, expected_seed_passes).await;
     let seeded = observer.snapshot();
+    assert_eq!(seeded.reconciliation_passes, expected_seed_passes);
 
     store
         .record_project_memory_fact_retrieval(
@@ -1087,13 +1117,14 @@ async fn settled_workload_telemetry_stays_flat_until_exact_source_mutation() {
         settled.retained_graph_owner_count
     );
 
-    seed_high_level_fact(
+    let expected_reconciliation_passes = repeated.reconciliation_passes + 1;
+    add_high_level_source_fact(
         &store,
-        &runtime,
         "settled-workload-source-mutation",
         "A real graph source mutation must reconcile exactly once after settlement.",
     )
     .await;
+    wait_for_completed_reconciliation_pass(&observer, expected_reconciliation_passes).await;
     let source_mutated = observer.snapshot();
 
     assert_eq!(
