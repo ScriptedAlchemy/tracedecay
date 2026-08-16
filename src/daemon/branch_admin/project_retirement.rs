@@ -86,13 +86,12 @@ async fn wait_for_project_server_retirement(
     }
 }
 
-async fn track_project_server_retirement(
-    retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
+fn track_project_server_retirement_after_admission(
+    retirements: &mut Vec<ProjectServerRetirement>,
     owner: StoreOwnerKey,
     task: tokio::task::JoinHandle<()>,
     cancelled_is_clean: bool,
 ) {
-    let mut retirements = retirements.lock().await;
     retirements.retain(|retirement| {
         !matches!(
             &*retirement.completion.borrow(),
@@ -121,6 +120,21 @@ async fn track_project_server_retirement(
         _task: task,
         _fence: None,
     });
+}
+
+async fn track_project_server_retirement(
+    retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
+    owner: StoreOwnerKey,
+    task: tokio::task::JoinHandle<()>,
+    cancelled_is_clean: bool,
+) {
+    let mut retirements = retirements.lock().await;
+    track_project_server_retirement_after_admission(
+        &mut retirements,
+        owner,
+        task,
+        cancelled_is_clean,
+    );
 }
 
 pub(super) async fn attach_project_retirement_fence(
@@ -204,6 +218,20 @@ pub(super) async fn settle_project_retirements(
 }
 
 impl StoreAdministration {
+    /// Admit retirement tracking before spawning the worker, so cancellation
+    /// can never detach a live server retirement between those transitions.
+    pub(crate) async fn spawn_tracked_project_server_retirement<Task>(
+        &self,
+        owner: StoreOwnerKey,
+        retirement: Task,
+    ) where
+        Task: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut retirements = self.project_server_retirements.lock().await;
+        let task = tokio::spawn(retirement);
+        track_project_server_retirement_after_admission(&mut retirements, owner, task, false);
+    }
+
     // pub(crate): project_server_lifecycle registers retirements from outside
     // branch_admin when a project server shuts down.
     pub(crate) async fn track_project_server_retirement(
@@ -438,5 +466,57 @@ mod tests {
         .await;
         assert!(matches!(receipt.status(), ShutdownTaskStatus::Failed(_)));
         assert_eq!(retirements.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_admitted_retirement_caller_keeps_shutdown_join_ownership() {
+        let administration = StoreAdministration::default();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let caller_administration = administration.clone();
+        let caller = tokio::spawn({
+            let release = Arc::clone(&release);
+            async move {
+                caller_administration
+                    .spawn_tracked_project_server_retirement(owner("project-a"), async move {
+                        let _ = started_tx.send(());
+                        release.notified().await;
+                    })
+                    .await;
+                std::future::pending::<()>().await;
+            }
+        });
+        started_rx
+            .await
+            .expect("the tracked retirement must start before caller cancellation");
+        caller.abort();
+        assert!(
+            caller
+                .await
+                .expect_err("caller cancellation must surface")
+                .is_cancelled(),
+            "the caller must be cancelled after retirement admission"
+        );
+
+        let mut shutdown = Box::pin(administration.join_project_server_retirements());
+        std::future::poll_fn(|context| {
+            assert!(
+                shutdown.as_mut().poll(context).is_pending(),
+                "daemon shutdown must retain and join the admitted retirement"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        release.notify_one();
+        shutdown.await;
+        assert!(
+            administration
+                .project_server_retirements
+                .lock()
+                .await
+                .is_empty(),
+            "joined retirement ownership must be released after clean completion"
+        );
     }
 }

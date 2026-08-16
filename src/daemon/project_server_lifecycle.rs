@@ -220,9 +220,11 @@ pub(super) async fn schedule_project_server_retirement(
     servers: Vec<Arc<crate::mcp::McpServer>>,
     route_registered: Option<Arc<AtomicBool>>,
 ) {
-    let retirement = tokio::spawn(retire_project_servers(servers, route_registered));
     store_administration
-        .track_project_server_retirement(owner, retirement)
+        .spawn_tracked_project_server_retirement(
+            owner,
+            retire_project_servers(servers, route_registered),
+        )
         .await;
 }
 
