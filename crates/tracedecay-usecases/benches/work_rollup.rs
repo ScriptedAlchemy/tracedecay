@@ -87,6 +87,7 @@ fn validate_completion(report: &WorkRollupReport) {
     assert!(report.fragment_is_application_canonical);
     assert_eq!(report.raw_coverage, CoverageStateV1::Known);
     assert_eq!(report.coverage, CoverageStateV1::Known);
+    assert!(report.raw_rollup_equal, "{report:#?}");
 }
 
 fn main() {
