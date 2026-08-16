@@ -1439,7 +1439,6 @@ mod global_retention_tests {
 
     use super::*;
     use crate::daemon::branch_admin::StoreAdministration;
-    use crate::db::engine::{Executor, QueryExecutor, Row};
     use crate::global_db::RegisteredGlobalDb;
     use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
 
@@ -1467,6 +1466,52 @@ mod global_retention_tests {
     }
 
     async fn seed_eligible_projected_message(database: &RegisteredGlobalDb) {
+        let session = tracedecay_sessions::runtime::SessionRecord {
+            provider: "claude".to_owned(),
+            session_id: "retention-session".to_owned(),
+            project_key: "retention-project".to_owned(),
+            project_path: "/retention-project".to_owned(),
+            title: Some("Retention fixture".to_owned()),
+            started_at: Some(0),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        assert!(
+            database.upsert_session(&session).await,
+            "register the retention fixture session before its projection"
+        );
+        let message = tracedecay_sessions::runtime::SessionMessageRecord {
+            provider: session.provider.clone(),
+            message_id: "retention-message".to_owned(),
+            session_id: session.session_id.clone(),
+            role: "assistant".to_owned(),
+            timestamp: Some(0),
+            ordinal: 1,
+            text: "retention fixture".to_owned(),
+            kind: None,
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        };
+        assert!(
+            database
+                .upsert_transcript_batch(
+                    &session,
+                    std::slice::from_ref(&message),
+                    "global-retention-fixture",
+                    crate::global_db::ParseOffset::default(),
+                )
+                .await,
+            "project the registered retention fixture message"
+        );
+
         let transaction = database
             .begin_write_transaction()
             .await
@@ -1479,8 +1524,6 @@ mod global_retention_tests {
                     INSERT INTO retention_delete_receipts(deleted_message_id)
                     VALUES (OLD.message_id);
                  END;
-                 INSERT INTO sessions(provider, session_id, project_key, project_path)
-                 VALUES ('claude', 'retention-session', 'retention-project', '/retention-project');
                  INSERT INTO lcm_raw_messages(
                     provider, message_id, session_id, role, ordinal, timestamp,
                     content, content_hash, storage_kind, payload_ref, snippet_text,
@@ -1490,16 +1533,17 @@ mod global_retention_tests {
                     'retention fixture', 'retention-fixture-hash', 'inline', NULL,
                     'retention fixture', 'retention fixture', 0, 0, NULL
                  );
+                 INSERT INTO lcm_summary_nodes(
+                    node_id, provider, conversation_id, session_id, depth, summary_text,
+                    summary_hash, summary_token_count, source_token_count
+                 ) VALUES (
+                    'retention-summary', 'claude', 'retention-session', 'retention-session', 0,
+                    'retention summary', 'retention-summary-hash', 1, 1
+                 );
                  INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
                  SELECT 'retention-summary', 'raw_message', CAST(store_id AS TEXT), 0
                  FROM lcm_raw_messages
-                 WHERE provider = 'claude' AND message_id = 'retention-message';
-                 INSERT INTO session_messages(
-                    provider, message_id, session_id, role, timestamp, ordinal, text
-                 ) VALUES (
-                    'claude', 'retention-message', 'retention-session', 'assistant', 0, 1,
-                    'retention fixture'
-                 );",
+                 WHERE provider = 'claude' AND message_id = 'retention-message';",
             )
             .await
             .expect("seed a projection-durable retention candidate");
@@ -1507,6 +1551,14 @@ mod global_retention_tests {
             .commit()
             .await
             .expect("commit retention fixture");
+        assert_eq!(
+            database
+                .session_message_count()
+                .await
+                .expect("confirm the registered projection exists"),
+            1,
+            "the retention candidate must exist before retention admission"
+        );
     }
 
     async fn deletion_receipt_count(database: &RegisteredGlobalDb) -> i64 {
