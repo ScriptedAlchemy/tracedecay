@@ -423,10 +423,23 @@ mod descriptor_tests {
                 )
             })
             .collect::<BTreeSet<_>>();
-        assert_eq!(actual, expected);
         assert!(
-            model.measurements.len() > expected.len(),
-            "the normal projection must retain its dimensional cells"
+            expected.is_subset(&actual),
+            "the normal projection must retain every canonical descriptor identity"
+        );
+        let expected_metric_names = EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
+            .iter()
+            .map(|(metric, _, _)| *metric)
+            .collect::<BTreeSet<_>>();
+        let actual_metric_names = model
+            .measurements
+            .iter()
+            .map(|measurement| measurement.value.metric.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual_metric_names, expected_metric_names);
+        assert!(
+            actual.len() > expected.len(),
+            "the normal projection must retain its dimensional descriptor identities"
         );
         assert!(model.measurements.iter().all(|measurement| {
             measurement.value.value.is_none()

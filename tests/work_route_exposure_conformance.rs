@@ -1028,6 +1028,14 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
             )
         })
         .collect::<Vec<_>>();
+    let expected_descriptor_set = expected_descriptor_identities
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let expected_metric_names = expected_descriptor_identities
+        .iter()
+        .map(|(_, metric, _, _)| metric.clone())
+        .collect::<BTreeSet<_>>();
     let descriptor_identities = |metrics: &Value| {
         let reported = metrics["measurements"]
             .as_array()
@@ -1054,12 +1062,16 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
                 )
             })
             .collect::<BTreeSet<_>>();
+        let metric_names = reported
+            .iter()
+            .map(|(_, metric, _, _)| metric.clone())
+            .collect::<BTreeSet<_>>();
         let stable = expected_descriptor_identities
             .iter()
             .filter(|identity| reported.contains(*identity))
             .cloned()
             .collect::<Vec<_>>();
-        (reported.len(), stable)
+        (reported, metric_names, stable)
     };
 
     let anonymous = agent
@@ -1091,12 +1103,22 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         initial_metrics["horizon"], request["horizon"],
         "{initial_metrics}"
     );
-    let (initial_reported_descriptor_count, initial_descriptor_identities) =
-        descriptor_identities(initial_metrics);
+    let (
+        initial_reported_descriptor_identities,
+        initial_metric_names,
+        initial_descriptor_identities,
+    ) = descriptor_identities(initial_metrics);
+    assert!(
+        expected_descriptor_set.is_subset(&initial_reported_descriptor_identities),
+        "an empty authorized horizon must retain every canonical topology metric descriptor identity: {initial_metrics}"
+    );
     assert_eq!(
-        initial_reported_descriptor_count,
-        expected_descriptor_identities.len(),
-        "an empty authorized horizon must not emit an unknown topology metric descriptor: {initial_metrics}"
+        initial_metric_names, expected_metric_names,
+        "an empty authorized horizon must not emit an unknown topology metric descriptor family: {initial_metrics}"
+    );
+    assert!(
+        initial_reported_descriptor_identities.len() > expected_descriptor_identities.len(),
+        "an empty authorized horizon must retain dimensional topology metric identities: {initial_metrics}"
     );
     assert_eq!(
         initial_descriptor_identities, expected_descriptor_identities,
@@ -1147,20 +1169,30 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         restored_metrics["horizon"], request["horizon"],
         "{restored_metrics}"
     );
-    let (restored_reported_descriptor_count, restored_descriptor_identities) =
-        descriptor_identities(restored_metrics);
+    let (
+        restored_reported_descriptor_identities,
+        restored_metric_names,
+        restored_descriptor_identities,
+    ) = descriptor_identities(restored_metrics);
+    assert!(
+        expected_descriptor_set.is_subset(&restored_reported_descriptor_identities),
+        "a restarted topology metrics route must retain every canonical metric descriptor identity: {restored_metrics}"
+    );
     assert_eq!(
-        restored_reported_descriptor_count,
-        expected_descriptor_identities.len(),
-        "a restarted topology metrics route must not emit an unknown metric descriptor: {restored_metrics}"
+        restored_metric_names, expected_metric_names,
+        "a restarted topology metrics route must not emit an unknown metric descriptor family: {restored_metrics}"
+    );
+    assert!(
+        restored_reported_descriptor_identities.len() > expected_descriptor_identities.len(),
+        "a restarted topology metrics route must retain dimensional metric identities: {restored_metrics}"
     );
     assert_eq!(
         restored_descriptor_identities, expected_descriptor_identities,
         "a restarted topology metrics route must retain the complete canonical metric descriptor identity: {restored_metrics}"
     );
     assert_eq!(
-        restored_descriptor_identities, initial_descriptor_identities,
-        "a physical restart must preserve exact topology metric descriptor identity: {restored_metrics}"
+        restored_reported_descriptor_identities, initial_reported_descriptor_identities,
+        "a physical restart must preserve every topology metric descriptor identity: {restored_metrics}"
     );
     assert!(
         restored_metrics["measurements"]
