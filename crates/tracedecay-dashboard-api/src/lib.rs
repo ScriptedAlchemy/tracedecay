@@ -2426,12 +2426,15 @@ mod authority_tests {
             .project_database_arc()
             .expect("project session authority");
 
-        let selected = resolve_lcm_store_for_layout(&fixture.layout, Some(Arc::clone(&retained)));
+        let selected = resolve_lcm_store_for_layout(&fixture.layout, Some(retained.clone()));
 
-        assert!(Arc::ptr_eq(
-            selected.lcm_db.as_ref().expect("retained LCM authority"),
-            &retained,
-        ));
+        assert!(
+            selected
+                .lcm_db
+                .as_ref()
+                .expect("retained LCM authority")
+                .shares_client_with(&retained)
+        );
         assert_eq!(selected.path, retained.db_path().display().to_string());
         assert_ne!(selected.scope, "global");
     }

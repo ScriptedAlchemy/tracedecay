@@ -64,7 +64,7 @@ pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
             }) => {
                 let run = AgentTaskRunContext::new(
                     super::user_automation_root(profile_root),
-                    Arc::clone(&sessions_db),
+                    sessions_db.clone(),
                     options.run_id.clone(),
                     "session_reflector",
                     options.trigger,

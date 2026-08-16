@@ -1378,17 +1378,21 @@ mod tests {
 
     use tempfile::TempDir;
     use tracedecay_domain::LocatorDigest;
+    use tracedecay_runtime_core::store_runtime::registry::{
+        StoreRuntimeRetirementBlocker, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementResult,
+    };
     use tracedecay_store::{StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
     use super::*;
 
     #[tokio::test]
     async fn registered_database_lease_keeps_runtime_alive_after_map_owner_drops() {
-        let harness = crate::tests::harness::RegisteredGlobalDbHarness::open(
+        let fixture = crate::tests::harness::RegisteredGlobalDbRetirementHarnessV1::open(
             "registered-global-db-lease-foreign-survival",
         )
         .await;
-        let mut owners = BTreeMap::from([("profile", harness.mount().await)]);
+        let (map_owner, database, retirement, _directory, scope) = fixture.into_parts();
+        let mut owners = BTreeMap::from([("profile", map_owner)]);
         let foreign: RegisteredGlobalDbLeaseV1 = owners
             .get("profile")
             .expect("map owner contains the registered database")
@@ -1400,12 +1404,54 @@ mod tests {
                     .expect("map owner retains the same client token")
             )
         );
-        let runtime_identity = foreign.runtime().runtime_identity();
 
         owners.clear();
+        drop(owners);
+        drop(database);
+        drop(scope);
 
-        assert_eq!(foreign.runtime().runtime_identity(), runtime_identity);
-        assert!(foreign.runtime().begin_operation().is_ok());
+        match retirement
+            .registry()
+            .reserve_retirement_batch(vec![retirement.retirement_target()])
+        {
+            StoreRuntimeRetirementResult::Blocked(blockers) => {
+                assert!(matches!(
+                    blockers.as_slice(),
+                    [StoreRuntimeRetirementBlocker::ClientLeases { binding, count }]
+                        if binding.as_ref() == retirement.binding() && *count == 1
+                ));
+            }
+            StoreRuntimeRetirementResult::Reserved(_) => {
+                panic!("foreign registered database lease must refuse retirement")
+            }
+        }
+
+        drop(foreign);
+
+        let mut reservation = match retirement
+            .registry()
+            .reserve_retirement_batch(vec![retirement.retirement_target()])
+        {
+            StoreRuntimeRetirementResult::Reserved(reservation) => reservation,
+            StoreRuntimeRetirementResult::Blocked(blockers) => {
+                panic!("dropped registered database lease must permit retirement: {blockers:?}")
+            }
+        };
+        let committed = reservation
+            .commit()
+            .expect("retire released registered runtime");
+        assert!(matches!(
+            committed.outcomes(),
+            [StoreRuntimeRetirementOutcome::Closed { target }]
+                if target.binding() == retirement.binding()
+        ));
+
+        let reopened = retirement
+            .reopen()
+            .await
+            .expect("reopen retired registered runtime");
+        assert_eq!(reopened.binding(), retirement.binding());
+        assert_eq!(reopened.locator().verified(), retirement.locator());
     }
 
     #[derive(Default)]

@@ -39,7 +39,10 @@ pub use connection::{
     ProjectMemoryReconciliationTelemetryObserverV1, ProjectMemoryReconciliationTelemetrySnapshotV1,
 };
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-pub use connection::{TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
+pub use connection::{
+    RegisteredTestRuntimeFixtureV1, RegisteredTestRuntimeRetirementControlV1,
+    TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+};
 pub use external_source::install_external_source_schema;
 pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
 pub use memory_connection::MemoryConnection;

@@ -89,8 +89,8 @@ pub(super) async fn open_project_for_handshake(
         project_path,
         open_options.clone(),
         store_layout.clone(),
-        Arc::clone(&configuration_database),
-        Arc::clone(&registry_database),
+        configuration_database.clone(),
+        registry_database.clone(),
         Arc::clone(&runtime_registry),
     )
     .await;

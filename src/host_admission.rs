@@ -177,7 +177,7 @@ impl HostAdmissionTestRuntimeV1 {
             profile_id: self.profile_id.clone(),
             profile_root: self.profile_root.clone(),
             project_id: Some(project_id),
-            profile_database: Arc::clone(&self.profile_database),
+            profile_database: self.profile_database.clone(),
             profile_registered: self.profile_registered.clone(),
             project_registered: Some(registered),
             session_registry: Arc::clone(&self.session_registry),
@@ -834,13 +834,13 @@ impl HostAdmissionTestRuntimeV1 {
                     operation: "bind MCP test project sessions".to_owned(),
                     message: "registered ProjectSessions mount is unavailable".to_owned(),
                 })?;
-        let profile_database = Arc::clone(&self.profile_database);
+        let profile_database = self.profile_database.clone();
         let profile_sessions = self.profile_registered.clone();
         let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
         let mut context =
             crate::mcp::server::McpServerConstructionContext::direct(cg, scope_prefix)
                 .with_direct_databases(
-                    Some(Arc::clone(&profile_database)),
+                    Some(profile_database.clone()),
                     Some(profile_database),
                     Some(project_sessions),
                     Some(profile_sessions),
@@ -975,7 +975,7 @@ impl HostAdmissionTestRuntimeV1 {
             open_options,
             store_layout,
             project_database,
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             Arc::clone(&self.session_registry),
         )
         .await
@@ -996,7 +996,7 @@ impl HostAdmissionTestRuntimeV1 {
             open_options,
             store_layout,
             project_database,
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             Arc::clone(&self.session_registry),
         )
         .await
@@ -1040,7 +1040,7 @@ impl HostAdmissionTestRuntimeV1 {
             open_options,
             store_layout,
             project_database,
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             Arc::clone(&self.session_registry),
         )
         .await
@@ -1061,7 +1061,7 @@ impl HostAdmissionTestRuntimeV1 {
             open_options,
             store_layout,
             project_database,
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             Arc::clone(&self.session_registry),
         )
         .await
