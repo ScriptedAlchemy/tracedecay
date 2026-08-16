@@ -219,6 +219,7 @@ mod tests {
                     limbo_health: 0,
                     waiting_general: 0,
                     waiting_health: 0,
+                    snapshot_admissions: 0,
                 },
                 true,
             )
