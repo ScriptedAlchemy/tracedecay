@@ -52,24 +52,13 @@ impl StoreRuntimeRegistry {
         let selected = {
             let state = self.lock_state();
             let mut selected = state.entries.values().filter_map(|entry| match entry {
-                RegistryEntry::Ready(ready) if ready.owner.locator().path() == path => ready
-                    .owner
-                    .database_authority
-                    .as_ref()
-                    .and_then(|authority| {
-                        ready
-                            .owner
-                            .validate_database_write_authority(
-                                authority,
-                                "close registered runtime by path",
-                            )
-                            .ok()
-                            .map(|_| (ready.owner.binding().clone(), authority.clone()))
-                    }),
+                RegistryEntry::Ready(ready) if ready.owner.locator().path() == path => Some(ready),
                 _ => None,
             });
-            let first = selected.next();
-            if first.is_some() && selected.next().is_some() {
+            let Some(ready) = selected.next() else {
+                return Ok(None);
+            };
+            if selected.next().is_some() {
                 return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "select exact registered runtime close",
                     message: format!(
@@ -78,12 +67,17 @@ impl StoreRuntimeRegistry {
                     ),
                 });
             }
-            first
+            (ready.owner.binding().clone(), Arc::clone(&ready.owner))
         };
-        let Some((binding, authority)) = selected else {
-            return Ok(None);
-        };
-        self.close_exact(&binding, &authority).await.map(Some)
+        let (binding, owner) = selected;
+        let authority = owner.database_authority.as_ref().ok_or_else(|| {
+            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "close registered runtime by path",
+                message: "registered runtime has no originating database authority".to_owned(),
+            }
+        })?;
+        owner.validate_database_write_authority(authority, "close registered runtime by path")?;
+        self.close_exact(&binding, authority).await.map(Some)
     }
 
     /// Closes one exact runtime for an exclusive maintenance handoff.
@@ -565,6 +559,96 @@ mod tests {
             acquired_at: UtcMicros(now.0.saturating_sub(1_000_000)),
             expires_at: UtcMicros(now.0.saturating_add(60_000_000)),
         }
+    }
+
+    #[tokio::test]
+    async fn close_path_rejects_single_runtime_without_retained_authority() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, _authority) = mount_code_runtime(path).await;
+        let profile_path = profile.canonical_path().to_path_buf();
+
+        assert!(matches!(
+            registry.close_path(&profile_path).await,
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "close registered runtime by path",
+                message,
+            }) if message == "registered runtime has no originating database authority"
+        ));
+        assert!(matches!(
+            registry.lookup(profile.binding()),
+            StoreRuntimeLookup::Ready(_)
+        ));
+
+        drop(code);
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn close_path_detects_duplicate_path_before_authority_validation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let path = seed_final_graph_db(path).await;
+        let authority =
+            DatabaseAuthority::for_runtime(&path, "mount duplicate-path code runtime").unwrap();
+        let registry = StoreRuntimeRegistry::new(
+            Arc::new(FixtureResolver {
+                profile_path: path.clone(),
+            }),
+            Arc::new(LifecycleShardRuntimePublisher),
+        );
+        let incarnation = StoreIncarnationV1::new(1).unwrap();
+        let profile = match registry
+            .open(StoreRuntimeOpenRequest::new_read_only(
+                profile_shard(),
+                incarnation,
+                None,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("profile publication failed: {failure:?}")
+            }
+        };
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let code = match registry
+            .open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                incarnation,
+                Some(pin),
+                authority,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("code publication failed: {failure:?}")
+            }
+        };
+        let shared_path = code.canonical_path().to_path_buf();
+
+        assert!(matches!(
+            registry.close_path(&shared_path).await,
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "select exact registered runtime close",
+                message,
+            }) if message.contains("multiple registered runtimes")
+        ));
+        assert!(matches!(
+            registry.lookup(profile.binding()),
+            StoreRuntimeLookup::Ready(_)
+        ));
+        assert!(matches!(
+            registry.lookup(code.binding()),
+            StoreRuntimeLookup::Ready(_)
+        ));
+
+        drop(code);
+        drop(profile);
     }
 
     #[tokio::test]
