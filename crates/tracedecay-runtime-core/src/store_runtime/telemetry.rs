@@ -479,6 +479,7 @@ mod tests {
             watcher_leases: 1,
             scheduler_leases: 1,
             client_leases: 1,
+            operation_leases: 0,
             wal_bytes: 8_192,
             memory_estimate_bytes: 16_384,
             idle_for: Duration::from_mins(1),

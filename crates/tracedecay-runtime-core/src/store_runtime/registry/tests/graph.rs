@@ -192,13 +192,14 @@ async fn graph_lease_drop_is_counted_and_epoch_compare_and_swap_safe() {
     let stale = peer.binding().clone();
     let stale_locator = peer.verified_locator().clone();
     let stale_path = peer.canonical_path().to_path_buf();
+    let stale_lease_token = registry.lock_state().next_graph_lease_token;
     drop(peer);
     assert_eq!(registry.retained_graph_publications_for_test(), 0);
 
     let replacement = registry.retain_graph_store(key).await.unwrap();
     assert!(replacement.binding().authority_epoch > stale.authority_epoch);
     let replacement_epoch = replacement.binding().authority_epoch;
-    assert!(!registry.release_graph_store(&stale, &stale_locator, &stale_path));
+    assert!(!registry.release_graph_store(&stale, &stale_locator, &stale_path, stale_lease_token,));
     assert_eq!(registry.retained_graph_publications_for_test(), 1);
     assert_eq!(replacement.binding().authority_epoch, replacement_epoch);
 

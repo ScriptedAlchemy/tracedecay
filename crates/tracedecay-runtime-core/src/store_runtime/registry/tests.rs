@@ -268,7 +268,7 @@ fn cancelled_open_task_wakes_every_joiner_and_allows_retry() {
 #[tokio::test]
 async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
     let config = StoreRuntimeRegistryConfig::new(2).unwrap();
-    let (registry, _, publisher) = registry(config);
+    let (registry, _, _publisher) = registry(config);
     let pin = profile_pin(&registry).await;
     let held = open_published(&registry, code_request("worktree.held", &pin)).await;
     let leased = open_published(&registry, code_request("worktree.leased", &pin)).await;
