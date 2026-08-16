@@ -222,7 +222,7 @@ impl StoreRuntimeLeaseSource {
 /// The registry's non-cloneable physical attachment. Callers receive only
 /// `StoreRuntimeClientLease`; the registry retains this owner for the full
 /// publication lifetime.
-pub(crate) struct StoreRuntimeOwnerAttachment {
+struct StoreRuntimeOwnerAttachment {
     source: Arc<StoreRuntimeLeaseSource>,
 }
 
@@ -430,7 +430,7 @@ impl StoreRuntimeClientLease {
 
     /// Verified locator this attachment was published against.
     pub fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
-        self.locator().verified()
+        self.inner.source.verified_locator()
     }
 
     /// Whether the physical attachment currently holds a writer.
