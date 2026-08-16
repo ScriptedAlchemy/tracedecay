@@ -1330,14 +1330,16 @@ mod tests {
             "/opt/tracedecay-v1"
         );
 
-        let current = cursor_component_set("/opt/tracedecay-v2");
+        let current_bin =
+            super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let current = cursor_component_set(&current_bin);
         let update = cursor_component_request(HostBundleLifecycleOpV1::Update, [62; 16], true);
         let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
             "cursor",
             home.path(),
             lifecycle.path(),
             update.lifecycle.operation,
-            "/opt/tracedecay-v2".to_string(),
+            current_bin.clone(),
         )
         .unwrap();
         let update_receipt = HostComponentSetTransactionV1::new(&mut writer)
@@ -1349,7 +1351,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
         assert_eq!(
             updated_mcp["mcpServers"]["tracedecay"]["command"],
-            "/opt/tracedecay-v2"
+            current_bin
         );
         let updated_bytes = std::fs::read(&mcp_path).unwrap();
 
@@ -1358,7 +1360,7 @@ mod tests {
             home.path(),
             lifecycle.path(),
             update.lifecycle.operation,
-            "/opt/tracedecay-v2".to_string(),
+            current_bin.clone(),
         )
         .unwrap();
         let repeated_receipt = HostComponentSetTransactionV1::new(&mut writer)
@@ -1414,13 +1416,37 @@ mod tests {
         .expect("Doctor must inspect the transaction receipts through production registration");
         assert_eq!(
             report.components.len(),
-            current.component_set.components.len()
+            current.component_set.components.len(),
+            "Doctor must report exactly the Cursor Desktop component set: {report:#?}"
         );
-        assert!(report.components.iter().all(|component| {
-            component.host == Some(HostKindV1::CursorDesktop)
-                && component.state == HostBundleComponentDoctorStateV1::Current
-                && component.registration == Some(HostBundleRegistrationStateV1::Current)
-        }));
+        for expected_component in [
+            HostBundleComponentV1::Core,
+            HostBundleComponentV1::Agent,
+            HostBundleComponentV1::ContextMcp,
+        ] {
+            let component = report
+                .components
+                .iter()
+                .find(|component| component.component == Some(expected_component))
+                .unwrap_or_else(|| {
+                    panic!("Doctor omitted Cursor Desktop {expected_component:?}: {report:#?}")
+                });
+            assert_eq!(
+                component.host,
+                Some(HostKindV1::CursorDesktop),
+                "unexpected Doctor host for {expected_component:?}: {component:#?}; full report: {report:#?}"
+            );
+            assert_eq!(
+                component.state,
+                HostBundleComponentDoctorStateV1::Current,
+                "unexpected Doctor state for {expected_component:?}: {component:#?}; full report: {report:#?}"
+            );
+            assert_eq!(
+                component.registration,
+                Some(HostBundleRegistrationStateV1::Current),
+                "unexpected registration state for {expected_component:?}: {component:#?}; full report: {report:#?}"
+            );
+        }
         assert_eq!(std::fs::read(&user_config).unwrap(), user_config_bytes);
 
         assert_eq!(
