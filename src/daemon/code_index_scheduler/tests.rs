@@ -46,7 +46,7 @@ use tracedecay_usecases::semantic_runtime::{
     SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
 };
 
-use super::registry::ColdMountOpenEventV1;
+use super::registry::{ColdMountOpenEventV1, ServingGenerationRollbackOutcomeV1};
 use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
     CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1,
@@ -2712,6 +2712,61 @@ async fn serving_arms_still_refuse_a_different_worktree_identity() {
             .await
             .is_none(),
         "the callable-code ladder refuses a different worktree identity too"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn exact_serving_generation_rollback_preserves_a_newer_generation() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, _scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let original = registry
+        .latest_generation_id(fixture.path())
+        .await
+        .expect("initial retained generation");
+
+    fixture.edit(
+        "src/main.rs",
+        "fn main() { refreshed(); }\nfn refreshed() {}\n",
+    );
+    git(fixture.path(), &["add", "src/main.rs"]);
+    git(
+        fixture.path(),
+        &["commit", "-qm", "refresh retained generation"],
+    );
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
+            .await,
+        "the mounted worktree must accept a refresh hint"
+    );
+    let newer = wait_for_generation_change(&registry, fixture.path(), &original).await;
+
+    assert_eq!(
+        registry
+            .retire_serving_generation_if_exact(fixture.path(), &original)
+            .await,
+        ServingGenerationRollbackOutcomeV1::NoMatch,
+        "a stale rollback must not clear the newer retained generation"
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(newer.clone())
+    );
+    assert_eq!(
+        registry
+            .retire_serving_generation_if_exact(fixture.path(), &newer)
+            .await,
+        ServingGenerationRollbackOutcomeV1::Cleared
+    );
+    assert!(
+        registry
+            .latest_generation_id(fixture.path())
+            .await
+            .is_none(),
+        "the exact failed generation must be retired"
     );
 
     registry.shutdown().await;

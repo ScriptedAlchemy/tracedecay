@@ -221,6 +221,14 @@ pub(in crate::daemon) struct CodeIndexServingScopeV1 {
     pub(in crate::daemon) serving_generation: Option<Arc<CodeIndexPublishedGenerationV1>>,
 }
 
+/// Outcome of retiring the retained generation from a failed branch
+/// publication. A no-match preserves a newer generation that won the race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::daemon) enum ServingGenerationRollbackOutcomeV1 {
+    Cleared,
+    NoMatch,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CodeIndexGenerationPublishedV1 {
     pub project_root: PathBuf,
@@ -1191,6 +1199,38 @@ impl CodeIndexSchedulerRegistryV1 {
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             }
         }
+    }
+
+    /// Retire one retained generation only when it is still the exact
+    /// generation installed by the caller. This is the serving-generation CAS
+    /// companion to branch metadata rollback: it must never clear a newer or
+    /// foreign generation that replaced the failed publication.
+    pub(in crate::daemon) async fn retire_serving_generation_if_exact(
+        &self,
+        project_root: &Path,
+        expected: &CodeGenerationId,
+    ) -> ServingGenerationRollbackOutcomeV1 {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return ServingGenerationRollbackOutcomeV1::NoMatch;
+        };
+        let serving_generation = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return ServingGenerationRollbackOutcomeV1::NoMatch;
+            };
+            Arc::clone(&worktree.serving_generation)
+        };
+        let mut serving = serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if serving
+            .as_ref()
+            .is_none_or(|current| current.generation().manifest().generation_id != *expected)
+        {
+            return ServingGenerationRollbackOutcomeV1::NoMatch;
+        }
+        *serving = None;
+        ServingGenerationRollbackOutcomeV1::Cleared
     }
 
     fn pack_trigger(trigger: CodeIndexCadenceTriggerV1) -> u64 {

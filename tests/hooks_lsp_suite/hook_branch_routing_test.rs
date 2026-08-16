@@ -199,6 +199,57 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         "a refreshed commit must receive a newer publication epoch"
     );
 
+    // Branch-name equality alone is never an idempotence proof. A persisted
+    // source with another worktree/ref/OID must be replaced by the exact
+    // provenance captured for this mounted worktree.
+    let mut mismatched_meta = tracedecay::branch_meta::load_branch_meta(&shard_root)
+        .expect("refreshed branch metadata must remain readable");
+    let mismatched = mismatched_meta
+        .branches
+        .get_mut("feature/hook")
+        .and_then(|entry| entry.graph_source.as_mut())
+        .expect("refreshed branch must have source provenance");
+    mismatched.project_id = "project.foreign".to_owned();
+    mismatched.repository_id = "repository.foreign".to_owned();
+    mismatched.worktree_id = "worktree.foreign".to_owned();
+    mismatched.worktree_root = "/fixture/foreign".to_owned();
+    mismatched.reference = "refs/heads/foreign".to_owned();
+    mismatched.source_oid = "f".repeat(40);
+    tracedecay::branch_meta::save_branch_meta(&shard_root, &mismatched_meta).unwrap();
+
+    let repaired = harness
+        .track_worktree_branch(&project, &project, "feature/hook")
+        .await
+        .unwrap();
+    assert_eq!(
+        repaired,
+        tracedecay::branch::BranchAddOutcome::Added,
+        "foreign source provenance must not pass branch-name idempotence"
+    );
+    let repaired_source = tracedecay::branch_meta::load_branch_meta(&shard_root)
+        .expect("repaired branch metadata must be published")
+        .branches
+        .get("feature/hook")
+        .and_then(|entry| entry.graph_source.as_ref())
+        .cloned()
+        .expect("repaired branch must restore exact provenance");
+    assert_eq!(repaired_source.project_id, refreshed_source.project_id);
+    assert_eq!(
+        repaired_source.repository_id,
+        refreshed_source.repository_id
+    );
+    assert_eq!(repaired_source.worktree_id, refreshed_source.worktree_id);
+    assert_eq!(
+        repaired_source.worktree_root,
+        refreshed_source.worktree_root
+    );
+    assert_eq!(repaired_source.reference, refreshed_source.reference);
+    assert_eq!(repaired_source.source_oid, refreshed_source.source_oid);
+    assert!(
+        repaired_source.publication_epoch.get() > refreshed_source.publication_epoch.get(),
+        "restoring foreign provenance must advance the publisher epoch"
+    );
+
     // A write on a second branch rolls the store to a newer generation under
     // the new ref; the first branch keeps its sealed provenance record.
     git(&project, &["checkout", "-b", "feature/second"]);
@@ -217,10 +268,10 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .expect("second branch sync must seal its own generation");
     assert_eq!(second.reference, "refs/heads/feature/second");
     assert!(
-        second.publication_epoch.get() > refreshed_source.publication_epoch.get(),
+        second.publication_epoch.get() > repaired_source.publication_epoch.get(),
         "a later branch write must land in a newer publication epoch \
-         (refreshed {}, second {})",
-        refreshed_source.publication_epoch.get(),
+         (repaired {}, second {})",
+        repaired_source.publication_epoch.get(),
         second.publication_epoch.get()
     );
     let first = meta
@@ -230,7 +281,7 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .expect("first branch must keep its sealed provenance");
     assert_eq!(
         first.publication_epoch.get(),
-        refreshed_source.publication_epoch.get()
+        repaired_source.publication_epoch.get()
     );
     assert!(
         !shard_root.join("branches").exists(),
