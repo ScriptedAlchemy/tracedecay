@@ -194,7 +194,7 @@ fn sessions_request(project: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpe
     )
 }
 
-async fn assert_health_route(handle: &StoreRuntimeHandle, writer_expected: bool) {
+async fn assert_health_route(handle: &StoreRuntimeClientLease, writer_expected: bool) {
     assert!(
         !matches!(
             handle.binding().shard_id.scope,

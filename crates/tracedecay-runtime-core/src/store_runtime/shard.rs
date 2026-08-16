@@ -33,6 +33,7 @@ pub enum ShardRuntimeResource {
     Watcher,
     Scheduler,
     Client,
+    Operation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,6 +121,7 @@ pub struct ShardRuntimeHealthSnapshot {
     pub watcher_leases: u32,
     pub scheduler_leases: u32,
     pub client_leases: u32,
+    pub operation_leases: u32,
     pub wal_bytes: u64,
     pub memory_estimate_bytes: u64,
     pub idle_for: Duration,
@@ -153,6 +155,9 @@ pub enum ShardRuntimeEvictionBlocker {
         count: u32,
     },
     ClientLeases {
+        count: u32,
+    },
+    OperationLeases {
         count: u32,
     },
     NotIdle {
@@ -205,6 +210,9 @@ struct ShardRuntimeState {
     watcher_leases: u32,
     scheduler_leases: u32,
     client_leases: u32,
+    client_lifetime_leases: BTreeMap<u64, ()>,
+    operation_lifetime_leases: BTreeMap<u64, ()>,
+    next_lifetime_lease_token: u64,
     runtime_leases: BTreeMap<RuntimeLeaseIdV1, RuntimeLeaseV1>,
     wal_bytes: u64,
     memory_estimate_bytes: u64,
@@ -231,6 +239,9 @@ impl ShardRuntime {
                 watcher_leases: 0,
                 scheduler_leases: 0,
                 client_leases: 0,
+                client_lifetime_leases: BTreeMap::new(),
+                operation_lifetime_leases: BTreeMap::new(),
+                next_lifetime_lease_token: 0,
                 runtime_leases: BTreeMap::new(),
                 wal_bytes: 0,
                 memory_estimate_bytes: 0,
@@ -446,6 +457,61 @@ impl ShardRuntime {
         })
     }
 
+    /// Registers one client lifetime token. Clones share this token and only
+    /// its final drop releases the canonical counter.
+    pub(crate) fn issue_client_lifetime_lease(
+        runtime: std::sync::Arc<Self>,
+    ) -> Result<ShardRuntimeClientLifetimeLease, ShardRuntimeError> {
+        let token = runtime.register_lifetime_lease(ShardRuntimeResource::Client)?;
+        Ok(ShardRuntimeClientLifetimeLease {
+            inner: std::sync::Arc::new(ShardRuntimeLifetimeLeaseToken {
+                runtime,
+                token,
+                resource: ShardRuntimeResource::Client,
+            }),
+        })
+    }
+
+    fn issue_operation_lifetime_lease(
+        runtime: std::sync::Arc<Self>,
+    ) -> Result<ShardRuntimeOperationLifetimeLease, ShardRuntimeError> {
+        let token = runtime.register_lifetime_lease(ShardRuntimeResource::Operation)?;
+        Ok(ShardRuntimeOperationLifetimeLease {
+            inner: std::sync::Arc::new(ShardRuntimeLifetimeLeaseToken {
+                runtime,
+                token,
+                resource: ShardRuntimeResource::Operation,
+            }),
+        })
+    }
+
+    fn register_lifetime_lease(
+        &self,
+        resource: ShardRuntimeResource,
+    ) -> Result<u64, ShardRuntimeError> {
+        let mut state = self.lock_state();
+        state.require_ready(resource)?;
+        let token = state.next_lifetime_lease_token.checked_add(1).ok_or(
+            ShardRuntimeError::CounterOverflow {
+                counter: "runtime lifetime lease tokens",
+            },
+        )?;
+        state.next_lifetime_lease_token = token;
+        let tokens = match resource {
+            ShardRuntimeResource::Client => &mut state.client_lifetime_leases,
+            ShardRuntimeResource::Operation => &mut state.operation_lifetime_leases,
+            _ => {
+                return Err(ShardRuntimeError::ResourceUnavailable {
+                    resource,
+                    state: state.maintenance_state,
+                });
+            }
+        };
+        tokens.insert(token, ());
+        state.touch();
+        Ok(token)
+    }
+
     #[cfg(test)]
     pub(crate) fn queue_work(
         &self,
@@ -484,6 +550,22 @@ impl ShardRuntime {
         state.touch();
     }
 
+    fn release_lifetime_lease(&self, resource: ShardRuntimeResource, token: u64) {
+        let mut state = self.lock_state();
+        let released = match resource {
+            ShardRuntimeResource::Client => state.client_lifetime_leases.remove(&token).is_some(),
+            ShardRuntimeResource::Operation => {
+                state.operation_lifetime_leases.remove(&token).is_some()
+            }
+            _ => false,
+        };
+        if released {
+            state.touch();
+        } else {
+            debug_assert!(false, "lifetime token may only release once");
+        }
+    }
+
     #[cfg(test)]
     fn release_queued_work(&self, operations: u32, bytes: u64) {
         let mut state = self.lock_state();
@@ -505,6 +587,7 @@ impl ShardRuntimeState {
 
     fn active_client_leases(&self) -> u32 {
         self.client_leases
+            .saturating_add(u32::try_from(self.client_lifetime_leases.len()).unwrap_or(u32::MAX))
             .saturating_add(u32::try_from(self.runtime_leases.len()).unwrap_or(u32::MAX))
     }
 
@@ -518,6 +601,7 @@ impl ShardRuntimeState {
             && self.watcher_leases == 0
             && self.scheduler_leases == 0
             && self.active_client_leases() == 0
+            && self.operation_lifetime_leases.is_empty()
     }
 
     fn require_ready(&self, resource: ShardRuntimeResource) -> Result<(), ShardRuntimeError> {
@@ -554,6 +638,8 @@ impl ShardRuntimeState {
             watcher_leases: self.watcher_leases,
             scheduler_leases: self.scheduler_leases,
             client_leases: self.active_client_leases(),
+            operation_leases: u32::try_from(self.operation_lifetime_leases.len())
+                .unwrap_or(u32::MAX),
             wal_bytes: self.wal_bytes,
             memory_estimate_bytes: self.memory_estimate_bytes,
             idle_for: now.saturating_duration_since(self.last_activity),
@@ -620,6 +706,12 @@ impl ShardRuntimeState {
                 self.active_client_leases(),
                 ShardRuntimeEvictionBlocker::ClientLeases {
                     count: self.active_client_leases(),
+                },
+            ),
+            (
+                u32::try_from(self.operation_lifetime_leases.len()).unwrap_or(u32::MAX),
+                ShardRuntimeEvictionBlocker::OperationLeases {
+                    count: u32::try_from(self.operation_lifetime_leases.len()).unwrap_or(u32::MAX),
                 },
             ),
         ] {
@@ -736,6 +828,57 @@ impl Drop for ShardRuntimeLease<'_> {
         if let Some(kind) = self.kind.take() {
             self.runtime.release_lease(kind);
         }
+    }
+}
+
+struct ShardRuntimeLifetimeLeaseToken {
+    runtime: std::sync::Arc<ShardRuntime>,
+    token: u64,
+    resource: ShardRuntimeResource,
+}
+
+impl Drop for ShardRuntimeLifetimeLeaseToken {
+    fn drop(&mut self) {
+        self.runtime
+            .release_lifetime_lease(self.resource, self.token);
+    }
+}
+
+/// Cloneable client capability with a single shared registered token.
+#[derive(Clone)]
+pub(crate) struct ShardRuntimeClientLifetimeLease {
+    inner: std::sync::Arc<ShardRuntimeLifetimeLeaseToken>,
+}
+
+impl ShardRuntimeClientLifetimeLease {
+    pub(crate) fn begin_operation(
+        &self,
+    ) -> Result<ShardRuntimeOperationLifetimeLease, ShardRuntimeError> {
+        ShardRuntime::issue_operation_lifetime_lease(std::sync::Arc::clone(&self.inner.runtime))
+    }
+}
+
+impl std::fmt::Debug for ShardRuntimeClientLifetimeLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShardRuntimeClientLifetimeLease")
+            .field("token", &self.inner.token)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Cloneable operation capability with a single shared registered token.
+#[derive(Clone)]
+pub(crate) struct ShardRuntimeOperationLifetimeLease {
+    inner: std::sync::Arc<ShardRuntimeLifetimeLeaseToken>,
+}
+
+impl std::fmt::Debug for ShardRuntimeOperationLifetimeLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShardRuntimeOperationLifetimeLease")
+            .field("token", &self.inner.token)
+            .finish_non_exhaustive()
     }
 }
 
@@ -1028,5 +1171,31 @@ mod tests {
         assert_eq!(observation.health.health, ShardRuntimeHealth::Degraded);
         assert!(observation.eviction.is_eligible());
         assert_eq!(observation.eviction.idle_for, observation.health.idle_for);
+    }
+
+    #[test]
+    fn independently_issued_lifetime_leases_count_by_token_and_clone_releases_last() {
+        let runtime = std::sync::Arc::new(drive_to(Ready));
+        let first = ShardRuntime::issue_client_lifetime_lease(runtime.clone()).unwrap();
+        let first_clone = first.clone();
+        let second = ShardRuntime::issue_client_lifetime_lease(runtime.clone()).unwrap();
+
+        assert_eq!(runtime.health_snapshot().client_leases, 2);
+        drop(first);
+        assert_eq!(runtime.health_snapshot().client_leases, 2);
+        drop(first_clone);
+        assert_eq!(runtime.health_snapshot().client_leases, 1);
+        drop(second);
+        assert_eq!(runtime.health_snapshot().client_leases, 0);
+    }
+
+    #[test]
+    fn client_operations_are_independent_retirement_blockers() {
+        let runtime = std::sync::Arc::new(drive_to(Ready));
+        let client = ShardRuntime::issue_client_lifetime_lease(runtime.clone()).unwrap();
+        let operation = client.begin_operation().unwrap();
+        assert_eq!(runtime.health_snapshot().operation_leases, 1);
+        drop(operation);
+        assert_eq!(runtime.health_snapshot().operation_leases, 0);
     }
 }

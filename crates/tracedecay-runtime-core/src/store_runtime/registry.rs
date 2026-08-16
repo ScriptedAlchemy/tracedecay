@@ -23,7 +23,7 @@ mod ports;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -97,17 +97,121 @@ impl StoreRuntimeKey {
 }
 
 #[derive(Clone)]
-pub struct StoreRuntimeHandle {
-    inner: Arc<StoreRuntimeHandleInner>,
+pub struct StoreRuntimeClientLease {
+    inner: Arc<StoreRuntimeClientLeaseToken>,
 }
 
-struct StoreRuntimeHandleInner {
+struct StoreRuntimeClientLeaseToken {
+    source: Arc<StoreRuntimeLeaseSource>,
+    _lifetime: super::shard::ShardRuntimeClientLifetimeLease,
+}
+
+/// One cloneable in-flight operation token issued beneath a client lease.
+#[derive(Clone, Debug)]
+pub struct StoreRuntimeOperationLease {
+    _lifetime: super::shard::ShardRuntimeOperationLifetimeLease,
+}
+
+impl std::ops::Deref for StoreRuntimeClientLeaseToken {
+    type Target = StoreRuntimeLeaseSource;
+
+    fn deref(&self) -> &Self::Target {
+        &self.source
+    }
+}
+
+struct StoreRuntimeLeaseSource {
     publication: StoreRuntimeRegistryPublicationV1,
     runtime: Arc<ShardRuntime>,
     attachment: Arc<dyn PhysicalRuntimeAttachment>,
     locator: RuntimeLocatorRecord,
     opened_file_identity: u64,
     database_authority: Option<crate::db::DatabaseAuthority>,
+}
+
+/// The registry's non-cloneable physical attachment. Callers receive only
+/// `StoreRuntimeClientLease`; the registry retains this owner for the full
+/// publication lifetime.
+pub(crate) struct StoreRuntimeOwnerAttachment {
+    source: Arc<StoreRuntimeLeaseSource>,
+}
+
+/// Unique database-facade attachment. Cloning a `Database` shares its
+/// `DatabaseInner` and therefore this one attachment; a separately published
+/// facade must consume an independently issued client lease.
+pub(crate) struct DatabaseRuntimeAttachment {
+    client: StoreRuntimeClientLease,
+}
+
+impl StoreRuntimeOwnerAttachment {
+    fn issue_client_lease(&self) -> Result<StoreRuntimeClientLease, StoreRuntimeRegistryFailure> {
+        let lifetime = ShardRuntime::issue_client_lifetime_lease(Arc::clone(&self.source.runtime))
+            .map_err(|error| StoreRuntimeRegistryFailure::LeaseRejected {
+                message: error.to_string(),
+            })?;
+        Ok(StoreRuntimeClientLease {
+            inner: Arc::new(StoreRuntimeClientLeaseToken {
+                source: Arc::clone(&self.source),
+                _lifetime: lifetime,
+            }),
+        })
+    }
+}
+
+impl StoreRuntimeClientLease {
+    pub fn begin_operation(
+        &self,
+    ) -> Result<StoreRuntimeOperationLease, StoreRuntimeRegistryFailure> {
+        self.inner
+            ._lifetime
+            .begin_operation()
+            .map(|_lifetime| StoreRuntimeOperationLease { _lifetime })
+            .map_err(|error| StoreRuntimeRegistryFailure::LeaseRejected {
+                message: error.to_string(),
+            })
+    }
+
+    pub fn health_snapshot(&self) -> super::shard::ShardRuntimeHealthSnapshot {
+        self.inner.runtime.health_snapshot()
+    }
+
+    pub(crate) fn into_database_attachment(self) -> DatabaseRuntimeAttachment {
+        DatabaseRuntimeAttachment { client: self }
+    }
+}
+
+impl DatabaseRuntimeAttachment {
+    pub(crate) fn issue_client_lease(
+        &self,
+    ) -> Result<StoreRuntimeClientLease, StoreRuntimeRegistryFailure> {
+        let lifetime =
+            ShardRuntime::issue_client_lifetime_lease(Arc::clone(&self.client.inner.runtime))
+                .map_err(|error| StoreRuntimeRegistryFailure::LeaseRejected {
+                    message: error.to_string(),
+                })?;
+        Ok(StoreRuntimeClientLease {
+            inner: Arc::new(StoreRuntimeClientLeaseToken {
+                source: Arc::clone(&self.client.inner.source),
+                _lifetime: lifetime,
+            }),
+        })
+    }
+}
+
+impl std::ops::Deref for DatabaseRuntimeAttachment {
+    type Target = StoreRuntimeClientLease;
+
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
+impl std::ops::Deref for StoreRuntimeOwnerAttachment {
+    type Target = StoreRuntimeLeaseSource;
+
+    fn deref(&self) -> &Self::Target {
+        &self.source
+    }
 }
 
 struct RuntimeDatabaseWriteAuthority {
@@ -194,7 +298,7 @@ impl tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority
     }
 }
 
-impl StoreRuntimeHandle {
+impl StoreRuntimeClientLease {
     pub fn publication(&self) -> &StoreRuntimeRegistryPublicationV1 {
         &self.inner.publication
     }
@@ -203,7 +307,7 @@ impl StoreRuntimeHandle {
         &self.inner.publication.binding
     }
 
-    pub fn runtime(&self) -> &Arc<ShardRuntime> {
+    pub(crate) fn runtime(&self) -> &ShardRuntime {
         &self.inner.runtime
     }
 
@@ -560,13 +664,9 @@ impl StoreRuntimeHandle {
         self.validate_opened_file_identity("authorize registered runtime read")?;
         self.inner.attachment.dispatch_read(request, probe)
     }
-
-    fn is_exclusively_held_by_registry(&self) -> bool {
-        Arc::strong_count(&self.inner) == 1
-    }
 }
 
-impl tracedecay_store::StorageRuntimeReadPort for StoreRuntimeHandle {
+impl tracedecay_store::StorageRuntimeReadPort for StoreRuntimeClientLease {
     fn dispatch_read<'a>(
         &'a self,
         request: tracedecay_store::RuntimeReadRequestV1,
@@ -574,7 +674,7 @@ impl tracedecay_store::StorageRuntimeReadPort for StoreRuntimeHandle {
     ) -> tracedecay_store::StorageRuntimePortFutureV1<'a, tracedecay_store::RuntimeReadOutcomeV1>
     {
         Box::pin(async move {
-            StoreRuntimeHandle::dispatch_read(self, request, probe).map_err(|_| {
+            StoreRuntimeClientLease::dispatch_read(self, request, probe).map_err(|_| {
                 tracedecay_store::StorageRuntimeErrorV1::Infrastructure {
                     operation: "dispatch registered runtime read".to_owned(),
                 }
@@ -584,10 +684,10 @@ impl tracedecay_store::StorageRuntimeReadPort for StoreRuntimeHandle {
     }
 }
 
-impl fmt::Debug for StoreRuntimeHandle {
+impl fmt::Debug for StoreRuntimeClientLease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("StoreRuntimeHandle")
+            .debug_struct("StoreRuntimeClientLease")
             .field("publication", &self.inner.publication)
             .field("locator_key", self.inner.locator.key())
             .finish_non_exhaustive()
@@ -636,6 +736,9 @@ pub enum StoreRuntimeRegistryFailure {
     PublicationIdExhausted,
     GraphLeaseCountExhausted {
         binding: Box<StoreRuntimeBindingV1>,
+    },
+    GraphLeaseTokenExhausted {
+        key: Box<StoreRuntimeKey>,
     },
     GraphLocatorConflict {
         key: Box<StoreRuntimeKey>,
@@ -715,7 +818,7 @@ pub enum StoreRuntimeRegistryFailure {
 
 #[derive(Clone, Debug)]
 pub enum StoreRuntimeLookup {
-    Ready(StoreRuntimeHandle),
+    Ready(StoreRuntimeClientLease),
     Opening {
         key: Box<StoreRuntimeKey>,
     },
@@ -736,12 +839,12 @@ pub enum StoreRuntimeLookup {
 }
 
 struct ReadyRuntime {
-    handle: StoreRuntimeHandle,
+    owner: Arc<StoreRuntimeOwnerAttachment>,
 }
 
 struct EvictingRuntime {
     attempt: u64,
-    handle: StoreRuntimeHandle,
+    owner: Arc<StoreRuntimeOwnerAttachment>,
 }
 
 struct DestructivePathReservation {
@@ -754,7 +857,10 @@ struct RetainedGraphPublication {
     binding: StoreRuntimeBindingV1,
     verified_locator: VerifiedStoreLocatorV1,
     canonical_path: PathBuf,
-    leases: usize,
+    /// One entry per independently issued graph lease. Clones share the
+    /// returned lease object and therefore release one exact token at last
+    /// drop rather than being inferred from reference counts.
+    lease_tokens: BTreeSet<u64>,
 }
 
 enum RegistryEntry {
@@ -773,6 +879,7 @@ struct RegistryState {
     next_open_attempt: u64,
     next_eviction_attempt: u64,
     next_publication: u64,
+    next_graph_lease_token: u64,
 }
 
 struct StoreRuntimeRegistryInner {
@@ -835,9 +942,12 @@ impl StoreRuntimeRegistry {
         let state = self.lock_state();
         match state.entries.get(&key) {
             Some(RegistryEntry::Ready(ready)) => {
-                let actual = ready.handle.binding();
+                let actual = ready.owner.binding();
                 if actual.authority_epoch == expected.authority_epoch {
-                    StoreRuntimeLookup::Ready(ready.handle.clone())
+                    match ready.owner.issue_client_lease() {
+                        Ok(lease) => StoreRuntimeLookup::Ready(lease),
+                        Err(_) => StoreRuntimeLookup::Missing { key: Box::new(key) },
+                    }
                 } else {
                     StoreRuntimeLookup::Fenced {
                         expected: Box::new(expected.clone()),
@@ -857,14 +967,14 @@ impl StoreRuntimeRegistry {
                             RegistryEntry::Ready(ready) => {
                                 Some(StoreRuntimeLookup::WrongIncarnation {
                                     expected: Box::new(expected.clone()),
-                                    actual: Box::new(ready.handle.binding().clone()),
+                                    actual: Box::new(ready.owner.binding().clone()),
                                 })
                             }
                             RegistryEntry::Opening(_) => None,
                             RegistryEntry::Evicting(evicting) => {
                                 Some(StoreRuntimeLookup::WrongIncarnation {
                                     expected: Box::new(expected.clone()),
-                                    actual: Box::new(evicting.handle.binding().clone()),
+                                    actual: Box::new(evicting.owner.binding().clone()),
                                 })
                             }
                         })
@@ -878,11 +988,39 @@ impl StoreRuntimeRegistry {
     ///
     /// This does not revalidate or expose its retained writer authority. Any
     /// later write still enters the ordinary actor-time authority gates.
-    pub fn retained_runtime_for_read(&self, key: &StoreRuntimeKey) -> Option<StoreRuntimeHandle> {
+    pub fn retained_runtime_for_read(
+        &self,
+        key: &StoreRuntimeKey,
+    ) -> Option<StoreRuntimeClientLease> {
         let state = self.lock_state();
         match state.entries.get(key) {
-            Some(RegistryEntry::Ready(ready)) => Some(ready.handle.clone()),
+            Some(RegistryEntry::Ready(ready)) => ready.owner.issue_client_lease().ok(),
             Some(RegistryEntry::Opening(_) | RegistryEntry::Evicting(_)) | None => None,
+        }
+    }
+
+    pub(super) fn issue_client_lease_for_open(
+        &self,
+        key: &StoreRuntimeKey,
+    ) -> Result<StoreRuntimeClientLease, StoreRuntimeRegistryFailure> {
+        let state = self.lock_state();
+        match state.entries.get(key) {
+            Some(RegistryEntry::Ready(ready)) => ready.owner.issue_client_lease(),
+            Some(RegistryEntry::Opening(_)) => {
+                Err(StoreRuntimeRegistryFailure::OpenTaskAbandoned {
+                    key: Box::new(key.clone()),
+                })
+            }
+            Some(RegistryEntry::Evicting(_)) => {
+                Err(StoreRuntimeRegistryFailure::RuntimeEvictionInProgress {
+                    key: Box::new(key.clone()),
+                })
+            }
+            None => Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "issue registered client lease",
+                message: "published runtime disappeared before its opener received a lease"
+                    .to_owned(),
+            }),
         }
     }
 
@@ -891,30 +1029,30 @@ impl StoreRuntimeRegistry {
         admission: AdmissionConfigV1,
         global_queued_bytes: Option<u64>,
     ) -> RuntimeRegistryInventory {
-        let (opening_shards, handles) = {
+        let (opening_shards, sources) = {
             let state = self.lock_state();
             let opening_shards = state
                 .entries
                 .values()
                 .filter(|entry| matches!(entry, RegistryEntry::Opening(_)))
                 .count();
-            let handles = state
+            let sources = state
                 .entries
                 .values()
                 .filter_map(|entry| match entry {
-                    RegistryEntry::Ready(ready) => Some(ready.handle.clone()),
+                    RegistryEntry::Ready(ready) => Some(Arc::clone(&ready.owner.source)),
                     RegistryEntry::Opening(_) => None,
-                    RegistryEntry::Evicting(evicting) => Some(evicting.handle.clone()),
+                    RegistryEntry::Evicting(evicting) => Some(evicting.owner.clone()),
                 })
                 .collect::<Vec<_>>();
             let opening_shards = u32::try_from(opening_shards).unwrap_or(u32::MAX);
-            (opening_shards, handles)
+            (opening_shards, sources)
         };
-        let entries = handles
+        let entries = sources
             .into_iter()
-            .map(|handle| {
-                let mut observation = handle.runtime().observe(self.inner.config.eviction_idle());
-                let physical = handle.physical_snapshot();
+            .map(|source| {
+                let mut observation = source.runtime().observe(self.inner.config.eviction_idle());
+                let physical = source.physical_snapshot();
                 observation.health.writer_present |= physical.writer_present;
                 observation.health.queued_operations = observation
                     .health

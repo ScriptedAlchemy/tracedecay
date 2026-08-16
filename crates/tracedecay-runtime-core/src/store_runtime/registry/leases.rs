@@ -159,14 +159,14 @@ impl StoreRuntimeRegistry {
             let state = self.lock_state();
             match state.entries.get(&key) {
                 Some(RegistryEntry::Ready(ready)) => {
-                    let actual = ready.handle.binding();
+                    let actual = ready.owner.binding();
                     if actual.authority_epoch != expected.authority_epoch {
                         return StoreRuntimeLeaseAcquireResult::Fenced {
                             expected: Box::new(expected),
                             actual: Box::new(actual.clone()),
                         };
                     }
-                    Arc::clone(ready.handle.runtime())
+                    Arc::clone(ready.owner.runtime())
                 }
                 Some(RegistryEntry::Opening(_)) => {
                     return StoreRuntimeLeaseAcquireResult::Opening { key: Box::new(key) };
@@ -209,10 +209,10 @@ impl StoreRuntimeRegistry {
             let Some(RegistryEntry::Ready(ready)) = state.entries.get(&key) else {
                 return false;
             };
-            if ready.handle.binding() != binding {
+            if ready.owner.binding() != binding {
                 return false;
             }
-            Arc::clone(ready.handle.runtime())
+            Arc::clone(ready.owner.runtime())
         };
         runtime.release_runtime_lease(lease_id)
     }
@@ -307,7 +307,7 @@ fn require_ready_profile_runtime(
             profile_shard: Box::new(binding.shard_id.clone()),
         });
     };
-    let runtime_state = ready.handle.runtime().maintenance_state();
+    let runtime_state = ready.owner.runtime().maintenance_state();
     if runtime_state != RuntimeMaintenanceStateV1::Ready {
         return Err(StoreRuntimeRegistryFailure::ProfileAuthorityUnavailable {
             binding: Box::new(binding.clone()),

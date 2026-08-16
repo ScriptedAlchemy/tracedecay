@@ -201,7 +201,7 @@ impl StoreRuntimeRegistry {
                 }
                 if let Some(key) = state.entries.iter().find_map(|(key, entry)| match entry {
                     RegistryEntry::Evicting(evicting)
-                        if target.includes_database_path(evicting.handle.locator().path()) =>
+                        if target.includes_database_path(evicting.owner.locator().path()) =>
                     {
                         Some(key.clone())
                     }
@@ -223,14 +223,14 @@ impl StoreRuntimeRegistry {
                     .values()
                     .filter_map(|entry| match entry {
                         RegistryEntry::Ready(ready)
-                            if target.includes_database_path(ready.handle.locator().path()) =>
+                            if target.includes_database_path(ready.owner.locator().path()) =>
                         {
                             ready
                                 .handle
                                 .inner
                                 .database_authority
                                 .clone()
-                                .map(|authority| (ready.handle.binding().clone(), authority))
+                                .map(|authority| (ready.owner.binding().clone(), authority))
                         }
                         RegistryEntry::Opening(_)
                         | RegistryEntry::Ready(_)

@@ -4,11 +4,12 @@ use super::memory_graph_reconciliation::{
 };
 use super::{
     Arc, Connection, Database, DatabaseAccessMode, DatabaseAuthority, DatabaseInner, Path, Result,
-    StoreRuntimeHandle, TraceDecayError, database_slot, integrity, registered_attachment_required,
+    StoreRuntimeClientLease, TraceDecayError, database_slot, integrity,
+    registered_attachment_required,
 };
 
 impl Database {
-    pub fn retained_runtime(&self) -> &StoreRuntimeHandle {
+    pub(crate) fn retained_runtime(&self) -> &StoreRuntimeClientLease {
         &self.inner._runtime
     }
 
@@ -125,7 +126,7 @@ impl Database {
     /// originating authority; a read-only facade never requests it. Neither
     /// mode derives identity from a path or extracts the physical attachment.
     pub async fn publish_runtime(
-        runtime: StoreRuntimeHandle,
+        runtime: StoreRuntimeClientLease,
         access: DatabaseAccessMode,
     ) -> Result<Self> {
         let writable = access.is_writable();
@@ -211,7 +212,15 @@ impl Database {
         let authority = authority.hold_for(db_path, "open_read_only")?;
         let slot = database_slot(authority.database_identity_key());
         if let Some(inner) = slot.lock().await.upgrade() {
-            let read_only = DatabaseInner::publish(inner._runtime.clone(), false, None, None)?;
+            let lease =
+                inner
+                    ._runtime
+                    .issue_client_lease()
+                    .map_err(|error| TraceDecayError::Database {
+                        operation: "publish read-only database runtime".to_owned(),
+                        message: format!("{error:?}"),
+                    })?;
+            let read_only = DatabaseInner::publish(lease, false, None, None)?;
             return Ok((
                 Self {
                     inner: Arc::new(read_only),
