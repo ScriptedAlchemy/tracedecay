@@ -1195,7 +1195,10 @@ pub(crate) fn manual_branch_source_owns_artifacts(
     branch: &str,
     source: &crate::branch_meta::BranchGraphSourceV1,
 ) -> bool {
-    let artifacts = ManualBranchArtifactsV1::for_branch(data_root, branch);
+    let canonical_data_root = data_root
+        .canonicalize()
+        .unwrap_or_else(|_| data_root.to_path_buf());
+    let artifacts = ManualBranchArtifactsV1::for_branch(&canonical_data_root, branch);
     let worktree = artifacts
         .worktree
         .canonicalize()
