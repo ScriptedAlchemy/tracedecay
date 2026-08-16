@@ -191,8 +191,9 @@ impl ManualBranchActivationError {
         match self {
             Self::SchedulerUnavailable { .. }
             | Self::ActivationFailed { .. }
-            | Self::LifecycleContended { .. } => true,
-            Self::GitAuthorityUnavailable { .. } | Self::InvalidBranchRef { .. } => false,
+            | Self::LifecycleContended { .. }
+            | Self::GitAuthorityUnavailable { .. } => true,
+            Self::InvalidBranchRef { .. } => false,
         }
     }
 

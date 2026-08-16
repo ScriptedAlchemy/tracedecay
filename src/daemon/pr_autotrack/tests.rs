@@ -667,7 +667,7 @@ async fn manual_branch_activation_refuses_exact_lifecycle_contention_before_muta
             .expect_err("concurrent exact branch activation must be rejected");
 
     assert!(matches!(
-        error,
+        &error,
         ManualBranchActivationError::LifecycleContended { .. }
     ));
     assert!(!git_ref_exists(
@@ -748,7 +748,7 @@ async fn manual_branch_fails_closed_without_scheduler_before_git_or_state_mutati
         .expect_err("missing scheduler must deny activation");
 
     assert!(matches!(
-        error,
+        &error,
         ManualBranchActivationError::SchedulerUnavailable { .. }
     ));
     assert_eq!(error.reason_code(), "code_index_scheduler_unavailable");
@@ -783,10 +783,14 @@ async fn manual_branch_missing_ref_is_typed_failure() {
     .expect_err("missing branch ref must be a typed failure");
 
     assert!(matches!(
-        error,
+        &error,
         ManualBranchActivationError::InvalidBranchRef { .. }
     ));
     assert_eq!(error.reason_code(), "invalid_branch_ref");
+    assert!(
+        !error.retryable(),
+        "a permanently missing branch identity must not become retryable"
+    );
     assert!(!data_root.join("branch-worktrees").exists());
     assert!(!git_ref_exists(
         repo.path(),
@@ -929,9 +933,25 @@ fn manual_artifact_cleanup_keeps_exact_refs_when_git_authority_is_unavailable() 
     )
     .expect_err("unavailable Git must not be collapsed into an absent ref");
     assert!(matches!(
-        error,
+        &error,
         ManualBranchActivationError::GitAuthorityUnavailable { .. }
     ));
+    assert!(
+        error.retryable(),
+        "a bounded exact-ref read timeout must remain retryable"
+    );
+    let response = super::super::branch_add::typed_project_route_error(
+        serde_json::json!("exact-read-timeout"),
+        error.reason_code(),
+        error.retryable(),
+        error.detail(),
+    );
+    let response = serde_json::to_value(response).expect("serialize production JSON-RPC error");
+    assert_eq!(
+        response["error"]["data"]["reason_code"],
+        "git_authority_unavailable"
+    );
+    assert_eq!(response["error"]["data"]["retryable"], true);
     assert!(
         git_ref_exists(repo.path(), &artifacts.tracking_ref)
             && git_ref_exists(repo.path(), &branch_ref),
@@ -949,4 +969,156 @@ fn manual_artifact_cleanup_keeps_exact_refs_when_git_authority_is_unavailable() 
         )
         .expect("restored Git authority must complete exact cleanup")
     );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_exact_read() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    let branch = "feature/stalled-exact-read";
+    init_manual_branch_repo(repo.path(), branch);
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .expect("open project graph"),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let activation = activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), branch)
+        .await
+        .expect("initial activation creates exact artifacts");
+    let artifacts = ManualBranchArtifactsV1::for_branch(&data_root, branch);
+    let ref_path = repo.path().join(".git").join(
+        artifacts
+            .tracking_ref
+            .strip_prefix("refs/")
+            .expect("manual tracking ref is rooted under refs"),
+    );
+    std::fs::remove_file(&ref_path).expect("replace exact tracking ref with a FIFO");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&ref_path)
+            .status()
+            .expect("run mkfifo")
+            .success(),
+        "the exact Git ref reader must block on the real FIFO"
+    );
+
+    let (writer_ready_tx, writer_ready_rx) = std::sync::mpsc::sync_channel(1);
+    let writer_path = ref_path.clone();
+    let fifo_writer_task = tokio::task::spawn_blocking(move || {
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(writer_path)
+            .expect("open FIFO writer once Git begins its exact ref read");
+        writer_ready_tx
+            .send(writer)
+            .expect("deliver open FIFO writer");
+    });
+
+    let (owner_done_tx, owner_done_rx) = tokio::sync::oneshot::channel();
+    let owner_repo = repo.path().to_path_buf();
+    let owner_data_root = data_root.clone();
+    let owner_graph = Arc::clone(&graph);
+    let owner_schedulers = schedulers.clone();
+    let owner_branch = branch.to_owned();
+    let requester = tokio::spawn(async move {
+        let owner = tokio::spawn(async move {
+            let lifecycle = try_acquire_manual_branch_lifecycle(&owner_data_root, &owner_branch)
+                .expect("activation owner acquires the exact lifecycle");
+            let control = PrCommandControl {
+                command_timeout: Duration::from_millis(300),
+                ..PrCommandControl::default()
+            };
+            let outcome = activate_manual_branch_with_administration(
+                &owner_repo,
+                &owner_data_root,
+                &owner_branch,
+                PrStoreAdministration::with_control(&owner_schedulers, &owner_graph, &control),
+                &lifecycle,
+            )
+            .await;
+            let _ = owner_done_tx.send(outcome);
+        });
+        let _ = owner.await;
+    });
+
+    let fifo_writer = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || {
+            writer_ready_rx
+                .recv()
+                .expect("Git exact-ref read opens the FIFO")
+        }),
+    )
+    .await
+    .expect("activation reaches the stalled exact-ref read")
+    .expect("FIFO-writer task joins");
+    fifo_writer_task.await.expect("FIFO writer task joins");
+    let (heartbeat_tx, heartbeat_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        let _ = heartbeat_tx.send(());
+    });
+    tokio::time::timeout(Duration::from_millis(100), heartbeat_rx)
+        .await
+        .expect("the current-thread runtime keeps scheduling while Git exact-read stalls")
+        .expect("heartbeat task runs");
+
+    requester.abort();
+    assert!(
+        requester.await.is_err(),
+        "the requester is cancelled while its lifecycle owner continues"
+    );
+    let error = tokio::time::timeout(Duration::from_secs(2), owner_done_rx)
+        .await
+        .expect("lifecycle owner remains bounded by its Git deadline")
+        .expect("lifecycle owner reports its terminal activation outcome")
+        .expect_err("a timed-out exact read cannot be treated as a missing ref");
+    assert!(matches!(
+        &error,
+        ManualBranchActivationError::GitAuthorityUnavailable { .. }
+    ));
+    assert!(error.retryable());
+
+    drop(fifo_writer);
+    std::fs::remove_file(&ref_path).expect("remove stalled FIFO ref");
+    git(
+        repo.path(),
+        &["update-ref", &artifacts.tracking_ref, &activation.head_sha],
+    );
+    assert!(
+        crate::branch_meta::load_branch_meta(&data_root)
+            .is_none_or(|metadata| !metadata.branches.contains_key(branch)),
+        "activation alone must not leak sealed branch provenance"
+    );
+    let lifecycle = try_acquire_manual_branch_lifecycle(&data_root, branch)
+        .expect("completed owner releases the exact lifecycle lease");
+    cleanup_manual_branch_activation(
+        repo.path(),
+        &data_root,
+        &schedulers,
+        &activation,
+        &lifecycle,
+    )
+    .await
+    .expect("recovered exact artifacts cleanly retire");
+    assert!(!activation.worktree.exists(), "no linked worktree leaks");
+    assert!(
+        !git_ref_exists(repo.path(), &artifacts.tracking_ref),
+        "no synthetic tracking ref leaks"
+    );
+    assert!(
+        !schedulers.is_worktree_mounted(&activation.worktree).await,
+        "no scheduler mount leaks"
+    );
+    assert!(
+        crate::branch_meta::load_branch_meta(&data_root)
+            .is_none_or(|metadata| !metadata.branches.contains_key(branch)),
+        "no branch provenance leaks"
+    );
+    drop(lifecycle);
+    schedulers.shutdown().await;
 }
