@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde_json::Value;
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_code_index::{
@@ -73,7 +75,7 @@ fn import_request() -> CodeIndexBuildRequestV1 {
     request
 }
 
-fn published_import_generation() -> CodeIndexPublishedGenerationV1 {
+fn published_import_generation() -> Arc<CodeIndexPublishedGenerationV1> {
     let mut owner = CodeIndexProductionOwnerV1::new(
         config(),
         SharedPublicationStore::default(),

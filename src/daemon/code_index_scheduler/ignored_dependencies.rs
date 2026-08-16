@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use gix::bstr::ByteSlice;
 use serde_json::Value;
@@ -242,28 +243,13 @@ impl CodeIndexWorktreeSchedulerV1 {
                 return Err(map_production_interruption(error));
             }
         };
-        let published = self
-            .publication
-            .load_active_shared()
-            .map_err(CodeIndexProductionErrorV1::Publication)?
-            .ok_or_else(|| {
-                CodeIndexSchedulerErrorV1::Identity(
-                    "ignored-dependency publication is absent from the active cache".to_owned(),
-                )
-            })?;
-        if published.manifest().generation_id != generation.manifest().generation_id {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "ignored-dependency publication cache does not match the completed build"
-                    .to_owned(),
-            ));
-        }
-        let generation_id = published.manifest().generation_id.clone();
+        let generation_id = generation.manifest().generation_id.clone();
         self.retained_snapshot_bytes = retained_bytes;
-        self.latest_content_identity = Some(published.snapshot().content_identity.clone());
+        self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
         let sampled_signature = self.worktree_stat_signature().ok();
         self.mark_reconciled(sampled_metadata, sampled_signature);
-        let latest = self.bind_latest_complete(published.clone());
-        let publication = publication_evidence(reextracted_files, &published)?;
+        let latest = self.bind_latest_complete(Arc::clone(&generation));
+        let publication = publication_evidence(reextracted_files, &generation)?;
         Ok(CodeIndexIgnoredDependencyBuildV1 {
             outcome: CodeIndexIgnoredDependencyIndexOutcomeV1 {
                 generation_id,

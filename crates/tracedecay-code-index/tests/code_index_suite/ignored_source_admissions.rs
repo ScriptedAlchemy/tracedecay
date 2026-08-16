@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde_json::Value;
 use tracedecay_code_index::{
     chunks::content_digest,
@@ -95,7 +97,7 @@ fn request_with_ignored_sources(
     request
 }
 
-fn publish(request: CodeIndexBuildRequestV1) -> CodeIndexPublishedGenerationV1 {
+fn publish(request: CodeIndexBuildRequestV1) -> Arc<CodeIndexPublishedGenerationV1> {
     let mut owner = CodeIndexProductionOwnerV1::new(
         config(),
         SharedPublicationStore::default(),

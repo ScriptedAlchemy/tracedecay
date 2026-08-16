@@ -413,7 +413,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 _ => CodeIndexSearchUnavailableReasonV1::Internal,
             })?;
-        Ok(self.bind_latest_complete(Arc::new(generation)))
+        Ok(self.bind_latest_complete(generation))
     }
 }
 

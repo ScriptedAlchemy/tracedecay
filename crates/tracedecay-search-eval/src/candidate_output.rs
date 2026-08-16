@@ -476,7 +476,7 @@ pub trait ProductionCandidateNativeExecutionAuthorityV1: Send + Sync {
 
 #[derive(Clone, Default)]
 struct SharedPublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, CodeIndexPublishedGenerationV1>>>,
+    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
 }
 
 impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
@@ -489,14 +489,14 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
                 "candidate-output publication lock is poisoned".to_owned(),
             )
         })?;
-        Ok(active.get(scope).cloned())
+        Ok(active.get(scope).map(|generation| generation.as_ref().clone()))
     }
 
     fn publish_atomically(
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: CodeIndexPublishedGenerationV1,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         let mut active = self.active.lock().map_err(|_| {
             CodeIndexPublicationStoreErrorV1::Unavailable(
@@ -591,10 +591,10 @@ type ScopedLexicalProjections = BTreeMap<Vec<String>, CodeLexicalProjectionAdapt
 type ScopedGraphEvidence = BTreeMap<Vec<String>, CodeGraphEvidenceReader>;
 
 struct PublishedCorpus {
-    generation: CodeIndexPublishedGenerationV1,
+    generation: Arc<CodeIndexPublishedGenerationV1>,
     lexical_projections: ScopedLexicalProjections,
     graph_projections: ScopedGraphEvidence,
-    incremental_generation: CodeIndexPublishedGenerationV1,
+    incremental_generation: Arc<CodeIndexPublishedGenerationV1>,
     incremental_before_content_digest: String,
     incremental_after_content_digest: String,
     occurrence_map: BTreeMap<String, OccurrenceMapEntry>,
@@ -604,8 +604,8 @@ struct PublishedCorpus {
     corpus: Vec<CorpusDocumentV1>,
     corpus_digest: String,
     eligible_chunks: u64,
-    no_op_generation: CodeIndexPublishedGenerationV1,
-    deletion_generation: CodeIndexPublishedGenerationV1,
+    no_op_generation: Arc<CodeIndexPublishedGenerationV1>,
+    deletion_generation: Arc<CodeIndexPublishedGenerationV1>,
     admitted_scope: AdmittedCorpusScopeFn,
 }
 
@@ -3049,7 +3049,7 @@ fn build_projection_source_generation(
     sealed_at: UtcMicros,
     target_projection_key: ProjectionKeyV1,
     label: &str,
-) -> Result<CodeIndexPublishedGenerationV1, CandidateOutputError> {
+) -> Result<Arc<CodeIndexPublishedGenerationV1>, CandidateOutputError> {
     snapshot.captured_at = UtcMicros(sealed_at.0.saturating_sub(10_000));
     owner
         .build_and_publish(

@@ -62,7 +62,7 @@ fn import_request() -> CodeIndexBuildRequestV1 {
     request
 }
 
-fn published_import_generation() -> CodeIndexPublishedGenerationV1 {
+fn published_import_generation() -> Arc<CodeIndexPublishedGenerationV1> {
     let mut owner = CodeIndexProductionOwnerV1::new(
         config(),
         SharedPublicationStore::default(),

@@ -219,7 +219,7 @@ pub trait CodeIndexAtomicPublicationPort {
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: CodeIndexPublishedGenerationV1,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1>;
 }
 
@@ -1020,7 +1020,7 @@ where
         &mut self,
         request: CodeIndexBuildRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
+    ) -> Result<Arc<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
         Self::checkpoint(control)?;
         let ignored_source_roster = IgnoredSourceRosterV1::admit(
             &request.snapshot,
@@ -1182,8 +1182,11 @@ where
         let expected = active
             .as_ref()
             .map(|generation| generation.manifest.generation_id.clone());
+        // Shared rather than cloned: the publication store caches the same
+        // immutable generation the caller receives.
+        let candidate = Arc::new(candidate);
         self.publication
-            .publish_atomically(&scope, expected.as_ref(), candidate.clone())?;
+            .publish_atomically(&scope, expected.as_ref(), Arc::clone(&candidate))?;
         Ok(candidate)
     }
 

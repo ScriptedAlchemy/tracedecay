@@ -947,7 +947,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         &mut self,
         _scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: CodeIndexPublishedGenerationV1,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         let store_root = self
             .active_path
@@ -1120,10 +1120,10 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 // memory. Bumping the epoch retires any decode that started
                 // against the prior pointer so it cannot install over this one.
                 state.active_epoch = state.active_epoch.wrapping_add(1);
-                state.active = Some(Arc::new(generation));
+                state.active = Some(generation);
             }
             CodeIndexPublicationDispositionV1::RetainedHistory => {
-                state.decoded.push_back(Arc::new(generation));
+                state.decoded.push_back(generation);
                 while state.decoded.len() > DECODED_GENERATION_CACHE_CAPACITY {
                     state.decoded.pop_front();
                 }
@@ -2103,23 +2103,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 Err(error) => return Err(error.into()),
             };
-            let published_generation = self
-                .publication
-                .load_active_shared()
-                .map_err(CodeIndexProductionErrorV1::Publication)?
-                .ok_or_else(|| {
-                    CodeIndexSchedulerErrorV1::Identity(
-                        "published code generation is absent from the publication cache".to_owned(),
-                    )
-                })?;
-            if published_generation.manifest().generation_id != generation.manifest().generation_id
-            {
-                return Err(CodeIndexSchedulerErrorV1::Identity(
-                    "published code generation cache does not match the completed build".to_owned(),
-                ));
-            }
-            drop(generation);
-            let generation = published_generation;
             self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
             self.mark_reconciled(sampled_metadata.clone(), sampled_signature.clone());
 

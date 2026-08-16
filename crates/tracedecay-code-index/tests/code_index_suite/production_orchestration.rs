@@ -39,7 +39,7 @@ mod parallel_equivalence;
 
 #[derive(Clone, Default)]
 pub(super) struct SharedPublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, CodeIndexPublishedGenerationV1>>>,
+    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>>,
 }
 
 impl SharedPublicationStore {
@@ -62,14 +62,14 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
             .lock()
             .expect("publication lock")
             .get(scope)
-            .cloned())
+            .map(|generation| generation.as_ref().clone()))
     }
 
     fn publish_atomically(
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: CodeIndexPublishedGenerationV1,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         let mut active = self.active.lock().expect("publication lock");
         if active
