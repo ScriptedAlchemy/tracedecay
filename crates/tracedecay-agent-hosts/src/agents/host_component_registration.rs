@@ -477,7 +477,7 @@ impl CatalogHostComponentRegistrationAuthority {
         let mut paths = self
             .integration
             .host_component_registration_paths_checked(&components, &self.context.home)
-            .map_err(Self::registration_error)?;
+            .map_err(|error| Self::registration_error(component_set.host, error))?;
         if self.integration.id() == "claude" {
             let artifact_owned_manifest = self
                 .context
