@@ -148,8 +148,8 @@ use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
 
 mod runtime;
+pub use runtime::PrAutotrackTask;
 pub(super) use runtime::spawn_with_administration;
-pub use runtime::{PrAutotrackTask, spawn, teardown_disabled_project};
 
 #[derive(Clone, Copy)]
 struct PrStoreAdministration<'a> {
@@ -1208,10 +1208,12 @@ async fn track_pr(
     let label_for_prep = label.clone();
     let expected_head = pr.head_sha.clone();
     let command_control = administration.command_control.clone();
+    let pr_number = pr.number;
     match tokio::task::spawn_blocking(move || {
         prepare_pr_worktree(
             &repo,
             &wt,
+            pr_number,
             &tref,
             &label_for_prep,
             &expected_head,
@@ -1378,19 +1380,13 @@ async fn cleanup_failed_track(
 fn prepare_pr_worktree(
     repo_root: &Path,
     worktree: &Path,
+    pr_number: u64,
     tracking_ref: &str,
     label: &str,
     expected_head: &str,
     command_control: &PrCommandControl,
 ) -> std::result::Result<(), String> {
-    let pr_ref_spec = {
-        let n = tracking_ref
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        format!("+refs/pull/{n}/head:{tracking_ref}")
-    };
+    let pr_ref_spec = format!("+refs/pull/{pr_number}/head:{tracking_ref}");
     let fetch = successful_git_with_control(
         repo_root,
         &["fetch", "--no-tags", "origin", &pr_ref_spec],

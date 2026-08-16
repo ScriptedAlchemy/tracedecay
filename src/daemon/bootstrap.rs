@@ -587,7 +587,6 @@ async fn run_foreground_unix(
     // gated per-project on `sync.auto_track_pr_branches` (default off), so this
     // loop is inert unless a project opts in.
     let pr_autotrack_task = pr_autotrack::spawn_with_administration(
-        crate::global_db::global_db_path(),
         engine.store_administration.clone(),
         engine.invocation.code_index_schedulers.clone(),
     );

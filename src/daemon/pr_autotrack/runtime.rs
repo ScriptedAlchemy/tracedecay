@@ -43,31 +43,9 @@ impl PrAutotrackTask {
     }
 }
 
-/// Spawns the PR-autotrack poll loop. Cheap and inert when no registered project
-/// has the feature enabled — each tick consults only daemon-published snapshots.
-pub fn spawn(global_db_path: Option<PathBuf>) -> PrAutotrackTask {
-    spawn_with_administration(
-        global_db_path,
-        StoreAdministration::default(),
-        inert_schedulers(),
-    )
-}
-
-fn inert_schedulers() -> CodeIndexSchedulerRegistryV1 {
-    CodeIndexSchedulerRegistryV1::with_resident_memory(
-        1,
-        Arc::new(
-            tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
-                tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
-            ),
-        ),
-    )
-}
-
 /// Spawns the PR-autotrack poll loop with the daemon's shared store coordinator
 /// and the retained code-index scheduler used for PR-head worktree activation.
 pub(crate) fn spawn_with_administration(
-    _global_db_path: Option<PathBuf>,
     administration: StoreAdministration,
     schedulers: CodeIndexSchedulerRegistryV1,
 ) -> PrAutotrackTask {
@@ -240,16 +218,6 @@ async fn poll_project(
 
 /// Tears down all managed PR state for a project whose `auto_track_pr_branches`
 /// is now disabled.
-pub async fn teardown_disabled_project(
-    graph: Arc<crate::tracedecay::TraceDecay>,
-    repo_root: &Path,
-) {
-    let Ok(administration) = StoreAdministration::for_retained_project_graph(&graph).await else {
-        return;
-    };
-    teardown_disabled_project_with_graph(repo_root, graph, &administration, None, None).await;
-}
-
 async fn teardown_disabled_project_with_administration(
     repo_root: &Path,
     administration: &StoreAdministration,
@@ -259,47 +227,20 @@ async fn teardown_disabled_project_with_administration(
     let Some(graph) = retained_project_graph(administration, repo_root).await else {
         return;
     };
-    teardown_disabled_project_with_graph(
-        repo_root,
-        graph,
-        administration,
-        Some(schedulers),
-        Some(cancellation),
-    )
-    .await;
-}
-
-async fn teardown_disabled_project_with_graph(
-    repo_root: &Path,
-    graph: Arc<crate::tracedecay::TraceDecay>,
-    _administration: &StoreAdministration,
-    schedulers: Option<&CodeIndexSchedulerRegistryV1>,
-    cancellation: Option<&CancellationToken>,
-) {
     let data_root = graph.store_layout().data_root.clone();
     if load_state(&data_root).managed.is_empty() {
         return;
     }
     let command_control = PrCommandControl {
-        cancellation: cancellation.cloned(),
+        cancellation: Some(cancellation.clone()),
         ..PrCommandControl::default()
-    };
-    let pr_administration = match schedulers {
-        Some(schedulers) => {
-            PrStoreAdministration::with_control(schedulers, &graph, &command_control)
-        }
-        None => PrStoreAdministration {
-            schedulers: None,
-            graph: Some(&graph),
-            command_control: &command_control,
-        },
     };
     let report = reconcile_project_with_administration(
         repo_root,
         &data_root,
         &PrDiscovery::default(),
         MAX_NEW_TRACKS_PER_CYCLE,
-        pr_administration,
+        PrStoreAdministration::with_control(schedulers, &graph, &command_control),
     )
     .await;
     log_daemon_event(

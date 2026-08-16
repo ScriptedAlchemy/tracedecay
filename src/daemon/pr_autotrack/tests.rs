@@ -4,8 +4,15 @@ use super::*;
 
 #[tokio::test]
 async fn spawned_loop_is_cancellable_and_joinable() {
-    let profile = tempfile::tempdir().unwrap();
-    let task = spawn(Some(profile.path().join("global.db")));
+    let schedulers = CodeIndexSchedulerRegistryV1::with_resident_memory(
+        1,
+        Arc::new(
+            tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+                tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            ),
+        ),
+    );
+    let task = spawn_with_administration(StoreAdministration::default(), schedulers);
 
     assert!(
         tokio::time::timeout(Duration::from_secs(1), task.shutdown())
