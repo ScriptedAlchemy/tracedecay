@@ -1,6 +1,21 @@
 //! Daemon-owned LSP lease reclamation and shutdown behavior.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use super::*;
+use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture, MAX_LSP_WORKSPACE_ROOTS};
+use tracedecay_usecases::lsp_runtime::UpstreamCapabilityInitializationAuthority;
+
+struct CountingUpstreamCapabilityInitializer(Arc<AtomicUsize>);
+
+impl UpstreamCapabilityInitializationAuthority for CountingUpstreamCapabilityInitializer {
+    fn initialize_upstream_capabilities(
+        &self,
+    ) -> LspRuntimeFuture<std::result::Result<UpstreamCapabilities, LspRuntimeFailure>> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async { Ok(UpstreamCapabilities::default()) })
+    }
+}
 
 fn lsp_deadline() -> Deadline {
     Deadline::new(UtcMicros(i64::MAX)).expect("LSP deadline")
@@ -102,6 +117,65 @@ async fn cancellation_before_lease_activation_retires_reserved_task_ownership() 
         "a detached endpoint must not activate lease work after explicit cancellation"
     );
     assert_eq!(registry.active_tasks(), 0);
+}
+
+#[tokio::test]
+async fn rejected_lsp_open_does_not_initialize_analyzer_or_mint_session_access() {
+    let service = DaemonInvocationService::default();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
+    let project_root = PathBuf::from("/authoritative");
+    let initializations = Arc::new(AtomicUsize::new(0));
+    let factory = Arc::new(
+        unavailable_lsp_session_factory()
+            .as_ref()
+            .clone()
+            .with_upstream_capability_initializer(Arc::new(CountingUpstreamCapabilityInitializer(
+                Arc::clone(&initializations),
+            ))),
+    );
+    DaemonLspOwnerRegistrar::new(&service)
+        .register_factory(project_root.clone(), factory)
+        .await
+        .expect("register LSP owner");
+
+    let response = service
+        .invoke(
+            &registry,
+            Some(&project_root),
+            Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
+                "file:///authoritative",
+            ))),
+            None,
+            None,
+            DaemonInvocationRequest::lsp_open(
+                "request.oversized-preflight",
+                env!("CARGO_PKG_VERSION"),
+                None,
+                vec!["file:///untrusted".to_owned(); MAX_LSP_WORKSPACE_ROOTS + 1],
+                lsp_deadline(),
+                CancellationContext::active("cancel.oversized-preflight")
+                    .expect("cancellation context"),
+            ),
+        )
+        .await;
+
+    assert!(matches!(
+        response.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+    ));
+    assert_eq!(
+        initializations.load(Ordering::Relaxed),
+        0,
+        "rejected admission must not start an analyzer"
+    );
+    assert_eq!(
+        registry.lock().await.active_sessions(),
+        0,
+        "rejected admission must not mint or register session access"
+    );
+    assert_eq!(service.active_lsp_runtime_count().await, 0);
 }
 
 #[tokio::test]

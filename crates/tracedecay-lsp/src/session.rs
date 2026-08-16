@@ -384,9 +384,7 @@ impl LspSessionRegistry {
         if self.sessions.contains_key(&authorized.session_id) {
             return Err(LspEndpointError::DuplicateSession);
         }
-        if self.sessions.len() >= self.max_sessions {
-            return Err(LspEndpointError::Saturated);
-        }
+        self.validate_open_capacity(now_ms)?;
         let access =
             LspSessionAccess::new(authorized.session_id.clone(), authorized.credential.clone());
         self.sessions.insert(
@@ -543,6 +541,19 @@ impl LspSessionRegistry {
     pub fn active_sessions(&self) -> usize {
         self.sessions.len()
     }
+
+    fn validate_open_capacity(&self, now_ms: u64) -> Result<(), LspEndpointError> {
+        if self
+            .sessions
+            .values()
+            .filter(|session| session.expires_at_ms > now_ms)
+            .count()
+            >= self.max_sessions
+        {
+            return Err(LspEndpointError::Saturated);
+        }
+        Ok(())
+    }
 }
 
 /// Typed single-project endpoint used by daemon startup.
@@ -575,14 +586,25 @@ where
         request: LspSessionOpenRequest,
         now_ms: u64,
     ) -> Result<LspSessionAccess, LspEndpointError> {
+        self.preflight_open(&request, now_ms)?;
+        let authorized = self.admission.admit_lsp_session(&request, now_ms)?;
+        self.registry.register(authorized, now_ms)
+    }
+
+    /// Rejects invalid or saturated requests before a caller initializes an
+    /// analyzer or asks the admission authority to mint credentials.
+    pub fn preflight_open(
+        &self,
+        request: &LspSessionOpenRequest,
+        now_ms: u64,
+    ) -> Result<(), LspEndpointError> {
         // Client folder hints are never authority: admission resolves the
-        // workspace independently. The only thing enforced here is the hard
-        // root ceiling, so an oversized hint cannot cost an admission.
+        // workspace independently. Bound the request shape and current
+        // capacity before either stateful admission or analyzer initialization.
         if request.workspace_folders.len() > MAX_LSP_WORKSPACE_ROOTS {
             return Err(LspEndpointError::AdmissionRejected);
         }
-        let authorized = self.admission.admit_lsp_session(&request, now_ms)?;
-        self.registry.register(authorized, now_ms)
+        self.registry.validate_open_capacity(now_ms)
     }
 
     pub fn registry(&self) -> &LspSessionRegistry {
@@ -880,17 +902,21 @@ mod tests {
         let mut endpoint = DaemonLspSessionEndpoint::new(RecordingAdmission {
             calls: Arc::clone(&calls),
         });
+        let oversized_request = LspSessionOpenRequest {
+            workspace_folders: (0..=MAX_LSP_WORKSPACE_ROOTS)
+                .map(|index| format!("file:///folder-{index}"))
+                .collect(),
+            ..LspSessionOpenRequest::default()
+        };
+        let preflight = endpoint
+            .preflight_open(&oversized_request, 10)
+            .expect_err("an oversized folder hint must not mutate the endpoint");
+        assert_eq!(preflight, LspEndpointError::AdmissionRejected);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(endpoint.registry().active_sessions(), 0);
         let oversized = endpoint
-            .open(
-                LspSessionOpenRequest {
-                    workspace_folders: (0..=MAX_LSP_WORKSPACE_ROOTS)
-                        .map(|index| format!("file:///folder-{index}"))
-                        .collect(),
-                    ..LspSessionOpenRequest::default()
-                },
-                10,
-            )
-            .expect_err("an oversized folder hint must not cost an admission");
+            .open(oversized_request, 10)
+            .expect_err("open must reuse the oversized-folder preflight");
         assert_eq!(oversized, LspEndpointError::AdmissionRejected);
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         assert_eq!(endpoint.registry().active_sessions(), 0);
@@ -926,6 +952,29 @@ mod tests {
         assert_eq!(
             endpoint.registry_mut().root(&access, 11).unwrap().uri(),
             "file:///admitted"
+        );
+    }
+
+    #[test]
+    fn endpoint_preflight_does_not_expire_sessions_or_call_admission() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut endpoint = DaemonLspSessionEndpoint::new(RecordingAdmission {
+            calls: Arc::clone(&calls),
+        });
+        endpoint
+            .open(LspSessionOpenRequest::default(), 0)
+            .expect("initial session");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        endpoint
+            .preflight_open(&LspSessionOpenRequest::default(), LSP_SESSION_TTL_MS)
+            .expect("expired capacity is available without mutating the registry");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            endpoint.registry().active_sessions(),
+            1,
+            "preflight must not expire a registered session"
         );
     }
 

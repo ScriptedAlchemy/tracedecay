@@ -312,7 +312,7 @@ impl UpstreamCapabilities {
     /// are unavailable rather than inferred from the client request.
     pub(crate) fn from_initialize_response(response: &Value) -> Self {
         let capabilities = response.get("capabilities").and_then(Value::as_object);
-        let semantic = [
+        let mut semantic: BTreeSet<_> = [
             ("declarationProvider", SemanticCapability::Declaration),
             ("definitionProvider", SemanticCapability::Definition),
             ("typeDefinitionProvider", SemanticCapability::TypeDefinition),
@@ -327,7 +327,6 @@ impl UpstreamCapabilities {
             ("callHierarchyProvider", SemanticCapability::CallHierarchy),
             ("signatureHelpProvider", SemanticCapability::SignatureHelp),
             ("typeHierarchyProvider", SemanticCapability::TypeHierarchy),
-            ("renameProvider", SemanticCapability::RenameCandidate),
         ]
         .into_iter()
         .filter_map(|(field, capability)| {
@@ -337,6 +336,14 @@ impl UpstreamCapabilities {
                 .then_some(capability)
         })
         .collect();
+        if capabilities
+            .and_then(|capabilities| capabilities.get("renameProvider"))
+            .and_then(Value::as_object)
+            .and_then(|rename| rename.get("prepareProvider"))
+            .is_some_and(|prepare| prepare.as_bool() == Some(true))
+        {
+            semantic.insert(SemanticCapability::RenameCandidate);
+        }
         Self {
             supports_diagnostics: capabilities
                 .and_then(|capabilities| capabilities.get("diagnosticProvider"))
@@ -708,6 +715,36 @@ mod tests {
         assert!(!effective.supports_semantic(SemanticCapability::Definition));
         assert!(!effective.supports_semantic(SemanticCapability::References));
         assert!(!effective.supports_semantic(SemanticCapability::RenameCandidate));
+    }
+
+    #[test]
+    fn analyzer_initialize_response_requires_prepare_rename_provider() {
+        for rename_provider in [
+            json!(true),
+            json!(false),
+            json!({}),
+            json!({ "prepareProvider": false }),
+            json!({ "prepareProvider": "true" }),
+        ] {
+            let upstream = UpstreamCapabilities::from_initialize_response(&json!({
+                "capabilities": { "renameProvider": rename_provider }
+            }));
+            assert!(
+                !upstream
+                    .semantic
+                    .contains(&SemanticCapability::RenameCandidate),
+                "renameProvider {rename_provider:?} must not claim prepareRename"
+            );
+        }
+
+        let upstream = UpstreamCapabilities::from_initialize_response(&json!({
+            "capabilities": { "renameProvider": { "prepareProvider": true } }
+        }));
+        assert!(
+            upstream
+                .semantic
+                .contains(&SemanticCapability::RenameCandidate)
+        );
     }
 
     #[test]
