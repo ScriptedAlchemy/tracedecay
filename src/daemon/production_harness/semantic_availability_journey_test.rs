@@ -113,11 +113,12 @@ async fn semantic_runtime_state(
     answered(harness, project, "tracedecay_runtime", json!({})).await["semantic_runtime"].clone()
 }
 
-/// Writes one real Claude transcript into the pinned isolated profile so
-/// ordinary session retrieval has a genuine message to find. Without this the
-/// session lane would answer emptily and prove nothing.
-fn seed_session_transcript(project: &Path) {
-    let home = PathBuf::from(std::env::var_os("HOME").expect("pinned isolated HOME"));
+/// Writes one real Claude transcript into the composition's own transcript
+/// source home so ordinary session retrieval has a genuine message to find.
+/// Without this the session lane would answer emptily and prove nothing.
+fn seed_session_transcript(isolation_root: &Path, project: &Path) {
+    let home = ProductionProjectCompositionHarnessV1::transcript_source_home(isolation_root)
+        .expect("composition transcript source home");
     let directory = home.join(".claude/projects/semantic-availability-journey");
     std::fs::create_dir_all(&directory).expect("session transcript directory");
     let cwd = project.to_string_lossy();
@@ -245,7 +246,7 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
             "test: seed semantic availability journey",
         ],
     );
-    seed_session_transcript(&project);
+    seed_session_transcript(isolation.path(), &project);
 
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
