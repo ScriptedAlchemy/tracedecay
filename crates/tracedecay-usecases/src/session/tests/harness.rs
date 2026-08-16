@@ -18,7 +18,7 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_sessions::runtime::lcm::payload::{upsert_payload_metadata, write_external_payload};
@@ -33,7 +33,7 @@ pub(super) const PRIVACY_CANARY: &str = "sk-proj-private-canary";
 pub(super) const SAFE_PRIVACY_PAYLOAD: &str = "The billing pipeline regression is fixed.";
 
 pub(super) struct RegisteredTemporalHarness {
-    pub(super) registered: Arc<RegisteredGlobalDb>,
+    pub(super) registered: RegisteredGlobalDbLeaseV1,
     _directory: TempDir,
     _runtime: RegisteredGlobalDbTestRuntime,
 }

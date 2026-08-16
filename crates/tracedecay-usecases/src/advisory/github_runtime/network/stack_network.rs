@@ -310,7 +310,7 @@ mod tests {
         .unwrap();
         let database = runtime.project_database_arc().unwrap();
         let anchors =
-            ProjectGitHubStackAnchorAuthorityV1::new(Arc::clone(&database), scope.clone()).unwrap();
+            ProjectGitHubStackAnchorAuthorityV1::new(database.clone(), scope.clone()).unwrap();
         let provider = ProviderId::new("provider.github").unwrap();
         let (_credential_authority, resolution) = registered_fixture_credential(
             "stack-anchor-http",

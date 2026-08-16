@@ -14,15 +14,15 @@ use crate::dashboard::{
     DashboardGitCorrelationReadErrorV1, DashboardGitCorrelationReadFutureV1,
     DashboardGitCorrelationReadPortV1, DashboardGitCorrelationReadV1,
 };
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::store::GlobalDbGitCorrelationStore;
 
 pub struct DashboardGitCorrelationReadAdapter {
-    store: GlobalDbGitCorrelationStore<Arc<RegisteredGlobalDb>>,
+    store: GlobalDbGitCorrelationStore<RegisteredGlobalDbLeaseV1>,
 }
 
 impl DashboardGitCorrelationReadAdapter {
-    pub fn new(project_database: Arc<RegisteredGlobalDb>) -> Self {
+    pub fn new(project_database: RegisteredGlobalDbLeaseV1) -> Self {
         Self {
             store: GlobalDbGitCorrelationStore::new(project_database),
         }

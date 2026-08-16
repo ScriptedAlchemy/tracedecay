@@ -19,7 +19,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -321,14 +321,14 @@ pub(super) async fn handle_dashboard(
     retained_project_server_resolver: Option<crate::mcp::server::RetainedProjectServerResolver>,
     code_graph_read_admission: Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
     code_graph_projection_read_port: Option<crate::mcp::server::CodeGraphProjectionReadPort>,
-    registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+    registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
     daemon_user_profile_id: Option<UserProfileId>,
     daemon_profile_root: Option<PathBuf>,
     session_retrieval: Option<
         Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>,
     >,
     session_identity: Option<tracedecay_usecases::context::ResolvedSessionIdentity>,
-    registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
+    registered_savings_db: Option<RegisteredGlobalDbLeaseV1>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
@@ -520,7 +520,7 @@ pub(super) async fn handle_dashboard(
                 registered_project_session_db.as_ref().map(|database| {
                     Arc::new(
                         super::dashboard_git_correlation::DashboardGitCorrelationReadAdapter::new(
-                            Arc::clone(database),
+                            database.clone(),
                         ),
                     )
                         as Arc<dyn crate::dashboard::DashboardGitCorrelationReadPortV1>

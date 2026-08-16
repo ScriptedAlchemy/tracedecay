@@ -34,7 +34,7 @@ use tracedecay_domain::configuration::{
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     TELEMETRY_TIMINGS_SETTING_KEY,
 };
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::StoreLayout;
 
@@ -129,13 +129,13 @@ pub type RuntimeConfigurationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<
 
 pub struct OpenedRuntimeConfiguration {
     pub(crate) configuration: PinnedRuntimeConfiguration,
-    pub(crate) registered_database: Arc<RegisteredGlobalDb>,
+    pub(crate) registered_database: RegisteredGlobalDbLeaseV1,
 }
 
 impl OpenedRuntimeConfiguration {
     pub fn new(
         configuration: PinnedRuntimeConfiguration,
-        registered_database: Arc<RegisteredGlobalDb>,
+        registered_database: RegisteredGlobalDbLeaseV1,
     ) -> Self {
         Self {
             configuration,
@@ -149,28 +149,28 @@ pub trait RuntimeConfigurationAuthorityPort: Send + Sync {
         &'a self,
         project_root: &'a Path,
         layout: &'a StoreLayout,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> RuntimeConfigurationFuture<'a, OpenedRuntimeConfiguration>;
 
     fn open_read_only<'a>(
         &'a self,
         project_root: &'a Path,
         layout: &'a StoreLayout,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> RuntimeConfigurationFuture<'a, OpenedRuntimeConfiguration>;
 
     fn resolve<'a>(
         &'a self,
         project_root: &'a Path,
         layout: &'a StoreLayout,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> RuntimeConfigurationFuture<'a, PinnedRuntimeConfiguration>;
 
     fn load_read_only<'a>(
         &'a self,
         project_root: &'a Path,
         layout: &'a StoreLayout,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> RuntimeConfigurationFuture<'a, PinnedRuntimeConfiguration>;
 }
 
@@ -188,7 +188,7 @@ pub fn install_runtime_configuration_authority(
 pub async fn open_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &StoreLayout,
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 ) -> Result<OpenedRuntimeConfiguration> {
     runtime_configuration_authority()?
         .open(project_root, layout, database)
@@ -198,7 +198,7 @@ pub async fn open_runtime_configuration_for_registered_database(
 pub async fn open_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
     layout: &StoreLayout,
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 ) -> Result<OpenedRuntimeConfiguration> {
     runtime_configuration_authority()?
         .open_read_only(project_root, layout, database)

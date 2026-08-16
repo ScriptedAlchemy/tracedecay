@@ -460,11 +460,11 @@ async fn concurrent_registered_mounts_singleflight_to_one_runtime() {
 #[tokio::test]
 async fn queued_registered_write_rechecks_authority_when_dequeued() {
     let mut harness = RegisteredGlobalDbHarness::open("queued-authority-loss").await;
-    let db = Arc::clone(&harness.registered);
+    let db = harness.registered.clone();
     let transaction = db.begin_write_transaction().await.unwrap();
 
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let queued_db = Arc::clone(&db);
+    let queued_db = db.clone();
     let queued = tokio::spawn(async move {
         started_tx.send(()).unwrap();
         queued_db
@@ -496,10 +496,10 @@ async fn queued_registered_write_rechecks_authority_when_dequeued() {
 #[tokio::test]
 async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payload() {
     let harness = RegisteredGlobalDbHarness::open("cancelled-authoritative-transaction").await;
-    let db = Arc::clone(&harness.registered);
+    let db = harness.registered.clone();
     let storage_root = harness.storage_root().to_path_buf();
     let (created_tx, created_rx) = tokio::sync::oneshot::channel();
-    let task_db = Arc::clone(&db);
+    let task_db = db.clone();
     let task_storage_root = storage_root.clone();
     let task = tokio::spawn(async move {
         let transaction = task_db.begin_write_transaction().await.unwrap();
@@ -549,7 +549,7 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
     drop(rows);
     drop(snapshot);
 
-    let queued_db = Arc::clone(&db);
+    let queued_db = db.clone();
     let queued_write = tokio::spawn(async move {
         queued_db
             .writer_connection()
@@ -603,7 +603,7 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
 #[tokio::test]
 async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     let harness = RegisteredGlobalDbHarness::open("cancelled-lcm-lifecycle").await;
-    let db = Arc::clone(&harness.registered);
+    let db = harness.registered.clone();
     let update = tracedecay_sessions::runtime::lcm::LcmLifecycleUpdate {
         provider: "cursor".to_string(),
         conversation_id: "cancelled-lifecycle".to_string(),
@@ -619,7 +619,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
         ],
     };
     let (written_tx, written_rx) = tokio::sync::oneshot::channel();
-    let task_db = Arc::clone(&db);
+    let task_db = db.clone();
     let task_update = update.clone();
     let task = tokio::spawn(async move {
         let transaction = task_db.begin_write_transaction().await.unwrap();
@@ -828,9 +828,9 @@ async fn analytics_import_cursor_conflict_rolls_back_events() {
 #[tokio::test]
 async fn registered_handles_share_one_serialized_writer() {
     let harness = RegisteredGlobalDbHarness::open("shared-registered-writer").await;
-    let first = Arc::clone(&harness.registered);
-    let second = Arc::clone(&harness.registered);
-    let savings = Arc::clone(&harness.registered);
+    let first = harness.registered.clone();
+    let second = harness.registered.clone();
+    let savings = harness.registered.clone();
 
     let transaction = first.begin_write_transaction().await.unwrap();
     let event = AnalyticsEventInsert {
@@ -882,7 +882,7 @@ async fn registered_handles_share_one_serialized_writer() {
 #[tokio::test]
 async fn optional_accounting_exposes_database_failures_to_callers() {
     let mut harness = RegisteredGlobalDbHarness::open("accounting-write-errors").await;
-    let database = Arc::clone(&harness.registered);
+    let database = harness.registered.clone();
     harness.revoke();
 
     let upsert_error = database
@@ -902,7 +902,7 @@ async fn optional_accounting_exposes_database_failures_to_callers() {
 async fn concurrent_registered_writes_remain_isolated() {
     let harness = RegisteredGlobalDbHarness::open("concurrent-registered-writes").await;
     let handles = (0..12)
-        .map(|_| Arc::clone(&harness.registered))
+        .map(|_| harness.registered.clone())
         .collect::<Vec<_>>();
 
     let mut writes = tokio::task::JoinSet::new();
@@ -1038,7 +1038,7 @@ async fn analytics_query_honors_upper_horizon_and_row_cursor() {
 #[tokio::test]
 async fn queued_registered_writes_preserve_fifo_fairness() {
     let harness = RegisteredGlobalDbHarness::open("registered-writer-fairness").await;
-    let db = Arc::clone(&harness.registered);
+    let db = harness.registered.clone();
     db.writer_connection()
         .unwrap()
         .execute_batch(
@@ -1053,7 +1053,7 @@ async fn queued_registered_writes_preserve_fifo_fairness() {
 
     let mut queued = Vec::new();
     for label in ["first", "second", "third"] {
-        let queued_db = Arc::clone(&db);
+        let queued_db = db.clone();
         queued.push(tokio::spawn(async move {
             queued_db
                 .writer_connection()
@@ -1134,7 +1134,7 @@ async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
 #[tokio::test]
 async fn retained_registered_database_rejects_new_writer_after_scope_drop() {
     let mut harness = RegisteredGlobalDbHarness::open("retained-registered-writer").await;
-    let db = Arc::clone(&harness.registered);
+    let db = harness.registered.clone();
     harness.revoke();
 
     let error = match db.writer_connection() {
@@ -1148,7 +1148,7 @@ async fn retained_registered_database_rejects_new_writer_after_scope_drop() {
 #[tokio::test]
 async fn issued_registered_writer_rejects_autocommit_after_scope_drop() {
     let mut harness = RegisteredGlobalDbHarness::open("issued-registered-writer").await;
-    let db = Arc::clone(&harness.registered);
+    let db = harness.registered.clone();
     let writer = db.writer_connection().expect("acquire registered writer");
     harness.revoke();
 
@@ -1169,7 +1169,7 @@ async fn issued_registered_writer_rejects_autocommit_after_scope_drop() {
 #[tokio::test]
 async fn begun_registered_transaction_rolls_back_when_scope_drops_before_commit() {
     let mut harness = RegisteredGlobalDbHarness::open("begun-registered-transaction").await;
-    let db = Arc::clone(&harness.registered);
+    let db = harness.registered.clone();
     let transaction = db.begin_write_transaction().await.unwrap();
     transaction
         .execute(
@@ -1194,7 +1194,7 @@ async fn begun_registered_transaction_rolls_back_when_scope_drops_before_commit(
 #[tokio::test]
 async fn begun_registered_transaction_can_roll_back_after_scope_drop() {
     let mut harness = RegisteredGlobalDbHarness::open("registered-rollback").await;
-    let db = Arc::clone(&harness.registered);
+    let db = harness.registered.clone();
     let transaction = db.begin_write_transaction().await.unwrap();
     transaction
         .execute(

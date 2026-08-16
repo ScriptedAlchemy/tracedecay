@@ -575,7 +575,7 @@ impl StoreAdministration {
 
     pub(super) async fn registered_profile_session_database(
         &self,
-    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
         self.ensure_account_active().await?;
         self.session_runtime_registry()
             .await?
@@ -585,7 +585,7 @@ impl StoreAdministration {
 
     pub(super) async fn registered_profile_database(
         &self,
-    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
         let database = self.raw_registered_profile_database().await?;
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
@@ -604,7 +604,7 @@ impl StoreAdministration {
 
     async fn raw_registered_profile_database(
         &self,
-    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
         self.session_runtime_registry()
             .await?
             .profile_database()
@@ -639,7 +639,7 @@ impl StoreAdministration {
 
     pub(super) async fn mounted_registered_session_databases(
         &self,
-    ) -> Vec<Arc<crate::global_db::RegisteredGlobalDb>> {
+    ) -> Vec<crate::global_db::RegisteredGlobalDbLeaseV1> {
         let Ok(profile_root) = self
             .profile_identity()
             .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
@@ -690,7 +690,7 @@ impl StoreAdministration {
         &self,
         project_root: &Path,
         store_layout: &crate::storage::StoreLayout,
-    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
         let project_id = store_layout
             .identity
             .project_id
@@ -756,7 +756,7 @@ impl StoreAdministration {
 
     pub(super) async fn host_admission_broker(
         &self,
-        database: &Arc<crate::global_db::RegisteredGlobalDb>,
+        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
     ) -> Result<tracedecay_usecases::host_admission::SharedHostAdmissionBroker> {
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database

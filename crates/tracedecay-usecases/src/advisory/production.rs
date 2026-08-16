@@ -6,7 +6,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracedecay_hooks::HookFeedbackDeliveryPortV1;
 
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_runtime_core::db::Database;
 
@@ -64,7 +64,7 @@ impl AdvisoryProductionAuthoritiesV1 {
 
 #[derive(Clone)]
 pub struct AdvisoryProductionOpenV1 {
-    pub project_runtime_db: Arc<RegisteredGlobalDb>,
+    pub project_runtime_db: RegisteredGlobalDbLeaseV1,
     pub database: Database,
     pub code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     pub code_index_identity:
@@ -117,7 +117,7 @@ pub fn open_advisory_production_authorities(
     )
     .ok_or(AdvisoryProductionOpenErrorV1::GitHubAuthorityUnavailable)?;
     let proximity_evidence = production_proximity_evidence_authority_v1(
-        Arc::clone(&project_runtime_db),
+        project_runtime_db.clone(),
         code_graph,
         feedback_scope.clone(),
         project_root,

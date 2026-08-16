@@ -22,7 +22,7 @@ use tracedecay_store::{
 use super::DaemonSessionRuntimeRegistryV1;
 use super::code_graph::inline_graph_publication_input_digest;
 use crate::daemon::profile_identity;
-use crate::global_db::{RegisteredGlobalDb, VerifiedGraphRuntimePortV1};
+use crate::global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
 
 mod concurrency;
 mod mount_scope;
@@ -63,7 +63,7 @@ impl ContractFixture {
     async fn mount_unbound(
         &self,
         project_id: &ProjectId,
-    ) -> (Arc<crate::db::Database>, Arc<RegisteredGlobalDb>) {
+    ) -> (Arc<crate::db::Database>, RegisteredGlobalDbLeaseV1) {
         let roots = self.project_roots(project_id);
         for root in &roots {
             std::fs::create_dir_all(root).expect("worktree root");
@@ -94,7 +94,7 @@ impl ContractFixture {
         project_id: &ProjectId,
     ) -> (
         Arc<crate::db::Database>,
-        Arc<RegisteredGlobalDb>,
+        RegisteredGlobalDbLeaseV1,
         Arc<dyn VerifiedGraphRuntimePortV1>,
     ) {
         let (project_database, sessions) = self.mount_unbound(project_id).await;
@@ -571,7 +571,7 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
         .await
         .expect("close refusal restores a mounted ProjectSessions route");
     assert!(
-        !Arc::ptr_eq(&external_old_sessions, &restored),
+        !external_old_sessions.shares_client_with(&restored),
         "restoration must not reinsert the facade that still leases the old graph handle"
     );
     let (replay_binding, replay_path) = fixture

@@ -63,7 +63,7 @@ impl DaemonSessionSyncService {
     pub(super) fn coalesce_import(
         &self,
         context: Arc<SessionSyncProjectContext>,
-        project_sessions: Arc<RegisteredGlobalDb>,
+        project_sessions: RegisteredGlobalDbLeaseV1,
         key: String,
         journal: SessionSyncJournalV1,
         primary_key: String,
@@ -354,7 +354,7 @@ impl DaemonSessionSyncService {
 impl SessionSyncProjectContext {
     pub(super) async fn source_frontiers_for(
         &self,
-        project_sessions: &Arc<RegisteredGlobalDb>,
+        project_sessions: &RegisteredGlobalDbLeaseV1,
         source: &SessionSyncCommandV1,
     ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         match source {
@@ -362,7 +362,7 @@ impl SessionSyncProjectContext {
                 self.source_frontiers(project_sessions).await
             }
             SessionSyncCommandV1::SynchronizeGit(_) => {
-                self.git_history_source_frontiers(Arc::clone(project_sessions))
+                self.git_history_source_frontiers(project_sessions.clone())
                     .await
             }
         }
@@ -370,7 +370,7 @@ impl SessionSyncProjectContext {
 
     pub(super) async fn source_frontiers(
         &self,
-        project_sessions: &Arc<RegisteredGlobalDb>,
+        project_sessions: &RegisteredGlobalDbLeaseV1,
     ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let mut frontiers = Vec::new();
         for (store_scope, database) in [
@@ -409,7 +409,7 @@ impl SessionSyncProjectContext {
 
     async fn git_history_source_frontiers(
         &self,
-        project_sessions: Arc<RegisteredGlobalDb>,
+        project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let store = GlobalDbGitCorrelationStore::new(project_sessions);
         let snapshot = store.read_snapshot().await.map_err(store_error)?;
@@ -439,13 +439,12 @@ impl SessionSyncProjectContext {
         admitted_at: UtcMicros,
         request: &SessionSyncRequestV1,
         shutdown: &tracedecay_usecases::observation::ObservationCancellation,
-        project_sessions: Arc<RegisteredGlobalDb>,
+        project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncWorkResult {
         let cancellation = tracedecay_usecases::observation::ObservationCancellation::default();
         let pass_cancellation = cancellation.clone();
         let pass = async {
-            let project_authority =
-                GlobalDbSessionIngestAuthority::new(Arc::clone(&project_sessions));
+            let project_authority = GlobalDbSessionIngestAuthority::new(project_sessions.clone());
             let project = tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
                 &self.brain_id,
                 &self.profile_id,
@@ -492,9 +491,8 @@ impl SessionSyncProjectContext {
             } else {
                 let profile_sweep_started_at = now_micros();
                 let user_authority =
-                    GlobalDbSessionIngestAuthority::new(Arc::clone(&self.user_sessions));
-                let registry_authority =
-                    GlobalDbSessionIngestAuthority::new(Arc::clone(&self.registry));
+                    GlobalDbSessionIngestAuthority::new(self.user_sessions.clone());
+                let registry_authority = GlobalDbSessionIngestAuthority::new(self.registry.clone());
                 let user =
                     tracedecay_sessions::runtime::ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
                         &self.brain_id,
@@ -644,7 +642,7 @@ impl SessionSyncProjectContext {
         request: &SessionSyncRequestV1,
         options: SessionGitSyncV1,
         shutdown: &tracedecay_usecases::observation::ObservationCancellation,
-        project_sessions: Arc<RegisteredGlobalDb>,
+        project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncWorkResult {
         if shutdown.is_cancelled() {
             return SessionSyncWorkResult::Interrupted(SessionSyncInterruption::Shutdown);
@@ -660,7 +658,7 @@ impl SessionSyncProjectContext {
             cancellation.clone(),
             GIT_SYNC_COMMAND_DEADLINE,
         );
-        let store = GlobalDbGitCorrelationStore::new(Arc::clone(&project_sessions));
+        let store = GlobalDbGitCorrelationStore::new(project_sessions.clone());
         let backfill_options = tracedecay_sessions::runtime::git_correlation::BackfillOptions {
             since: options.since_unix(),
             limit_sessions: options.max_sessions(),

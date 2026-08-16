@@ -12,7 +12,7 @@ use tracedecay_domain::{
     ManifestDigest, ObservationSourceCursorV1, ProjectionGenerationId, UtcMicros, canonical_sha256,
 };
 use tracedecay_runtime_core::db::DatabaseAuthority;
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeHandle;
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeClientLease;
 use tracedecay_rusqlite_runtime::exact_sql::{ExactSqlStatement, ExactSqlValue};
 use tracedecay_store::{
     AnchoredObservationWrite, CommandDigestV1, DurabilityClassV1, IdempotencyIdentityV1,
@@ -31,7 +31,7 @@ const PROJECTION_GENERATION: &str = "remote-replay.v1";
 
 #[derive(Clone)]
 struct ReplayTargetV1 {
-    runtime: StoreRuntimeHandle,
+    runtime: StoreRuntimeClientLease,
     authority: DatabaseAuthority,
 }
 
@@ -164,7 +164,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
     pub(crate) fn register_target(
         &self,
         project_id: ProjectId,
-        runtime: StoreRuntimeHandle,
+        runtime: StoreRuntimeClientLease,
         authority: DatabaseAuthority,
     ) -> Result<(), String> {
         let mut targets = self
@@ -284,7 +284,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
     pub(crate) fn registered_query_target(
         &self,
         project_id: &ProjectId,
-    ) -> Result<StoreRuntimeHandle, String> {
+    ) -> Result<StoreRuntimeClientLease, String> {
         if !self.accepting.load(Ordering::Acquire) {
             return Err("remote replay target registry is unavailable".to_owned());
         }

@@ -26,16 +26,16 @@ use tracedecay_store::{
 };
 
 use tracedecay_runtime_core::db::DatabaseAuthority;
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeHandle;
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeClientLease;
 /// Observation-store adapter over the already-registered authoritative runtime.
 pub struct GlobalDbObservationStore<'a> {
-    runtime: &'a StoreRuntimeHandle,
+    runtime: &'a StoreRuntimeClientLease,
     write_authority: &'a DatabaseAuthority,
 }
 
 impl<'a> GlobalDbObservationStore<'a> {
     pub const fn with_runtime(
-        runtime: &'a StoreRuntimeHandle,
+        runtime: &'a StoreRuntimeClientLease,
         write_authority: &'a DatabaseAuthority,
     ) -> Self {
         Self {
@@ -331,7 +331,7 @@ impl RuntimeRequestProbeV1 for RuntimeObservationProbe {
 }
 
 fn dispatch_runtime_observation_read(
-    runtime: &StoreRuntimeHandle,
+    runtime: &StoreRuntimeClientLease,
     operation: ObservationReadOperationV1,
 ) -> ObservationStoreResult<ObservationReadResultV1> {
     let command_digest = canonical_sha256(&operation)
@@ -432,7 +432,7 @@ fn stored_observation_from_runtime_row(
 }
 
 fn read_runtime_source_cursor(
-    runtime: &StoreRuntimeHandle,
+    runtime: &StoreRuntimeClientLease,
     source: &ClaudeSourceIdentityV1,
     scope: &ObservationScopeV1,
 ) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
@@ -452,7 +452,7 @@ fn read_runtime_source_cursor(
 }
 
 fn read_runtime_retrieval_anchor_by_alias(
-    runtime: &StoreRuntimeHandle,
+    runtime: &StoreRuntimeClientLease,
     scope: &ObservationScopeV1,
     alias: &tracedecay_domain::NativeAliasV2,
 ) -> ObservationStoreResult<Option<tracedecay_domain::RetrievalAnchorId>> {
@@ -472,7 +472,7 @@ fn read_runtime_retrieval_anchor_by_alias(
 }
 
 fn read_runtime_stored_observation(
-    runtime: &StoreRuntimeHandle,
+    runtime: &StoreRuntimeClientLease,
     observation_id: &CanonicalObservationIdV1,
 ) -> ObservationStoreResult<Option<StoredObservation>> {
     match dispatch_runtime_observation_read(
@@ -492,7 +492,7 @@ fn read_runtime_stored_observation(
 }
 
 async fn submit_runtime_write(
-    runtime: &StoreRuntimeHandle,
+    runtime: &StoreRuntimeClientLease,
     authority: &DatabaseAuthority,
     payload: RepositoryWritePayloadV1,
     idempotency_key: String,
@@ -742,7 +742,7 @@ mod tests {
         let _ = assert_exact_fields;
         assert_eq!(
             std::mem::size_of::<GlobalDbObservationStore<'static>>(),
-            std::mem::size_of::<(&'static StoreRuntimeHandle, &'static DatabaseAuthority,)>()
+            std::mem::size_of::<(&'static StoreRuntimeClientLease, &'static DatabaseAuthority,)>()
         );
     }
 }

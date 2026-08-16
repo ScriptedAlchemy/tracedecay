@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_domain::{BrainId, FactOwnerV1, ProjectId, UserProfileId};
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_runtime_core::storage::StoreLayout;
@@ -20,12 +20,12 @@ pub trait ProjectRuntime: Send + Sync {
     fn store_layout(&self) -> &StoreLayout;
     fn project_memory_owner(&self) -> Result<FactOwnerV1>;
     fn profile_id(&self) -> &UserProfileId;
-    fn profile_database(&self) -> &Arc<RegisteredGlobalDb>;
+    fn profile_database(&self) -> &RegisteredGlobalDbLeaseV1;
     fn project_sessions<'a>(
         &'a self,
         project_id: ProjectId,
         roots: Vec<PathBuf>,
-    ) -> RuntimeFuture<'a, Arc<RegisteredGlobalDb>>;
+    ) -> RuntimeFuture<'a, RegisteredGlobalDbLeaseV1>;
     fn open_project_store_db(&self) -> RuntimeFuture<'_, Database>;
 }
 
@@ -34,7 +34,7 @@ pub type TraceDecay = dyn ProjectRuntime;
 /// Profile runtime needed by projectless automation.
 pub trait ProfileRuntime: Send + Sync {
     fn profile_id(&self) -> &UserProfileId;
-    fn profile_sessions(&self) -> RuntimeFuture<'_, Arc<RegisteredGlobalDb>>;
+    fn profile_sessions(&self) -> RuntimeFuture<'_, RegisteredGlobalDbLeaseV1>;
     fn open_user_memory_db(&self) -> RuntimeFuture<'_, Database>;
 }
 

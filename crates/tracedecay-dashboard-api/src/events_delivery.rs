@@ -692,16 +692,12 @@ mod tests {
             policy_revision: "dashboard-delivery-policy.v1".to_owned(),
         };
         let producer = Arc::new(
-            BoundedObservabilityProducerV1::start(Arc::clone(&database), identity.clone(), 8)
+            BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 8)
                 .expect("observability producer"),
         );
         let authority = Arc::new(
-            DeliverySettlementAuthorityV1::new(
-                Arc::clone(&database),
-                Arc::clone(&producer),
-                identity,
-            )
-            .expect("delivery authority"),
+            DeliverySettlementAuthorityV1::new(database.clone(), Arc::clone(&producer), identity)
+                .expect("delivery authority"),
         );
         let mut frame = event();
         let first = DashboardDeliverySettlementRegistryV1::new(Some(Arc::clone(&authority)));
@@ -758,16 +754,12 @@ mod tests {
             policy_revision: "dashboard-deadline-policy.v1".to_owned(),
         };
         let producer = Arc::new(
-            BoundedObservabilityProducerV1::start(Arc::clone(&database), identity.clone(), 8)
+            BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 8)
                 .expect("observability producer"),
         );
         let authority = Arc::new(
-            DeliverySettlementAuthorityV1::new(
-                Arc::clone(&database),
-                Arc::clone(&producer),
-                identity,
-            )
-            .expect("delivery authority"),
+            DeliverySettlementAuthorityV1::new(database.clone(), Arc::clone(&producer), identity)
+                .expect("delivery authority"),
         );
         let (receipt, mut pending) =
             pending_delivery(&event(), "dashboard:sse:connection-without-ack")

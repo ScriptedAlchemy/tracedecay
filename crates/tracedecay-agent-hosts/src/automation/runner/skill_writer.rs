@@ -184,7 +184,7 @@ pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
             }) => {
                 let run = AgentTaskRunContext::new(
                     user_automation_root(profile_root),
-                    Arc::clone(&sessions_db),
+                    sessions_db.clone(),
                     options.run_id.clone(),
                     "skill_writer",
                     options.trigger,
@@ -219,7 +219,7 @@ pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
 
 pub(super) struct SkillWriterStoreRuntime<'a> {
     pub(super) dashboard_root: PathBuf,
-    pub(super) sessions_db: Arc<RegisteredGlobalDb>,
+    pub(super) sessions_db: RegisteredGlobalDbLeaseV1,
     pub(super) analytics_project_root: Option<&'a Path>,
     pub(super) analytics_db: Option<&'a RegisteredGlobalDb>,
     pub(super) authority: CurationApplyAuthorityV1,

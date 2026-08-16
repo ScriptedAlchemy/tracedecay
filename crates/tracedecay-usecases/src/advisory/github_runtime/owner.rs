@@ -24,7 +24,7 @@ use crate::advisory::{
     GitHubReadOnlyDescriptorSetV1, GitHubRestDescriptorV1,
 };
 use crate::stack_coordinator::DaemonGitHubStackCoordinatorV1;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::Database;
 
 pub struct GitHubReviewRuntimeOwnerConfigV1 {
@@ -36,7 +36,7 @@ pub struct GitHubReviewRuntimeOwnerConfigV1 {
     pub http: GitHubHttpReadConfigV1,
     pub identity: GitHubReviewProviderIdentityV1,
     pub stack_coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
-    pub stack_anchor_db: Arc<RegisteredGlobalDb>,
+    pub stack_anchor_db: RegisteredGlobalDbLeaseV1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,7 +225,7 @@ where
     let stack_provider = config.identity.provider.clone();
     let stack_coordinator = Arc::clone(&config.stack_coordinator);
     let stack_anchors = super::ProjectGitHubStackAnchorAuthorityV1::new(
-        Arc::clone(&config.stack_anchor_db),
+        config.stack_anchor_db.clone(),
         config.feedback_scope.clone(),
     )
     .ok_or(GitHubReviewRuntimeOwnerBuildErrorV1::StoreUnavailable)?;

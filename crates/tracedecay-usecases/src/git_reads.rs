@@ -20,7 +20,7 @@ use tracedecay_domain::{
     GitIndexPreviewId, ManifestDigest, RootScopeOutcomeV1, ScopeOutcome, ScopePartialReasonV1,
     ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, UtcMicros,
 };
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_db::{GraphCancellation, GraphDbError};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_store::FactReadControl;
@@ -277,7 +277,7 @@ fn git_unavailable_reason(reason: GitReadUnavailableReasonV1) -> ScopeUnavailabl
 pub struct GitReadAuthorityV1 {
     project_root: PathBuf,
     scope: ResolvedScope,
-    project_sessions: Option<Arc<RegisteredGlobalDb>>,
+    project_sessions: Option<RegisteredGlobalDbLeaseV1>,
 }
 
 impl GitReadAuthorityV1 {
@@ -292,7 +292,7 @@ impl GitReadAuthorityV1 {
     pub fn new_with_project_sessions(
         project_root: impl Into<PathBuf>,
         scope: ResolvedScope,
-        project_sessions: Arc<RegisteredGlobalDb>,
+        project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> Self {
         Self {
             project_root: project_root.into(),

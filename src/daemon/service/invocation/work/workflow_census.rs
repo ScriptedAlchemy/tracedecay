@@ -424,7 +424,7 @@ struct WorkflowFanOutCensusObservationRecoveryInnerV1 {
 
 impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
     pub(in crate::daemon::service::invocation) fn mount(
-        database: Arc<crate::global_db::RegisteredGlobalDb>,
+        database: crate::global_db::RegisteredGlobalDbLeaseV1,
         project_id: tracedecay_domain::ProjectId,
         producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
     ) -> Result<Self, tracedecay_application::ApplicationContractError> {
@@ -437,7 +437,7 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
         let worker_cancellation = cancellation.clone();
         let task = tokio::spawn(async move {
             loop {
-                let read_database = Arc::clone(&database);
+                let read_database = database.clone();
                 let mut read = tokio::task::spawn_blocking(move || {
                     read_pending_census_observations(&read_database)
                 });
@@ -480,7 +480,7 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
                     };
                     match emission {
                         Ok(_) => {
-                            let mark_database = Arc::clone(&database);
+                            let mark_database = database.clone();
                             let mut mark = tokio::task::spawn_blocking(move || {
                                 mark_durable_census_observations(&mark_database, &observations)
                             });

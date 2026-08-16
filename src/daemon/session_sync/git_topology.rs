@@ -17,7 +17,7 @@ use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 use tracedecay_store::FactReadControl;
 
 use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 
 use super::{SESSION_SYNC_POLL_INTERVAL, SessionSyncProjectContext, work::SessionSyncInterruption};
 
@@ -48,7 +48,7 @@ impl SessionSyncProjectContext {
         &self,
         request: &tracedecay_application::session_sync::SessionSyncRequestV1,
         shutdown: &tracedecay_usecases::observation::ObservationCancellation,
-        project_sessions: Arc<RegisteredGlobalDb>,
+        project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> GitTopologySyncOutcome {
         let scope = match crate::daemon::project_open_owners::resolved_scope_for_project(
             &self.project_root,

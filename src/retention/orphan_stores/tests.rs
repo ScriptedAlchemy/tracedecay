@@ -7,7 +7,7 @@ use super::quarantine::{QuarantineRecoveryOutcome, recover_existing_store_quaran
 use super::*;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::DaemonDatabaseScope;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::storage::{STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
@@ -19,7 +19,7 @@ async fn open_registered_db(
 ) -> (
     DaemonSessionRuntimeRegistryV1,
     DaemonDatabaseScope,
-    Arc<RegisteredGlobalDb>,
+    RegisteredGlobalDbLeaseV1,
 ) {
     // `create_dir_all` in the callers honours the ambient umask, so under a
     // group-writable umask (0002) the profile root lands at 0775 and profile

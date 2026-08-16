@@ -17,19 +17,19 @@ use crate::semantic_runtime::{
     SemanticLinkedTransitionV1, SemanticRetrievalConfigurationPortV1, SemanticRollbackCommandV1,
     SemanticRuntimeFuture,
 };
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 #[derive(Clone)]
 pub struct ProductionSemanticRetrievalConfigurationStoreV1 {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
     prepared_central_commits: Arc<Mutex<BTreeMap<String, PreparedCentralCommit>>>,
 }
 
 impl ProductionSemanticRetrievalConfigurationStoreV1 {
     pub fn open(
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         scope: ResolvedScope,
     ) -> Result<Self, SemanticConfigurationBackendErrorV1> {
         scope
@@ -45,7 +45,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         })
     }
 
-    pub(super) fn database(&self) -> &Arc<RegisteredGlobalDb> {
+    pub(super) fn database(&self) -> &RegisteredGlobalDbLeaseV1 {
         &self.database
     }
 

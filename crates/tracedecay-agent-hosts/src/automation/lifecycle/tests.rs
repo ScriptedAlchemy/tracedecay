@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc, sync::atomic::Ordering};
 
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::{
     AgentTaskRunContext, AutomationRunControl, NonEmptyAutomaticFactReceipts, RUN_ID_COUNTER,
@@ -17,7 +17,7 @@ use crate::automation::run_ledger::{
 };
 
 struct TestSessionsDb {
-    db: Arc<RegisteredGlobalDb>,
+    db: RegisteredGlobalDbLeaseV1,
     _runtime: tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
 }
 
@@ -221,7 +221,7 @@ async fn append_skip(
     let sessions = test_sessions_db(dashboard_root).await;
     let mut run = AgentTaskRunContext::new(
         dashboard_root.to_path_buf(),
-        Arc::clone(&sessions.db),
+        sessions.db.clone(),
         Some(run_id.to_string()),
         "test",
         trigger,
@@ -496,7 +496,7 @@ async fn post_gate_scheduler_skip(dashboard_root: &Path, run_id: &str, reason: &
     let sessions = test_sessions_db(dashboard_root).await;
     let mut run = AgentTaskRunContext::new(
         dashboard_root.to_path_buf(),
-        Arc::clone(&sessions.db),
+        sessions.db.clone(),
         Some(run_id.to_string()),
         "test",
         AutomationTrigger::Scheduler,
@@ -542,7 +542,7 @@ async fn page_cursor_transitions_bypass_reason_only_skip_deduplication() {
         let sessions = test_sessions_db(root).await;
         let mut run = AgentTaskRunContext::new(
             root.to_path_buf(),
-            Arc::clone(&sessions.db),
+            sessions.db.clone(),
             Some(run_id.to_owned()),
             "test",
             AutomationTrigger::Scheduler,
@@ -593,7 +593,7 @@ async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
     for run_id in ["run-1", "run-2"] {
         let run = AgentTaskRunContext::new(
             root.to_path_buf(),
-            Arc::clone(&sessions.db),
+            sessions.db.clone(),
             Some(run_id.to_string()),
             "memory_curator",
             AutomationTrigger::Scheduler,
@@ -613,7 +613,7 @@ async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
 
     let run = AgentTaskRunContext::new(
         root.to_path_buf(),
-        Arc::clone(&sessions.db),
+        sessions.db.clone(),
         Some("run-3".to_string()),
         "memory_curator",
         AutomationTrigger::Scheduler,

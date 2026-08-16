@@ -19,7 +19,7 @@ pub(super) async fn open_and_register_project_primitive_runtime(
     project_root: &Path,
     graph: Arc<crate::tracedecay::TraceDecay>,
     server: &McpServer,
-    session_db: Arc<crate::global_db::RegisteredGlobalDb>,
+    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: &str,
 ) -> Result<()> {

@@ -50,7 +50,7 @@ pub(super) fn reconcile_workflow_fan_out(
         );
         if cancelled_children || projection.sequence() != initial_sequence {
             super::publish_committed_task_activity_in_background(
-                Arc::clone(&registered.database),
+                registered.database.clone(),
                 project_root.to_path_buf(),
                 None,
             );
@@ -308,7 +308,7 @@ pub(super) fn reconcile_workflow_fan_out(
     );
     if cancelled_children || projection.sequence() != initial_sequence {
         super::publish_committed_task_activity_in_background(
-            Arc::clone(&registered.database),
+            registered.database.clone(),
             project_root.to_path_buf(),
             None,
         );

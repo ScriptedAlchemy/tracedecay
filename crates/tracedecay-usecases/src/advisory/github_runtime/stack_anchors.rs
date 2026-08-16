@@ -26,7 +26,7 @@ use tracedecay_domain::{
     RetrievalAnchorTargetV2, ScopeResolutionId, UserProfileId, UtcMicros, VectorWatermark,
     canonical_sha256,
 };
-use tracedecay_global_db::{RegisteredGitTopologyAnchorAuthorityV2, RegisteredGlobalDb};
+use tracedecay_global_db::{RegisteredGitTopologyAnchorAuthorityV2, RegisteredGlobalDbLeaseV1};
 use tracedecay_tool_catalog::{CapabilityId as GrantCapabilityId, UseCaseId as GrantUseCaseId};
 
 use super::stack::DecodedGitHubStackSnapshotV1;
@@ -78,18 +78,18 @@ pub struct GitHubStackDurableObservationV1 {
 
 #[derive(Clone)]
 pub struct ProjectGitHubStackAnchorAuthorityV1 {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     anchors: Arc<dyn GitTopologyAnchorAuthorityV2>,
     scope: FeedbackScopeV1,
 }
 
 impl ProjectGitHubStackAnchorAuthorityV1 {
-    pub fn new(database: Arc<RegisteredGlobalDb>, scope: FeedbackScopeV1) -> Option<Self> {
+    pub fn new(database: RegisteredGlobalDbLeaseV1, scope: FeedbackScopeV1) -> Option<Self> {
         scope.validate().ok()?;
         (database.binding().shard_id.scope.project_id() == Some(&scope.project_id)).then(|| Self {
-            anchors: Arc::new(RegisteredGitTopologyAnchorAuthorityV2::new(Arc::clone(
-                &database,
-            ))),
+            anchors: Arc::new(RegisteredGitTopologyAnchorAuthorityV2::new(
+                database.clone(),
+            )),
             database,
             scope,
         })

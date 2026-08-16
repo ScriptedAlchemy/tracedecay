@@ -125,7 +125,7 @@ async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_no
     .expect("registered runtime");
     let database = runtime.project_database_arc().expect("project database");
     let producer = BoundedObservabilityProducerV1::start(
-        Arc::clone(&database),
+        database.clone(),
         producer_identity(&scope.project_id),
         64,
     )

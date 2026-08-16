@@ -31,8 +31,8 @@ use tracedecay_store::SessionRefreshCompletionRequestV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::storage::{
     EnrollmentMarker, StorageMode, read_repository_identity_marker, write_enrollment_marker,
     write_repository_identity_marker,
@@ -258,7 +258,7 @@ impl VersionedTokenEstimator for Words {
 }
 
 struct PreparedRepetition {
-    registered: Arc<RegisteredGlobalDb>,
+    registered: RegisteredGlobalDbLeaseV1,
     session: SessionId,
     root_sessions: Vec<SessionId>,
     context: RequestContext,

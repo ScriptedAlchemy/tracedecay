@@ -21,7 +21,7 @@ use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, LifecycleShardRuntimePublisher,
     LocalProfileIdentityAuthorityV1, LocalProfileStoreAuthorityV1,
     LocalProjectEnrollmentAuthorityV1, LocalStoreRuntimeResolverV1, ProfileAuthorityPinResult,
-    RegisteredGlobalDb, RegisteredSchemaConvergenceMaintenance, Result, RetainedHookTasks,
+    RegisteredGlobalDbLeaseV1, RegisteredSchemaConvergenceMaintenance, Result, RetainedHookTasks,
     RetainedMemoryGraphReconciliationTasksV1, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeResolver, open_runtime, open_runtime_with_presence,
     register_registered_schema_installer, registry_open_error, runtime_incarnation,
@@ -198,10 +198,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(())
     }
 
-    pub(crate) async fn profile_database(&self) -> Result<Arc<RegisteredGlobalDb>> {
+    pub(crate) async fn profile_database(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         let mut mounted = self.profile_database.lock().await;
         if let Some(database) = mounted.as_ref() {
-            return Ok(Arc::clone(database));
+            return Ok(database.clone());
         }
         let database = self
             .attach_registered(
@@ -209,14 +209,14 @@ impl DaemonSessionRuntimeRegistryV1 {
                 "attach profile authority store",
             )
             .await?;
-        *mounted = Some(Arc::clone(&database));
+        *mounted = Some(database.clone());
         Ok(database)
     }
 
-    pub(crate) async fn profile_sessions(&self) -> Result<Arc<RegisteredGlobalDb>> {
+    pub(crate) async fn profile_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         let mut mounted = self.profile_sessions.lock().await;
         if let Some(database) = mounted.as_ref() {
-            return Ok(Arc::clone(database));
+            return Ok(database.clone());
         }
         let shard_id = StoreShardIdV1::profile_sessions(
             self.identity.brain_id().clone(),
@@ -244,7 +244,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             graph_binding,
             graph_verified_locator,
         )?;
-        *mounted = Some(Arc::clone(&database));
+        *mounted = Some(database.clone());
         Ok(database)
     }
 
@@ -508,10 +508,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             .cloned()
     }
 
-    pub(crate) async fn mounted_session_databases(&self) -> Vec<Arc<RegisteredGlobalDb>> {
+    pub(crate) async fn mounted_session_databases(&self) -> Vec<RegisteredGlobalDbLeaseV1> {
         let mut databases = Vec::new();
         if let Some(database) = self.profile_sessions.lock().await.as_ref() {
-            databases.push(Arc::clone(database));
+            databases.push(database.clone());
         }
         databases.extend(self.project_sessions.lock().await.values().cloned());
         databases
@@ -549,7 +549,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) async fn mounted_project_sessions(
         &self,
         project_id: &ProjectId,
-    ) -> Option<Arc<RegisteredGlobalDb>> {
+    ) -> Option<RegisteredGlobalDbLeaseV1> {
         self.project_sessions.lock().await.get(project_id).cloned()
     }
 
@@ -557,7 +557,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         project_id: ProjectId,
         enrollment_roots: impl IntoIterator<Item = PathBuf>,
-    ) -> Result<Arc<RegisteredGlobalDb>> {
+    ) -> Result<RegisteredGlobalDbLeaseV1> {
         self.resolver
             .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
                 project_id.clone(),
@@ -572,10 +572,10 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) async fn mount_registered_project_sessions(
         &self,
         project_id: ProjectId,
-    ) -> Result<Arc<RegisteredGlobalDb>> {
+    ) -> Result<RegisteredGlobalDbLeaseV1> {
         let mut mounted = self.project_sessions.lock().await;
         if let Some(database) = mounted.get(&project_id) {
-            return Ok(Arc::clone(database));
+            return Ok(database.clone());
         }
         let shard_id = StoreShardIdV1::project_sessions(
             self.identity.brain_id().clone(),
@@ -611,7 +611,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.remote_replay_transaction
             .register_target(project_id.clone(), replay_runtime, replay_authority)
             .map_err(|error| session_registry_error("register remote replay target", error))?;
-        mounted.insert(project_id.clone(), Arc::clone(&database));
+        mounted.insert(project_id.clone(), database.clone());
         let recoveries = self
             .remote_recovery_authorities
             .lock()

@@ -25,7 +25,9 @@ use tracedecay_store::{
 
 #[cfg(test)]
 use crate::db::engine::TestConnection;
-use crate::global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDb};
+use crate::global_db::{
+    GlobalDbNativeIntegrationStore, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
+};
 
 /// The actor queue is intentionally finite: saturation fails closed instead of
 /// accumulating unbounded mutation work while a durable writer is stalled.
@@ -107,7 +109,7 @@ enum StoreCommand {
 }
 
 enum ActorDatabase {
-    Registered(Arc<RegisteredGlobalDb>),
+    Registered(RegisteredGlobalDbLeaseV1),
     #[cfg(test)]
     Engine(Box<TestConnection>),
 }
@@ -135,7 +137,7 @@ pub(crate) struct DaemonNativeIntegrationStore {
 }
 
 impl DaemonNativeIntegrationStore {
-    pub(crate) fn open(database: Arc<RegisteredGlobalDb>) -> NativeIntegrationStoreResult<Self> {
+    pub(crate) fn open(database: RegisteredGlobalDbLeaseV1) -> NativeIntegrationStoreResult<Self> {
         Self::open_actor(ActorDatabase::Registered(database))
     }
 

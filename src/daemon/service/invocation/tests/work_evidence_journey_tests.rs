@@ -310,7 +310,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         .session_request_scope()
         .expect("Work scope");
     let retrieval = crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
-        Arc::clone(&database),
+        database.clone(),
         retrieval_root,
         None,
     )
@@ -364,7 +364,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     let policy_digest = mount_test_work_observability(
         &service,
         &project,
-        Arc::clone(&database),
+        database.clone(),
         &scope,
         &configuration_digest,
     )
@@ -372,7 +372,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     DaemonWorkRuntimeRegistrar::new(&service)
         .register(
             project.clone(),
-            Arc::clone(&database),
+            database.clone(),
             authority.clone(),
             actor,
             grant,

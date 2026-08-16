@@ -34,7 +34,7 @@ pub(crate) use lifecycle::{git_remote_url, is_fts_only_corruption};
 /// syncing a Rust codebase's semantic knowledge graph.
 pub struct TraceDecay {
     db: Database,
-    profile_database: Arc<crate::global_db::RegisteredGlobalDb>,
+    profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
     store_runtime_registry:
         Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
     config: TraceDecayConfig,
@@ -85,7 +85,7 @@ impl TraceDecay {
         &self.store_runtime_registry
     }
 
-    pub(crate) fn profile_database(&self) -> &Arc<crate::global_db::RegisteredGlobalDb> {
+    pub(crate) fn profile_database(&self) -> &crate::global_db::RegisteredGlobalDbLeaseV1 {
         &self.profile_database
     }
 

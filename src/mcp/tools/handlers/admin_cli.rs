@@ -14,7 +14,7 @@ use tracedecay_application::{CancellationSignal, Deadline, IdempotencyKey, Reque
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -84,12 +84,12 @@ const fn default_storage_report_page_limit() -> usize {
 }
 
 struct AdminCliContext<'a> {
-    global_db: &'a Arc<RegisteredGlobalDb>,
+    global_db: &'a RegisteredGlobalDbLeaseV1,
     accounting_db: Option<&'a RegisteredGlobalDb>,
     profile_root: Option<&'a Path>,
     project: Option<&'a TraceDecay>,
-    registered_project_session_db: Option<&'a Arc<RegisteredGlobalDb>>,
-    registered_user_session_db: Option<&'a Arc<RegisteredGlobalDb>>,
+    registered_project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
+    registered_user_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     profile_identity: Option<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     session_sync: Option<&'a dyn SessionSyncServicePort>,
     request_id: Option<RequestId>,
@@ -100,7 +100,7 @@ struct AdminCliContext<'a> {
 impl<'a> AdminCliContext<'a> {
     fn with_project(
         cg: &'a TraceDecay,
-        global_db: &'a Arc<RegisteredGlobalDb>,
+        global_db: &'a RegisteredGlobalDbLeaseV1,
         accounting_db: Option<&'a RegisteredGlobalDb>,
         profile_root: Option<&'a Path>,
         session_authorities: super::SessionAuthorities<'a>,
@@ -125,7 +125,7 @@ impl<'a> AdminCliContext<'a> {
     }
 
     fn projectless(
-        global_db: &'a Arc<RegisteredGlobalDb>,
+        global_db: &'a RegisteredGlobalDbLeaseV1,
         accounting_db: Option<&'a RegisteredGlobalDb>,
         profile_root: &'a Path,
     ) -> Self {
@@ -186,7 +186,7 @@ impl<'a> AdminCliContext<'a> {
         Ok(Some(ObservationScopeV1::Project { project_id }))
     }
 
-    fn require_registered_project_session_db(&self) -> Result<&'a Arc<RegisteredGlobalDb>> {
+    fn require_registered_project_session_db(&self) -> Result<&'a RegisteredGlobalDbLeaseV1> {
         self.registered_project_session_db
             .ok_or_else(|| TraceDecayError::Config {
                 message: "daemon registered project session database is unavailable".to_string(),
@@ -206,7 +206,7 @@ impl<'a> AdminCliContext<'a> {
 pub(super) async fn handle_admin_cli(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&Arc<RegisteredGlobalDb>>,
+    global_db: Option<&RegisteredGlobalDbLeaseV1>,
     accounting_db: Option<&RegisteredGlobalDb>,
     profile_root: Option<&Path>,
     session_authorities: super::SessionAuthorities<'_>,
@@ -238,7 +238,7 @@ pub(super) async fn handle_admin_cli(
 
 pub(crate) async fn handle_projectless_admin_cli(
     args: Value,
-    global_db: &Arc<RegisteredGlobalDb>,
+    global_db: &RegisteredGlobalDbLeaseV1,
     accounting_db: Option<&RegisteredGlobalDb>,
     profile_root: &Path,
 ) -> Result<ToolResult> {
@@ -804,8 +804,8 @@ fn render_session_sync_outcome(outcome: SessionSyncOutcomeV1) -> Value {
     }
 }
 
-async fn sessions_unfinished(db: &Arc<RegisteredGlobalDb>, limit: usize) -> Result<Value> {
-    let items = crate::store::GlobalDbWorkflowStore::new(Arc::clone(db))
+async fn sessions_unfinished(db: &RegisteredGlobalDbLeaseV1, limit: usize) -> Result<Value> {
+    let items = crate::store::GlobalDbWorkflowStore::new(db.clone())
         .list_unfinished_workflows(limit)
         .await
         .map_err(|message| TraceDecayError::Config { message })?;

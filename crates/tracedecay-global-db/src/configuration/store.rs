@@ -15,7 +15,7 @@ use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
 use super::schema::ConfigurationSchemaError;
 #[cfg(test)]
 use super::schema::ensure_configuration_schema;
-use crate::RegisteredGlobalDb;
+use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CandidateDispositionV1, ChangePlanId,
@@ -631,16 +631,16 @@ pub struct OwnedGlobalDbConfigurationControlStore {
     /// The exact daemon-registered project-runtime database handle. Production
     /// composition always supplies it at construction; no later attachment,
     /// path reopen, or authority substitution is available.
-    db: Arc<RegisteredGlobalDb>,
+    db: RegisteredGlobalDbLeaseV1,
 }
 
 impl OwnedGlobalDbConfigurationControlStore {
-    pub fn from_registered_project_runtime_db(db: Arc<RegisteredGlobalDb>) -> Self {
+    pub fn from_registered_project_runtime_db(db: RegisteredGlobalDbLeaseV1) -> Self {
         Self { db }
     }
 
-    fn database(&self) -> Arc<RegisteredGlobalDb> {
-        Arc::clone(&self.db)
+    fn database(&self) -> RegisteredGlobalDbLeaseV1 {
+        self.db.clone()
     }
 
     /// Revalidate the current daemon/maintenance scope before any mutation.

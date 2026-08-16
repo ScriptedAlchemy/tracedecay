@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OwnedMutexGuard;
 use tracedecay_domain::{ProjectId, canonical_sha256};
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 
 use super::super::artifacts::validate_isolated_restore;
@@ -19,7 +19,7 @@ use super::mounted_identity::validate_existing_mounted_identity;
 const REMOTE_RESTORE_QUARANTINE_VERSION: &str = "tracedecay.remote-restore-quarantine.v1";
 
 pub(super) struct RetiredMountedRestoreTargetV1 {
-    pub(super) mounted: OwnedMutexGuard<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
+    pub(super) mounted: OwnedMutexGuard<BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>>,
     pub(super) reservation: Option<DestructiveMaintenanceReservation>,
     pub(super) preserved_identity: Option<u64>,
     pub(super) _quiescence: Option<
@@ -46,8 +46,8 @@ pub(super) fn replacement_target(destination: &Path) -> Result<DestructiveMainte
 }
 
 pub(super) async fn lock_project_sessions_for_replacement(
-    project_sessions: &Arc<tokio::sync::Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>>,
-) -> OwnedMutexGuard<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>> {
+    project_sessions: &Arc<tokio::sync::Mutex<BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>>>,
+) -> OwnedMutexGuard<BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>> {
     Arc::clone(project_sessions).lock_owned().await
 }
 
@@ -527,7 +527,7 @@ impl RemoteRecoveryPublicationContextV1 {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn prepare_remote_restore_swap(
         &self,
-        mounted: &mut BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>,
+        mounted: &mut BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>,
         project_id: ProjectId,
         destination: &Path,
         staging: &Path,
@@ -682,7 +682,7 @@ impl RemoteRecoveryPublicationContextV1 {
         let mut mounted = Arc::clone(&self.project_sessions).lock_owned().await;
         if !mounted
             .get(project_id)
-            .is_some_and(|mounted| Arc::ptr_eq(mounted, &database))
+            .is_some_and(|mounted| mounted.shares_client_with(&database))
         {
             if let Some(current) = mounted.get(project_id).cloned() {
                 self.rebind_session_sync(project_id, &current).await?;
@@ -857,7 +857,7 @@ impl RemoteRecoveryPublicationContextV1 {
     pub(super) async fn prepare_mounted(
         &self,
         project_id: &ProjectId,
-        database: &Arc<RegisteredGlobalDb>,
+        database: &RegisteredGlobalDbLeaseV1,
     ) -> Result<()> {
         let runtime = database.runtime().clone();
         let authority = runtime
@@ -883,9 +883,9 @@ impl RemoteRecoveryPublicationContextV1 {
 
     pub(in crate::daemon::store_runtime::session_registry::remote_recovery) async fn publish_quarantined_mounted(
         &self,
-        mounted: &mut BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>,
+        mounted: &mut BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>,
         project_id: ProjectId,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         destination: &Path,
         outcome: RestorePublicationV1,
     ) -> Result<()> {
@@ -932,7 +932,7 @@ impl RemoteRecoveryPublicationContextV1 {
 
     pub(super) async fn abort_and_remount_quarantined_restore(
         &self,
-        mounted: &mut BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>,
+        mounted: &mut BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>,
         project_id: ProjectId,
         destination: &Path,
         reservation: DestructiveMaintenanceReservation,

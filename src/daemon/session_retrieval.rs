@@ -31,7 +31,7 @@ use crate::global_db::session_temporal::{
     RegisteredGlobalDbSessionTemporalExecution, SessionPageReconstruction,
     SessionPageReconstructionRequest,
 };
-use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb};
+use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::tracedecay::TraceDecay;
 use tracedecay_sessions::runtime::SessionMessageSearchResult;
 use tracedecay_temporal_query::context::{TokenPolicy, VersionedTokenEstimator};
@@ -382,7 +382,7 @@ const fn requires_refresh_worker(freshness_policy: SessionFreshnessPolicy) -> bo
 }
 
 pub(crate) struct DaemonSessionRetrievalService {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     root: DaemonSessionRetrievalRoot,
     configuration: SessionRetrievalConfiguration,
     refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
@@ -390,7 +390,7 @@ pub(crate) struct DaemonSessionRetrievalService {
 
 impl DaemonSessionRetrievalService {
     pub(crate) fn new(
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         root: DaemonSessionRetrievalRoot,
         refresh_status: Option<SessionTemporalRefreshWake>,
     ) -> Option<Self> {
@@ -408,8 +408,8 @@ impl DaemonSessionRetrievalService {
     }
 
     pub(crate) fn new_registered(
-        database: Arc<RegisteredGlobalDb>,
-        registered_database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
+        registered_database: RegisteredGlobalDbLeaseV1,
         root: DaemonSessionRetrievalRoot,
         refresh_status: Option<SessionTemporalRefreshWake>,
     ) -> Option<Self> {

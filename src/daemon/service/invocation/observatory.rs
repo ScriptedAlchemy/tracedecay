@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::*;
 
 struct RegisteredObservatoryReadPort {
-    database: Arc<crate::global_db::RegisteredGlobalDb>,
+    database: crate::global_db::RegisteredGlobalDbLeaseV1,
     scope_ref: String,
 }
 

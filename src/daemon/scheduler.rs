@@ -1581,7 +1581,7 @@ mod global_retention_tests {
         let _cadence_reset = ResetGlobalRetentionCadence::new();
         let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-writer-admission").await;
-        let database = Arc::clone(&harness.registered);
+        let database = harness.registered.clone();
         seed_eligible_projected_message(database.as_ref()).await;
 
         let config = global_retention_config();
@@ -1651,7 +1651,7 @@ mod global_retention_tests {
         let _cadence_reset = ResetGlobalRetentionCadence::new();
         let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-cancelled-admission").await;
-        let database = Arc::clone(&harness.registered);
+        let database = harness.registered.clone();
         seed_eligible_projected_message(database.as_ref()).await;
         let administration = StoreAdministration::default();
         let config = global_retention_config();
@@ -1662,7 +1662,7 @@ mod global_retention_tests {
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let task_administration = administration.clone();
-        let task_database = Arc::clone(&database);
+        let task_database = database.clone();
         let task_config = config.clone();
         let retention = tokio::spawn(async move {
             started_tx.send(()).expect("report retention start");
@@ -1715,7 +1715,7 @@ mod global_retention_tests {
         let _cadence_reset = ResetGlobalRetentionCadence::new();
         let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-prune-failure").await;
-        let database = Arc::clone(&harness.registered);
+        let database = harness.registered.clone();
         seed_eligible_projected_message(database.as_ref()).await;
         database
             .writer_connection()

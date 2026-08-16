@@ -308,7 +308,7 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
 fn validate_snapshot(
     command: &RemoteExactObservationQueryCommandV1,
     snapshot: &RemoteQueryAuthoritySnapshotV1,
-    target: &tracedecay_runtime_core::store_runtime::registry::StoreRuntimeHandle,
+    target: &tracedecay_runtime_core::store_runtime::registry::StoreRuntimeClientLease,
 ) -> Result<(), RemoteExactObservationQueryErrorV1> {
     let CurrentRemoteAuthorityStateV1::Available(current) = &snapshot.authority else {
         return Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable);

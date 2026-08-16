@@ -7,14 +7,14 @@ use std::path::PathBuf;
 use tracedecay_sessions::admission::HostAdmission;
 use tracedecay_sessions::runtime::ingest::{IngestAdmissionBinding, SessionIngestAuthority};
 
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::store::{GlobalDbGitCorrelationStore, GlobalDbTranscriptStore, GlobalDbWorkflowStore};
 use tracedecay_usecases::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 
 /// Session-ingest authority over one registered database.
 ///
 /// The holder `D` is generic so a caller that owns an
-/// `Arc<RegisteredGlobalDb>` can build a `'static` authority. That matters
+/// `RegisteredGlobalDbLeaseV1` can build a `'static` authority. That matters
 /// beyond ergonomics: when the authority type carries a free lifetime, the
 /// `SessionIngestAuthority` GATs plus the `admission` method's
 /// `Box<dyn HostAdmission + 'a>` return push the auto-trait leak check into a

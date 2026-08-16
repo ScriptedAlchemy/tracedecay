@@ -5,7 +5,7 @@ use tracedecay::dashboard;
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::ProjectId;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 
@@ -15,8 +15,8 @@ use tracedecay_usecases::host_admission::HostAdmissionScope;
 /// authority wiring needed by root tests.
 pub(crate) struct DashboardTestRuntimeV1 {
     profile_root: std::path::PathBuf,
-    profile_database: Arc<RegisteredGlobalDb>,
-    project_database: Arc<RegisteredGlobalDb>,
+    profile_database: RegisteredGlobalDbLeaseV1,
+    project_database: RegisteredGlobalDbLeaseV1,
     graph: dashboard::DashboardGraphTestRuntimeV1,
     project_id: ProjectId,
 }
@@ -117,8 +117,8 @@ impl DashboardTestRuntimeV1 {
     ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
         Ok(dashboard::DashboardHostAdmissionTestAuthorityV1::new(
             Arc::clone(self),
-            Arc::clone(&self.profile_database),
-            Arc::clone(&self.project_database),
+            self.profile_database.clone(),
+            self.project_database.clone(),
         ))
     }
 
@@ -135,16 +135,16 @@ impl DashboardTestRuntimeV1 {
         let lcm_read_authority = dashboard::dashboard_lcm_read_authority_for_test(
             cg.as_ref(),
             self.profile_database.as_ref(),
-            Arc::clone(&self.project_database),
+            self.project_database.clone(),
         )
         .await
         .ok_or_else(|| TraceDecayError::Config {
             message: "dashboard fixture could not compose the LCM read authority".to_owned(),
         })?;
         let git_correlation_read_authority =
-            dashboard::dashboard_git_correlation_read_authority_for_test(Arc::clone(
-                &self.project_database,
-            ));
+            dashboard::dashboard_git_correlation_read_authority_for_test(
+                self.project_database.clone(),
+            );
         let authority = authority
             .with_automation_authority(automation_authority, automation_writer)
             .with_lcm_read_authority(lcm_read_authority)

@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use tracedecay_domain::ProjectId;
 
-use super::{RegisteredGlobalDb, RemoteRecoveryPublicationContextV1, Result};
+use super::{RegisteredGlobalDbLeaseV1, RemoteRecoveryPublicationContextV1, Result};
 use crate::daemon::store_runtime::session_registry::session_registry_error;
 
 impl RemoteRecoveryPublicationContextV1 {
     pub(super) async fn rebind_session_sync(
         &self,
         project_id: &ProjectId,
-        database: &Arc<RegisteredGlobalDb>,
+        database: &RegisteredGlobalDbLeaseV1,
     ) -> Result<()> {
         let service = self.session_sync_service("rebind project session sync")?;
         service
@@ -31,7 +31,7 @@ impl RemoteRecoveryPublicationContextV1 {
     pub(super) async fn retire_unpublished_mounted(
         &self,
         project_id: &ProjectId,
-        database: &Arc<RegisteredGlobalDb>,
+        database: &RegisteredGlobalDbLeaseV1,
     ) -> Result<()> {
         let mut failures = Vec::new();
         if let Err(error) = self.retire_session_sync(project_id).await {

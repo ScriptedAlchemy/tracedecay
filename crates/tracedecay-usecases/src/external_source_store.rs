@@ -28,7 +28,7 @@ use tracedecay_store::{
 };
 
 use crate::request_identity::{LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency};
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeHandle;
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeClientLease;
 
 #[derive(Debug, Error)]
 pub enum RuntimeExternalSourceErrorV1 {
@@ -86,13 +86,13 @@ pub(crate) struct RuntimeSourceCaptureRequestV1<'a> {
 
 #[derive(Clone)]
 pub struct RuntimeExternalSourceStore {
-    runtime: StoreRuntimeHandle,
+    runtime: StoreRuntimeClientLease,
     authority: tracedecay_runtime_core::db::DatabaseAuthority,
 }
 
 impl RuntimeExternalSourceStore {
     pub fn new(
-        runtime: StoreRuntimeHandle,
+        runtime: StoreRuntimeClientLease,
         authority: tracedecay_runtime_core::db::DatabaseAuthority,
     ) -> Result<Self, RuntimeExternalSourceErrorV1> {
         if authority.canonical_database_path() != runtime.locator().path() {

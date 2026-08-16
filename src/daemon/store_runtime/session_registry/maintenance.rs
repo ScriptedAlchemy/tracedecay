@@ -12,8 +12,8 @@ use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 use std::sync::atomic::Ordering;
 
 use super::{
-    DaemonSessionRuntimeRegistryV1, RegisteredGlobalDb, Result, StoreRuntimeHandle,
-    registry_open_error, release_process_allocator_memory,
+    DaemonSessionRuntimeRegistryV1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, Result,
+    StoreRuntimeClientLease, registry_open_error, release_process_allocator_memory,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,7 +89,7 @@ impl RegisteredSchemaConvergenceMaintenance {
 
     pub(super) fn schedule(
         &self,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         convergence: Option<crate::global_db::schema_stages::RegisteredSchemaConvergence>,
     ) {
         let shard_id = database.binding().shard_id.clone();
@@ -238,9 +238,9 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     pub(super) async fn attach_registered(
         &self,
-        runtime: StoreRuntimeHandle,
+        runtime: StoreRuntimeClientLease,
         operation: &'static str,
-    ) -> Result<Arc<RegisteredGlobalDb>> {
+    ) -> Result<RegisteredGlobalDbLeaseV1> {
         let expected_binding: StoreRuntimeBindingV1 = runtime.binding().clone();
         let expected_locator = runtime.locator().verified().clone();
         let authority = runtime
@@ -268,10 +268,9 @@ impl DaemonSessionRuntimeRegistryV1 {
                 None,
             )
         };
-        let database = Arc::new(database);
         if long_lived {
             self.registered_schema_convergence
-                .schedule(Arc::clone(&database), convergence);
+                .schedule(database.clone(), convergence);
         }
         Ok(database)
     }

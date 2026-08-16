@@ -26,7 +26,7 @@ use tracedecay_usecases::session::lcm::{
     LcmTranscriptIngestCommand, lcm_authority_operation_identity,
 };
 
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 
 mod mount;
 mod receipt;
@@ -43,25 +43,25 @@ trait LcmDaemonStore: Send + Sync {
 }
 
 struct RegisteredLcmDaemonStore {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 }
 
 impl RegisteredLcmDaemonStore {
-    fn new(database: Arc<RegisteredGlobalDb>) -> Self {
+    fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self { database }
     }
 }
 
 impl LcmDaemonStore for RegisteredLcmDaemonStore {
     fn ingest(&self, request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse> {
-        let database = Arc::clone(&self.database);
+        let database = self.database.clone();
         Box::pin(async move {
             // Persist the host-completed turn through the canonical
             // compression ingest route (session upsert + protected raw-message
             // ingest). The no-op summarizer stops before any summary is
             // minted, so ingest commits raw turn content and nothing else.
             let turn = turn_ingest_compression_request(request.clone());
-            super::lcm_effects::DaemonLcmEffectService::new(Arc::clone(&database), None, None)
+            super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None)
                 .compress(turn)
                 .await?;
             database.lcm_preflight(request).await
@@ -69,7 +69,7 @@ impl LcmDaemonStore for RegisteredLcmDaemonStore {
     }
 
     fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
-        let database = Arc::clone(&self.database);
+        let database = self.database.clone();
         Box::pin(async move {
             super::lcm_effects::DaemonLcmEffectService::new(database, None, None)
                 .compress(request)
@@ -156,7 +156,7 @@ pub(crate) struct DaemonLcmAuthority {
 }
 
 impl DaemonLcmAuthority {
-    pub(crate) fn registered(database: Arc<RegisteredGlobalDb>) -> Self {
+    pub(crate) fn registered(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self {
             store: Some(Arc::new(RegisteredLcmDaemonStore::new(database))),
         }

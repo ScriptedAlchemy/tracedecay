@@ -265,7 +265,7 @@ impl DaemonInvocationState {
     pub(super) fn query_activation_registrar(
         &self,
         project_root: &Path,
-        session_db: Arc<crate::global_db::RegisteredGlobalDb>,
+        session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
     ) -> Arc<dyn tracedecay_usecases::semantic_runtime::RetrievalProfileActivationObserverV1> {
         Arc::new(
             query_authority_provider::DaemonQueryActivationRegistrarV1::new(

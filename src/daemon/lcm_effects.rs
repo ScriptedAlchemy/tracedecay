@@ -4,7 +4,7 @@ use std::time::Duration;
 use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_sessions::runtime::lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSessionBoundaryRequest,
     LcmSessionBoundaryResponse, LcmSummarizerMode,
@@ -20,7 +20,7 @@ const LCM_EFFECT_WORK_LIMIT: usize = 4_096;
 /// transaction before its commit checkpoint.
 #[derive(Clone)]
 pub(crate) struct DaemonLcmEffectService {
-    db: Arc<RegisteredGlobalDb>,
+    db: RegisteredGlobalDbLeaseV1,
     control: LcmEffectControl,
 }
 
@@ -89,7 +89,7 @@ impl LcmEffectControl {
 
 impl DaemonLcmEffectService {
     pub(crate) fn new(
-        db: Arc<RegisteredGlobalDb>,
+        db: RegisteredGlobalDbLeaseV1,
         deadline: Option<&Deadline>,
         cancellation: Option<&CancellationSignal>,
     ) -> Self {
@@ -305,7 +305,7 @@ mod tests {
     #[tokio::test]
     async fn compression_producer_apply_read_and_rollback_stay_one_authority() {
         let harness = RegisteredGlobalDbHarness::open("lcm-compress-effect-journey").await;
-        let db = Arc::clone(&harness.registered);
+        let db = harness.registered.clone();
         assert!(
             db.upsert_session(&session("cursor", "compress-session"))
                 .await
@@ -319,10 +319,9 @@ mod tests {
 
         let cancellation = CancellationSignal::active("cancellation.lcm-compress-journey").unwrap();
         assert!(cancellation.cancel(tracedecay_domain::UtcMicros(2)));
-        let service_cancelled =
-            DaemonLcmEffectService::new(Arc::clone(&db), None, Some(&cancellation))
-                .compress(compression_request("compress-session"))
-                .await;
+        let service_cancelled = DaemonLcmEffectService::new(db.clone(), None, Some(&cancellation))
+            .compress(compression_request("compress-session"))
+            .await;
         assert_eq!(service_cancelled.unwrap_err(), LcmError::Cancelled);
 
         let cancellation_control = execution_control();
@@ -341,7 +340,7 @@ mod tests {
         assert_eq!(rolled_back.raw_message_count, 8);
         assert_eq!(rolled_back.summary_node_count, 0);
 
-        let response = DaemonLcmEffectService::new(Arc::clone(&db), None, None)
+        let response = DaemonLcmEffectService::new(db.clone(), None, None)
             .compress(compression_request("compress-session"))
             .await
             .unwrap();
@@ -426,7 +425,7 @@ mod tests {
         drop(response);
         drop(db);
         let harness = harness.restart().await;
-        let restarted = Arc::clone(&harness.registered);
+        let restarted = harness.registered.clone();
         let restart_control = execution_control();
         let (_, restarted_relations) = restarted
             .active_session_summary_relations(
@@ -445,7 +444,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_reads_canonical_state_without_creating_or_ingesting_a_session() {
         let harness = RegisteredGlobalDbHarness::open("lcm-preflight-read-only").await;
-        let db = Arc::clone(&harness.registered);
+        let db = harness.registered.clone();
         let response = db
             .lcm_preflight(tracedecay_sessions::runtime::lcm::LcmPreflightRequest {
                 provider: "cursor".to_string(),
@@ -486,7 +485,7 @@ mod tests {
     #[tokio::test]
     async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_identity() {
         let harness = RegisteredGlobalDbHarness::open("lcm-native-summary-evidence").await;
-        let db = Arc::clone(&harness.registered);
+        let db = harness.registered.clone();
         for (provider, session_id) in [
             ("cursor", "cursor-native-session"),
             ("claude", "claude-native-session"),
@@ -688,7 +687,7 @@ mod tests {
     #[tokio::test]
     async fn providers_without_authoritative_summarizers_keep_frontiers_pending() {
         let harness = RegisteredGlobalDbHarness::open("lcm-summary-unavailable").await;
-        let db = Arc::clone(&harness.registered);
+        let db = harness.registered.clone();
         let storage_root = db.db_path().parent().unwrap();
         for provider in [
             "claude", "hermes", "kiro", "kimi", "opencode", "cline", "roo", "kilo",
@@ -703,7 +702,7 @@ mod tests {
                     .unwrap();
             }
 
-            let response = DaemonLcmEffectService::new(Arc::clone(&db), None, None)
+            let response = DaemonLcmEffectService::new(db.clone(), None, None)
                 .compress(daemon_summary_request(provider, &session_id))
                 .await
                 .unwrap();
@@ -796,7 +795,7 @@ mod tests {
     fn codex_and_cursor_daemon_adapters_commit_exact_authoritative_summaries() {
         crate::hooks::run_with_test_env_lock(async {
             let harness = RegisteredGlobalDbHarness::open("lcm-provider-summary-adapters").await;
-            let db = Arc::clone(&harness.registered);
+            let db = harness.registered.clone();
             let temporary = tempfile::tempdir().unwrap();
             let cursor_bin = temporary.path().join("cursor-agent");
             let codex_bin = temporary.path().join("codex");
@@ -853,7 +852,7 @@ done
                         .await
                         .unwrap();
                 }
-                let response = DaemonLcmEffectService::new(Arc::clone(&db), None, None)
+                let response = DaemonLcmEffectService::new(db.clone(), None, None)
                     .compress(daemon_summary_request(provider, &session_id))
                     .await
                     .unwrap();
@@ -906,11 +905,11 @@ done
     #[tokio::test]
     async fn boundary_apply_and_cancelled_rollback_are_observable() {
         let harness = RegisteredGlobalDbHarness::open("lcm-boundary-effect-journey").await;
-        let db = Arc::clone(&harness.registered);
+        let db = harness.registered.clone();
         for session_id in ["old-session", "new-session", "cancelled-session"] {
             assert!(db.upsert_session(&session("cursor", session_id)).await);
         }
-        let service = DaemonLcmEffectService::new(Arc::clone(&db), None, None);
+        let service = DaemonLcmEffectService::new(db.clone(), None, None);
         let response = service
             .session_boundary(LcmSessionBoundaryRequest {
                 provider: "cursor".to_string(),

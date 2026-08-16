@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 const VERIFIED_GRAPH_MAX_SYMBOLS: usize = 500_000;
 const VERIFIED_GRAPH_MAX_RELATIONS: usize = 2_000_000;
@@ -739,7 +739,7 @@ pub(crate) async fn handle_pr_context(
     args: Value,
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
-    registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+    registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
 ) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_pr_context")?;
     let controls = PrContextControls {

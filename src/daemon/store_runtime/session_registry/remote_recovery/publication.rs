@@ -11,7 +11,7 @@ use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 use super::super::open_runtime_during_remote_restore;
 use super::artifacts::{replay_current_authority_state, validate_isolated_restore};
 use super::{
-    DatabaseAuthority, DestructiveMaintenanceTarget, RegisteredGlobalDb,
+    DatabaseAuthority, DestructiveMaintenanceTarget, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
     RemoteRecoveryPublicationContextV1, Result, interruption_value, registry_open_error,
     session_registry_error,
 };
@@ -606,7 +606,7 @@ impl RemoteRecoveryPublicationContextV1 {
         let mut mounted = Arc::clone(&self.project_sessions).lock_owned().await;
         if !mounted
             .get(&project_id)
-            .is_some_and(|mounted| Arc::ptr_eq(mounted, &database))
+            .is_some_and(|mounted| mounted.shares_client_with(&database))
         {
             if let Some(current) = mounted.get(&project_id).cloned() {
                 self.rebind_session_sync(&project_id, &current).await?;
@@ -894,7 +894,7 @@ impl RemoteRecoveryPublicationContextV1 {
         &self,
         project_id: ProjectId,
         expected_opened_file_identity: u64,
-    ) -> Result<Arc<RegisteredGlobalDb>> {
+    ) -> Result<RegisteredGlobalDbLeaseV1> {
         let shard_id = StoreShardIdV1::project_sessions(
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
@@ -939,14 +939,14 @@ impl RemoteRecoveryPublicationContextV1 {
             graph_binding,
             graph_verified_locator,
         )?;
-        Ok(Arc::new(database))
+        Ok(database)
     }
 
     pub(super) async fn publish_mounted(
         &self,
-        mounted: &mut BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>,
+        mounted: &mut BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>,
         project_id: ProjectId,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> Result<()> {
         self.prepare_mounted(&project_id, &database).await?;
         mounted.insert(project_id, database);

@@ -3,13 +3,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
 
-use crate::RegisteredGlobalDb;
+use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 
 static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct RegisteredGlobalDbHarness {
-    pub registered: Arc<RegisteredGlobalDb>,
+    pub registered: RegisteredGlobalDbLeaseV1,
     /// Retains the shared database runtime slot so concurrent remounts
     /// singleflight to the one runtime the daemon would hold in production.
     _database: tracedecay_runtime_core::db::Database,
@@ -37,8 +37,8 @@ enum RegisteredTestWriteAuthority {
 /// migration, and host-admission adapters deliberately stay outside it.
 #[cfg(any(test, feature = "test-helpers"))]
 pub struct RegisteredGlobalDbTestRuntime {
-    profile_registered: Arc<RegisteredGlobalDb>,
-    project_registered: Option<Arc<RegisteredGlobalDb>>,
+    profile_registered: RegisteredGlobalDbLeaseV1,
+    project_registered: Option<RegisteredGlobalDbLeaseV1>,
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
     _scope: DaemonDatabaseScope,
 }
@@ -137,13 +137,13 @@ impl RegisteredGlobalDbTestRuntime {
         self.profile_registered.as_ref()
     }
 
-    pub fn profile_database_arc(&self) -> Arc<RegisteredGlobalDb> {
-        Arc::clone(&self.profile_registered)
+    pub fn profile_database_arc(&self) -> RegisteredGlobalDbLeaseV1 {
+        self.profile_registered.clone()
     }
 
     pub async fn remount_profile_database_for_test(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
+    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
         open_registered_test_database(
             self.profile_registered.db_path(),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
@@ -218,7 +218,7 @@ impl RegisteredGlobalDbTestRuntime {
 
     pub fn project_database_arc(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
+    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
         self.project_registered.clone().ok_or_else(|| {
             tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "bind registered project test database".to_owned(),
@@ -278,7 +278,7 @@ impl RegisteredGlobalDbHarness {
     #[cfg(test)]
     pub(super) async fn remount_profile_database_for_test(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
+    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
         Ok(open_registered_test_database_with(
             self.registered.db_path(),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
@@ -296,7 +296,7 @@ impl RegisteredGlobalDbHarness {
             .expect("registered database storage root")
     }
 
-    pub async fn mount(&self) -> Arc<RegisteredGlobalDb> {
+    pub async fn mount(&self) -> RegisteredGlobalDbLeaseV1 {
         open_registered_test_database_with(
             self.registered.db_path(),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
@@ -356,9 +356,9 @@ pub(crate) enum SessionTemporalFixtureCountV1 {
 /// Test-only registered database fixture retained below the use-case layer.
 #[doc(hidden)]
 pub struct HostAdmissionTestRuntimeV1 {
-    profile_registry: Arc<RegisteredGlobalDb>,
-    profile_registered: Arc<RegisteredGlobalDb>,
-    project_registered: Option<Arc<RegisteredGlobalDb>>,
+    profile_registry: RegisteredGlobalDbLeaseV1,
+    profile_registered: RegisteredGlobalDbLeaseV1,
+    project_registered: Option<RegisteredGlobalDbLeaseV1>,
     _scope: Option<DaemonDatabaseScope>,
 }
 
@@ -367,9 +367,9 @@ impl HostAdmissionTestRuntimeV1 {
     /// runtime. This constructor grants no authority and owns no runtime scope.
     #[doc(hidden)]
     pub fn from_registered_databases_for_test(
-        profile_registry: Arc<RegisteredGlobalDb>,
-        profile_registered: Arc<RegisteredGlobalDb>,
-        project_registered: Option<Arc<RegisteredGlobalDb>>,
+        profile_registry: RegisteredGlobalDbLeaseV1,
+        profile_registered: RegisteredGlobalDbLeaseV1,
+        project_registered: Option<RegisteredGlobalDbLeaseV1>,
     ) -> Self {
         Self {
             profile_registry,
@@ -1056,7 +1056,7 @@ fn bind_test_session_relation_graph_with_registry(
 async fn open_registered_test_database(
     path: &std::path::Path,
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
-) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
+) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
     Ok(
         open_registered_test_database_with(path, scope, RegisteredTestWriteAuthority::Fixture)
             .await?
@@ -1070,7 +1070,7 @@ async fn open_registered_test_database_with(
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
     write_authority: RegisteredTestWriteAuthority,
 ) -> tracedecay_runtime_core::errors::Result<(
-    Arc<RegisteredGlobalDb>,
+    RegisteredGlobalDbLeaseV1,
     tracedecay_runtime_core::db::Database,
 )> {
     crate::register_test_schema_installer();
@@ -1116,15 +1116,13 @@ async fn open_registered_test_database_with(
             )?
         }
     };
-    let registered = Arc::new(
-        RegisteredGlobalDb::migrate_and_attach(
-            runtime,
-            expected_binding,
-            expected_locator,
-            authority,
-        )
-        .await?,
-    );
+    let registered = RegisteredGlobalDb::migrate_and_attach(
+        runtime,
+        expected_binding,
+        expected_locator,
+        authority,
+    )
+    .await?;
     Ok((registered, database))
 }
 

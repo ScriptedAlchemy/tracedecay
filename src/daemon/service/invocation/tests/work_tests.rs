@@ -131,7 +131,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     let policy_digest = mount_test_work_observability(
         &service,
         project.path(),
-        Arc::clone(&database),
+        database.clone(),
         &scope,
         &configuration_digest,
     )
@@ -545,7 +545,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     let policy_digest = mount_test_work_observability(
         &service,
         project.path(),
-        Arc::clone(&database),
+        database.clone(),
         &scope,
         &configuration_digest,
     )
@@ -553,7 +553,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     DaemonWorkRuntimeRegistrar::new(&service)
         .register(
             project.path().to_path_buf(),
-            Arc::clone(&database),
+            database.clone(),
             authority,
             actor,
             grant,
