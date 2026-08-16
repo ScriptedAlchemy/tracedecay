@@ -21,6 +21,7 @@ pub(crate) enum MemoryGraphReconciliationTaskScheduleV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProjectMemoryReconciliationTelemetrySnapshotV1 {
     pub reconciliation_passes: u64,
+    pub active_reconciliation_pass_count: u64,
     pub source_rows_loaded: u64,
     pub source_bytes_loaded: u64,
     pub publication_attempts: u64,
@@ -31,6 +32,7 @@ pub struct ProjectMemoryReconciliationTelemetrySnapshotV1 {
 #[derive(Default)]
 pub(crate) struct ProjectMemoryReconciliationTelemetryV1 {
     reconciliation_passes: AtomicU64,
+    active_reconciliation_pass_count: AtomicU64,
     source_rows_loaded: AtomicU64,
     source_bytes_loaded: AtomicU64,
     publication_attempts: AtomicU64,
@@ -40,6 +42,10 @@ pub(crate) struct ProjectMemoryReconciliationTelemetryV1 {
 pub struct ProjectMemoryReconciliationTelemetryObserverV1 {
     telemetry: Arc<ProjectMemoryReconciliationTelemetryV1>,
     database: Weak<super::registry::DatabaseInner>,
+}
+
+pub(crate) struct ProjectMemoryReconciliationPassLeaseV1 {
+    telemetry: Arc<ProjectMemoryReconciliationTelemetryV1>,
 }
 
 impl ProjectMemoryReconciliationTelemetryObserverV1 {
@@ -63,6 +69,10 @@ impl ProjectMemoryReconciliationTelemetryObserverV1 {
             });
         ProjectMemoryReconciliationTelemetrySnapshotV1 {
             reconciliation_passes: self.telemetry.reconciliation_passes.load(Ordering::SeqCst),
+            active_reconciliation_pass_count: self
+                .telemetry
+                .active_reconciliation_pass_count
+                .load(Ordering::SeqCst),
             source_rows_loaded: self.telemetry.source_rows_loaded.load(Ordering::SeqCst),
             source_bytes_loaded: self.telemetry.source_bytes_loaded.load(Ordering::SeqCst),
             publication_attempts: self.telemetry.publication_attempts.load(Ordering::SeqCst),
@@ -73,8 +83,26 @@ impl ProjectMemoryReconciliationTelemetryObserverV1 {
 }
 
 impl ProjectMemoryReconciliationTelemetryV1 {
-    pub(crate) fn record_reconciliation_pass(&self) -> Result<(), &'static str> {
-        increment_counter(&self.reconciliation_passes, 1, "reconciliation passes")
+    pub(crate) fn begin_reconciliation_pass(
+        self: &Arc<Self>,
+    ) -> Result<ProjectMemoryReconciliationPassLeaseV1, &'static str> {
+        increment_counter(
+            &self.active_reconciliation_pass_count,
+            1,
+            "active reconciliation passes",
+        )?;
+        if let Err(error) =
+            increment_counter(&self.reconciliation_passes, 1, "reconciliation passes")
+        {
+            decrement_counter(
+                &self.active_reconciliation_pass_count,
+                "active reconciliation passes",
+            )?;
+            return Err(error);
+        }
+        Ok(ProjectMemoryReconciliationPassLeaseV1 {
+            telemetry: Arc::clone(self),
+        })
     }
 
     pub(crate) fn record_source_load(&self, rows: u64, bytes: u64) -> Result<(), &'static str> {
@@ -84,6 +112,14 @@ impl ProjectMemoryReconciliationTelemetryV1 {
 
     pub(crate) fn record_publication_attempt(&self) -> Result<(), &'static str> {
         increment_counter(&self.publication_attempts, 1, "publication attempts")
+    }
+}
+
+impl Drop for ProjectMemoryReconciliationPassLeaseV1 {
+    fn drop(&mut self) {
+        self.telemetry
+            .active_reconciliation_pass_count
+            .fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -100,6 +136,15 @@ fn increment_counter(
         .map_err(|_| counter_name)
 }
 
+fn decrement_counter(counter: &AtomicU64, counter_name: &'static str) -> Result<(), &'static str> {
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            current.checked_sub(1)
+        })
+        .map(|_| ())
+        .map_err(|_| counter_name)
+}
+
 #[derive(Default)]
 struct MemoryGraphReconciliationTaskStateV1 {
     accepting: bool,
@@ -109,6 +154,7 @@ struct MemoryGraphReconciliationTaskStateV1 {
     current: Option<JoinHandle<()>>,
     retired: Vec<JoinHandle<()>>,
     joining: bool,
+    joining_task_count: usize,
 }
 
 struct MemoryGraphReconciliationSharedV1 {
@@ -247,7 +293,7 @@ impl MemoryGraphReconciliationCoordinatorV1 {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        usize::from(state.current.is_some()) + state.retired.len()
+        usize::from(state.current.is_some()) + state.retired.len() + state.joining_task_count
     }
 }
 
@@ -403,6 +449,7 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
                     if let Some(current) = state.current.take() {
                         tasks.push(current);
                     }
+                    state.joining_task_count = tasks.len();
                     Some(tasks)
                 }
             };
@@ -427,7 +474,7 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
                 };
                 task.await
             };
-            lease.tasks.pop();
+            lease.remove_completed_task();
             match result {
                 Ok(()) => {}
                 Err(error) if error.is_cancelled() => {}
@@ -467,6 +514,18 @@ struct MemoryGraphReconciliationJoinLeaseV1 {
     tasks: Vec<JoinHandle<()>>,
 }
 
+impl MemoryGraphReconciliationJoinLeaseV1 {
+    fn remove_completed_task(&mut self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(self.tasks.pop());
+        state.joining_task_count = self.tasks.len();
+    }
+}
+
 impl Drop for MemoryGraphReconciliationJoinLeaseV1 {
     fn drop(&mut self) {
         let mut state = self
@@ -476,6 +535,7 @@ impl Drop for MemoryGraphReconciliationJoinLeaseV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.retired.append(&mut self.tasks);
         state.joining = false;
+        state.joining_task_count = 0;
         if state.retired.is_empty() {
             state.running = false;
             state.current_identity = None;
@@ -583,6 +643,50 @@ mod tests {
         wait_until(|| calls.load(Ordering::SeqCst) == 2 && !owner.running()).await;
         assert!(!owner.pending());
         owner.shutdown().await.expect("join reconciler worker");
+    }
+
+    #[tokio::test]
+    async fn shutdown_observation_counts_join_lease_tasks_until_join_completes() {
+        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
+        let (owner, _) = task_owner(&coordinator);
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let task_started = Arc::clone(&started);
+        let task_release = Arc::clone(&release);
+
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), move |_| {
+                let task_started = Arc::clone(&task_started);
+                let task_release = Arc::clone(&task_release);
+                async move {
+                    task_started.notify_one();
+                    task_release.notified().await;
+                    true
+                }
+            }),
+            MemoryGraphReconciliationTaskScheduleV1::Scheduled
+        );
+        started.notified().await;
+
+        let shutdown_owner = owner.clone();
+        let shutdown = tokio::spawn(async move { shutdown_owner.shutdown().await });
+        wait_until(|| {
+            let state = coordinator
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.joining && state.joining_task_count == 1
+        })
+        .await;
+        assert_eq!(coordinator.retained_task_count(), 1);
+
+        release.notify_one();
+        shutdown
+            .await
+            .expect("shutdown task must not panic")
+            .expect("shutdown must join retained reconciliation task");
+        assert_eq!(coordinator.retained_task_count(), 0);
     }
 
     #[tokio::test]
