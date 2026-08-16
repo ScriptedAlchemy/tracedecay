@@ -1875,6 +1875,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler is shutting down".to_owned(),
             ));
         }
+        if mounted.len() >= self.max_worktrees {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler capacity is exhausted".to_owned(),
+            ));
+        }
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;

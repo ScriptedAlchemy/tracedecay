@@ -2866,6 +2866,59 @@ async fn abandoned_serving_generation_installation_releases_the_exact_replay_cla
     registry.shutdown().await;
 }
 
+#[tokio::test]
+async fn cancelled_serving_generation_installation_releases_the_exact_replay_claim() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, _scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let generation = registry
+        .serving_code_scope(fixture.path())
+        .await
+        .and_then(|scope| scope.serving_generation)
+        .expect("initial retained generation");
+    let generation_id = generation.manifest().generation_id.clone();
+    let task_registry = registry.clone();
+    let task_root = fixture.path().to_path_buf();
+    let task_generation = Arc::clone(&generation);
+    let (claimed, claimed_observed) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let ServingGenerationInstallationOutcomeV1::Installed(_installation) = task_registry
+            .install_exact_serving_generation(&task_root, &task_generation)
+            .await
+        else {
+            panic!("the initial serving generation must admit one exact owner")
+        };
+        claimed.send(()).expect("publish exact installation claim");
+        std::future::pending::<()>().await;
+        drop(_installation);
+    });
+    claimed_observed
+        .await
+        .expect("installation task must hold the claim before cancellation");
+    task.abort();
+    let _ = task.await;
+
+    let ServingGenerationInstallationOutcomeV1::Installed(replay) = registry
+        .install_exact_serving_generation(fixture.path(), &generation)
+        .await
+    else {
+        panic!("cancelling an installation task must release the exact replay claim")
+    };
+    assert_eq!(
+        registry
+            .commit_serving_generation_installation(fixture.path(), replay)
+            .await,
+        ServingGenerationRollbackOutcomeV1::Cleared
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(generation_id),
+        "cancelling the claim owner must leave its serving generation intact"
+    );
+
+    registry.shutdown().await;
+}
+
 /// The second half of the outage: search resolves its generation without ever
 /// running the freshness ladder, so when both arms came up empty nothing
 /// requested the reconcile that would remedy it — the typed failure repeated
