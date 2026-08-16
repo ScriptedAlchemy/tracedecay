@@ -450,21 +450,6 @@ impl ProductionProjectCompositionHarnessV1 {
         worktree_root: impl AsRef<Path>,
         branch: &str,
     ) -> Result<crate::branch::BranchAddOutcome> {
-        let resources = self
-            .resources
-            .as_ref()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "production-composition harness is shut down".to_owned(),
-            })?;
-        let canonical_project_root =
-            std::fs::canonicalize(project_root.as_ref()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "failed to canonicalize production-composition project '{}': {error}",
-                        project_root.as_ref().display()
-                    ),
-                }
-            })?;
         let canonical_worktree_root =
             std::fs::canonicalize(worktree_root.as_ref()).map_err(|error| {
                 TraceDecayError::Config {
@@ -474,55 +459,160 @@ impl ProductionProjectCompositionHarnessV1 {
                     ),
                 }
             })?;
-        if !resources
-            .invocation
-            .code_index_schedulers
-            .is_worktree_mounted(&canonical_worktree_root)
-            .await
-        {
-            return Err(TraceDecayError::project_route(
-                "code_index_scheduler_unavailable",
-                true,
-                format!(
-                    "code-index scheduler authority is unavailable for branch worktree '{}' in project '{}'",
-                    canonical_worktree_root.display(),
-                    canonical_project_root.display()
-                ),
-            ));
-        }
-        let serving = resources
-            .invocation
-            .code_index_schedulers
-            .serving_code_scope(&canonical_worktree_root)
-            .await
-            .and_then(|scope| scope.serving_generation)
-            .ok_or_else(|| {
+        let (data_root, project_id) = {
+            let graph = self.server(project_root.as_ref())?.cg().await;
+            let layout = graph.store_layout();
+            let project_id =
+                layout
+                    .identity
+                    .project_id
+                    .clone()
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message:
+                            "branch graph publication requires an authoritative project identity"
+                                .to_owned(),
+                    })?;
+            (layout.data_root.clone(), project_id)
+        };
+        let prepared = crate::branch::prepare_branch_tracking_in_layout(
+            &canonical_worktree_root,
+            branch,
+            &data_root,
+        )
+        .await?;
+        let prepared = match prepared {
+            crate::branch::BranchTrackingPreparation::Added(prepared) => prepared,
+            crate::branch::BranchTrackingPreparation::AlreadyTracked => {
+                return Ok(crate::branch::BranchAddOutcome::AlreadyTracked);
+            }
+            crate::branch::BranchTrackingPreparation::Deferred => {
+                return Ok(crate::branch::BranchAddOutcome::Deferred);
+            }
+        };
+
+        let publication = async {
+            // The scheduler is the V2 generation authority. Branch metadata is
+            // prepared before its refresh so only a sealed generation can claim
+            // the newly admitted branch slot.
+            self.sync_tracked_worktree_branch(
+                project_root.as_ref(),
+                &canonical_worktree_root,
+                branch,
+                branch,
+            )
+            .await?;
+            let resources = self.resources.as_ref().ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+            let serving = resources
+                .invocation
+                .code_index_schedulers
+                .serving_code_scope(&canonical_worktree_root)
+                .await
+                .ok_or_else(|| {
+                    TraceDecayError::project_route(
+                        "code_index_activation_unavailable",
+                        true,
+                        format!(
+                            "code-index activation is unavailable for branch worktree '{}'",
+                            canonical_worktree_root.display()
+                        ),
+                    )
+                })?;
+            let generation = serving.serving_generation.ok_or_else(|| {
                 TraceDecayError::project_route(
                     "code_index_activation_unavailable",
                     true,
                     format!(
-                        "code-index activation is unavailable for branch worktree '{}'",
+                        "code-index activation did not retain a sealed generation for branch worktree '{}'",
                         canonical_worktree_root.display()
                     ),
                 )
             })?;
-        let requested_reference = format!("refs/heads/{branch}");
-        if serving
-            .snapshot()
-            .reference
-            .as_ref()
-            .map(tracedecay_domain::RefId::as_str)
-            != Some(requested_reference.as_str())
-        {
-            return Err(TraceDecayError::project_route(
-                "code_index_scheduler_identity_mismatch",
-                true,
-                format!(
-                    "mounted code-index scheduler is bound to a different branch than '{branch}'; dynamic worktree activation is unavailable"
-                ),
-            ));
+            let snapshot = generation.snapshot();
+            let reference = snapshot.reference.as_ref().ok_or_else(|| {
+                TraceDecayError::project_route(
+                    "code_index_scheduler_identity_mismatch",
+                    true,
+                    "sealed code-index generation has no branch reference".to_owned(),
+                )
+            })?;
+            let expected_reference = format!("refs/heads/{branch}");
+            if reference.as_str() != expected_reference
+                || snapshot.repository != serving.repository_id
+                || snapshot.worktree.as_ref() != Some(&serving.worktree_id)
+            {
+                return Err(TraceDecayError::project_route(
+                    "code_index_scheduler_identity_mismatch",
+                    true,
+                    format!(
+                        "sealed code-index generation does not match branch worktree '{}'",
+                        canonical_worktree_root.display()
+                    ),
+                ));
+            }
+            let source_oid = snapshot.source_revision.as_ref().ok_or_else(|| {
+                TraceDecayError::project_route(
+                    "code_index_activation_unavailable",
+                    true,
+                    "sealed code-index generation has no exact source revision".to_owned(),
+                )
+            })?;
+            let last_publication_epoch = crate::branch_meta::load_branch_meta(&data_root)
+                .into_iter()
+                .flat_map(|meta| meta.branches.into_values())
+                .filter_map(|entry| entry.graph_source)
+                .map(|source| source.publication_epoch.get())
+                .max()
+                .unwrap_or(0);
+            let next_publication_epoch = last_publication_epoch.checked_add(1).ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: "branch graph publication epoch is exhausted".to_owned(),
+                }
+            })?;
+            let publication_epoch = tracedecay_domain::BranchGraphPublicationEpochV1::new(
+                next_publication_epoch,
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("branch graph publication epoch is invalid: {error}"),
+            })?;
+            let source = crate::branch_meta::BranchGraphSourceV1 {
+                publication_epoch,
+                project_id,
+                repository_id: serving.repository_id.as_str().to_owned(),
+                worktree_id: serving.worktree_id.as_str().to_owned(),
+                worktree_root: canonical_worktree_root.to_string_lossy().into_owned(),
+                reference: reference.as_str().to_owned(),
+                source_oid: source_oid.as_str().to_owned(),
+            };
+            if !crate::branch_meta::publish_graph_source(&data_root, branch, source).map_err(
+                |error| TraceDecayError::Config {
+                    message: format!("branch graph source publication failed: {error}"),
+                },
+            )? {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "branch graph source publication lost tracked branch '{branch}' before commit"
+                    ),
+                });
+            }
+            Ok(())
         }
-        Ok(crate::branch::BranchAddOutcome::AlreadyTracked)
+        .await;
+
+        match publication {
+            Ok(()) => Ok(crate::branch::BranchAddOutcome::Added),
+            Err(error) => {
+                match crate::branch::rollback_prepared_branch_tracking(&data_root, &prepared) {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(TraceDecayError::Config {
+                        message: format!(
+                            "branch sync failed: {error}; published branch rollback also failed: {rollback_error}"
+                        ),
+                    }),
+                }
+            }
+        }
     }
 
     pub async fn sync_tracked_worktree_branch(
