@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +17,7 @@ use tracedecay_domain::{
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_semantic::projector::{PreparedVectorGenerationV1, ProjectedChunkVectorV1};
 
+use super::journey_test_support::git;
 use super::*;
 use crate::retention::code_index_generations::{
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, prepare_next_code_generation_retention_cancellable,
@@ -41,15 +41,6 @@ where
     T::Error: std::fmt::Debug,
 {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .current_dir(root)
-        .args(args)
-        .status()
-        .expect("run git fixture command");
-    assert!(status.success(), "git fixture command failed: {args:?}");
 }
 
 fn initialize_git_project(root: &Path) {

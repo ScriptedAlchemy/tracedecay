@@ -23,26 +23,10 @@ use tracedecay_usecases::store::vector_generations::{
     GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
 };
 
+use super::journey_test_support::{git, tool_payload};
 use super::*;
 
 const EVALUATED_PROFILE_ID: &str = "hybrid-conservative";
-
-pub(super) fn git(project: &Path, arguments: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .current_dir(project)
-        .args(arguments)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {arguments:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout)
-        .expect("git output")
-        .trim()
-        .to_owned()
-}
 
 fn commit(project: &Path, message: &str) -> String {
     git(project, &["add", "."]);
@@ -60,15 +44,6 @@ fn commit(project: &Path, message: &str) -> String {
         ],
     );
     git(project, &["rev-parse", "HEAD"])
-}
-
-pub(super) fn tool_payload(response: &JsonRpcResponse) -> Value {
-    assert!(response.error.is_none(), "tool failed: {response:?}");
-    let result = response.result.as_ref().expect("tool result");
-    let text = result["content"][0]["text"].as_str().expect("tool text");
-    serde_json::from_str(text).unwrap_or_else(|error| {
-        panic!("tool did not return JSON: {error}; result={result}; text={text}")
-    })
 }
 
 fn assert_tool_effect_succeeded(response: &JsonRpcResponse) {

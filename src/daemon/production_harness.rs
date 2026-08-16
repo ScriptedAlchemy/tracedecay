@@ -869,6 +869,9 @@ mod code_index_activation_test {
 }
 
 #[cfg(test)]
+mod journey_test_support;
+
+#[cfg(test)]
 mod generation_retention_test;
 
 #[cfg(test)]

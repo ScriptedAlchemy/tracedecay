@@ -19,6 +19,7 @@ use tracedecay_tool_catalog::{
     EffectClass, IdempotencyContract, ReceiptContract, ReconciliationContract, TerminalState,
 };
 
+use super::journey_test_support::tool_payload;
 use super::*;
 
 const HTTP_AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -32,18 +33,6 @@ fn initialize_project(project: &Path) {
         .status()
         .expect("initialize Git project");
     assert!(status.success(), "Git project initialization failed");
-}
-
-fn tool_payload(response: &JsonRpcResponse) -> Value {
-    assert!(response.error.is_none(), "tool failed: {response:?}");
-    let result = response.result.as_ref().expect("tool result");
-    assert_ne!(result["isError"], true, "tool failed: {result}");
-    serde_json::from_str(
-        result["content"][0]["text"]
-            .as_str()
-            .expect("tool result text"),
-    )
-    .expect("typed tool payload")
 }
 
 async fn current_revision(

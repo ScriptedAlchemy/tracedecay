@@ -15,10 +15,10 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use super::journey_test_support::{git, tool_payload};
 use super::semantic_activation_journey_test::{
-    evaluate_native_profile, git, installed_selection_material, seed_distribution_fixture,
-    selection, semantic_candidate, set_semantic_profile, tool_payload,
-    wait_for_semantic_generation,
+    evaluate_native_profile, installed_selection_material, seed_distribution_fixture, selection,
+    semantic_candidate, set_semantic_profile, wait_for_semantic_generation,
 };
 use super::*;
 
