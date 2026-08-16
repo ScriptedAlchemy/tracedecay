@@ -1611,7 +1611,7 @@ pub mod work_rollup_harness {
     fn linux_directory_count(path: &str, excludes_own_descriptor: bool) -> Option<u64> {
         let mut entries = std::fs::read_dir(path).ok()?;
         let count = entries.try_fold(0_u64, |count, entry| {
-            entry.ok()?.file_name();
+            let _entry = entry.ok()?;
             count.checked_add(1)
         })?;
         Some(if excludes_own_descriptor {
@@ -1807,8 +1807,8 @@ pub mod work_rollup_harness {
     pub async fn run_work_rollup_case() -> WorkRollupReport {
         let total_started = Instant::now();
         let PreparedWorkRollupCase {
-            _pin: _pin,
-            _runtime: _runtime,
+            _pin,
+            _runtime,
             database,
             producer,
             dropped_sources,
@@ -1956,8 +1956,8 @@ pub mod work_rollup_harness {
             .checked_mul(repetitions_per_window)
             .expect("bounded settled Work rollup repetition count");
         let PreparedWorkRollupCase {
-            _pin: _pin,
-            _runtime: _runtime,
+            _pin,
+            _runtime,
             database,
             producer,
             dropped_sources,
