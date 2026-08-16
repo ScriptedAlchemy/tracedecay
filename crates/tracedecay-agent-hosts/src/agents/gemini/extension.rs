@@ -410,15 +410,21 @@ pub(super) fn gemini_extension_deactivate_with(gemini: &Path, home: &Path) -> Re
     run_gemini_extension_step(gemini, &["extensions", "uninstall", EXTENSION_NAME], home)
 }
 
-/// Ask Gemini CLI itself what extensions it has, or `None` when its binary is
-/// not on `PATH`.
+/// Ask Gemini CLI itself what extensions it has, or `None` only when its
+/// binary is genuinely unavailable on `PATH`.
 ///
 /// Used only by the doctor, which must never *claim* an activation state it
 /// could not observe: when this returns `None` the doctor says so instead of
-/// inferring adoption from files TraceDecay staged itself.
-pub(super) fn host_reported_extensions(home: &Path) -> Option<host_cli::HostCliOutcomeV1> {
-    let gemini = host_cli::require_host_cli(GEMINI_CLI, GEMINI_CLI_LIFECYCLE).ok()?;
-    host_cli::run_host_cli(&gemini, &["extensions", "list"], home).ok()
+/// inferring adoption from files TraceDecay staged itself. A present but
+/// unusable binary, metadata failure, or launch failure remains a typed error
+/// so it cannot be relabelled as ordinary host absence.
+pub(super) fn host_reported_extensions(home: &Path) -> Result<Option<host_cli::HostCliOutcomeV1>> {
+    let gemini = match host_cli::require_host_cli(GEMINI_CLI, GEMINI_CLI_LIFECYCLE) {
+        Ok(gemini) => gemini,
+        Err(TraceDecayError::HostCliUnavailable { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    host_cli::run_host_cli(&gemini, &["extensions", "list"], home).map(Some)
 }
 
 /// Run one `gemini extensions ...` step, converting a failed invocation into
