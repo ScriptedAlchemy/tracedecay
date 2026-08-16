@@ -592,9 +592,10 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
     );
     registry.bind_route(route("oldest-active"), oldest.clone());
     let idle_server = Arc::new(2);
+    let idle_witness = Arc::downgrade(&idle_server);
     registry.insert_at(
         idle.clone(),
-        Arc::clone(&idle_server),
+        idle_server,
         now.checked_sub(std::time::Duration::from_secs(10)).unwrap(),
     );
     registry.bind_route(route("idle"), idle.clone());
@@ -616,6 +617,9 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
         &retired[0].0, &idle,
         "retirement must retain the exact victim identity"
     );
+    let idle_server = idle_witness
+        .upgrade()
+        .expect("the returned retirement owns the evicted server");
     assert!(
         Arc::ptr_eq(&retired[0].1, &idle_server),
         "the caller must receive the exact idle server for canonical retirement"
@@ -654,6 +658,7 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
 
     drop(active_lease);
     drop(inserted_lease);
+    drop(idle_server);
     drop(retired);
 
     let reopened = Arc::new(5);
