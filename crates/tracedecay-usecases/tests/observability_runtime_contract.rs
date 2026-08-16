@@ -952,7 +952,7 @@ async fn real_work_owner_receipts_converge_to_rollup() {
     assert_eq!(report.durable_sources, 512, "{report:#?}");
     assert_eq!(report.fragment_count, 1, "{report:#?}");
     assert_eq!(report.coverage, CoverageStateV1::Known, "{report:#?}");
-    assert!(report.raw_rollup_equal, "{report:#?}");
+    assert_eq!(report.raw_coverage, CoverageStateV1::Known, "{report:#?}");
 }
 
 pub mod work_rollup_harness {
@@ -960,16 +960,20 @@ pub mod work_rollup_harness {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use serde::{Deserialize, Serialize};
     use tracedecay_application::{
         AdjudicateWorkLeakCommandV1, CancellationContext, CapabilityGrantId,
-        CapabilityGrantSnapshot, Deadline, DisclosureClass, ExecutionTopologyMetricsRequestV1,
-        ExecutionTopologyMetricsV1, ExecutionTopologyRollupFragmentQueryV1,
-        ExecutionTopologyRollupFragmentV1, ExecutionTopologyRollupQueryPort,
-        ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1, RequestContext,
-        RequestId, ResolvedScope, RetryWorkAttemptCommandV1, VerifiedWorkLeakEvidenceV1,
-        VerifiedWorkRetryFailureV1, WorkLeakAdjudicationReceiptV1, WorkRetryCauseV1,
-        WorkRetryFailureSelectorV1, WorkRetryReceiptV1, WorkRetrySourceV1,
-        canonical_execution_topology_rollup_fragment_bytes, execution_topology_rollup_metrics,
+        CapabilityGrantSnapshot, Deadline, DisclosureClass,
+        ExecutionGitHubStackCapabilityReadingV1, ExecutionTopologyDrillAnchorV1,
+        ExecutionTopologyEmissionCoverageV1, ExecutionTopologyMeasurementV1,
+        ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
+        ExecutionTopologyRollupFragmentQueryV1, ExecutionTopologyRollupFragmentV1,
+        ExecutionTopologyRollupQueryPort, MetricCoverageV1, ObservabilityHorizonV1,
+        ObservabilityQueryPort, ObservabilityQueryV1, RequestContext, RequestId, ResolvedScope,
+        RetryWorkAttemptCommandV1, VerifiedWorkLeakEvidenceV1, VerifiedWorkRetryFailureV1,
+        WorkLeakAdjudicationReceiptV1, WorkRetryCauseV1, WorkRetryFailureSelectorV1,
+        WorkRetryReceiptV1, WorkRetrySourceV1, canonical_execution_topology_rollup_fragment_bytes,
+        execution_topology_rollup_metrics,
     };
     use tracedecay_domain::{
         ActorId, AttemptId, CoverageStateV1, DuplicateEffectOutcomeV1, DuplicateEffortKindV1,
@@ -997,6 +1001,7 @@ pub mod work_rollup_harness {
     pub const MAX_EVENTS: u32 = 10_000;
     pub const TRIPWIRE: Duration = Duration::from_secs(2);
     pub const READ_TRIPWIRE: Duration = Duration::from_millis(250);
+    pub const WORK_ROLLUP_BENCHMARK_ARTIFACT_SCHEMA_VERSION: u16 = 1;
 
     const FAMILY_SOURCE_COUNT: usize = SOURCE_COUNT / 4;
     const SCOPE: &str = "project.work-rollup.rc01";
@@ -1014,9 +1019,6 @@ pub mod work_rollup_harness {
         pub fragment_is_application_canonical: bool,
         pub raw_coverage: CoverageStateV1,
         pub coverage: CoverageStateV1,
-        pub raw_watermark: String,
-        pub rollup_watermark: String,
-        pub raw_rollup_equal: bool,
         pub setup_elapsed: Duration,
         pub offer_elapsed: Duration,
         pub fragment_ready_elapsed: Duration,
@@ -1038,30 +1040,181 @@ pub mod work_rollup_harness {
 
     /// Values unavailable on this host or absent from the mounted production
     /// telemetry remain explicit rather than being fabricated as zero.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "state", rename_all = "snake_case")]
     pub enum WorkRollupMeasurement {
-        Measured(u64),
-        Unavailable,
+        Measured {
+            value: u64,
+        },
+        Unavailable {
+            reason: WorkRollupMeasurementUnavailableReasonV1,
+        },
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum WorkRollupMeasurementUnavailableReasonV1 {
+        UnsupportedPlatform,
+        ProcfsUnavailable,
+        CgroupMemoryEventsUnavailable,
+        ReaderPoolUnavailable,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WorkRollupCgroupMemoryEvents {
+        pub oom: WorkRollupMeasurement,
+        pub oom_kill: WorkRollupMeasurement,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct WorkRollupResourceSample {
         pub rss_bytes: WorkRollupMeasurement,
         pub rss_anon_bytes: WorkRollupMeasurement,
         pub open_file_descriptors: WorkRollupMeasurement,
         pub task_count: WorkRollupMeasurement,
+        pub reader_snapshot_admissions: WorkRollupMeasurement,
+        pub cgroup_memory_events: WorkRollupCgroupMemoryEvents,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WorkRollupMeasurementDeltaV1 {
+        pub before: WorkRollupMeasurement,
+        pub after: WorkRollupMeasurement,
+        pub delta: Option<i128>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WorkRollupCgroupMemoryEventsDeltaV1 {
+        pub oom: WorkRollupMeasurementDeltaV1,
+        pub oom_kill: WorkRollupMeasurementDeltaV1,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WorkRollupResourceDeltasV1 {
+        pub rss_bytes: WorkRollupMeasurementDeltaV1,
+        pub rss_anon_bytes: WorkRollupMeasurementDeltaV1,
+        pub open_file_descriptors: WorkRollupMeasurementDeltaV1,
+        pub task_count: WorkRollupMeasurementDeltaV1,
+        pub reader_snapshot_admissions: WorkRollupMeasurementDeltaV1,
+        pub cgroup_memory_events: WorkRollupCgroupMemoryEventsDeltaV1,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct WorkRollupSettledWindow {
+        pub window_index: usize,
+        pub first_operation: usize,
+        pub operation_count: usize,
+        pub semantic_identity_equal: bool,
+        pub observation_timestamps: WorkRollupObservationTimestampWindow,
+        pub resources_before: WorkRollupResourceSample,
+        pub resources_after: WorkRollupResourceSample,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct WorkRollupObservationTimestampWindow {
+        pub control_observed_at_micros: i64,
+        pub first_repeated_observed_at_micros: i64,
+        pub last_repeated_observed_at_micros: i64,
+        pub nondecreasing: bool,
     }
 
     #[derive(Clone, Debug)]
     pub struct SettledWorkRollupReport {
         pub control_operations: usize,
         pub repeated_operations: usize,
-        pub semantic_output_identity: bool,
-        pub reconciliations: WorkRollupMeasurement,
-        pub database_reads: WorkRollupMeasurement,
+        pub semantic_identity_equal: bool,
+        pub observation_timestamps_nondecreasing: bool,
         pub repetition_elapsed: Vec<Duration>,
-        pub resources_before: WorkRollupResourceSample,
-        pub resources_after: WorkRollupResourceSample,
+        pub windows: Vec<WorkRollupSettledWindow>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum WorkRollupJourneyV1 {
+        FreshStoreAndSettledRetainedRollupReads,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum WorkRollupReconciliationScopeV1 {
+        OwnedByMemoryPlateauSuite,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WorkRollupMeasurementScopeV1 {
+        pub journey: WorkRollupJourneyV1,
+        pub reconciliation_measurement: WorkRollupReconciliationScopeV1,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WorkRollupFixtureV1 {
+        pub offered_sources: usize,
+        pub warmup_repetitions: usize,
+        pub fresh_measured_repetitions: usize,
+        pub settled_window_count: usize,
+        pub settled_repetitions_per_window: usize,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "state", rename_all = "snake_case")]
+    pub enum WorkRollupRateV1 {
+        Measured {
+            operations_per_second: f64,
+        },
+        Unavailable {
+            reason: WorkRollupRateUnavailableReasonV1,
+        },
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum WorkRollupRateUnavailableReasonV1 {
+        ZeroElapsedClock,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WorkRollupLatencyV1 {
+        pub p95_micros: u64,
+        pub max_micros: u64,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub struct WorkRollupFreshStoreMeasurementV1 {
+        pub throughput: WorkRollupRateV1,
+        pub setup_p95_micros: u64,
+        pub fragment_ready_p95_micros: u64,
+        pub application_read_p95_micros: u64,
+        pub journey_p95_micros: u64,
+        pub full_repetition_p95_micros: u64,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub struct WorkRollupSettledWindowMeasurementV1 {
+        pub window_index: usize,
+        pub first_operation: usize,
+        pub operation_count: usize,
+        pub latency: WorkRollupLatencyV1,
+        pub throughput: WorkRollupRateV1,
+        pub semantic_identity_equal: bool,
+        pub observation_timestamps: WorkRollupObservationTimestampWindowV1,
+        pub resources: WorkRollupResourceDeltasV1,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WorkRollupObservationTimestampWindowV1 {
+        pub control_observed_at_micros: i64,
+        pub first_repeated_observed_at_micros: i64,
+        pub last_repeated_observed_at_micros: i64,
+        pub nondecreasing: bool,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub struct WorkRollupBenchmarkArtifactV1 {
+        pub schema_version: u16,
+        pub scope: WorkRollupMeasurementScopeV1,
+        pub fixture: WorkRollupFixtureV1,
+        pub fresh_store: WorkRollupFreshStoreMeasurementV1,
+        pub settled_windows: Vec<WorkRollupSettledWindowMeasurementV1>,
     }
 
     fn id<T>(value: impl Into<String>) -> T
@@ -1266,27 +1419,40 @@ pub mod work_rollup_harness {
         }
     }
 
-    fn equivalent_metrics(
-        raw: &ExecutionTopologyMetricsV1,
-        rollup: &ExecutionTopologyMetricsV1,
-    ) -> bool {
-        let mut raw = raw.clone();
-        let mut rollup = rollup.clone();
-        let normalized_horizon = ObservabilityHorizonV1 {
-            since_micros: 0,
-            until_micros: DAY_MICROS,
-        };
-        for model in [&mut raw, &mut rollup] {
-            model.horizon = normalized_horizon.clone();
-            model.observed_at_micros = 0;
-            model.watermark = "normalized-watermark".to_owned();
-            model.drill_anchors.clear();
-            for measurement in &mut model.measurements {
-                measurement.value.provenance.watermark = "normalized-watermark".to_owned();
-                measurement.value.temporal.horizon = normalized_horizon.clone();
+    /// The read timestamp records when a caller observed an otherwise stable
+    /// retained rollup. It is intentionally separate from semantic identity;
+    /// every other result field is retained byte-for-byte through serde.
+    #[derive(Clone, Debug, PartialEq, Serialize)]
+    struct WorkRollupSemanticIdentityV1 {
+        authorized_scope_ref: String,
+        horizon: ObservabilityHorizonV1,
+        watermark: String,
+        current: bool,
+        coverage: MetricCoverageV1,
+        emission_coverage: ExecutionTopologyEmissionCoverageV1,
+        github_stack_capability: ExecutionGitHubStackCapabilityReadingV1,
+        drill_anchors: Vec<ExecutionTopologyDrillAnchorV1>,
+        measurements: Vec<ExecutionTopologyMeasurementV1>,
+    }
+
+    impl From<&ExecutionTopologyMetricsV1> for WorkRollupSemanticIdentityV1 {
+        fn from(metrics: &ExecutionTopologyMetricsV1) -> Self {
+            Self {
+                authorized_scope_ref: metrics.authorized_scope_ref.clone(),
+                horizon: metrics.horizon.clone(),
+                watermark: metrics.watermark.clone(),
+                current: metrics.current,
+                coverage: metrics.coverage.clone(),
+                emission_coverage: metrics.emission_coverage.clone(),
+                github_stack_capability: metrics.github_stack_capability.clone(),
+                drill_anchors: metrics.drill_anchors.clone(),
+                measurements: metrics.measurements.clone(),
             }
         }
-        raw == rollup
+    }
+
+    fn serialized_semantic_identity(identity: &WorkRollupSemanticIdentityV1) -> Vec<u8> {
+        serde_json::to_vec(identity).expect("serialize complete Work rollup semantic identity")
     }
 
     async fn prepare_work_rollup_case() -> PreparedWorkRollupCase {
@@ -1414,7 +1580,7 @@ pub mod work_rollup_harness {
 
     #[cfg(target_os = "linux")]
     fn linux_directory_count(path: &str, excludes_own_descriptor: bool) -> Option<u64> {
-        let entries = std::fs::read_dir(path).ok()?;
+        let mut entries = std::fs::read_dir(path).ok()?;
         let count = entries.try_fold(0_u64, |count, entry| {
             entry.ok()?.file_name();
             count.checked_add(1)
@@ -1431,20 +1597,183 @@ pub mod work_rollup_harness {
         None
     }
 
-    fn measured(value: Option<u64>) -> WorkRollupMeasurement {
+    fn measured(
+        value: Option<u64>,
+        unavailable_reason: WorkRollupMeasurementUnavailableReasonV1,
+    ) -> WorkRollupMeasurement {
         value.map_or(
-            WorkRollupMeasurement::Unavailable,
-            WorkRollupMeasurement::Measured,
+            WorkRollupMeasurement::Unavailable {
+                reason: unavailable_reason,
+            },
+            |value| WorkRollupMeasurement::Measured { value },
         )
     }
 
-    fn sample_work_rollup_resources() -> WorkRollupResourceSample {
+    #[cfg(target_os = "linux")]
+    fn linux_cgroup_memory_events() -> Option<(u64, u64)> {
+        let cgroup_path = std::fs::read_to_string("/proc/self/cgroup")
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))?;
+        let events_path = std::path::Path::new("/sys/fs/cgroup")
+            .join(cgroup_path.trim_start_matches('/'))
+            .join("memory.events");
+        let events = std::fs::read_to_string(events_path).ok()?;
+        let mut oom = None;
+        let mut oom_kill = None;
+        for line in events.lines() {
+            let Some((key, value)) = line.split_once(char::is_whitespace) else {
+                continue;
+            };
+            let Ok(value) = value.trim().parse::<u64>() else {
+                continue;
+            };
+            match key {
+                "oom" => oom = Some(value),
+                "oom_kill" => oom_kill = Some(value),
+                _ => {}
+            }
+        }
+        Some((oom?, oom_kill?))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn linux_cgroup_memory_events() -> Option<(u64, u64)> {
+        None
+    }
+
+    #[cfg(target_os = "linux")]
+    fn host_measurement_unavailable_reason() -> WorkRollupMeasurementUnavailableReasonV1 {
+        WorkRollupMeasurementUnavailableReasonV1::ProcfsUnavailable
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn host_measurement_unavailable_reason() -> WorkRollupMeasurementUnavailableReasonV1 {
+        WorkRollupMeasurementUnavailableReasonV1::UnsupportedPlatform
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cgroup_measurement_unavailable_reason() -> WorkRollupMeasurementUnavailableReasonV1 {
+        WorkRollupMeasurementUnavailableReasonV1::CgroupMemoryEventsUnavailable
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn cgroup_measurement_unavailable_reason() -> WorkRollupMeasurementUnavailableReasonV1 {
+        WorkRollupMeasurementUnavailableReasonV1::UnsupportedPlatform
+    }
+
+    fn sample_work_rollup_resources(database: &RegisteredGlobalDb) -> WorkRollupResourceSample {
+        let host_unavailable_reason = host_measurement_unavailable_reason();
+        let cgroup_unavailable_reason = cgroup_measurement_unavailable_reason();
+        let cgroup_events = linux_cgroup_memory_events();
         WorkRollupResourceSample {
-            rss_bytes: measured(linux_status_bytes("VmRSS:")),
-            rss_anon_bytes: measured(linux_status_bytes("RssAnon:")),
+            rss_bytes: measured(
+                linux_status_bytes("VmRSS:"),
+                host_unavailable_reason.clone(),
+            ),
+            rss_anon_bytes: measured(
+                linux_status_bytes("RssAnon:"),
+                host_unavailable_reason.clone(),
+            ),
             // Opening /proc/self/fd consumes one descriptor while it is listed.
-            open_file_descriptors: measured(linux_directory_count("/proc/self/fd", true)),
-            task_count: measured(linux_directory_count("/proc/self/task", false)),
+            open_file_descriptors: measured(
+                linux_directory_count("/proc/self/fd", true),
+                host_unavailable_reason.clone(),
+            ),
+            task_count: measured(
+                linux_directory_count("/proc/self/task", false),
+                host_unavailable_reason,
+            ),
+            reader_snapshot_admissions: measured(
+                database
+                    .read_connection()
+                    .reader_pool_occupancy()
+                    .map(|snapshot| snapshot.snapshot_admissions),
+                WorkRollupMeasurementUnavailableReasonV1::ReaderPoolUnavailable,
+            ),
+            cgroup_memory_events: WorkRollupCgroupMemoryEvents {
+                oom: measured(
+                    cgroup_events.map(|(oom, _)| oom),
+                    cgroup_unavailable_reason.clone(),
+                ),
+                oom_kill: measured(
+                    cgroup_events.map(|(_, oom_kill)| oom_kill),
+                    cgroup_unavailable_reason,
+                ),
+            },
+        }
+    }
+
+    fn measurement_delta(
+        before: &WorkRollupMeasurement,
+        after: &WorkRollupMeasurement,
+    ) -> WorkRollupMeasurementDeltaV1 {
+        let delta = match (before, after) {
+            (
+                WorkRollupMeasurement::Measured { value: before },
+                WorkRollupMeasurement::Measured { value: after },
+            ) => Some(i128::from(*after) - i128::from(*before)),
+            _ => None,
+        };
+        WorkRollupMeasurementDeltaV1 {
+            before: before.clone(),
+            after: after.clone(),
+            delta,
+        }
+    }
+
+    pub fn work_rollup_resource_deltas(
+        before: &WorkRollupResourceSample,
+        after: &WorkRollupResourceSample,
+    ) -> WorkRollupResourceDeltasV1 {
+        WorkRollupResourceDeltasV1 {
+            rss_bytes: measurement_delta(&before.rss_bytes, &after.rss_bytes),
+            rss_anon_bytes: measurement_delta(&before.rss_anon_bytes, &after.rss_anon_bytes),
+            open_file_descriptors: measurement_delta(
+                &before.open_file_descriptors,
+                &after.open_file_descriptors,
+            ),
+            task_count: measurement_delta(&before.task_count, &after.task_count),
+            reader_snapshot_admissions: measurement_delta(
+                &before.reader_snapshot_admissions,
+                &after.reader_snapshot_admissions,
+            ),
+            cgroup_memory_events: WorkRollupCgroupMemoryEventsDeltaV1 {
+                oom: measurement_delta(
+                    &before.cgroup_memory_events.oom,
+                    &after.cgroup_memory_events.oom,
+                ),
+                oom_kill: measurement_delta(
+                    &before.cgroup_memory_events.oom_kill,
+                    &after.cgroup_memory_events.oom_kill,
+                ),
+            },
+        }
+    }
+
+    fn assert_structurally_exact_resource_invariants(
+        before: &WorkRollupResourceSample,
+        after: &WorkRollupResourceSample,
+        window_index: usize,
+    ) {
+        for (resource, before, after) in [
+            (
+                "open file descriptors",
+                &before.open_file_descriptors,
+                &after.open_file_descriptors,
+            ),
+            ("task count", &before.task_count, &after.task_count),
+        ] {
+            if let (
+                WorkRollupMeasurement::Measured { value: before },
+                WorkRollupMeasurement::Measured { value: after },
+            ) = (before, after)
+            {
+                assert_eq!(
+                    before, after,
+                    "settled Work rollup changed {resource} in window {window_index}"
+                );
+            }
         }
     }
 
@@ -1570,9 +1899,6 @@ pub mod work_rollup_harness {
             fragment_is_application_canonical,
             raw_coverage: raw.coverage.state,
             coverage: rollup.coverage.state,
-            raw_watermark: raw.watermark.clone(),
-            rollup_watermark: rollup.watermark.clone(),
-            raw_rollup_equal: equivalent_metrics(&raw, &rollup),
             setup_elapsed,
             offer_elapsed,
             fragment_ready_elapsed,
@@ -1584,11 +1910,21 @@ pub mod work_rollup_harness {
 
     /// Repeats the retained-rollup application operation over one already-settled
     /// runtime. No new owner receipts are offered after the control read.
-    pub async fn run_settled_work_rollup_case(repetitions: usize) -> SettledWorkRollupReport {
+    pub async fn run_settled_work_rollup_case(
+        window_count: usize,
+        repetitions_per_window: usize,
+    ) -> SettledWorkRollupReport {
         assert!(
-            repetitions > 0,
-            "a settled work-rollup measurement requires at least one repeat"
+            window_count > 1,
+            "a settled work-rollup measurement requires multiple bounded windows"
         );
+        assert!(
+            repetitions_per_window > 0,
+            "a settled work-rollup measurement requires at least one repeat per window"
+        );
+        let repetitions = window_count
+            .checked_mul(repetitions_per_window)
+            .expect("bounded settled Work rollup repetition count");
         let PreparedWorkRollupCase {
             _pin: _pin,
             _runtime: _runtime,
@@ -1610,38 +1946,193 @@ pub mod work_rollup_harness {
             until_micros: DAY_START_MICROS + DAY_MICROS,
         };
         let context = read_context();
+        // Allocate every measurement collection before the control operation so
+        // setup allocation cannot be misreported as settled-workload growth.
+        let mut repetition_elapsed = Vec::with_capacity(repetitions);
+        let mut semantic_matches = Vec::with_capacity(repetitions);
+        let mut windows = Vec::with_capacity(window_count);
         let control = read_full_day_rollup(&port, &context, &full_day).await;
+        let control_semantic_identity = WorkRollupSemanticIdentityV1::from(&control);
+        let control_semantic_serialized = serialized_semantic_identity(&control_semantic_identity);
+        assert!(
+            control.observed_at_micros > 0,
+            "the control read must carry a valid observation timestamp"
+        );
+        let mut previous_observed_at_micros = control.observed_at_micros;
+        let mut observation_timestamps_nondecreasing = true;
         assert_eq!(
             control.coverage.state,
             CoverageStateV1::Known,
             "the control read must retain an application-readable rollup"
         );
 
-        let resources_before = sample_work_rollup_resources();
-        let mut repetition_elapsed = Vec::with_capacity(repetitions);
-        for repetition in 1..=repetitions {
-            let started = Instant::now();
-            let repeated = read_full_day_rollup(&port, &context, &full_day).await;
-            repetition_elapsed.push(started.elapsed());
-            assert!(
-                equivalent_metrics(&control, &repeated),
-                "settled Work rollup changed on identical repetition {repetition}: \
-                 control={control:#?} repeated={repeated:#?}"
+        for window_index in 0..window_count {
+            let resources_before = sample_work_rollup_resources(database.as_ref());
+            let first_operation = repetition_elapsed.len();
+            let semantic_matches_before_window = semantic_matches.len();
+            let mut first_repeated_observed_at_micros = None;
+            let mut last_repeated_observed_at_micros = control.observed_at_micros;
+            let mut window_timestamps_nondecreasing = true;
+            for repetition_in_window in 0..repetitions_per_window {
+                let repetition = first_operation + repetition_in_window + 1;
+                let started = Instant::now();
+                let repeated = read_full_day_rollup(&port, &context, &full_day).await;
+                repetition_elapsed.push(started.elapsed());
+                assert!(
+                    repeated.observed_at_micros > 0,
+                    "settled Work rollup repeat {repetition} had an invalid observation timestamp"
+                );
+                let observed_at_nondecreasing =
+                    repeated.observed_at_micros >= previous_observed_at_micros;
+                assert!(
+                    observed_at_nondecreasing,
+                    "settled Work rollup observation timestamp moved backwards on repetition \
+                     {repetition}: previous={previous_observed_at_micros} \
+                     repeated={}",
+                    repeated.observed_at_micros
+                );
+                previous_observed_at_micros = repeated.observed_at_micros;
+                observation_timestamps_nondecreasing &= observed_at_nondecreasing;
+                window_timestamps_nondecreasing &= observed_at_nondecreasing;
+                first_repeated_observed_at_micros.get_or_insert(repeated.observed_at_micros);
+                last_repeated_observed_at_micros = repeated.observed_at_micros;
+                let repeated_semantic_identity = WorkRollupSemanticIdentityV1::from(&repeated);
+                let exact_match = control_semantic_identity == repeated_semantic_identity
+                    && control_semantic_serialized
+                        == serialized_semantic_identity(&repeated_semantic_identity);
+                semantic_matches.push(exact_match);
+                assert!(
+                    exact_match,
+                    "settled Work rollup semantic identity changed on identical repetition \
+                     {repetition}: \
+                     control={control:#?} repeated={repeated:#?}"
+                );
+            }
+            let resources_after = sample_work_rollup_resources(database.as_ref());
+            assert_structurally_exact_resource_invariants(
+                &resources_before,
+                &resources_after,
+                window_index + 1,
             );
+            let semantic_identity_equal = semantic_matches[semantic_matches_before_window..]
+                .iter()
+                .all(|matches| *matches);
+            windows.push(WorkRollupSettledWindow {
+                window_index: window_index + 1,
+                first_operation,
+                operation_count: repetitions_per_window,
+                semantic_identity_equal,
+                observation_timestamps: WorkRollupObservationTimestampWindow {
+                    control_observed_at_micros: control.observed_at_micros,
+                    first_repeated_observed_at_micros: first_repeated_observed_at_micros
+                        .expect("every settled window has at least one repetition"),
+                    last_repeated_observed_at_micros,
+                    nondecreasing: window_timestamps_nondecreasing,
+                },
+                resources_before,
+                resources_after,
+            });
         }
-        let resources_after = sample_work_rollup_resources();
 
         SettledWorkRollupReport {
             control_operations: 1,
             repeated_operations: repetitions,
-            semantic_output_identity: true,
-            // This production journey mounts no Work-rollup reconciliation counter.
-            reconciliations: WorkRollupMeasurement::Unavailable,
-            // The registered port exposes no per-operation database-read counter.
-            database_reads: WorkRollupMeasurement::Unavailable,
+            semantic_identity_equal: semantic_matches.iter().all(|matches| *matches),
+            observation_timestamps_nondecreasing,
             repetition_elapsed,
-            resources_before,
-            resources_after,
+            windows,
+        }
+    }
+
+    #[cfg(test)]
+    mod artifact_schema_tests {
+        use super::*;
+
+        fn unavailable_measurement() -> WorkRollupMeasurement {
+            WorkRollupMeasurement::Unavailable {
+                reason: WorkRollupMeasurementUnavailableReasonV1::UnsupportedPlatform,
+            }
+        }
+
+        fn unavailable_delta() -> WorkRollupMeasurementDeltaV1 {
+            WorkRollupMeasurementDeltaV1 {
+                before: unavailable_measurement(),
+                after: unavailable_measurement(),
+                delta: None,
+            }
+        }
+
+        #[test]
+        fn work_rollup_benchmark_artifact_jsonl_roundtrips_through_typed_schema() {
+            let unavailable = unavailable_delta();
+            let artifact = WorkRollupBenchmarkArtifactV1 {
+                schema_version: WORK_ROLLUP_BENCHMARK_ARTIFACT_SCHEMA_VERSION,
+                scope: WorkRollupMeasurementScopeV1 {
+                    journey: WorkRollupJourneyV1::FreshStoreAndSettledRetainedRollupReads,
+                    reconciliation_measurement:
+                        WorkRollupReconciliationScopeV1::OwnedByMemoryPlateauSuite,
+                },
+                fixture: WorkRollupFixtureV1 {
+                    offered_sources: 512,
+                    warmup_repetitions: 3,
+                    fresh_measured_repetitions: 30,
+                    settled_window_count: 3,
+                    settled_repetitions_per_window: 10,
+                },
+                fresh_store: WorkRollupFreshStoreMeasurementV1 {
+                    throughput: WorkRollupRateV1::Measured {
+                        operations_per_second: 512.0,
+                    },
+                    setup_p95_micros: 10,
+                    fragment_ready_p95_micros: 20,
+                    application_read_p95_micros: 30,
+                    journey_p95_micros: 40,
+                    full_repetition_p95_micros: 50,
+                },
+                settled_windows: vec![WorkRollupSettledWindowMeasurementV1 {
+                    window_index: 1,
+                    first_operation: 0,
+                    operation_count: 10,
+                    latency: WorkRollupLatencyV1 {
+                        p95_micros: 60,
+                        max_micros: 70,
+                    },
+                    throughput: WorkRollupRateV1::Measured {
+                        operations_per_second: 10.0,
+                    },
+                    semantic_identity_equal: true,
+                    observation_timestamps: WorkRollupObservationTimestampWindowV1 {
+                        control_observed_at_micros: 1_000,
+                        first_repeated_observed_at_micros: 1_001,
+                        last_repeated_observed_at_micros: 1_010,
+                        nondecreasing: true,
+                    },
+                    resources: WorkRollupResourceDeltasV1 {
+                        rss_bytes: unavailable.clone(),
+                        rss_anon_bytes: unavailable.clone(),
+                        open_file_descriptors: unavailable.clone(),
+                        task_count: unavailable.clone(),
+                        reader_snapshot_admissions: unavailable.clone(),
+                        cgroup_memory_events: WorkRollupCgroupMemoryEventsDeltaV1 {
+                            oom: unavailable.clone(),
+                            oom_kill: unavailable,
+                        },
+                    },
+                }],
+            };
+
+            let mut jsonl = serde_json::to_vec(&artifact).expect("serialize typed artifact");
+            jsonl.push(b'\n');
+            let line =
+                std::str::from_utf8(&jsonl[..jsonl.len() - 1]).expect("artifact JSONL is utf-8");
+            let decoded = serde_json::from_str::<WorkRollupBenchmarkArtifactV1>(line)
+                .expect("deserialize typed artifact");
+
+            assert_eq!(decoded, artifact);
+            assert_eq!(
+                serde_json::to_vec(&decoded).expect("re-serialize typed artifact"),
+                jsonl[..jsonl.len() - 1]
+            );
         }
     }
 }
