@@ -131,6 +131,12 @@ impl ReadConnection {
         self.connection.read_snapshot().await
     }
 
+    /// Live reader-pool telemetry for this exact store.
+    #[must_use]
+    pub fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot> {
+        self.connection.reader_pool_occupancy()
+    }
+
     /// The same store, read as background work.
     ///
     /// Use this for bulk sweeps, catch-up ingest, and maintenance scans: they
