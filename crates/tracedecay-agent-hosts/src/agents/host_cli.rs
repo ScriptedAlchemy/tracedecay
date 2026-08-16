@@ -116,23 +116,26 @@ fn require_host_cli_from(
     lifecycle: &str,
     path_var: Option<&std::ffi::OsStr>,
 ) -> Result<PathBuf> {
-    resolve_on_path(program, path_var).ok_or_else(|| TraceDecayError::HostCliUnavailable {
+    resolve_on_path(program, path_var)?.ok_or_else(|| TraceDecayError::HostCliUnavailable {
         program: program.to_string(),
         lifecycle: lifecycle.to_string(),
     })
 }
 
 /// First executable match for `program` across `path_var`.
-fn resolve_on_path(program: &str, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
-    std::env::split_paths(path_var?).find_map(|dir| {
+fn resolve_on_path(program: &str, path_var: Option<&std::ffi::OsStr>) -> Result<Option<PathBuf>> {
+    let Some(path_var) = path_var else {
+        return Ok(None);
+    };
+    for dir in std::env::split_paths(path_var) {
         for name in candidate_file_names(program) {
             let candidate = dir.join(&name);
-            if is_executable_file(&candidate) {
-                return Some(candidate);
+            if is_executable_file(&candidate)? {
+                return Ok(Some(candidate));
             }
         }
-        None
-    })
+    }
+    Ok(None)
 }
 
 /// Executable spellings to try for a bare program name.
@@ -150,16 +153,22 @@ fn candidate_file_names(program: &str) -> Vec<String> {
 }
 
 #[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
+fn is_executable_file(path: &Path) -> Result<bool> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(TraceDecayError::Io(error)),
+    }
 }
 
 #[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
+fn is_executable_file(path: &Path) -> Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(TraceDecayError::Io(error)),
+    }
 }
 
 /// Spawn a host command, absorbing the transient `ETXTBSY` window that follows
@@ -463,6 +472,26 @@ mod tests {
             )
             .is_err(),
             "a non-executable file must not be mistaken for the host CLI"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_metadata_failure_is_not_relabelled_as_host_cli_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let non_directory = dir.path().join("not-a-directory");
+        std::fs::write(&non_directory, b"not a directory").unwrap();
+
+        let error = require_host_cli_from(
+            "claude",
+            "claude plugin lifecycle",
+            Some(non_directory.as_os_str()),
+        )
+        .expect_err("a broken PATH entry must preserve its filesystem failure");
+
+        assert!(
+            matches!(error, TraceDecayError::Io(_)),
+            "only an exhausted search may become HostCliUnavailable: {error}"
         );
     }
 

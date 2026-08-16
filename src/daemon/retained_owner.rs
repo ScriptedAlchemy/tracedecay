@@ -175,9 +175,28 @@ pub(super) fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExec
         | TraceDecayError::Database { .. }
         | TraceDecayError::Search { .. }
         | TraceDecayError::File { .. }
+        | TraceDecayError::HostCliUnavailable { .. }
         | TraceDecayError::Io(_)
         | TraceDecayError::Sqlite(_)
         | TraceDecayError::Json(_)
         | TraceDecayError::Automation(_) => RetainedSurfaceExecutionErrorV1::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_cli_requirement_maps_to_unavailable() {
+        let error = TraceDecayError::HostCliUnavailable {
+            program: "kiro-cli".to_string(),
+            lifecycle: "kiro MCP registry lifecycle".to_string(),
+        };
+
+        assert_eq!(
+            map_execution_error(error),
+            RetainedSurfaceExecutionErrorV1::Unavailable
+        );
     }
 }

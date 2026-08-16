@@ -158,7 +158,7 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
 }
 
 fn should_run_host_healthcheck(agent: &dyn agents::AgentIntegration, home: &Path) -> bool {
-    agent.has_tracedecay(home) || agent.reports_absence_to_doctor()
+    agent.reports_absence_to_doctor() || agent.has_tracedecay(home)
 }
 
 fn render_canonical_doctor_report(
@@ -628,6 +628,7 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
         | crate::errors::TraceDecayError::Parse { .. }
         | crate::errors::TraceDecayError::Database { .. }
         | crate::errors::TraceDecayError::Search { .. }
+        | crate::errors::TraceDecayError::HostCliUnavailable { .. }
         | crate::errors::TraceDecayError::ProfileResetRequired { .. }
         | crate::errors::TraceDecayError::SyncLock { .. }
         | crate::errors::TraceDecayError::Sqlite(_)
