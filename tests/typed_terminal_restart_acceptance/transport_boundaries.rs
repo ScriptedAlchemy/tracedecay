@@ -40,6 +40,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode, OperationRequestOptions};
 use tracedecay_sdk::operations::{ApplicationFactStoreAdd, ApplicationStorageStatus};
 
@@ -327,6 +328,15 @@ fn fact_add_body(content: &str) -> Value {
     json!({ "content": content, "category": "general" })
 }
 
+/// Asserts a marker passes production memory hygiene, so a hygiene refusal can
+/// never masquerade as the partial-effect terminal this suite induces.
+fn assert_marker_is_storable(marker: &str) {
+    assert!(
+        detect_secret_like(marker).is_none(),
+        "marker {marker:?} would be refused as secret-like before the commit boundary"
+    );
+}
+
 /// Asserts the SDK surfaced a typed terminal rather than a success or a
 /// transport failure, and returns its canonical envelope.
 fn sdk_problem(error: ClientError, context: &str) -> (String, Value) {
@@ -338,8 +348,8 @@ fn sdk_problem(error: ClientError, context: &str) -> (String, Value) {
 
 #[test]
 fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
-    // Each marker stays under `MAX_MARKER_TOKEN_BYTES` so production memory
-    // hygiene stores the fact instead of refusing it as secret-like.
+    // Each marker stays short enough that production memory hygiene stores
+    // the fact instead of refusing it as a high-entropy secret-like token.
     const HTTP_MARKER: &str = "boundaries-partial-http-4a71c8";
     const MCP_MARKER: &str = "boundaries-partial-mcp-4a71c8";
     const SDK_MARKER: &str = "boundaries-partial-sdk-4a71c8";
