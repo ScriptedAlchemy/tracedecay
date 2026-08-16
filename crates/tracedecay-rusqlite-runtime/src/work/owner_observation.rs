@@ -27,7 +27,7 @@ impl WorkOwnerObservationStoragePortV1 for WorkSqliteStorage {
         limit: NonZeroU16,
     ) -> Result<Vec<PendingWorkOwnerObservationV1>, StorageError> {
         let rows = registered_work_query(
-            &self.handle,
+            self.handle(),
             "SELECT kind, project_id, repository_id, worktree_id, actor_id, policy_digest,
                     command_id, receipt_revision, receipt_digest, receipt_payload, ordered_at
              FROM (
@@ -106,7 +106,7 @@ impl WorkOwnerObservationStoragePortV1 for WorkSqliteStorage {
             return Err(StorageError::Conflict);
         }
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| StorageError::Unavailable)?;
         let (update, query) = marker_statements(marker)?;

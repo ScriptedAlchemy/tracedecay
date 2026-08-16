@@ -406,7 +406,7 @@ impl TraceDecay {
     }
 
     async fn schema_version(db: &Database, operation: &str) -> Result<u32> {
-        let connection = db.engine_conn();
+        let connection = db.read_connection();
         let mut rows = connection
             .query("PRAGMA user_version", ())
             .await

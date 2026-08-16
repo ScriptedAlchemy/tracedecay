@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::{Error as EngineError, QueryExecutor};
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 use super::schema::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 
@@ -658,7 +659,7 @@ impl RegisteredGlobalDb {
         }
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
-            Err(error) => return unavailable_report(classify_engine_error(&error)),
+            Err(error) => return unavailable_report(classify_database_error(&error)),
         };
         let report = diagnose_snapshot(&snapshot).await;
         let after = session_temporal_store_fingerprint(database_path).ok();
@@ -935,6 +936,15 @@ fn is_fts_virtual_table_corruption(error: &EngineError) -> bool {
 
 fn classify_engine_error(error: &EngineError) -> SessionTemporalHealthStatus {
     if is_engine_locked(error) {
+        SessionTemporalHealthStatus::Locked
+    } else {
+        SessionTemporalHealthStatus::Unavailable
+    }
+}
+
+fn classify_database_error(error: &TraceDecayError) -> SessionTemporalHealthStatus {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("locked") || message.contains("busy") {
         SessionTemporalHealthStatus::Locked
     } else {
         SessionTemporalHealthStatus::Unavailable

@@ -20,6 +20,8 @@ use crate::support::weak_registry::WeakRegistry;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
+#[cfg(test)]
+use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_store::StoreShardScopeV1;
 
@@ -140,19 +142,19 @@ impl HostAdmissionTestRuntimeV1 {
             .await?;
         // The shared registry caches project mounts, so a project that was
         // mounted before (opened, dropped, reopened while a sibling keeps the
-        // registry alive) already carries its graph runtime; only a first
+        // registry alive) already carries its weak graph proxy; only a first
         // mount binds one.
         if registered.project_graph_runtime().is_none() {
             let project_database = self
                 .session_registry
                 .project_memory(project_id.clone(), [project_root.to_path_buf()])
                 .await?;
-            let graph_runtime = verified_graph_test_support::bound_graph_runtime(
+            let graph_proxy = verified_graph_test_support::bound_graph_runtime(
                 &project_database,
                 "bind sibling test runtime project graph",
             )?;
             registered
-                .bind_project_graph_runtime(graph_runtime)
+                .bind_project_graph_runtime(graph_proxy)
                 .map_err(|_| TraceDecayError::Database {
                     operation: "bind sibling test runtime project graph".to_owned(),
                     message: "project graph runtime was already mounted for project sessions"
@@ -220,24 +222,24 @@ impl HostAdmissionTestRuntimeV1 {
             let registered = session_registry
                 .project_sessions(project_id.clone(), [project_root.clone()])
                 .await?;
-            // Production project open binds the retained project graph
-            // runtime to the registered project-sessions authority before
+            // Production project open binds a weak project graph proxy to
+            // the registered project-sessions authority before
             // any ingest runs; persist-time git-evidence publication
             // requires that mount, so the canonical test runtime provides
             // the same composition. The shared registry caches project
             // mounts, so a project reopened while its profile registry stays
-            // live already carries its graph runtime; only a first mount
+            // live already carries its weak graph proxy; only a first mount
             // binds one.
             if registered.project_graph_runtime().is_none() {
                 let project_database = session_registry
                     .project_memory(project_id.clone(), [project_root])
                     .await?;
-                let graph_runtime = verified_graph_test_support::bound_graph_runtime(
+                let graph_proxy = verified_graph_test_support::bound_graph_runtime(
                     &project_database,
                     "bind test runtime project graph",
                 )?;
                 registered
-                    .bind_project_graph_runtime(graph_runtime)
+                    .bind_project_graph_runtime(graph_proxy)
                     .map_err(|_| TraceDecayError::Database {
                         operation: "bind test runtime project graph".to_owned(),
                         message: "project graph runtime was already mounted for project sessions"
@@ -308,14 +310,11 @@ impl HostAdmissionTestRuntimeV1 {
     pub(crate) async fn read_snapshot(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::db::engine::Result<
-        tracedecay_runtime_core::db::engine::ReadSnapshot,
-    > {
+    ) -> Result<DatabaseEngineReadSnapshot> {
         self.registered_database(scope)
-            .ok_or_else(|| {
-                tracedecay_runtime_core::db::engine::Error::invalid_operation(
-                    "registered session test runtime unavailable",
-                )
+            .ok_or_else(|| TraceDecayError::Database {
+                operation: "open registered session test snapshot".to_owned(),
+                message: "registered session test runtime unavailable".to_owned(),
             })?
             .read_snapshot()
             .await
@@ -367,14 +366,11 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn observation_store(
         &self,
         scope: HostAdmissionScope,
-    ) -> std::result::Result<crate::store::GlobalDbObservationStore<'_>, HostAdmissionOutcome> {
+    ) -> std::result::Result<crate::store::GlobalDbObservationStore, HostAdmissionOutcome> {
         let database = self
             .registered_database(scope)
             .ok_or_else(registered_authority_unavailable_outcome)?;
-        Ok(crate::store::GlobalDbObservationStore::with_runtime(
-            database.runtime(),
-            database.authority(),
-        ))
+        Ok(database.observation_store())
     }
 
     #[doc(hidden)]

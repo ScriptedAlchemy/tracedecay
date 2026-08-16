@@ -5,8 +5,6 @@
 //! signatures, or behavior changed. `use super::*` re-exposes every name the
 //! parent `daemon` module had in scope so the moved code resolves unchanged.
 
-use std::sync::Arc;
-
 use serde_json::json;
 
 use crate::client_identity::DaemonClientIdentity;

@@ -21,9 +21,8 @@ use std::fmt::Write as _;
 
 use crate::runtime::git_correlation::MAX_SESSIONS_FOR_LIMIT;
 pub use crate::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
-use tracedecay_runtime_core::db::engine::{
-    Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
-};
+use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, Value, params};
 
 /// Schema version recorded in `session_schema_migrations` under
 /// [`MIGRATION_NAME`]. Bump when the workflow tables change shape.
@@ -363,15 +362,33 @@ fn clamp_limit(limit: usize) -> i64 {
 ///
 /// A run detail and its agents are therefore observed at one database
 /// generation; callers cannot rediscover or reopen the physical store.
-pub struct RegisteredWorkflowIndexSnapshot {
-    snapshot: RegisteredReadSnapshot,
+pub struct RegisteredWorkflowIndexSnapshot<S = DatabaseEngineReadSnapshot> {
+    snapshot: S,
 }
 
 impl RegisteredWorkflowIndexSnapshot {
-    pub fn from_snapshot(snapshot: RegisteredReadSnapshot) -> Self {
+    /// Retains the registered database's guarded snapshot for one workflow
+    /// read operation. Dropping this value releases the database client lease.
+    pub fn from_snapshot(snapshot: DatabaseEngineReadSnapshot) -> Self {
         Self { snapshot }
     }
+}
 
+#[cfg(test)]
+impl RegisteredWorkflowIndexSnapshot<tracedecay_runtime_core::db::engine::ReadSnapshot> {
+    /// Standalone engine fixtures are intentionally test-only: production
+    /// callers must retain a `DatabaseEngineReadSnapshot` guard instead.
+    fn from_engine_test_snapshot(
+        snapshot: tracedecay_runtime_core::db::engine::ReadSnapshot,
+    ) -> Self {
+        Self { snapshot }
+    }
+}
+
+impl<S> RegisteredWorkflowIndexSnapshot<S>
+where
+    S: QueryExecutor + Send + Sync,
+{
     async fn has_tables(&self, names: &[&str]) -> Result<bool, WorkflowIndexError> {
         if names.is_empty() {
             return Ok(true);
@@ -779,7 +796,7 @@ mod detail_coverage_tests {
             .expect("agent");
         }
 
-        let snapshot = RegisteredWorkflowIndexSnapshot::from_snapshot(
+        let snapshot = RegisteredWorkflowIndexSnapshot::from_engine_test_snapshot(
             connection.read_snapshot().await.expect("snapshot"),
         );
         let prefix = snapshot

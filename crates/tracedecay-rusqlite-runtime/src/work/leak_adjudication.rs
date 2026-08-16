@@ -21,7 +21,7 @@ impl WorkLeakAdjudicationStoragePortV1 for WorkSqliteStorage {
         command_id: &tracedecay_domain::WorkCommandId,
     ) -> Result<Option<tracedecay_application::WorkLeakAdjudicationReceiptV1>, StorageError> {
         let transaction = self
-            .handle
+            .handle()
             .begin_deferred()
             .map_err(|_| StorageError::Unavailable)?;
         let receipt = replay_by_command(&transaction, authority, command_id.as_str())?
@@ -39,7 +39,7 @@ impl WorkLeakAdjudicationStoragePortV1 for WorkSqliteStorage {
     ) -> Result<WorkLeakAdjudicationOutcomeV1, StorageError> {
         validate_write(write)?;
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| StorageError::Unavailable)?;
         if let Some((digest, receipt)) = replay_by_command(

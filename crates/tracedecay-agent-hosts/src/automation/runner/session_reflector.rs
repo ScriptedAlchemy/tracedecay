@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 use tracedecay_store::ProjectMemoryFactStore;
 
 use crate::automation::automatic_facts::{

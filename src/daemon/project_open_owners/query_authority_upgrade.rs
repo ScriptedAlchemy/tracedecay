@@ -10,8 +10,6 @@
 //! generation becomes serving, mirroring the deferred feedback-cycle upgrade.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 use tracedecay_application::ResolvedScope;
 
 use super::DaemonInvocationState;

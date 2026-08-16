@@ -1,11 +1,298 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use tracedecay_domain::CodeGenerationId;
-use tracedecay_store::RetainedGraphStoreLeaseV1;
+use tracedecay_graph_db::{
+    GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
+    NeverCancelled,
+};
+use tracedecay_store::{
+    RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
+    RetainedGraphStoreOwnerOperationLeaseErrorV1, VerifiedStoreLocatorV1,
+    canonical_store_locator_digest,
+};
 
 use super::super::*;
 use super::support::*;
+
+struct TemporaryGraphPathResolver {
+    graph_path: PathBuf,
+}
+
+impl TemporaryGraphPathResolver {
+    fn resolve_locator(&self, key: &StoreRuntimeKey) -> ResolvedStoreLocator {
+        let locator = VerifiedStoreLocatorV1::new(
+            key.shard_id.clone(),
+            key.incarnation,
+            canonical_store_locator_digest(&self.graph_path).unwrap(),
+        );
+        ResolvedStoreLocator::new(locator, self.graph_path.clone())
+    }
+}
+
+impl StoreRuntimeResolver for TemporaryGraphPathResolver {
+    fn resolve<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+        _mode: StoreRuntimeOpenMode,
+        _database_authority: Option<&'a crate::db::DatabaseAuthority>,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+    {
+        let resolved = self.resolve_locator(key);
+        Box::pin(async move { Ok(resolved) })
+    }
+
+    fn resolve_graph<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+    {
+        let resolved = self.resolve_locator(key);
+        Box::pin(async move { Ok(resolved) })
+    }
+}
+
+#[tokio::test]
+async fn graph_db_map_owner_is_not_counted_as_an_ordinary_store_graph_client() {
+    let directory = tempfile::tempdir().unwrap();
+    let store_registry = StoreRuntimeRegistry::with_config(
+        Arc::new(TemporaryGraphPathResolver {
+            graph_path: directory.path().join("project.grafeo"),
+        }),
+        Arc::new(TestPublisher::default()),
+        StoreRuntimeRegistryConfig::default(),
+    )
+    .unwrap();
+    let pin = profile_pin(&store_registry).await;
+    let key = project_request("project.graphdb-map-owner", &pin)
+        .key()
+        .clone();
+    let proof: Arc<dyn RetainedGraphStoreLeaseV1> = store_registry
+        .retain_graph_store(key.clone())
+        .await
+        .unwrap();
+    drop(proof);
+    let operation_authority: Arc<dyn RetainedGraphStoreLeaseV1> = store_registry
+        .retain_graph_store(key.clone())
+        .await
+        .unwrap();
+    let (store_owner_attachment, _store_retirement_target) = store_registry
+        .attach_graph_store_owner(key.clone())
+        .await
+        .unwrap();
+    let graph_registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let map_owner = graph_registry
+        .resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+            operation: GraphDbRegistration {
+                authority_lease: operation_authority,
+                cancellation: Arc::new(NeverCancelled),
+                lifecycle_cancellation: Arc::new(NeverCancelled),
+                deadline: Instant::now() + Duration::from_secs(30),
+            },
+            authority_attachment: Box::new(store_owner_attachment),
+        })
+        .unwrap();
+
+    {
+        let state = store_registry.lock_state();
+        let publication = state
+            .graph_publications
+            .get(&key)
+            .expect("the graph map owner must retain its store publication");
+        assert_eq!(publication.binding, *map_owner.binding());
+        assert_eq!(
+            publication.lease_tokens.len(),
+            0,
+            "GraphDb map owner must not be counted as an ordinary Store graph client"
+        );
+    }
+    assert_eq!(store_registry.retained_graph_publications_for_test(), 1);
+}
+
+#[tokio::test]
+async fn graph_map_owner_retains_no_ordinary_store_graph_lease() {
+    let (store_registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&store_registry).await;
+    let key = project_request("project.graph-map-owner-identity", &pin)
+        .key()
+        .clone();
+
+    let (owner_attachment, retirement_target) = store_registry
+        .attach_graph_store_owner(key.clone())
+        .await
+        .unwrap();
+
+    {
+        let state = store_registry.lock_state();
+        let publication = state.graph_publications.get(&key).unwrap();
+        assert!(publication.owner_attachment.is_some());
+        assert!(publication.lease_tokens.is_empty());
+    }
+    assert_eq!(store_registry.retained_graph_publications_for_test(), 1);
+
+    drop(retirement_target);
+    drop(owner_attachment);
+    assert_eq!(store_registry.retained_graph_publications_for_test(), 0);
+}
+
+#[tokio::test]
+async fn graph_map_owner_issued_operation_lease_is_an_ordinary_token_and_releases_on_drop() {
+    let (store_registry, resolver, _) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&store_registry).await;
+    let key = project_request("project.graph-map-owner-operation", &pin)
+        .key()
+        .clone();
+    let (owner_attachment, retirement_target) = store_registry
+        .attach_graph_store_owner(key.clone())
+        .await
+        .unwrap();
+
+    let operation = owner_attachment.issue_operation_lease().unwrap();
+    assert_eq!(
+        resolver.graph_calls.load(Ordering::SeqCst),
+        1,
+        "issuing a map-owner operation lease must not re-resolve its graph path"
+    );
+    {
+        let state = store_registry.lock_state();
+        let publication = state.graph_publications.get(&key).unwrap();
+        assert!(matches!(
+            publication.owner_attachment,
+            Some(GraphStoreOwnerAttachmentState::MapOwned { .. })
+        ));
+        assert_eq!(
+            publication.lease_tokens.len(),
+            1,
+            "an operation issued by the map owner must block retirement as an ordinary graph lease"
+        );
+    }
+
+    drop(operation);
+    {
+        let state = store_registry.lock_state();
+        let publication = state.graph_publications.get(&key).unwrap();
+        assert!(publication.lease_tokens.is_empty());
+    }
+
+    drop(retirement_target);
+    drop(owner_attachment);
+    assert_eq!(store_registry.retained_graph_publications_for_test(), 0);
+}
+
+#[tokio::test]
+async fn reserved_graph_map_owner_cannot_issue_operation_leases() {
+    let (store_registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&store_registry).await;
+    let key = project_request("project.graph-map-owner-reserved-operation", &pin)
+        .key()
+        .clone();
+    let (owner_attachment, mut retirement_target) =
+        store_registry.attach_graph_store_owner(key).await.unwrap();
+
+    {
+        let mut state = store_registry.lock_state();
+        retirement_target
+            .reserve_locked(&store_registry, &mut state)
+            .unwrap();
+    }
+    assert!(matches!(
+        owner_attachment.issue_operation_lease(),
+        Err(RetainedGraphStoreOwnerOperationLeaseErrorV1::Retiring)
+    ));
+
+    {
+        let mut state = store_registry.lock_state();
+        assert!(retirement_target.restore_locked(&store_registry, &mut state));
+    }
+    let operation = owner_attachment.issue_operation_lease().unwrap();
+    drop(operation);
+    drop(retirement_target);
+    drop(owner_attachment);
+}
+
+#[tokio::test]
+async fn graph_map_owner_operation_lease_rejects_foreign_and_stale_identities() {
+    let (store_registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&store_registry).await;
+    let key = project_request("project.graph-map-owner-stale-operation", &pin)
+        .key()
+        .clone();
+    let (owner_attachment, retirement_target) = store_registry
+        .attach_graph_store_owner(key.clone())
+        .await
+        .unwrap();
+    let binding = owner_attachment.binding().clone();
+    let locator = owner_attachment.verified_locator().clone();
+    let path = owner_attachment.canonical_path().to_path_buf();
+    let (owner_id, attachment_id) = {
+        let state = store_registry.lock_state();
+        let publication = state.graph_publications.get(&key).unwrap();
+        let Some(GraphStoreOwnerAttachmentState::MapOwned {
+            owner_id,
+            attachment_id,
+        }) = publication.owner_attachment
+        else {
+            panic!("the exact map owner attachment must be live");
+        };
+        (owner_id, attachment_id)
+    };
+
+    let foreign_owner_id = GraphStoreOwnerIdentityV1(owner_id.0.checked_add(1).unwrap());
+    let foreign = store_registry.issue_graph_store_owner_operation_lease(
+        &binding,
+        &locator,
+        &path,
+        foreign_owner_id,
+        attachment_id,
+    );
+    assert!(matches!(
+        foreign,
+        Err(StoreRuntimeRegistryFailure::GraphOwnerAttachmentReservationLost { .. })
+    ));
+
+    {
+        let mut state = store_registry.lock_state();
+        state.graph_publications.remove(&key);
+    }
+    let stale = store_registry.issue_graph_store_owner_operation_lease(
+        &binding,
+        &locator,
+        &path,
+        owner_id,
+        attachment_id,
+    );
+    assert!(matches!(
+        stale,
+        Err(StoreRuntimeRegistryFailure::GraphOwnerAttachmentMissing { .. })
+    ));
+
+    drop(retirement_target);
+    drop(owner_attachment);
+}
+
+#[tokio::test]
+async fn graph_map_owner_attachment_rejects_a_second_map_owner() {
+    let (store_registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&store_registry).await;
+    let key = project_request("project.graph-map-owner-duplicate", &pin)
+        .key()
+        .clone();
+    let (_owner_attachment, _retirement_target) = store_registry
+        .attach_graph_store_owner(key.clone())
+        .await
+        .unwrap();
+
+    let error = store_registry
+        .attach_graph_store_owner(key)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        StoreRuntimeRegistryFailure::GraphOwnerAttachmentAlreadyRegistered { .. }
+    ));
+}
 
 #[tokio::test]
 async fn exact_graph_scopes_publish_without_a_physical_runtime() {

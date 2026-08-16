@@ -1545,7 +1545,7 @@ enum RetainedCompactionStore<'a> {
 impl RetainedCompactionStore<'_> {
     async fn storage_page_counts(&self) -> crate::errors::Result<(u64, u64, u64)> {
         match self {
-            Self::Registered(database) => database.storage_page_counts(),
+            Self::Registered(database) => database.storage_page_counts().await,
             Self::Project(database) => database.storage_page_counts().await,
         }
     }

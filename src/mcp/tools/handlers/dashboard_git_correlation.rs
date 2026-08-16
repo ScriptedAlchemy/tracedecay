@@ -8,8 +8,6 @@
 //! published a verified head is the typed empty start, never an error, and a
 //! store without its graph runtime mount stays a typed failed read.
 
-use std::sync::Arc;
-
 use crate::dashboard::{
     DashboardGitCorrelationReadErrorV1, DashboardGitCorrelationReadFutureV1,
     DashboardGitCorrelationReadPortV1, DashboardGitCorrelationReadV1,

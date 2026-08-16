@@ -17,6 +17,7 @@ use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
 use tracedecay_rusqlite_runtime::repository::{
     AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetExecutor, AuthorizedScopeSetSqliteStorage,
+    RetainedExactSqlCapability,
 };
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
@@ -32,6 +33,8 @@ const CAPABILITY: &str = "capability.multi-root.query";
 const USE_CASE: &str = "use-case.multi-root.query";
 
 struct NoTypedWrites;
+
+struct ScopeSetTestRetentionGuard;
 
 impl StorageOperationExecutor for NoTypedWrites {
     fn execute(
@@ -92,7 +95,12 @@ impl RegisteredScopeSetStore {
         .unwrap();
         let handle = ExactSqlHandle::attach(&writer, &readers).unwrap();
         Self {
-            storage: AuthorizedScopeSetSqliteStorage::from_registered(handle),
+            storage: AuthorizedScopeSetSqliteStorage::from_retained_exact_sql(
+                RetainedExactSqlCapability::from_authorized_handle_with_guard(
+                    handle,
+                    ScopeSetTestRetentionGuard,
+                ),
+            ),
             path,
             _writer: writer,
             _readers: readers,

@@ -165,25 +165,25 @@ impl DashboardGraphTestRuntimeV1 {
             .registry
             .project_sessions(project_id.clone(), [project_root.to_path_buf()])
             .await?;
-        // Production project open binds the retained project graph runtime to
-        // the registered project-sessions authority before any ingest runs;
+        // Production project open binds a weak project graph proxy to the
+        // registered project-sessions authority before any ingest runs;
         // git-evidence publication (Loom spans) requires that mount, so the
         // dashboard test composition provides the same binding. The registry
-        // caches the mount per project, so repeated opens reuse it.
+        // caches the mount per project, so repeated opens reuse the proxy.
         if registered.project_graph_runtime().is_none() {
             let project_database = self
                 .registry
                 .project_memory(project_id.clone(), [project_root.to_path_buf()])
                 .await?;
-            let graph_runtime = project_database.memory_graph_runtime().ok_or_else(|| {
+            let graph_proxy = project_database.memory_graph_runtime().ok_or_else(|| {
                 crate::errors::TraceDecayError::Database {
                     operation: "bind dashboard project graph".to_owned(),
                     message: "project memory database has no verified graph runtime".to_owned(),
                 }
             })?;
             // A lost set race means another caller already bound the same
-            // retained runtime; the required postcondition holds either way.
-            let _ = registered.bind_project_graph_runtime(graph_runtime);
+            // weak proxy; the required postcondition holds either way.
+            let _ = registered.bind_project_graph_runtime(graph_proxy);
         }
         Ok(registered)
     }

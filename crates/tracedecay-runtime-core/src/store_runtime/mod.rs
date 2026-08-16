@@ -17,4 +17,4 @@ pub mod shard;
 pub mod telemetry;
 mod verified_graph;
 
-pub use verified_graph::VerifiedGraphRuntimePortV1;
+pub use verified_graph::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1};

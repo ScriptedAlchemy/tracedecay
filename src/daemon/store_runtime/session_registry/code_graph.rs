@@ -8,13 +8,13 @@ use tracedecay_domain::{
     CodeGenerationId, RefId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
-    GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbRegistration,
-    GraphGenerationDependency, GraphGenerationManifest, GraphIdempotencyKey,
+    GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1,
+    GraphDbRegistration, GraphGenerationDependency, GraphGenerationManifest, GraphIdempotencyKey,
     GraphProjectionIdentity, GraphProjectorRevision, GraphReplayCollectionOutcome, GraphWriteBatch,
     SealedCodeGenerationReplay, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::store_runtime::registry::{
-    CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreLeaseV1, StoreRuntimeKey,
+    CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey,
 };
 use tracedecay_store::{
     CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphProjectionIdV1,
@@ -30,7 +30,7 @@ use tracedecay_store::{
     StoreShardIdV1,
 };
 
-use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
+use super::{DaemonSessionRuntimeRegistryV1, Result, SessionGraphOwnerV1, session_registry_error};
 
 mod memory_runtime;
 pub(super) use memory_runtime::{
@@ -147,22 +147,114 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
 /// [`RetainedCodeGraphRuntimeV1`].
 pub(crate) struct RetainedVerifiedGraphRuntimeV1 {
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
-    authority: Arc<CanonicalGraphStoreLeaseV1>,
-    publication_storage: tracedecay_rusqlite_runtime::repository::GraphPublicationExactSqlStorage,
+    database: crate::db::DatabaseOwnerV1,
+    graph: GraphDbOwnerAttachmentV1,
+    store_target: Mutex<Option<CanonicalGraphStoreOwnerRetirementTargetV1>>,
     relational_binding: tracedecay_store::StoreRuntimeBindingV1,
     relational_verified_locator: tracedecay_store::VerifiedStoreLocatorV1,
+    operation_admission: Mutex<MemoryGraphOperationAdmissionV1>,
     publication_gate: Mutex<()>,
     lifecycle_cancelled: Arc<AtomicBool>,
 }
 
+enum MemoryGraphOperationAdmissionV1 {
+    Ready,
+    Retiring,
+}
+
+/// Fences synchronous graph-port issuance while the daemon map retains the
+/// exact owner through a coordinated retirement attempt.
+pub(crate) struct MemoryGraphOperationRetirementReservationV1<'a> {
+    runtime: &'a RetainedVerifiedGraphRuntimeV1,
+    armed: bool,
+}
+
 impl RetainedVerifiedGraphRuntimeV1 {
-    pub(crate) fn close_reconciliation(&self) -> std::result::Result<(), GraphDbError> {
-        let _publication = self.publication_gate.lock().map_err(|_| {
-            GraphDbError::unavailable("verified graph publication gate is poisoned")
+    pub(crate) fn issue_database_lease(
+        &self,
+    ) -> std::result::Result<crate::db::Database, GraphDbError> {
+        self.require_operation_admission()?;
+        self.database.issue_lease().map_err(|error| {
+            GraphDbError::unavailable(format!(
+                "memory database owner cannot issue a client: {error:?}"
+            ))
+        })
+    }
+
+    pub(crate) fn issue_database_read_only_lease(
+        &self,
+    ) -> std::result::Result<crate::db::Database, GraphDbError> {
+        self.require_operation_admission()?;
+        self.database.issue_read_only_lease().map_err(|error| {
+            GraphDbError::unavailable(format!(
+                "memory database owner cannot issue a read-only client: {error:?}"
+            ))
+        })
+    }
+
+    pub(crate) fn take_store_graph_retirement_target(
+        &self,
+    ) -> std::result::Result<CanonicalGraphStoreOwnerRetirementTargetV1, GraphDbError> {
+        self.store_target
+            .lock()
+            .map_err(|_| {
+                GraphDbError::unavailable("memory graph retirement target lock is poisoned")
+            })?
+            .take()
+            .ok_or_else(|| GraphDbError::Conflict)
+    }
+
+    pub(crate) fn restore_store_graph_retirement_target(
+        &self,
+        target: CanonicalGraphStoreOwnerRetirementTargetV1,
+    ) -> std::result::Result<(), GraphDbError> {
+        let mut retained = self.store_target.lock().map_err(|_| {
+            GraphDbError::unavailable("memory graph retirement target lock is poisoned")
         })?;
-        self.graph_registry
-            .close_retained(self.authority.binding(), self.authority.verified_locator())
-            .map(|_| ())
+        if retained.is_some() {
+            return Err(GraphDbError::Conflict);
+        }
+        *retained = Some(target);
+        Ok(())
+    }
+
+    pub(crate) fn graph_retirement_target(&self) -> tracedecay_graph_db::GraphDbRetirementTarget {
+        self.graph.retirement_target()
+    }
+
+    pub(crate) fn reserve_database_retirement(
+        &self,
+    ) -> std::result::Result<crate::db::DatabaseOwnerRetirementReservationV1, GraphDbError> {
+        self.database.reserve_retirement().map_err(|error| {
+            GraphDbError::unavailable(format!(
+                "memory database owner cannot reserve retirement: {error:?}"
+            ))
+        })
+    }
+
+    fn require_operation_admission(&self) -> std::result::Result<(), GraphDbError> {
+        match *self.operation_admission.lock().map_err(|_| {
+            GraphDbError::unavailable("memory graph operation admission lock is poisoned")
+        })? {
+            MemoryGraphOperationAdmissionV1::Ready => Ok(()),
+            MemoryGraphOperationAdmissionV1::Retiring => Err(GraphDbError::Conflict),
+        }
+    }
+
+    pub(crate) fn reserve_operation_retirement(
+        &self,
+    ) -> std::result::Result<MemoryGraphOperationRetirementReservationV1<'_>, GraphDbError> {
+        let mut admission = self.operation_admission.lock().map_err(|_| {
+            GraphDbError::unavailable("memory graph operation admission lock is poisoned")
+        })?;
+        if matches!(*admission, MemoryGraphOperationAdmissionV1::Retiring) {
+            return Err(GraphDbError::Conflict);
+        }
+        *admission = MemoryGraphOperationAdmissionV1::Retiring;
+        Ok(MemoryGraphOperationRetirementReservationV1 {
+            runtime: self,
+            armed: true,
+        })
     }
 
     pub(crate) fn publish_verified_manifest(
@@ -174,6 +266,11 @@ impl RetainedVerifiedGraphRuntimeV1 {
         let _publication = self.publication_gate.lock().map_err(|_| {
             GraphDbError::unavailable("verified graph publication gate is poisoned")
         })?;
+        let database = self.issue_database_lease()?;
+        let mut storage = database
+            .graph_publication_storage()
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        let graph = self.graph.issue_lease()?;
         let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
         let identity = manifest.generation.as_str();
         let cancellation_identity = RuntimeCancellationIdentityV1 {
@@ -203,17 +300,8 @@ impl RetainedVerifiedGraphRuntimeV1 {
         };
         let context = GraphPublicationOperationContextV1::new(&control, &probe)
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
-        let registration = || GraphDbRegistration {
-            authority_lease: Arc::clone(&authority_lease),
-            cancellation: Arc::clone(&request_cancellation),
-            lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                &self.lifecycle_cancelled,
-            ))),
-            deadline: deadline_at,
-        };
         let relational_projection = GraphProjectionIdentityV1 {
-            shard_id: self.authority.binding().shard_id.clone(),
+            shard_id: self.relational_binding.shard_id.clone(),
             namespace: tracedecay_store::GraphNamespaceV1::new(
                 manifest.projection.namespace.as_str(),
             )
@@ -238,7 +326,6 @@ impl RetainedVerifiedGraphRuntimeV1 {
             }
             None => {}
         }
-        let mut storage = self.publication_storage.clone();
         // The verified-head CAS inside `publish_verified` is its own
         // irreversible durable commit; the journal append above already
         // consumes this flow's first at-most-once commit grant, so the
@@ -276,7 +363,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         let input = inline_graph_publication_input_digest(&publication_key, manifest)?;
         let requested_replay = |prior| {
             manifest.relational_replay(
-                self.authority.binding().shard_id.clone(),
+                self.relational_binding.shard_id.clone(),
                 idempotency_key.clone(),
                 input.clone(),
                 prior,
@@ -306,8 +393,8 @@ impl RetainedVerifiedGraphRuntimeV1 {
                     .as_ref()
                     .is_some_and(|head| head.key == publication_key)
                 {
-                    return self.graph_registry.recover_verified_snapshot(
-                        registration(),
+                    return self.graph_registry.recover_verified_snapshot_with_lease(
+                        &graph,
                         &mut storage,
                         &context,
                         &relational_projection,
@@ -329,8 +416,8 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 // verdict (completes the pending publication, dedupes an exact
                 // replay, or reports a true conflict) — answering Conflict here
                 // would wedge the projection permanently.
-                let publication = self.graph_registry.publish_verified(
-                    registration(),
+                let publication = self.graph_registry.publish_verified_with_lease(
+                    &graph,
                     &mut storage,
                     &publish_context,
                     &publication_key,
@@ -360,8 +447,8 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 return Err(GraphDbError::Conflict);
             }
         }
-        let publication = self.graph_registry.publish_verified(
-            registration(),
+        let publication = self.graph_registry.publish_verified_with_lease(
+            &graph,
             &mut storage,
             &publish_context,
             &replay.key,
@@ -374,6 +461,11 @@ impl RetainedVerifiedGraphRuntimeV1 {
         projection: &GraphProjectionIdentity,
         read_control: FactReadControl,
     ) -> std::result::Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        let database = self.issue_database_lease()?;
+        let mut storage = database
+            .graph_publication_storage()
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        let graph = self.graph.issue_lease()?;
         let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
         let cancellation_identity = RuntimeCancellationIdentityV1 {
             cancellation_id: RuntimeCancellationIdV1::new(format!(
@@ -408,22 +500,12 @@ impl RetainedVerifiedGraphRuntimeV1 {
         let context = GraphPublicationOperationContextV1::new(&control, &probe)
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         let relational_projection = GraphProjectionIdentityV1 {
-            shard_id: self.authority.binding().shard_id.clone(),
+            shard_id: self.relational_binding.shard_id.clone(),
             namespace: tracedecay_store::GraphNamespaceV1::new(projection.namespace.as_str())
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
             projection: GraphProjectionIdV1::new(projection.projection.as_str())
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         };
-        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
-        let registration = GraphDbRegistration {
-            authority_lease,
-            cancellation: request_cancellation,
-            lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                &self.lifecycle_cancelled,
-            ))),
-            deadline: deadline_at,
-        };
-        let mut storage = self.publication_storage.clone();
         // A projection that has never published a verified head is a typed
         // empty start, not an unavailability error (same pre-check as
         // `recover_semantic_vector_projection`).
@@ -435,8 +517,39 @@ impl RetainedVerifiedGraphRuntimeV1 {
             return Ok(None);
         }
         self.graph_registry
-            .recover_verified_snapshot(registration, &mut storage, &context, &relational_projection)
+            .recover_verified_snapshot_with_lease(
+                &graph,
+                &mut storage,
+                &context,
+                &relational_projection,
+            )
             .map(Some)
+    }
+}
+
+impl MemoryGraphOperationRetirementReservationV1<'_> {
+    /// Keeps operation admission closed after reconciliation cancellation has
+    /// crossed its irreversible boundary. Graph registry retirement remains
+    /// the sole graph-close authority.
+    pub(crate) fn commit(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for MemoryGraphOperationRetirementReservationV1<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut admission = self
+            .runtime
+            .operation_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*admission, MemoryGraphOperationAdmissionV1::Retiring) {
+            *admission = MemoryGraphOperationAdmissionV1::Ready;
+        }
+        self.armed = false;
     }
 }
 
@@ -1188,20 +1301,22 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    /// Retains the daemon-owned native relation graph for one exact session
-    /// shard and opens it through the shared graph registry.
-    pub(super) async fn retain_session_relation_graph_runtime(
+    pub(super) async fn retain_session_relation_graph_owner(
         &self,
         shard_id: StoreShardIdV1,
-    ) -> Result<graph_attachment::SessionRelationGraphAttachmentV1> {
-        graph_attachment::open_session_relation(
+    ) -> Result<SessionGraphOwnerV1> {
+        let (graph, store_target) = graph_attachment::open_session_relation_owner(
             &self.registry,
             &self.graph_registry,
             &self.graph_lifecycle_cancelled,
             self.incarnation,
             shard_id,
         )
-        .await
+        .await?;
+        Ok(SessionGraphOwnerV1 {
+            graph,
+            store_target,
+        })
     }
 }
 
@@ -1272,6 +1387,6 @@ impl Drop for DaemonSessionRuntimeRegistryV1 {
     fn drop(&mut self) {
         self.graph_lifecycle_cancelled
             .store(true, Ordering::Release);
-        self.memory_graph_reconciliation_tasks.cancel();
+        self.cancel_memory_graph_reconciliation_tasks();
     }
 }

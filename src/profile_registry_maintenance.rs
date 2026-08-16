@@ -5,14 +5,12 @@
 //! semantics live with the registry store in `tracedecay-global-db`; this
 //! wrapper owns only profile/runtime composition.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 use crate::global_db::{
     RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, registry_maintenance::RegistryGcReport,
     registry_maintenance::RegistryOrphanRelinkApplyReport,
     registry_maintenance::RegistryOrphanRelinkReport,
 };
+use std::path::{Path, PathBuf};
 
 pub struct ProfileRegistryMaintenanceRuntime {
     profile_database: RegisteredGlobalDbLeaseV1,

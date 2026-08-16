@@ -17,7 +17,7 @@ impl Database {
     /// Reads a metadata value by key, returning `None` if not set.
     pub async fn get_metadata(&self, key: &str) -> Result<Option<String>> {
         let mut rows = self
-            .engine_conn()
+            .read_connection()
             .query("SELECT value FROM metadata WHERE key = ?1", params![key])
             .await
             .map_err(|e| TraceDecayError::Database {
@@ -58,7 +58,7 @@ impl Database {
             Err(_) => i64::MAX,
         };
         let mut rows = self
-            .engine_conn()
+            .read_connection()
             .query(
                 "SELECT length(CAST(value AS BLOB)), \
                  CASE WHEN length(CAST(value AS BLOB)) <= ?2 THEN value ELSE NULL END \

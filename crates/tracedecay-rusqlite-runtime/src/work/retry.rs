@@ -30,7 +30,7 @@ impl WorkRetryStoragePortV1 for WorkSqliteStorage {
         command_id: &tracedecay_domain::WorkCommandId,
     ) -> Result<Option<WorkRetryAttemptOutcomeV1>, WorkAttemptStorageError> {
         let transaction = self
-            .handle
+            .handle()
             .begin_deferred()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         let outcome = replay(&transaction, authority, command_id.as_str())?;
@@ -47,7 +47,7 @@ impl WorkRetryStoragePortV1 for WorkSqliteStorage {
         concurrency: &TopologyConcurrencyPolicyV1,
     ) -> Result<WorkRetryAttemptOutcomeV1, WorkAttemptStorageError> {
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         let outcome =

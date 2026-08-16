@@ -333,13 +333,13 @@ mod tests {
         ProviderUsageReadV1, ProviderUsageScopeV1, RetentionClass, SanitizationReceiptId,
         SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     };
-    use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
+    use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
+    use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
     use tracedecay_store::ProjectionStoreError;
 
     use super::*;
     use crate::observation_projection::apply_provider_usage_effects;
-    use crate::tests::harness::RegisteredGlobalDbHarness;
-    use crate::{ensure_registered_schema, rebuild_projection_with_engine};
+    use crate::tests::harness::{RegisteredGlobalDbHarness, open_registered_test_fixture};
 
     fn fixture(
         index: u64,
@@ -489,8 +489,12 @@ mod tests {
     #[tokio::test]
     async fn live_usage_replay_is_exactly_once_and_uncorrelated_evidence_is_excluded() {
         let directory = tempfile::tempdir().unwrap();
-        let conn = TestConnection::open(&directory.path().join("sessions.db"));
-        ensure_registered_schema(&conn).await.unwrap();
+        let conn = open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
         let (usage, usage_cursor) = fixture(1, usage_fact(10));
         let usage_sequence = seed_observation(&conn, &usage, &usage_cursor, false).await;
 
@@ -556,8 +560,12 @@ mod tests {
     #[tokio::test]
     async fn live_usage_replay_rejects_a_divergent_durable_row() {
         let directory = tempfile::tempdir().unwrap();
-        let conn = TestConnection::open(&directory.path().join("sessions.db"));
-        ensure_registered_schema(&conn).await.unwrap();
+        let conn = open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
         let (usage, usage_cursor) = fixture(1, usage_fact(10));
         let usage_sequence = seed_observation(&conn, &usage, &usage_cursor, false).await;
         conn.execute(
@@ -598,8 +606,12 @@ mod tests {
     #[tokio::test]
     async fn rebuild_stages_and_activates_historical_usage() {
         let directory = tempfile::tempdir().unwrap();
-        let conn = TestConnection::open(&directory.path().join("sessions.db"));
-        ensure_registered_schema(&conn).await.unwrap();
+        let conn = open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
         let project_id = ProjectId::new("project.rebuild-provider-usage").unwrap();
         let (observation, cursor) = fixture_in_scope(
             1,
@@ -610,7 +622,8 @@ mod tests {
         );
         let frontier = seed_observation(&conn, &observation, &cursor, true).await;
 
-        rebuild_projection_with_engine(&conn, frontier)
+        conn.database()
+            .rebuild_observation_projection(frontier)
             .await
             .unwrap();
 
@@ -637,8 +650,12 @@ mod tests {
     #[tokio::test]
     async fn provider_usage_trigger_rejects_receipt_identity_mismatch() {
         let directory = tempfile::tempdir().unwrap();
-        let conn = TestConnection::open(&directory.path().join("sessions.db"));
-        ensure_registered_schema(&conn).await.unwrap();
+        let conn = open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
         let (first, first_cursor) = fixture(1, usage_fact(10));
         let first_sequence = seed_observation(&conn, &first, &first_cursor, false).await;
         apply_provider_usage_effects(&conn, first_sequence, &first)

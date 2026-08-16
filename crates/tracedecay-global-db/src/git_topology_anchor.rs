@@ -86,7 +86,7 @@ impl RegisteredGitTopologyAnchorAuthorityV2 {
             .database
             .read_snapshot()
             .await
-            .map_err(map_engine_error)?;
+            .map_err(map_database_error)?;
         let Some(record) = read_record(&snapshot, resolution.anchor_id.as_str()).await? else {
             return Ok(GitTopologyAnchorResolutionOutcomeV2::Unavailable);
         };

@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use serde_json::{Value, json};
 use sha2::Digest;

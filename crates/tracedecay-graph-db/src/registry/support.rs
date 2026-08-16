@@ -2,7 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
+use tracedecay_store::{
+    RetainedGraphStoreOwnerAttachmentV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+};
 
 use super::identity::{binding, require_binding};
 use super::path::inspect_graph_database_file;
@@ -56,6 +58,7 @@ pub(super) fn open_registered_graph(
     path: &Path,
     expected_format: GraphFormatVersion,
     registration: &GraphDbRegistration,
+    authority_attachment: Box<dyn RetainedGraphStoreOwnerAttachmentV1>,
 ) -> Result<GraphDbOwner, GraphDbError> {
     check_request(
         registration.lifecycle_cancellation.as_ref(),
@@ -78,6 +81,7 @@ pub(super) fn open_registered_graph(
             cancellation,
         },
         persistent_store_state,
+        authority_attachment,
     )?;
     if persistent_store_state == PersistentGraphStoreState::Prospective
         && let Err(error) = check_request(

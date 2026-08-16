@@ -7,10 +7,8 @@
 //! registry never reaches here (the boundary reports that state), and an
 //! unreadable registry still fails.
 
-use std::path::Path;
-use std::sync::Arc;
-
 use serde_json::Value;
+use std::path::Path;
 
 use crate::errors::Result;
 use crate::global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};

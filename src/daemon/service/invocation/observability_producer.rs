@@ -164,10 +164,7 @@ impl DaemonInvocationService {
                 let producer = registered.producer();
                 (producer.identity().authorized_scope_ref == project_id.as_str()).then(|| {
                     (
-                        (
-                            binding.clone(),
-                            database.runtime().locator().verified().clone(),
-                        ),
+                        (binding.clone(), database.verified_locator().clone()),
                         producer,
                     )
                 })

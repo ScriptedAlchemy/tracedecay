@@ -5,6 +5,7 @@ use super::dispatch_settlement::{
     ApplicationCancellationRegistration, DispatchControl, PreparedDispatchControl,
 };
 use super::*;
+use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::ToolResult;
 
 mod tool_dispatch;

@@ -1,10 +1,9 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_sessions::runtime::lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSessionBoundaryRequest,
     LcmSessionBoundaryResponse, LcmSummarizerMode,
@@ -200,6 +199,7 @@ fn summary_unavailable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::global_db::RegisteredGlobalDb;
     use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
     use serde_json::Value;
     use tracedecay_domain::SessionId;

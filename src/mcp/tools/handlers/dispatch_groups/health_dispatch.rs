@@ -1,7 +1,5 @@
 //! Code-health MCP dispatch family.
 
-use std::sync::Arc;
-
 use serde_json::Value;
 
 use crate::errors::Result;
@@ -48,8 +46,8 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
             health::handle_runtime(
                 cg,
                 args,
-                options.global_db.map(std::sync::Arc::as_ref),
-                active_project_session_db.map(Arc::as_ref),
+                options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
+                active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                 options.doctor_report_reader.as_ref(),
                 options.generation_census_reader.as_ref(),
             )

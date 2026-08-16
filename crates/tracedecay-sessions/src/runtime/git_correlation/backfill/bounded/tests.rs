@@ -44,6 +44,7 @@ impl TestStore {
 }
 
 impl GitCorrelationSessionStore for TestStore {
+    type ReadSnapshot = ReadSnapshot;
     type WriteTxn<'txn> = Transaction;
 
     fn require_project_sessions_authority(&self) -> Result<(), GitCorrelationError> {

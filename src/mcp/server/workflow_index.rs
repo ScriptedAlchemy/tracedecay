@@ -6,8 +6,6 @@
 //! refuses a non-ProjectSessions shard scope before a read snapshot exists;
 //! nothing here reaches past that gate to build a reader itself.
 
-use std::sync::Arc;
-
 use tracedecay_sessions::{
     WorkflowIndexReadPort, WorkflowIndexState, WorkflowReadError, WorkflowRunDetail,
     WorkflowRunDetailFuture, WorkflowRunDetailOutcome, WorkflowRunDetailRequest,

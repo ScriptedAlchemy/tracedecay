@@ -1,25 +1,21 @@
 use super::memory_graph_reconciliation::{
-    ProjectMemoryReconciliationPassLeaseV1, ProjectMemoryReconciliationTelemetryObserverV1,
-    ProjectMemoryReconciliationTelemetryV1,
+    MemoryGraphReconciliationRuntimeErrorV1, ProjectMemoryReconciliationPassLeaseV1,
+    ProjectMemoryReconciliationTelemetryObserverV1, ProjectMemoryReconciliationTelemetryV1,
 };
 use super::{
-    Arc, Connection, Database, DatabaseAccessMode, DatabaseAuthority, DatabaseInner, Path, Result,
-    StoreRuntimeClientLease, TraceDecayError, database_slot, integrity,
-    registered_attachment_required,
+    Arc, Database, DatabaseAccessMode, DatabaseAuthority, DatabaseInner, DatabaseOwnerV1, Path,
+    Result, StoreRuntimeClientLease, TraceDecayError, integrity,
 };
 
 impl Database {
-    pub(crate) fn retained_runtime(&self) -> &StoreRuntimeClientLease {
-        &self.inner._runtime
-    }
-
     pub fn is_writable(&self) -> bool {
-        self.inner.writable
+        self.client.is_writable()
     }
 
     pub(crate) fn downgrade(&self) -> super::WeakDatabase {
         super::WeakDatabase {
             inner: Arc::downgrade(&self.inner),
+            client: Arc::downgrade(&self.client),
         }
     }
 
@@ -60,17 +56,24 @@ impl Database {
     pub fn memory_graph_reconciliation_task_owner(
         &self,
     ) -> Option<super::MemoryGraphReconciliationTaskOwnerV1> {
-        let runtime = self.memory_graph_runtime()?;
-        let cancel_runtime = Arc::clone(&runtime);
-        let close_runtime = Arc::clone(&runtime);
-        Some(self.inner.memory_graph_reconciliation.task_owner(
-            Arc::new(move || cancel_runtime.cancel_reconciliation()),
-            Arc::new(move || {
-                close_runtime
-                    .close_reconciliation()
-                    .map_err(|error| error.to_string())
-            }),
-        ))
+        let runtime = self.inner.memory_graph_runtime.get()?.clone();
+        // The retained task owner may outlive the database facade while a
+        // coordinated capacity retirement fences the exact graph/store pair.
+        // It must therefore not keep the verified graph port (and its graph
+        // or store lease) alive. Retained cancellation upgrades explicitly
+        // and reports a typed unavailable outcome if an external close won.
+        let cancel_runtime = runtime;
+        Some(
+            self.inner
+                .memory_graph_reconciliation
+                .task_owner(Arc::new(move || {
+                    let runtime = cancel_runtime
+                        .upgrade()
+                        .ok_or(MemoryGraphReconciliationRuntimeErrorV1::RuntimeUnavailable)?;
+                    runtime.cancel_reconciliation();
+                    Ok(())
+                })),
+        )
     }
 
     pub(crate) fn memory_graph_reconciliation_pending(&self) -> bool {
@@ -103,7 +106,7 @@ impl Database {
 
     /// Clones the originating revocable write capability for actor-time checks.
     pub fn write_authority(&self) -> Result<DatabaseAuthority> {
-        if !self.inner.writable {
+        if !self.client.is_writable() {
             return Err(integrity::read_only_upgrade_error(
                 self.canonical_database_path(),
                 "acquire database write authority",
@@ -118,8 +121,16 @@ impl Database {
             })
     }
 
-    /// Publishes one verified registry runtime as the only physical owner of
-    /// this database path.
+    /// Publishes one verified registry runtime into its non-cloneable map
+    /// owner. Client facades exist only through [`DatabaseOwnerV1::issue_lease`].
+    ///
+    /// ```compile_fail
+    /// use tracedecay_runtime_core::db::DatabaseOwnerV1;
+    ///
+    /// fn competing_map_owner(owner: DatabaseOwnerV1) {
+    ///     let _duplicate = owner.clone();
+    /// }
+    /// ```
     ///
     /// The runtime already carries its typed binding, verified locator, and
     /// opened file identity. A read-write facade additionally retains the
@@ -128,7 +139,7 @@ impl Database {
     pub async fn publish_runtime(
         runtime: StoreRuntimeClientLease,
         access: DatabaseAccessMode,
-    ) -> Result<Self> {
+    ) -> Result<DatabaseOwnerV1> {
         let writable = access.is_writable();
         let authority = if writable {
             if !runtime.writer_present() {
@@ -148,94 +159,12 @@ impl Database {
         } else {
             None
         };
-        let slot = authority
-            .as_ref()
-            .map(|authority| database_slot(authority.database_identity_key()));
-        if let Some(slot) = &slot {
-            let mut open = slot.lock().await;
-            if let Some(inner) = open.upgrade() {
-                return Ok(Self { inner });
+        let inner = Arc::new(DatabaseInner::publish(runtime, access, authority)?);
+        DatabaseOwnerV1::from_published_inner(inner, access).map_err(|error| {
+            TraceDecayError::Database {
+                message: format!("failed to construct database owner: {error:?}"),
+                operation: "publish database runtime".to_owned(),
             }
-            let inner = Arc::new(DatabaseInner::publish(
-                runtime,
-                true,
-                authority,
-                Some(Arc::clone(slot)),
-            )?);
-            *open = Arc::downgrade(&inner);
-            return Ok(Self { inner });
-        }
-        DatabaseInner::publish(runtime, false, None, None)
-            .map(Arc::new)
-            .map(|inner| Self { inner })
-    }
-
-    /// Legacy compatibility lookup.
-    ///
-    /// Physical creation and schema bootstrap are owned by the registered
-    /// runtime. This method can reuse an attachment already published for the
-    /// exact authority, but it never opens a path or invents store identity.
-    pub async fn initialize(db_path: &Path, authority: &DatabaseAuthority) -> Result<(Self, bool)> {
-        let authority = authority.hold_for(db_path, "initialize")?;
-        authority.require_active_write_scope("initialize")?;
-        let slot = database_slot(authority.database_identity_key());
-        let open = slot.lock().await;
-        if let Some(inner) = open.upgrade() {
-            if !inner.writable {
-                return Err(integrity::read_only_upgrade_error(db_path, "initialize"));
-            }
-            return Ok((Self { inner }, false));
-        }
-        Err(registered_attachment_required("initialize", db_path))
-    }
-
-    /// Reuses an already-published writable attachment for `db_path`.
-    pub async fn open(db_path: &Path, authority: &DatabaseAuthority) -> Result<(Self, bool)> {
-        let authority = authority.hold_for(db_path, "open")?;
-        authority.require_active_write_scope("open")?;
-        let slot = database_slot(authority.database_identity_key());
-        let open = slot.lock().await;
-        if let Some(inner) = open.upgrade() {
-            if !inner.writable {
-                return Err(integrity::read_only_upgrade_error(db_path, "open"));
-            }
-            return Ok((Self { inner }, false));
-        }
-        Err(registered_attachment_required("open", db_path))
-    }
-
-    /// Reuses an already-published attachment for a read-only caller.
-    pub async fn open_read_only(
-        db_path: &Path,
-        authority: &DatabaseAuthority,
-    ) -> Result<(Self, bool)> {
-        let authority = authority.hold_for(db_path, "open_read_only")?;
-        let slot = database_slot(authority.database_identity_key());
-        if let Some(inner) = slot.lock().await.upgrade() {
-            let lease =
-                inner
-                    ._runtime
-                    .issue_client_lease()
-                    .map_err(|error| TraceDecayError::Database {
-                        operation: "publish read-only database runtime".to_owned(),
-                        message: format!("{error:?}"),
-                    })?;
-            let read_only = DatabaseInner::publish(lease, false, None, None)?;
-            return Ok((
-                Self {
-                    inner: Arc::new(read_only),
-                },
-                false,
-            ));
-        }
-        Err(registered_attachment_required("open_read_only", db_path))
-    }
-
-    /// Returns the canonical runtime facade.
-    ///
-    /// Mutations must use [`Self::writer_connection`] or an isolated
-    /// transaction while holding [`Self::writer`].
-    pub fn conn(&self) -> &Connection {
-        &self.inner.conn
+        })
     }
 }

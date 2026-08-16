@@ -138,7 +138,6 @@ impl GitHubReadOnlyClientV1 {
 mod tests {
     use std::io::Write;
     use std::net::TcpListener;
-    use std::sync::Arc;
 
     use serde_json::json;
     use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};

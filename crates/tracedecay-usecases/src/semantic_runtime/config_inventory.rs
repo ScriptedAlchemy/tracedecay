@@ -708,7 +708,7 @@ fn durable_store_binding_digest(
         INVENTORY_DIGEST_DOMAIN,
         "durable-store",
         &database.binding().shard_id,
-        &database.runtime().locator().verified().locator_digest,
+        &database.verified_locator().locator_digest,
     ))
     .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)
 }

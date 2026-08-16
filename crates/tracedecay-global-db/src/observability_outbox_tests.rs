@@ -353,7 +353,7 @@ async fn observability_retention_is_bounded_and_cancelled_waits_do_not_mutate() 
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    let database = std::sync::harness.registered.clone();
+    let database = harness.registered.clone();
     let prune = tokio::spawn(async move { database.prune_observability_events(31 * 86_400).await });
     tokio::task::yield_now().await;
     prune.abort();

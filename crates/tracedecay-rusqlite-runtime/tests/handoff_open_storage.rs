@@ -119,7 +119,8 @@ fn run<T>(future: impl Future<Output = T>) -> T {
 #[test]
 fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
     let store = RegisteredWorkflowStore::start("handoff-open");
-    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
+    let sqlite =
+        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
     let issue_context = context("request.handoff.issue");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
@@ -155,7 +156,8 @@ fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
 
     drop(service);
     let store = store.restart("handoff-open-restart");
-    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
+    let sqlite =
+        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
     let open_context = context("request.handoff.open");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let request = OpenTaskHandoffRequestV1 {
@@ -205,7 +207,8 @@ fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
 #[test]
 fn changed_input_for_the_same_request_is_an_idempotency_conflict() {
     let store = RegisteredWorkflowStore::start("handoff-open-idempotency-conflict");
-    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
+    let sqlite =
+        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
     let issue_context = context("request.handoff.issue-idempotency-conflict");
     let service = HandoffOpenService::new(sqlite.clone(), CurrentTarget);
     let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
@@ -273,7 +276,8 @@ fn changed_input_for_the_same_request_is_an_idempotency_conflict() {
 #[test]
 fn wrong_session_and_expired_grants_are_concealed_without_consuming() {
     let store = RegisteredWorkflowStore::start("handoff-open-conceal");
-    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
+    let sqlite =
+        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
     let issue_context = context("request.handoff.issue-conceal");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
@@ -332,7 +336,8 @@ fn wrong_session_and_expired_grants_are_concealed_without_consuming() {
 #[test]
 fn enumeration_reads_the_durable_frontier_secret_free_across_a_restart() {
     let store = RegisteredWorkflowStore::start("handoff-open-list");
-    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
+    let sqlite =
+        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
     let issue_context = context("request.handoff.issue-list");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
@@ -354,7 +359,8 @@ fn enumeration_reads_the_durable_frontier_secret_free_across_a_restart() {
     // not from anything the issuing process held in memory.
     drop(service);
     let store = store.restart("handoff-open-list-restart");
-    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
+    let sqlite =
+        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
 
     let live = run(service.list_task(

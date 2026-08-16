@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -7,15 +7,18 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracedecay_application::storage::{
-    StoreKeyV1, StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
+    StorageByteSizeV1, StorageTelemetryFuture, StorageTelemetryReadV1, StoreKeyV1,
+    StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthBaselinePendingV1, TableGrowthSampleV1,
+    TableGrowthTelemetryReadV1, TableNameV1,
 };
 use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
-    Deadline, DisclosureClass, RequestContext, ResolvedScope, now_micros,
+    Deadline, DisclosureClass, RequestAdmission, RequestContext, ResolvedScope, now_micros,
 };
-use tracedecay_domain::ManifestDigest;
+use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use super::branch_admin::StoreAdministration;
+use crate::db::DatabaseStorageTelemetryHandle;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 pub(super) mod generation;
@@ -33,11 +36,257 @@ const STORAGE_TELEMETRY_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 const STORAGE_TELEMETRY_CAPABILITY: &str = "capability.application.storage.telemetry";
 const STORAGE_TELEMETRY_USE_CASE: &str = "use-case.application.storage.telemetry.read";
 
+#[derive(Clone, Copy)]
+struct TableWatermark {
+    bytes: StorageByteSizeV1,
+    observed_at: UtcMicros,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TableGrowthObservation {
+    Preview,
+    Advance,
+}
+
+/// Store telemetry bound to the database's guarded read capability.
+///
+/// The runtime-core handle retains the exact database client that issued it;
+/// this daemon adapter must not unwrap that guard into a raw SQL handle just to
+/// retain the maintenance-owned table-growth baseline.
+#[derive(Clone)]
+pub(super) struct GuardedStoreTelemetryPort {
+    handle: DatabaseStorageTelemetryHandle,
+    store: StoreKeyV1,
+    scope: ResolvedScope,
+    reader_wait: Duration,
+    table_watermarks: Arc<std::sync::Mutex<Option<BTreeMap<TableNameV1, TableWatermark>>>>,
+}
+
+impl GuardedStoreTelemetryPort {
+    fn new(
+        handle: DatabaseStorageTelemetryHandle,
+        store: StoreKeyV1,
+        scope: ResolvedScope,
+        reader_wait: Duration,
+    ) -> Self {
+        Self {
+            handle,
+            store,
+            scope,
+            reader_wait,
+            table_watermarks: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn admits(&self, context: &RequestContext, store: &StoreKeyV1) -> bool {
+        context.validate().is_ok()
+            && context.scope() == &self.scope
+            && store == &self.store
+            && context.admission_at(now_micros()) == RequestAdmission::Admitted
+    }
+
+    fn for_scope(&self, scope: ResolvedScope) -> Self {
+        Self {
+            handle: self.handle.clone(),
+            store: self.store.clone(),
+            scope,
+            reader_wait: self.reader_wait,
+            table_watermarks: Arc::clone(&self.table_watermarks),
+        }
+    }
+
+    fn rebind(&self, handle: DatabaseStorageTelemetryHandle, scope: ResolvedScope) -> Self {
+        Self {
+            handle,
+            store: self.store.clone(),
+            scope,
+            reader_wait: self.reader_wait,
+            table_watermarks: Arc::clone(&self.table_watermarks),
+        }
+    }
+
+    pub(super) fn preview_table_growth<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        store: &'a StoreKeyV1,
+    ) -> StorageTelemetryFuture<'a, TableGrowthTelemetryReadV1> {
+        self.read_table_growth(context, store, TableGrowthObservation::Preview)
+    }
+
+    fn read_table_growth<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        store: &'a StoreKeyV1,
+        observation: TableGrowthObservation,
+    ) -> StorageTelemetryFuture<'a, TableGrowthTelemetryReadV1> {
+        Box::pin(async move {
+            if !self.admits(context, store) {
+                return TableGrowthTelemetryReadV1::Denied {
+                    store: store.clone(),
+                };
+            }
+            let Ok(current) = self
+                .handle
+                .table_size_telemetry(self.reader_wait, || telemetry_interruption(context))
+            else {
+                return TableGrowthTelemetryReadV1::Unknown {
+                    store: store.clone(),
+                };
+            };
+            let observed_at = now_micros();
+            let mut current_tables = BTreeMap::new();
+            for sample in current {
+                let Ok(table) = TableNameV1::new(sample.table_name) else {
+                    return TableGrowthTelemetryReadV1::Unknown {
+                        store: store.clone(),
+                    };
+                };
+                current_tables.insert(table, StorageByteSizeV1(sample.bytes));
+            }
+            let mut watermarks = match self.table_watermarks.lock() {
+                Ok(watermarks) => watermarks,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            compare_table_growth(
+                store,
+                current_tables,
+                observed_at,
+                &mut watermarks,
+                observation,
+            )
+        })
+    }
+}
+
+impl StoreSizeTelemetryPort for GuardedStoreTelemetryPort {
+    fn store_size<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        store: &'a StoreKeyV1,
+    ) -> StorageTelemetryFuture<'a, StorageTelemetryReadV1> {
+        Box::pin(async move {
+            if !self.admits(context, store) {
+                return StorageTelemetryReadV1::Denied {
+                    store: store.clone(),
+                };
+            }
+            let Ok(sample) = self
+                .handle
+                .store_size_telemetry(self.reader_wait, || telemetry_interruption(context))
+            else {
+                return StorageTelemetryReadV1::Unknown {
+                    store: store.clone(),
+                };
+            };
+            let sample = StoreSizeSampleV1 {
+                store: store.clone(),
+                page_size_bytes: sample.page_size_bytes,
+                page_count: sample.page_count,
+                freelist_pages: sample.freelist_pages,
+                observed_at: now_micros(),
+            };
+            if sample.validate().is_err() {
+                return StorageTelemetryReadV1::Unknown {
+                    store: store.clone(),
+                };
+            }
+            StorageTelemetryReadV1::Observed { sample }
+        })
+    }
+
+    fn table_growth<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        store: &'a StoreKeyV1,
+    ) -> StorageTelemetryFuture<'a, TableGrowthTelemetryReadV1> {
+        self.read_table_growth(context, store, TableGrowthObservation::Advance)
+    }
+}
+
+fn compare_table_growth(
+    store: &StoreKeyV1,
+    current_tables: BTreeMap<TableNameV1, StorageByteSizeV1>,
+    observed_at: UtcMicros,
+    watermarks: &mut Option<BTreeMap<TableNameV1, TableWatermark>>,
+    observation: TableGrowthObservation,
+) -> TableGrowthTelemetryReadV1 {
+    let Some(previous_watermarks) = watermarks.as_ref() else {
+        if observation == TableGrowthObservation::Preview {
+            return TableGrowthTelemetryReadV1::Unknown {
+                store: store.clone(),
+            };
+        }
+        let tables_observed = u64::try_from(current_tables.len()).unwrap_or(u64::MAX);
+        *watermarks = Some(
+            current_tables
+                .into_iter()
+                .map(|(table, bytes)| (table, TableWatermark { bytes, observed_at }))
+                .collect(),
+        );
+        return TableGrowthTelemetryReadV1::BaselineEstablished {
+            store: store.clone(),
+            observed_at,
+            tables_observed,
+        };
+    };
+
+    let mut growth = Vec::new();
+    let mut baseline_pending = Vec::new();
+    for (table, current_bytes) in &current_tables {
+        if let Some(previous) = previous_watermarks.get(table) {
+            let sample = TableGrowthSampleV1 {
+                store: store.clone(),
+                table: table.clone(),
+                previous_bytes: previous.bytes,
+                current_bytes: *current_bytes,
+                previous_observed_at: previous.observed_at,
+                current_observed_at: observed_at,
+            };
+            if sample.validate().is_err() {
+                return TableGrowthTelemetryReadV1::Unknown {
+                    store: store.clone(),
+                };
+            }
+            growth.push(sample);
+        } else {
+            baseline_pending.push(TableGrowthBaselinePendingV1 {
+                store: store.clone(),
+                table: table.clone(),
+                current_bytes: *current_bytes,
+                observed_at,
+            });
+        }
+    }
+    if observation == TableGrowthObservation::Advance {
+        *watermarks = Some(
+            current_tables
+                .into_iter()
+                .map(|(table, bytes)| (table, TableWatermark { bytes, observed_at }))
+                .collect(),
+        );
+    }
+    TableGrowthTelemetryReadV1::Observed {
+        store: store.clone(),
+        samples: growth,
+        baseline_pending,
+    }
+}
+
+fn telemetry_interruption(
+    context: &RequestContext,
+) -> Option<tracedecay_store::UnavailableReasonV1> {
+    match context.admission_at(now_micros()) {
+        RequestAdmission::Admitted => None,
+        RequestAdmission::Cancelled => Some(tracedecay_store::UnavailableReasonV1::Cancelled),
+        RequestAdmission::TimedOut => Some(tracedecay_store::UnavailableReasonV1::DeadlineExceeded),
+    }
+}
+
 #[derive(Clone)]
 struct CachedStoreTelemetryPort {
     scope: ResolvedScope,
     store: StoreKeyV1,
-    port: tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
+    port: GuardedStoreTelemetryPort,
 }
 
 /// Daemon-owned table-growth baseline authority shared by maintenance and
@@ -102,7 +351,7 @@ impl StoreTelemetrySamplingRegistry {
         &self,
         path: &Path,
         scope: &ResolvedScope,
-        open: impl FnOnce() -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, E>,
+        open: impl FnOnce() -> Result<DatabaseStorageTelemetryHandle, E>,
     ) -> bool {
         let Some(store_name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
             return false;
@@ -123,7 +372,7 @@ impl StoreTelemetrySamplingRegistry {
             cached.port = cached.port.rebind(handle, scope.clone());
             return true;
         }
-        let port = tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort::new(
+        let port = GuardedStoreTelemetryPort::new(
             handle,
             store.clone(),
             scope.clone(),
@@ -144,10 +393,7 @@ impl StoreTelemetrySamplingRegistry {
         &self,
         path: &Path,
         scope: &ResolvedScope,
-    ) -> Option<(
-        StoreKeyV1,
-        tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
-    )> {
+    ) -> Option<(StoreKeyV1, GuardedStoreTelemetryPort)> {
         let ports = self
             .ports
             .lock()
@@ -1086,13 +1332,69 @@ fn now_secs_i64() -> Result<i64, &'static str> {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use tracedecay_application::storage::{
+        StorageByteSizeV1, StoreKeyV1, TableGrowthTelemetryReadV1, TableNameV1,
+    };
+    use tracedecay_domain::UtcMicros;
+
     use super::{
         ColdStoreCursorV1, MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCadence,
         MaintenanceStoreOutcomeV1, SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry,
-        checkpoint_path, classify_cold_store_state, code_generation_retention_is_eligible,
-        cursor_after_attempted_units, load_cursor, next_cold_store_cursor, persist_cursor,
-        select_store_window,
+        TableGrowthObservation, checkpoint_path, classify_cold_store_state,
+        code_generation_retention_is_eligible, compare_table_growth, cursor_after_attempted_units,
+        load_cursor, next_cold_store_cursor, persist_cursor, select_store_window,
     };
+
+    #[test]
+    fn table_growth_preview_never_mutates_the_maintenance_baseline() {
+        let store = StoreKeyV1::new("project.db").expect("store key");
+        let table = TableNameV1::new("messages").expect("table name");
+        let mut watermarks = None;
+
+        let preview = compare_table_growth(
+            &store,
+            std::collections::BTreeMap::from([(table.clone(), StorageByteSizeV1(10))]),
+            UtcMicros(1),
+            &mut watermarks,
+            TableGrowthObservation::Preview,
+        );
+        assert!(matches!(
+            preview,
+            TableGrowthTelemetryReadV1::Unknown { .. }
+        ));
+        assert!(
+            watermarks.is_none(),
+            "preview must not establish a baseline"
+        );
+
+        let baseline = compare_table_growth(
+            &store,
+            std::collections::BTreeMap::from([(table.clone(), StorageByteSizeV1(10))]),
+            UtcMicros(2),
+            &mut watermarks,
+            TableGrowthObservation::Advance,
+        );
+        assert!(matches!(
+            baseline,
+            TableGrowthTelemetryReadV1::BaselineEstablished {
+                tables_observed: 1,
+                ..
+            }
+        ));
+
+        let observed = compare_table_growth(
+            &store,
+            std::collections::BTreeMap::from([(table, StorageByteSizeV1(20))]),
+            UtcMicros(3),
+            &mut watermarks,
+            TableGrowthObservation::Preview,
+        );
+        let TableGrowthTelemetryReadV1::Observed { samples, .. } = observed else {
+            panic!("preview should compare with the maintenance baseline");
+        };
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].growth_bytes().get(), 10);
+    }
 
     #[test]
     fn cadence_rate_limits_failures_and_successes() {

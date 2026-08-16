@@ -10,6 +10,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 
 use tracedecay_domain::{
     CodeGenerationId, DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
@@ -25,8 +27,12 @@ use tracedecay_store::{
     parse_diagnostic_evidence_class, parse_diagnostic_producer_kind, parse_diagnostic_severity,
 };
 
+#[cfg(test)]
 use tracedecay_runtime_core::db::MemoryConnection;
-use tracedecay_runtime_core::db::engine::{Row, Rows, TransactionBehavior, Value, params};
+#[cfg(test)]
+use tracedecay_runtime_core::db::engine::TransactionBehavior;
+use tracedecay_runtime_core::db::engine::{IntoParams, Row, Rows, Value, params};
+use tracedecay_runtime_core::db::{Database, DatabaseMemoryTransaction};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
@@ -53,27 +59,173 @@ const STATE_CLEARED: &str = DIAGNOSTIC_STATE_CLEARED;
 /// through `TraceDecay` application APIs but are excluded from active
 /// publication").
 pub struct DiagnosticsStore<'a> {
-    conn: MemoryConnection<'a>,
+    conn: DiagnosticsConnection<'a>,
 }
 
-impl<'a> DiagnosticsStore<'a> {
-    pub const fn new(conn: &'a tracedecay_runtime_core::db::engine::Connection) -> Self {
-        Self {
-            conn: MemoryConnection::runtime(conn),
+enum DiagnosticsConnection<'a> {
+    /// A retained canonical database client. Reads mint a guarded engine
+    /// facade for exactly the query lifetime; writes must first acquire a
+    /// canonical memory write transaction.
+    Database(Database),
+    /// Test-only direct engine fixture support. Production callers must use
+    /// `Database` so runtime retirement remains guarded.
+    #[cfg(test)]
+    Runtime(MemoryConnection<'a>),
+    /// An already-authorized production write transaction. The transaction
+    /// remains owned by `with_immediate_tx`, which commits or rolls it back
+    /// after the callback completes.
+    Transaction(&'a dyn DiagnosticsExecutor),
+}
+
+/// Object-safe executor used only to borrow an already-authorized transaction
+/// through the diagnostics helpers. Parameters cross this boundary as the
+/// engine's canonical owned values, so no raw connection escapes the runtime
+/// capability that issued it.
+trait DiagnosticsExecutor: Sync {
+    fn query_values<'a>(
+        &'a self,
+        sql: &'a str,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<Rows>> + Send + 'a>>;
+
+    fn execute_values<'a>(
+        &'a self,
+        sql: &'a str,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64>> + Send + 'a>>;
+
+    fn execute_batch<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+}
+
+impl DiagnosticsExecutor for DatabaseMemoryTransaction<'_> {
+    fn query_values<'a>(
+        &'a self,
+        sql: &'a str,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<Rows>> + Send + 'a>> {
+        Box::pin(async move {
+            DatabaseMemoryTransaction::query(self, sql, params)
+                .await
+                .map_err(|error| db_error("diagnostics transaction query", error))
+        })
+    }
+
+    fn execute_values<'a>(
+        &'a self,
+        sql: &'a str,
+        params: Vec<Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64>> + Send + 'a>> {
+        Box::pin(async move {
+            DatabaseMemoryTransaction::execute(self, sql, params)
+                .await
+                .map_err(|error| db_error("diagnostics transaction write", error))
+        })
+    }
+
+    fn execute_batch<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            DatabaseMemoryTransaction::execute_batch(self, sql)
+                .await
+                .map_err(|error| db_error("diagnostics transaction write", error))
+        })
+    }
+}
+
+impl DiagnosticsConnection<'_> {
+    async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
+    where
+        P: IntoParams,
+    {
+        let params = params
+            .into_params()
+            .map_err(|error| db_error("diagnostics query parameters", error))?;
+        match self {
+            Self::Database(database) => database
+                .read_connection()
+                .query(sql, params)
+                .await
+                .map_err(|error| db_error("diagnostics guarded query", error)),
+            #[cfg(test)]
+            Self::Runtime(connection) => MemoryConnection::query(connection, sql, params)
+                .await
+                .map_err(|error| db_error("diagnostics runtime query", error)),
+            Self::Transaction(transaction) => transaction.query_values(sql, params).await,
         }
     }
 
+    async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
+    where
+        P: IntoParams,
+    {
+        let params = params
+            .into_params()
+            .map_err(|error| db_error("diagnostics write parameters", error))?;
+        match self {
+            Self::Database(_) => Err(db_message(
+                "diagnostics guarded write",
+                "diagnostics writes require a canonical memory write transaction",
+            )),
+            #[cfg(test)]
+            Self::Runtime(connection) => MemoryConnection::execute(connection, sql, params)
+                .await
+                .map_err(|error| db_error("diagnostics runtime write", error)),
+            Self::Transaction(transaction) => transaction.execute_values(sql, params).await,
+        }
+    }
+
+    async fn execute_batch(&self, sql: &str) -> Result<()> {
+        match self {
+            Self::Database(_) => Err(db_message(
+                "diagnostics guarded write",
+                "diagnostics writes require a canonical memory write transaction",
+            )),
+            #[cfg(test)]
+            Self::Runtime(connection) => MemoryConnection::execute_batch(connection, sql)
+                .await
+                .map_err(|error| db_error("diagnostics runtime write", error)),
+            Self::Transaction(transaction) => transaction.execute_batch(sql).await,
+        }
+    }
+}
+
+impl DiagnosticsStore<'static> {
+    /// Creates a production diagnostics store over the canonical retained
+    /// database capability. Each read and write retains the issuing client's
+    /// guard through the corresponding engine operation or transaction.
+    pub fn new(database: Database) -> Self {
+        Self {
+            conn: DiagnosticsConnection::Database(database),
+        }
+    }
+}
+
+impl<'a> DiagnosticsStore<'a> {
+    #[cfg(test)]
     pub const fn new_runtime(conn: &'a tracedecay_runtime_core::db::engine::Connection) -> Self {
-        Self::new(conn)
+        Self {
+            conn: DiagnosticsConnection::Runtime(MemoryConnection::runtime(conn)),
+        }
     }
 
     /// Creates the diagnostics schema idempotently. Safe to call on every
     /// open; existing rows are never touched.
     pub async fn ensure_schema(&self) -> Result<()> {
-        self.conn
-            .execute_batch(SCHEMA)
-            .await
-            .map_err(|e| db_error("diagnostics ensure_schema", e))
+        self.with_immediate_tx("diagnostics ensure_schema", |store| {
+            Box::pin(async move {
+                store
+                    .conn
+                    .execute_batch(SCHEMA)
+                    .await
+                    .map_err(|error| db_error("diagnostics ensure_schema", error))
+            })
+        })
+        .await
     }
 
     /// The exact clean generation whose diagnostic snapshot is current.
@@ -116,6 +268,34 @@ impl<'a> DiagnosticsStore<'a> {
         Ok(generation)
     }
 
+    /// Every published generation id in deterministic order. This stays on
+    /// the guarded diagnostics store so read-only query clients never need a
+    /// raw engine connection.
+    pub(crate) async fn published_generation_ids(&self) -> Result<Vec<String>> {
+        let operation = "diagnostics published_generation_ids";
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT generation_id FROM diagnostic_generation_publications \
+                 ORDER BY generation_id",
+                params![],
+            )
+            .await
+            .map_err(|error| db_error(operation, error))?;
+        let mut generations = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| db_error(operation, error))?
+        {
+            generations.push(
+                row.get::<String>(0)
+                    .map_err(|error| db_error(operation, error))?,
+            );
+        }
+        Ok(generations)
+    }
+
     /// Runs `work` inside an immediate transaction, committing on success and
     /// rolling back on error or cancellation. The transactional store routes
     /// every statement through that exact transaction.
@@ -132,26 +312,56 @@ impl<'a> DiagnosticsStore<'a> {
     where
         T: Send,
     {
-        let transaction = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|e| db_error(operation, e))?;
-        let transactional_store = DiagnosticsStore {
-            conn: MemoryConnection::transaction(&transaction),
-        };
-        match work(&transactional_store).await {
-            Ok(value) => {
-                transaction
-                    .commit()
+        match &self.conn {
+            DiagnosticsConnection::Database(database) => {
+                let transaction = database.begin_memory_write_transaction(operation).await?;
+                let transactional_store = DiagnosticsStore {
+                    conn: DiagnosticsConnection::Transaction(&transaction),
+                };
+                let result = work(&transactional_store).await;
+                drop(transactional_store);
+                match result {
+                    Ok(value) => {
+                        transaction.commit().await?;
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        let _ = transaction.rollback().await;
+                        Err(error)
+                    }
+                }
+            }
+            #[cfg(test)]
+            DiagnosticsConnection::Runtime(connection) => {
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
                     .await
                     .map_err(|error| db_error(operation, error))?;
-                Ok(value)
+                let transactional_store = DiagnosticsStore {
+                    conn: DiagnosticsConnection::Runtime(MemoryConnection::transaction(
+                        &transaction,
+                    )),
+                };
+                let result = work(&transactional_store).await;
+                drop(transactional_store);
+                match result {
+                    Ok(value) => {
+                        transaction
+                            .commit()
+                            .await
+                            .map_err(|error| db_error(operation, error))?;
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        let _ = transaction.rollback().await;
+                        Err(error)
+                    }
+                }
             }
-            Err(error) => {
-                let _ = transaction.rollback().await;
-                Err(error)
-            }
+            DiagnosticsConnection::Transaction(_) => Err(db_message(
+                operation,
+                "nested diagnostics transactions are unsupported",
+            )),
         }
     }
 

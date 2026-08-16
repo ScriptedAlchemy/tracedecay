@@ -41,7 +41,7 @@ impl RegisteredGlobalDb {
             self.session_relation_graph.get()
         {
             return if existing_scope == &scope
-                && std::ptr::eq(&**existing_graph, &*graph)
+                && existing_graph.shares_runtime_with(&graph)
                 && existing_binding == &graph_binding
                 && existing_locator == &graph_verified_locator
             {

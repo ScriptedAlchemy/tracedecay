@@ -17,18 +17,18 @@ pub(super) async fn bind_verified_project_graph_runtime(
     database: Arc<crate::db::Database>,
     sessions: &RegisteredGlobalDb,
 ) -> crate::errors::Result<()> {
-    let runtime =
+    let graph_proxy =
         database
             .memory_graph_runtime()
             .ok_or_else(|| crate::errors::TraceDecayError::Config {
                 message: "project memory graph runtime was not mounted before project sessions"
                     .to_owned(),
             })?;
-    sessions.bind_project_graph_runtime(runtime).map_err(|_| {
-        crate::errors::TraceDecayError::Config {
+    sessions
+        .bind_project_graph_runtime(graph_proxy)
+        .map_err(|_| crate::errors::TraceDecayError::Config {
             message: "project graph runtime was already mounted for project sessions".to_owned(),
-        }
-    })
+        })
 }
 
 #[derive(Clone)]

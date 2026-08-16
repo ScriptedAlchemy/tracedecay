@@ -687,9 +687,17 @@ async fn offload_cas_preserves_revived_row_and_rolls_back_payload() -> Result<()
         .await
         .map_err(|error| error.to_string())?;
 
-    let error = offload_one(&store.conn, &store.storage_root, &target, &|_| Ok(()))
-        .await
-        .expect_err("stale candidate must fail the offload compare-and-swap");
+    fn authorize(_: &str) -> Result<(), LcmError> {
+        Ok(())
+    }
+    let error = offload_one(
+        RetentionStore::Connection(&store.conn),
+        &store.storage_root,
+        &target,
+        Some(&authorize),
+    )
+    .await
+    .expect_err("stale candidate must fail the offload compare-and-swap");
 
     assert!(error.to_string().contains("compare-and-swap rejected"));
     assert_eq!(

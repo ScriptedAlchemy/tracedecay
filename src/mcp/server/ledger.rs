@@ -1,6 +1,7 @@
 //! Token-savings ledger and tool/hook analytics recording.
 
 use super::*;
+use crate::global_db::RegisteredGlobalDb;
 
 /// Upper bound for [`McpServer::ledger_writes_settled`]. Savings-ledger writes
 /// are fire-and-forget `SQLite` appends that finish in well under a second on a

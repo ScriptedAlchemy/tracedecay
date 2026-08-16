@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use super::*;
+use crate::agents::AgentIntegration;
 use crate::display::format_bytes;
 
 #[test]

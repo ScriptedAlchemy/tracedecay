@@ -6,14 +6,15 @@ use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
-use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
+use tracedecay_store::StoreShardIdV1;
 
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 
 use super::{
-    DaemonSessionRuntimeRegistryV1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, Result,
-    StoreRuntimeClientLease, registry_open_error, release_process_allocator_memory,
+    DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, RegisteredGlobalDbLeaseV1,
+    RegisteredGlobalDbOwnerV1, Result, StoreRuntimeClientLease, release_process_allocator_memory,
+    session_registry_error,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -239,38 +240,29 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub(super) async fn attach_registered(
         &self,
         runtime: StoreRuntimeClientLease,
-        operation: &'static str,
-    ) -> Result<RegisteredGlobalDbLeaseV1> {
-        let expected_binding: StoreRuntimeBindingV1 = runtime.binding().clone();
-        let expected_locator = runtime.locator().verified().clone();
-        let authority = runtime
-            .database_authority(operation)
-            .map_err(|failure| registry_open_error(operation, failure))?;
+        _operation: &'static str,
+    ) -> Result<RegisteredGlobalDbOwnerV1> {
+        let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
         let long_lived = self.long_lived_session_maintenance();
         let (database, convergence) = if long_lived {
-            let (database, convergence) = RegisteredGlobalDb::migrate_and_attach_for_daemon(
-                runtime,
-                expected_binding,
-                expected_locator,
-                authority,
-            )
-            .await?;
+            let (database, convergence) =
+                RegisteredGlobalDbOwnerV1::migrate_and_attach_for_daemon(database).await?;
             (database, Some(convergence))
         } else {
             (
-                RegisteredGlobalDb::migrate_and_attach(
-                    runtime,
-                    expected_binding,
-                    expected_locator,
-                    authority,
-                )
-                .await?,
+                RegisteredGlobalDbOwnerV1::migrate_and_attach(database).await?,
                 None,
             )
         };
         if long_lived {
+            let lease = database.issue_lease().map_err(|error| {
+                session_registry_error(
+                    "issue registered schema convergence client",
+                    format!("{error:?}"),
+                )
+            })?;
             self.registered_schema_convergence
-                .schedule(database.clone(), convergence);
+                .schedule(lease, convergence);
         }
         Ok(database)
     }

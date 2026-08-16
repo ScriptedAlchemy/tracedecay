@@ -566,7 +566,7 @@ async fn node_facts(
     };
     let normalized_name = normalize_entity(&node.name).to_ascii_lowercase();
     let row_limit = i64::try_from(FACT_MATCH_LIMIT + 1).unwrap_or(i64::MAX);
-    let connection = state.mem_db.engine_conn();
+    let connection = state.mem_db.read_connection();
     let fts_query = format!("\"{}\"", node.name.replace('"', "\"\""));
     let fts_sql = "
         SELECT current.fact_id, payload.content, current.trust_score,

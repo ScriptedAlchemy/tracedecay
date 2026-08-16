@@ -59,9 +59,10 @@ impl SessionSyncProjectContext {
                 return GitTopologySyncOutcome::Finished(Err(GitTopologySyncFailure::Unavailable));
             }
         };
-        let Some(runtime) = project_sessions.project_graph_runtime().cloned() else {
+        let Some(runtime) = project_sessions.project_graph_runtime() else {
             return GitTopologySyncOutcome::Finished(Err(GitTopologySyncFailure::Unavailable));
         };
+        let runtime: Arc<dyn VerifiedGraphRuntimePortV1> = Arc::new(runtime.clone());
         let scope_sets = match project_sessions.authorized_scope_set_storage() {
             Ok(scope_sets) => scope_sets,
             Err(_) => {

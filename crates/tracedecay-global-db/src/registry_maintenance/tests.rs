@@ -174,7 +174,7 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
     // writer lane. A second independent mount would not serialize — connection
     // policy pins `busy_timeout = 0` precisely so SQLite never waits behind the
     // runtime's own queue — and would fail the write outright instead.
-    let concurrent_db = std::sync::harness.registered.clone();
+    let concurrent_db = harness.registered.clone();
 
     let transaction = harness
         .registered

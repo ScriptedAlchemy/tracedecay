@@ -178,14 +178,19 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
             .is_err()
     );
 
-    let replacement_a = crate::global_db::RegisteredGlobalDb::migrate_and_attach(
-        old_a.runtime().clone(),
-        old_a.binding().clone(),
-        old_a.runtime().locator().verified().clone(),
-        old_a.authority().clone(),
+    // Re-enter the canonical host-admission owner map. This mints a fresh
+    // short-lived registered lease without recovering a runtime or authority
+    // from the retired client.
+    let replacement_runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+        root_a.path(),
+        root_a.path().join(project_a.as_str()),
+        project_a.clone(),
     )
     .await
     .unwrap();
+    let replacement_a = replacement_runtime
+        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .unwrap();
     let recovery_request = SessionSyncRequestV1::new(
         RequestId::new("session-sync.rebind-recovery").unwrap(),
         IdempotencyKey::new("session-sync.rebind-recovery").unwrap(),

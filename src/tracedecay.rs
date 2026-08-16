@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use crate::config::TraceDecayConfig;
-use crate::db::Database;
+use crate::db::{Database, DatabaseStorageTelemetryHandle};
 use crate::errors::Result;
 use crate::storage::{self, StoreLayout};
 
@@ -63,9 +63,7 @@ pub struct TraceDecay {
 }
 
 impl TraceDecay {
-    pub(crate) fn storage_telemetry_handle(
-        &self,
-    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle> {
+    pub(crate) fn storage_telemetry_handle(&self) -> Result<DatabaseStorageTelemetryHandle> {
         self.db.storage_telemetry_handle()
     }
 

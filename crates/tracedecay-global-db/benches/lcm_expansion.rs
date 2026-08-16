@@ -113,7 +113,7 @@ fn observation(session_id: &SessionId, ordinal: u64, content: &str) -> DurableOb
 }
 
 async fn persist_observation(
-    store: &GlobalDbObservationStore<'_>,
+    store: &GlobalDbObservationStore,
     observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> (ObservationSourceCursorV1, String) {
@@ -227,7 +227,7 @@ async fn build_fixture() -> Fixture {
         .await
         .expect("open registered production store fixture");
     let database = runtime.profile_database();
-    let store = GlobalDbObservationStore::with_runtime(database.runtime(), database.authority());
+    let store = database.observation_store();
     let session_id = SessionId::new(SESSION_ID).expect("benchmark session id is valid");
     let mut cursor = None;
     let mut access_digest = None;

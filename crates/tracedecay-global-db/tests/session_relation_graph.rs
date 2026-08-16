@@ -16,12 +16,13 @@ use tracedecay_global_db::session_temporal::relations::{
 
 use sha2::{Digest, Sha256};
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwner, GraphDbRegistration,
-    GraphDbRegistry, GraphDbRegistryConfig, GraphDbRetirementOutcome, GraphDbRetirementTarget,
+    GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwner, GraphDbOwnerRegistrationV1,
+    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphDbRetirementOutcome,
     NeverCancelled,
 };
 use tracedecay_store::{
-    BrainId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
+    BrainId, RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
+    RetainedGraphStoreOwnerOperationLeaseErrorV1, StoreAuthorityEpochV1, StoreIncarnationV1,
     StoreRuntimeBindingV1, StoreShardIdV1, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
@@ -54,7 +55,7 @@ fn occurrence_id(seed: &str) -> MessageOccurrenceIdV1 {
 
 fn memory_relation_store() -> SessionRelationGraphStore {
     let owner = GraphDbOwner::memory(Arc::new(NeverCancelled)).expect("memory relation graph");
-    SessionRelationGraphStore::new(owner.lease())
+    SessionRelationGraphStore::new(owner.issue_lease().expect("memory relation graph lease"))
 }
 
 #[derive(Debug)]
@@ -75,6 +76,31 @@ impl RetainedGraphStoreLeaseV1 for TestGraphLease {
 
     fn canonical_path(&self) -> &Path {
         &self.canonical_path
+    }
+}
+
+impl RetainedGraphStoreOwnerAttachmentV1 for TestGraphLease {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    fn issue_operation_lease(
+        &self,
+    ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>
+    {
+        Ok(Arc::new(Self {
+            binding: self.binding.clone(),
+            verified_locator: self.verified_locator.clone(),
+            canonical_path: self.canonical_path.clone(),
+        }))
     }
 }
 
@@ -101,6 +127,18 @@ fn persistent_registration(canonical_path: PathBuf) -> GraphDbRegistration {
         cancellation: Arc::new(TestCancellation(AtomicBool::new(false))),
         lifecycle_cancellation: Arc::new(TestCancellation(AtomicBool::new(false))),
         deadline: Instant::now() + Duration::from_secs(30),
+    }
+}
+
+fn persistent_owner_registration(operation: GraphDbRegistration) -> GraphDbOwnerRegistrationV1 {
+    let authority_attachment = Box::new(TestGraphLease {
+        binding: operation.authority_lease.binding().clone(),
+        verified_locator: operation.authority_lease.verified_locator().clone(),
+        canonical_path: operation.authority_lease.canonical_path().to_path_buf(),
+    });
+    GraphDbOwnerRegistrationV1 {
+        operation,
+        authority_attachment,
     }
 }
 
@@ -403,24 +441,27 @@ fn profile_relation_projection_reopens_after_final_clone_allows_retirement() {
     let registry =
         GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).expect("test graph registry");
     let request = persistent_registration(graph_path);
-    let retirement_target = GraphDbRetirementTarget::new(
-        request.authority_lease.binding().clone(),
-        request.authority_lease.verified_locator().clone(),
-    );
+    let owner_attachment = registry
+        .resolve_owner_attachment(persistent_owner_registration(request.clone()))
+        .expect("attach persistent graph owner");
+    let retirement_target = owner_attachment.retirement_target();
     {
-        let database: GraphDbLeaseV1 = registry
-            .resolve(request.clone())
-            .expect("open persistent graph");
+        let database: GraphDbLeaseV1 = owner_attachment
+            .issue_lease()
+            .expect("issue persistent graph lease");
         let store = SessionRelationGraphStore::new(database);
         store
             .replace(&relation_projection)
             .expect("publish profile projection");
         let retained_clone = store.clone();
         drop(store);
-        assert!(matches!(
-            registry.reserve_retirement_batch(vec![retirement_target.clone()]),
-            Err(GraphDbError::Conflict)
-        ));
+        let refusal = match registry.reserve_retirement_batch(vec![retirement_target.clone()]) {
+            Ok(_) => panic!("retained graph client must refuse retirement"),
+            Err(refusal) => refusal,
+        };
+        assert_eq!(refusal.error(), &GraphDbError::Conflict);
+        let (_, retry_targets) = refusal.into_parts();
+        assert_eq!(retry_targets, vec![retirement_target.clone()]);
         drop(retained_clone);
     }
     let mut retirement = registry
@@ -438,7 +479,7 @@ fn profile_relation_projection_reopens_after_final_clone_allows_retirement() {
     ));
 
     let reopened: GraphDbLeaseV1 = registry
-        .reopen_for_harness(request)
+        .reopen_for_harness(persistent_owner_registration(request))
         .expect("reopen persistent graph");
     let visits = SessionRelationGraphStore::new(reopened)
         .summary_sources(

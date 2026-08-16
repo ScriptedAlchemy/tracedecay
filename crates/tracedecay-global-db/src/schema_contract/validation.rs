@@ -673,7 +673,8 @@ pub async fn validate_authority_schema_contract(
 #[cfg(test)]
 mod tests {
     use super::{normalize_default, validate_registry_schema_contract};
-    use tracedecay_runtime_core::db::engine::TestConnection;
+    use crate::tests::harness::open_registered_test_database_fixture;
+    use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 
     #[test]
     fn default_normalization_only_strips_balanced_outer_parentheses() {
@@ -689,9 +690,13 @@ mod tests {
     #[tokio::test]
     async fn registry_contract_validates_through_engine_connection() {
         let directory = tempfile::tempdir().unwrap();
-        let connection = TestConnection::open(&directory.path().join("global.db"));
-        crate::ensure_registered_schema(&connection).await.unwrap();
-        validate_registry_schema_contract(&connection)
+        let (database, _owner) = open_registered_test_database_fixture(
+            &directory.path().join("global.db"),
+            TestDatabaseRuntimeScope::Profile,
+        )
+        .await
+        .unwrap();
+        validate_registry_schema_contract(&database.read_connection())
             .await
             .unwrap();
     }

@@ -958,7 +958,6 @@ async fn real_work_owner_receipts_converge_to_rollup() {
 
 pub mod work_rollup_harness {
     use std::collections::BTreeSet;
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use serde::{Deserialize, Serialize};

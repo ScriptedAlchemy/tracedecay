@@ -4,7 +4,6 @@ mod runtime_retirement;
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::errors::{Result, TraceDecayError};

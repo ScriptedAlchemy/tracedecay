@@ -19,8 +19,8 @@ struct ProfileMemoryGraphRuntime {
 impl ProfileMemoryGraphRuntime {
     fn new(database: &Database) -> Self {
         Self {
-            binding: database.retained_runtime().binding().clone(),
-            locator: database.retained_runtime().locator().verified().clone(),
+            binding: database.registered_binding().clone(),
+            locator: database.registered_verified_locator().clone(),
             manifest: Mutex::new(None),
         }
     }
@@ -49,10 +49,6 @@ impl VerifiedGraphRuntimePortV1 for ProfileMemoryGraphRuntime {
     }
 
     fn cancel_reconciliation(&self) {}
-
-    fn close_reconciliation(&self) -> Result<(), GraphDbError> {
-        Ok(())
-    }
 
     fn publish_verified_manifest(
         &self,

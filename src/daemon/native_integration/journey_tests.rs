@@ -10,6 +10,8 @@ use std::path::Path;
 use std::process::Command;
 
 use super::registry::DaemonNativeIntegrationServiceRegistry;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
+use crate::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_application::{
     AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal,
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -26,6 +28,7 @@ use tracedecay_domain::{
     RepositoryId, ScopeSetId, ScopeSetRevision, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
     WorktreeInventorySnapshotId, canonical_sha256,
 };
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 const OBSERVED_AT: UtcMicros = UtcMicros(100);
 const EXPIRES_AT: UtcMicros = UtcMicros(10_000);
@@ -233,7 +236,7 @@ fn approval_for(
 }
 
 async fn mount(
-    database_path: std::path::PathBuf,
+    database: RegisteredGlobalDbLeaseV1,
     repository_root: std::path::PathBuf,
 ) -> (
     DaemonNativeIntegrationServiceRegistry,
@@ -241,8 +244,8 @@ async fn mount(
 ) {
     let registry = DaemonNativeIntegrationServiceRegistry::default();
     let owner = registry
-        .ensure_engine_test(
-            database_path,
+        .ensure(
+            database,
             repository_root,
             ProjectId::new("project.native.journey").expect("project id"),
             RepositoryId::new("repository.native.journey").expect("repository id"),
@@ -298,10 +301,19 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
         let repository_root = directory.path().join("repo");
         std::fs::create_dir_all(&repository_root).expect("repository root");
         prepare_pair(&repository_root, mode);
-        let database_path = directory.path().join("project-sessions.db");
-        drop(std::fs::File::create(&database_path).expect("database file"));
+        let project_id = ProjectId::new("project.native.journey").expect("project id");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            directory.path().join("profile"),
+            &repository_root,
+            project_id,
+        )
+        .await
+        .expect("canonical project test runtime");
+        let database = runtime
+            .registered_database_arc(HostAdmissionScope::Project)
+            .expect("registered project database");
 
-        let (registry, owner) = mount(database_path.clone(), repository_root.clone()).await;
+        let (registry, owner) = mount(database.clone(), repository_root.clone()).await;
         let request_id = format!("request.native.journey.{index}");
         let request = preflight_request(mode, &request_id);
         let context = request.context.clone();
@@ -392,7 +404,7 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
         }
 
         registry.shutdown().await.expect("shutdown owner registry");
-        let (restarted_registry, restarted_owner) = mount(database_path, repository_root).await;
+        let (restarted_registry, restarted_owner) = mount(database, repository_root).await;
         let durable = tokio::task::spawn_blocking(move || {
             restarted_owner.service().status(
                 tracedecay_application::NativeIntegrationStatusRequestV1 {
@@ -421,9 +433,18 @@ async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_t
     let repository_root = directory.path().join("repo");
     std::fs::create_dir_all(&repository_root).expect("repository root");
     prepare_pair(&repository_root, MechanicalIntegrationModeV1::FastForward);
-    let database_path = directory.path().join("project-sessions.db");
-    drop(std::fs::File::create(&database_path).expect("database file"));
-    let (registry, owner) = mount(database_path, repository_root.clone()).await;
+    let project_id = ProjectId::new("project.native.journey").expect("project id");
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        directory.path().join("profile"),
+        &repository_root,
+        project_id,
+    )
+    .await
+    .expect("canonical project test runtime");
+    let database = runtime
+        .registered_database_arc(HostAdmissionScope::Project)
+        .expect("registered project database");
+    let (registry, owner) = mount(database, repository_root.clone()).await;
     let request = preflight_request(
         MechanicalIntegrationModeV1::FastForward,
         "request.native.journey.drift",

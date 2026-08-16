@@ -12,10 +12,10 @@ use tracedecay_store::runtime::{
 };
 
 use super::publication_support::{
-    check_all, clear_retiring_fence, collect_closure, dependency_key, locator_from_dependency,
-    locator_from_key, map_publication_error, require_active_replay_evidence, require_head_replay,
-    require_projection_binding, require_publication_binding, retain_lease_closure,
-    validate_exact_dependency_closure, validate_replay_cursor,
+    RegisteredGraphDbOperationV1, check_all, clear_retiring_fence, collect_closure,
+    dependency_key_for_binding, locator_from_dependency, locator_from_key, map_publication_error,
+    require_active_replay_evidence, require_head_replay, require_projection_binding,
+    retain_lease_closure, validate_exact_dependency_closure, validate_replay_cursor,
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::generation::{
@@ -25,7 +25,7 @@ use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
 use crate::{
-    GraphDb, GraphDbError, GraphGenerationManifest, GraphGenerationReplaySource,
+    GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationManifest, GraphGenerationReplaySource,
     GraphProjectionIdentity, GraphReplayCollectionOutcome, VerifiedGraphCommit,
 };
 
@@ -387,14 +387,24 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
-        self.publish_verified_inner(
-            registration,
-            authority,
-            context,
-            publication_key,
-            None,
-            false,
-        )
+        let operation = self.registered_operation(registration)?;
+        self.publish_verified_inner(&operation, authority, context, publication_key, None, false)
+    }
+
+    /// Publishes through an already-issued, registry-validated graph lease.
+    ///
+    /// The caller retains the exact operation lease through the publication;
+    /// this does not reconstruct a Store registration or mint a second graph
+    /// client token.
+    pub fn publish_verified_with_lease(
+        &self,
+        database: &GraphDbLeaseV1,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        publication_key: &GraphPublicationKeyV1,
+    ) -> Result<VerifiedGraphCommit, GraphDbError> {
+        let operation = self.registered_operation_with_lease(database)?;
+        self.publish_verified_inner(&operation, authority, context, publication_key, None, false)
     }
 
     pub fn publish_verified_manifest(
@@ -405,8 +415,9 @@ impl GraphDbRegistry {
         publication_key: &GraphPublicationKeyV1,
         manifest: GraphGenerationManifest,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
         self.publish_verified_inner(
-            registration,
+            &operation,
             authority,
             context,
             publication_key,
@@ -422,29 +433,23 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
-        self.publish_verified_inner(
-            registration,
-            authority,
-            context,
-            publication_key,
-            None,
-            true,
-        )
+        let operation = self.registered_operation(registration)?;
+        self.publish_verified_inner(&operation, authority, context, publication_key, None, true)
     }
 
     fn publish_verified_inner(
         &self,
-        registration: GraphDbRegistration,
+        operation: &RegisteredGraphDbOperationV1,
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
         supplied_manifest: Option<GraphGenerationManifest>,
         reopen_metadata: bool,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
-        check_all(&registration, context)?;
-        require_publication_binding(&registration, publication_key)?;
-        let database = self.resolve(registration.clone())?;
-        let check = || check_all(&registration, context);
+        operation.check(self, context)?;
+        operation.require_publication_binding(publication_key)?;
+        let database = operation.database().clone();
+        let check = || operation.check(self, context);
         let replay = authority
             .replay(publication_key, context)
             .map_err(map_publication_error)?;
@@ -492,7 +497,7 @@ impl GraphDbRegistry {
             {
                 let mut visiting = BTreeSet::new();
                 let dependencies = self.load_dependencies(
-                    &registration,
+                    operation,
                     &database,
                     authority,
                     context,
@@ -524,7 +529,7 @@ impl GraphDbRegistry {
                     };
                 visiting.clear();
                 self.load_verified_head(
-                    &registration,
+                    operation,
                     &database,
                     authority,
                     context,
@@ -546,7 +551,7 @@ impl GraphDbRegistry {
         }
         let mut visiting = BTreeSet::new();
         let dependencies = self.load_dependencies(
-            &registration,
+            operation,
             &database,
             authority,
             context,
@@ -579,7 +584,8 @@ impl GraphDbRegistry {
             Ok(verified) => verified,
             Err(error) => {
                 if super::retains_fault(&error)
-                    && let Err(retain_error) = self.retain_verification_fault(&registration, &error)
+                    && let Err(retain_error) =
+                        self.retain_verification_fault_for_lease(operation.database(), &error)
                 {
                     return Err(crate::error::rollback_failure(
                         "retain graph generation verification fault",
@@ -590,7 +596,7 @@ impl GraphDbRegistry {
                 return Err(error);
             }
         };
-        check_all(&registration, context)?;
+        operation.check(self, context)?;
         let cas = GraphVerifiedHeadCompareAndSwapV1 {
             publication_key: replay.publication.key.clone(),
             input_digest: replay.publication.input_digest.clone(),
@@ -655,9 +661,36 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         projection: &GraphProjectionIdentityV1,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
-        check_all(&registration, context)?;
-        require_projection_binding(&registration, projection)?;
-        let database = self.resolve(registration.clone())?;
+        let operation = self.registered_operation(registration)?;
+        self.recover_verified_snapshot_with_operation(&operation, authority, context, projection)
+    }
+
+    /// Recovers through an already-issued, registry-validated graph lease.
+    ///
+    /// The exact mounted binding, locator, and live owner token are checked
+    /// before recovery begins; foreign, absent, and retiring leases remain
+    /// typed failures rather than reconstructed registrations.
+    pub fn recover_verified_snapshot_with_lease(
+        &self,
+        database: &GraphDbLeaseV1,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        projection: &GraphProjectionIdentityV1,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        let operation = self.registered_operation_with_lease(database)?;
+        self.recover_verified_snapshot_with_operation(&operation, authority, context, projection)
+    }
+
+    fn recover_verified_snapshot_with_operation(
+        &self,
+        operation: &RegisteredGraphDbOperationV1,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        projection: &GraphProjectionIdentityV1,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        operation.check(self, context)?;
+        operation.require_projection_binding(projection)?;
+        let database = operation.database().clone();
         let head = authority
             .verified_head(projection, context)
             .map_err(map_publication_error)?
@@ -666,7 +699,7 @@ impl GraphDbRegistry {
             })?;
         let mut visiting = BTreeSet::new();
         let lease = self.load_verified_head(
-            &registration,
+            operation,
             &database,
             authority,
             context,
@@ -674,7 +707,7 @@ impl GraphDbRegistry {
             &mut visiting,
         )?;
         database.install_verified_generation(Arc::clone(&lease))?;
-        check_all(&registration, context)?;
+        operation.check(self, context)?;
         let mut closure = BTreeMap::new();
         collect_closure(&lease, &mut closure)?;
         Ok(VerifiedGraphSnapshot::new(database, lease, closure))
@@ -687,9 +720,10 @@ impl GraphDbRegistry {
         context: &GraphPublicationOperationContextV1<'_>,
         key: &GraphPublicationKeyV1,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
-        check_all(&registration, context)?;
-        require_publication_binding(&registration, key)?;
-        let database = self.resolve(registration.clone())?;
+        let operation = self.registered_operation(registration)?;
+        operation.check(self, context)?;
+        operation.require_publication_binding(key)?;
+        let database = operation.database().clone();
         let replay = authority
             .replay(key, context)
             .map_err(map_publication_error)?;
@@ -723,7 +757,7 @@ impl GraphDbRegistry {
         })?;
         let mut visiting = BTreeSet::new();
         let lease = self.load_verified_head(
-            &registration,
+            &operation,
             &database,
             authority,
             context,
@@ -732,13 +766,13 @@ impl GraphDbRegistry {
         )?;
         let mut closure = BTreeMap::new();
         collect_closure(&lease, &mut closure)?;
-        check_all(&registration, context)?;
+        operation.check(self, context)?;
         Ok(VerifiedGraphSnapshot::new(database, lease, closure))
     }
 
     fn load_dependencies(
         &self,
-        registration: &GraphDbRegistration,
+        operation: &RegisteredGraphDbOperationV1,
         database: &GraphDb,
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
@@ -747,7 +781,7 @@ impl GraphDbRegistry {
     ) -> Result<BTreeMap<GraphProjectionIdentity, Arc<VerifiedGenerationLease>>, GraphDbError> {
         let mut loaded = BTreeMap::new();
         for dependency in &manifest.dependencies {
-            let key = dependency_key(registration, dependency)?;
+            let key = dependency_key_for_binding(operation.binding(), dependency)?;
             let replay = authority
                 .replay(&key, context)
                 .map_err(map_publication_error)?;
@@ -782,14 +816,8 @@ impl GraphDbRegistry {
             .map_err(|error| GraphDbError::Corrupt {
                 message: format!("dependency verified evidence is invalid: {error}"),
             })?;
-            let lease = self.load_verified_head(
-                registration,
-                database,
-                authority,
-                context,
-                head,
-                visiting,
-            )?;
+            let lease =
+                self.load_verified_head(operation, database, authority, context, head, visiting)?;
             loaded.insert(dependency.projection.clone(), lease);
         }
         validate_exact_dependency_closure(manifest, &loaded)?;
@@ -798,14 +826,14 @@ impl GraphDbRegistry {
 
     fn load_verified_head(
         &self,
-        registration: &GraphDbRegistration,
+        operation: &RegisteredGraphDbOperationV1,
         database: &GraphDb,
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         head: GraphVerifiedHeadV1,
         visiting: &mut BTreeSet<GenerationLocator>,
     ) -> Result<Arc<VerifiedGenerationLease>, GraphDbError> {
-        check_all(registration, context)?;
+        operation.check(self, context)?;
         let replay = authority
             .replay(&head.key, context)
             .map_err(map_publication_error)?;
@@ -814,7 +842,7 @@ impl GraphDbRegistry {
             "verified graph head has no durable active replay",
         )?;
         require_head_replay(&head, &replay)?;
-        let check = || check_all(registration, context);
+        let check = || operation.check(self, context);
         let metadata_manifest = metadata_manifest_from_replay(&replay.publication, &check)?;
         let metadata_only = metadata_manifest.is_some();
         let manifest = match metadata_manifest {
@@ -835,15 +863,9 @@ impl GraphDbRegistry {
                 message: "verified graph dependency closure contains a cycle".to_owned(),
             });
         }
-        let dependencies = self.load_dependencies(
-            registration,
-            database,
-            authority,
-            context,
-            &manifest,
-            visiting,
-        )?;
-        check_all(registration, context)?;
+        let dependencies =
+            self.load_dependencies(operation, database, authority, context, &manifest, visiting)?;
+        operation.check(self, context)?;
         let physical_namespace = locator.physical_namespace()?;
         match database
             .ensure_projection_readable(&physical_namespace, &manifest.projection.projection)

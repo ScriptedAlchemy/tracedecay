@@ -24,7 +24,7 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
     ) -> Result<Option<WorkProductEventCommitV1>, PortError> {
         let scope = context.authorized_scope();
         let rows = registered_work_query(
-            &self.handle,
+            self.handle(),
             "SELECT canonical_input_digest, event_payload FROM work_product_events_v1
              WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND command_id = ?3",
             owner_params(scope)
@@ -51,7 +51,7 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
         if !selection_covers(scope.selection(), &event) {
             return Err(PortError::NotFoundOrNotAuthorized);
         }
-        let published = super::load_published_versions(&self.handle, scope)
+        let published = super::load_published_versions(self.handle(), scope)
             .ok_or(PortError::Unavailable)?
             .into_iter()
             .find(|published| published.event_sequence == event.sequence())
@@ -68,7 +68,7 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
         draft: &WorkProductEventDraftV1,
     ) -> Result<WorkProductEventCommitOutcomeV1, PortError> {
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| PortError::Unavailable)?;
         let outcome = append_in_transaction(&transaction, context, draft);

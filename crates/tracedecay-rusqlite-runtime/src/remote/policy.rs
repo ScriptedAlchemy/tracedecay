@@ -32,7 +32,7 @@ impl RemoteSqliteStorageV1 {
         let scope_digest = replay_scope_digest(&evidence.repository_scope)?;
         let encoded = serde_json::to_string(evidence)
             .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)?;
-        self.handle
+        self.handle()
             .execute(
                 statement(
                     "INSERT INTO remote_replay_policies (
@@ -72,7 +72,7 @@ impl RemoteSqliteStorageV1 {
         let scope_digest = query_scope_digest(&record.repository_scope)?;
         let encoded = serde_json::to_string(record)
             .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
-        self.handle
+        self.handle()
             .execute(
                 statement(
                     "INSERT INTO remote_query_policies (
@@ -110,7 +110,7 @@ impl RemoteSqliteStorageV1 {
         scope: &RemoteRepositoryScopeV1,
     ) -> Result<RemoteReplayPolicyEvidenceV1, RemoteReplayApplicationErrorV1> {
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT evidence_json FROM remote_replay_policies WHERE scope_digest = ?1",
             vec![text(replay_scope_digest(scope)?.as_str())],
         )
@@ -128,7 +128,7 @@ impl RemoteSqliteStorageV1 {
         scope: &RemoteRepositoryScopeV1,
     ) -> Result<RemoteQueryPolicyRecordV1, RemoteExactObservationQueryErrorV1> {
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT record_json FROM remote_query_policies WHERE scope_digest = ?1",
             vec![text(query_scope_digest(scope)?.as_str())],
         )

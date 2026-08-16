@@ -27,7 +27,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -51,7 +51,10 @@ pub use capacity::StoreRuntimeRegistryConfig;
 pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
 pub use close::ClosedStoreRuntime;
 pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
-pub use graph::{CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreLeaseV1};
+pub use graph::{
+    CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreLeaseV1,
+    CanonicalGraphStoreOwnerAttachmentV1, CanonicalGraphStoreOwnerRetirementTargetV1,
+};
 pub use leases::{
     ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeAccessMode,
     StoreRuntimeLeaseAcquireResult, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
@@ -64,7 +67,8 @@ pub use ports::{
     StoreRuntimeResolver,
 };
 pub use retirement::{
-    StoreRuntimeRetirementBlocker, StoreRuntimeRetirementCommit, StoreRuntimeRetirementOutcome,
+    DatabaseGraphOwnerRetirementHandoffV1, StoreRuntimeRetirementBlocker,
+    StoreRuntimeRetirementCommit, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementRefusal,
     StoreRuntimeRetirementReservation, StoreRuntimeRetirementResult, StoreRuntimeRetirementTarget,
 };
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -107,6 +111,58 @@ pub struct StoreRuntimeClientLease {
     inner: Arc<StoreRuntimeClientLeaseToken>,
 }
 
+/// Exact identity of one database facade attachment within one registered
+/// runtime publication. It is never derived from a lease count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DatabaseRuntimeAttachmentIdV1(u64);
+
+/// Opaque identity of the daemon map owner that reserved a database facade
+/// attachment for retirement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DatabaseRuntimeOwnerIdentityV1(u64);
+
+/// Exact retirement reservation allocated for one database owner attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DatabaseRuntimeAttachmentReservationIdV1(u64);
+
+/// Store-side identity carried by a database owner reservation. The database
+/// layer owns rollback; Store uses this only to validate that the one map-owned
+/// attachment was reclassified before it permits physical retirement.
+#[derive(Clone)]
+pub(crate) struct DatabaseRuntimeOwnerAttachmentReservationIdentityV1 {
+    source: Arc<StoreRuntimeLeaseSource>,
+    attachment_id: DatabaseRuntimeAttachmentIdV1,
+    owner_id: DatabaseRuntimeOwnerIdentityV1,
+    reservation_id: DatabaseRuntimeAttachmentReservationIdV1,
+}
+
+/// Opaque RAII bridge supplied by a database owner to Store retirement. Store
+/// never reaches through it to the owner; dropping the bridge restores the
+/// owner attachment unless `commit` has crossed the irreversible fence.
+pub(crate) trait StoreRuntimeOwnerAttachmentRetirementReservationV1: Send {
+    fn identity(&self) -> &DatabaseRuntimeOwnerAttachmentReservationIdentityV1;
+
+    /// Returns this reservation to its concrete database-owner authority when
+    /// a pre-native-close Store attempt is refused or cancelled. Unknown
+    /// attachment bridges preserve themselves unchanged for Store retry.
+    fn try_into_database_owner_retirement_reservation(
+        self: Box<Self>,
+    ) -> Result<
+        crate::db::DatabaseOwnerRetirementReservationV1,
+        Box<dyn StoreRuntimeOwnerAttachmentRetirementReservationV1>,
+    >;
+
+    /// Runs every fallible reservation check before Store makes any target
+    /// globally committing. A successful preflight makes `commit` exact.
+    fn preflight_commit(&self) -> Result<(), StoreRuntimeRegistryFailure>;
+
+    fn commit(&mut self) -> Result<(), StoreRuntimeRegistryFailure>;
+
+    /// Once Store has crossed its commit fence, a failing exact commit remains
+    /// terminal; it must never restore an owner attachment to `Ready`.
+    fn terminalize_after_commit_failure(&mut self);
+}
+
 /// Opaque identity for the lifecycle allocation behind one client lease.
 ///
 /// It can compare runtime allocations without retaining or exposing the
@@ -140,7 +196,27 @@ struct StoreRuntimeLeaseSource {
     locator: RuntimeLocatorRecord,
     opened_file_identity: u64,
     database_authority: Option<crate::db::DatabaseAuthority>,
-    database_facades: AtomicUsize,
+    database_attachments: Mutex<BTreeMap<DatabaseRuntimeAttachmentIdV1, DatabaseAttachmentState>>,
+    next_database_attachment_id: AtomicU64,
+    next_database_owner_id: AtomicU64,
+    next_database_attachment_reservation_id: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DatabaseAttachmentState {
+    Active {
+        client_token: u64,
+    },
+    OwnerReserved {
+        client_token: u64,
+        owner_id: DatabaseRuntimeOwnerIdentityV1,
+        reservation_id: DatabaseRuntimeAttachmentReservationIdV1,
+    },
+    Committed {
+        client_token: u64,
+        owner_id: DatabaseRuntimeOwnerIdentityV1,
+        reservation_id: DatabaseRuntimeAttachmentReservationIdV1,
+    },
 }
 
 impl StoreRuntimeLeaseSource {
@@ -217,6 +293,303 @@ impl StoreRuntimeLeaseSource {
         }
         Ok(self.opened_file_identity)
     }
+
+    fn register_database_attachment(
+        &self,
+        client_token: u64,
+    ) -> Result<DatabaseRuntimeAttachmentIdV1, StoreRuntimeRegistryFailure> {
+        let id = DatabaseRuntimeAttachmentIdV1(allocate_database_attachment_counter(
+            &self.next_database_attachment_id,
+        )?);
+        let previous = self
+            .database_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, DatabaseAttachmentState::Active { client_token });
+        if previous.is_some() {
+            return Err(StoreRuntimeRegistryFailure::DatabaseAttachmentIdentityConflict);
+        }
+        Ok(id)
+    }
+
+    fn allocate_database_owner_identity(
+        &self,
+    ) -> Result<DatabaseRuntimeOwnerIdentityV1, StoreRuntimeRegistryFailure> {
+        Ok(DatabaseRuntimeOwnerIdentityV1(
+            allocate_database_attachment_counter(&self.next_database_owner_id)?,
+        ))
+    }
+
+    fn reserve_database_attachment_for_owner(
+        self: &Arc<Self>,
+        attachment_id: DatabaseRuntimeAttachmentIdV1,
+        owner_id: DatabaseRuntimeOwnerIdentityV1,
+    ) -> Result<DatabaseRuntimeOwnerAttachmentReservationIdentityV1, StoreRuntimeRegistryFailure>
+    {
+        let reservation_id = DatabaseRuntimeAttachmentReservationIdV1(
+            allocate_database_attachment_counter(&self.next_database_attachment_reservation_id)?,
+        );
+        let mut attachments = self
+            .database_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(state) = attachments.get_mut(&attachment_id) else {
+            return Err(StoreRuntimeRegistryFailure::DatabaseAttachmentMissing {
+                attachment_id: attachment_id.0,
+            });
+        };
+        match state {
+            DatabaseAttachmentState::Active { client_token } => {
+                let client_token = *client_token;
+                *state = DatabaseAttachmentState::OwnerReserved {
+                    client_token,
+                    owner_id,
+                    reservation_id,
+                };
+            }
+            DatabaseAttachmentState::OwnerReserved { .. }
+            | DatabaseAttachmentState::Committed { .. } => {
+                return Err(
+                    StoreRuntimeRegistryFailure::DatabaseAttachmentAlreadyReserved {
+                        attachment_id: attachment_id.0,
+                    },
+                );
+            }
+        }
+        Ok(DatabaseRuntimeOwnerAttachmentReservationIdentityV1 {
+            source: Arc::clone(self),
+            attachment_id,
+            owner_id,
+            reservation_id,
+        })
+    }
+
+    fn release_database_attachment(&self, attachment_id: DatabaseRuntimeAttachmentIdV1) {
+        let _ = self
+            .database_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&attachment_id);
+    }
+
+    fn restore_database_owner_attachment_reservation(
+        &self,
+        reservation: &DatabaseRuntimeOwnerAttachmentReservationIdentityV1,
+    ) -> Result<(), StoreRuntimeRegistryFailure> {
+        if !std::ptr::eq(self, Arc::as_ptr(&reservation.source)) {
+            return Err(StoreRuntimeRegistryFailure::DatabaseAttachmentOwnerMismatch);
+        }
+        let mut attachments = self
+            .database_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(state) = attachments.get_mut(&reservation.attachment_id) else {
+            return Err(
+                StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost {
+                    attachment_id: reservation.attachment_id.0,
+                },
+            );
+        };
+        if let DatabaseAttachmentState::OwnerReserved {
+            client_token,
+            owner_id,
+            reservation_id,
+        } = state
+            && *owner_id == reservation.owner_id
+            && *reservation_id == reservation.reservation_id
+        {
+            let client_token = *client_token;
+            *state = DatabaseAttachmentState::Active { client_token };
+            return match attachments.get(&reservation.attachment_id) {
+                Some(DatabaseAttachmentState::Active { .. }) => Ok(()),
+                _ => Err(
+                    StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost {
+                        attachment_id: reservation.attachment_id.0,
+                    },
+                ),
+            };
+        }
+        Err(
+            StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost {
+                attachment_id: reservation.attachment_id.0,
+            },
+        )
+    }
+
+    fn commit_database_owner_attachment_reservation(
+        &self,
+        reservation: &DatabaseRuntimeOwnerAttachmentReservationIdentityV1,
+    ) -> Result<(), StoreRuntimeRegistryFailure> {
+        let mut attachments = self
+            .database_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(state) = attachments.get_mut(&reservation.attachment_id) else {
+            return Err(
+                StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost {
+                    attachment_id: reservation.attachment_id.0,
+                },
+            );
+        };
+        match state {
+            DatabaseAttachmentState::OwnerReserved {
+                client_token,
+                owner_id,
+                reservation_id,
+            } if *owner_id == reservation.owner_id
+                && *reservation_id == reservation.reservation_id =>
+            {
+                let client_token = *client_token;
+                *state = DatabaseAttachmentState::Committed {
+                    client_token,
+                    owner_id: reservation.owner_id,
+                    reservation_id: reservation.reservation_id,
+                };
+                Ok(())
+            }
+            _ => Err(
+                StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost {
+                    attachment_id: reservation.attachment_id.0,
+                },
+            ),
+        }
+    }
+
+    fn validate_database_owner_attachment_reservation(
+        &self,
+        reservation: &DatabaseRuntimeOwnerAttachmentReservationIdentityV1,
+    ) -> Result<(), StoreRuntimeRegistryFailure> {
+        if !std::ptr::eq(self, Arc::as_ptr(&reservation.source)) {
+            return Err(StoreRuntimeRegistryFailure::DatabaseAttachmentOwnerMismatch);
+        }
+        let attachments = self
+            .database_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match attachments.get(&reservation.attachment_id) {
+            Some(DatabaseAttachmentState::OwnerReserved {
+                client_token: _,
+                owner_id,
+                reservation_id,
+            }) if *owner_id == reservation.owner_id
+                && *reservation_id == reservation.reservation_id =>
+            {
+                Ok(())
+            }
+            _ => Err(
+                StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost {
+                    attachment_id: reservation.attachment_id.0,
+                },
+            ),
+        }
+    }
+
+    fn retirement_database_attachment_blockers(
+        &self,
+        owner_reservation: Option<&DatabaseRuntimeOwnerAttachmentReservationIdentityV1>,
+    ) -> usize {
+        self.database_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(attachment_id, state)| {
+                !matches!(
+                    (owner_reservation, state),
+                    (
+                        Some(reservation),
+                        DatabaseAttachmentState::OwnerReserved {
+                            owner_id,
+                            reservation_id,
+                            ..
+                        },
+                    ) if **attachment_id == reservation.attachment_id
+                        && *owner_id == reservation.owner_id
+                        && *reservation_id == reservation.reservation_id
+                )
+            })
+            .count()
+    }
+
+    fn retirement_client_lease_blockers(&self, client_tokens: &BTreeSet<u64>) -> usize {
+        let attachment_tokens = self
+            .database_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(_, state)| match state {
+                DatabaseAttachmentState::Active { client_token }
+                | DatabaseAttachmentState::OwnerReserved { client_token, .. }
+                | DatabaseAttachmentState::Committed { client_token, .. } => *client_token,
+            })
+            .collect::<BTreeSet<_>>();
+        client_tokens
+            .iter()
+            .filter(|token| !attachment_tokens.contains(token))
+            .count()
+    }
+}
+
+fn allocate_database_attachment_counter(
+    counter: &AtomicU64,
+) -> Result<u64, StoreRuntimeRegistryFailure> {
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| StoreRuntimeRegistryFailure::DatabaseAttachmentIdentityExhausted)
+}
+
+impl DatabaseRuntimeOwnerAttachmentReservationIdentityV1 {
+    pub(crate) fn binding(&self) -> &StoreRuntimeBindingV1 {
+        self.source.binding()
+    }
+
+    pub(crate) fn locator(&self) -> &RuntimeLocatorRecord {
+        self.source.locator()
+    }
+
+    pub(crate) fn restore(&self) -> Result<(), StoreRuntimeRegistryFailure> {
+        self.source
+            .restore_database_owner_attachment_reservation(self)
+    }
+
+    pub(crate) fn commit(&self) -> Result<(), StoreRuntimeRegistryFailure> {
+        self.source
+            .commit_database_owner_attachment_reservation(self)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), StoreRuntimeRegistryFailure> {
+        self.source
+            .validate_database_owner_attachment_reservation(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_for_test(&self) {
+        self.source.release_database_attachment(self.attachment_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn make_stale_for_test(&self) {
+        let mut attachments = self
+            .source
+            .database_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(state) = attachments.get_mut(&self.attachment_id) else {
+            return;
+        };
+        if let DatabaseAttachmentState::OwnerReserved {
+            client_token,
+            owner_id,
+            reservation_id,
+        } = state
+            && *owner_id == self.owner_id
+            && *reservation_id == self.reservation_id
+        {
+            let client_token = *client_token;
+            *state = DatabaseAttachmentState::Active { client_token };
+        }
+    }
 }
 
 /// The registry's non-cloneable physical attachment. Callers receive only
@@ -231,6 +604,7 @@ struct StoreRuntimeOwnerAttachment {
 /// facade must consume an independently issued client lease.
 pub(crate) struct DatabaseRuntimeAttachment {
     client: StoreRuntimeClientLease,
+    id: DatabaseRuntimeAttachmentIdV1,
 }
 
 impl StoreRuntimeOwnerAttachment {
@@ -275,9 +649,13 @@ impl StoreRuntimeClientLease {
         self.inner.runtime.health_snapshot()
     }
 
-    pub(crate) fn into_database_attachment(self) -> DatabaseRuntimeAttachment {
-        self.inner.database_facades.fetch_add(1, Ordering::AcqRel);
-        DatabaseRuntimeAttachment { client: self }
+    pub(crate) fn into_database_attachment(
+        self,
+    ) -> Result<DatabaseRuntimeAttachment, StoreRuntimeRegistryFailure> {
+        let id = self
+            .inner
+            .register_database_attachment(self.inner._lifetime.token())?;
+        Ok(DatabaseRuntimeAttachment { client: self, id })
     }
 }
 
@@ -297,24 +675,32 @@ impl DatabaseRuntimeAttachment {
             }),
         })
     }
-}
 
-impl std::ops::Deref for DatabaseRuntimeAttachment {
-    type Target = StoreRuntimeClientLease;
-
-    fn deref(&self) -> &Self::Target {
+    pub(crate) fn client(&self) -> &StoreRuntimeClientLease {
         &self.client
+    }
+
+    pub(crate) fn allocate_owner_identity(
+        &self,
+    ) -> Result<DatabaseRuntimeOwnerIdentityV1, StoreRuntimeRegistryFailure> {
+        self.client.inner.allocate_database_owner_identity()
+    }
+
+    pub(crate) fn reserve_for_owner(
+        &self,
+        owner_id: DatabaseRuntimeOwnerIdentityV1,
+    ) -> Result<DatabaseRuntimeOwnerAttachmentReservationIdentityV1, StoreRuntimeRegistryFailure>
+    {
+        self.client
+            .inner
+            .source
+            .reserve_database_attachment_for_owner(self.id, owner_id)
     }
 }
 
 impl Drop for DatabaseRuntimeAttachment {
     fn drop(&mut self) {
-        let previous = self
-            .client
-            .inner
-            .database_facades
-            .fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous != 0, "database facade accounting underflow");
+        self.client.inner.release_database_attachment(self.id);
     }
 }
 
@@ -834,11 +1220,40 @@ pub enum StoreRuntimeRegistryFailure {
         key: Box<StoreRuntimeKey>,
     },
     PublicationIdExhausted,
+    DatabaseAttachmentIdentityExhausted,
+    DatabaseAttachmentIdentityConflict,
+    DatabaseAttachmentAlreadyReserved {
+        attachment_id: u64,
+    },
+    DatabaseAttachmentMissing {
+        attachment_id: u64,
+    },
+    DatabaseAttachmentOwnerMismatch,
+    DatabaseAttachmentReservationLost {
+        attachment_id: u64,
+    },
+    OwnerRetirementReservationLost,
+    OwnerRetirementCommitFailed {
+        message: String,
+    },
     GraphLeaseCountExhausted {
         binding: Box<StoreRuntimeBindingV1>,
     },
     GraphLeaseTokenExhausted {
         key: Box<StoreRuntimeKey>,
+    },
+    GraphOwnerAttachmentIdentityExhausted,
+    GraphOwnerAttachmentAlreadyRegistered {
+        binding: Box<StoreRuntimeBindingV1>,
+    },
+    GraphOwnerAttachmentMissing {
+        binding: Box<StoreRuntimeBindingV1>,
+    },
+    GraphOwnerAttachmentReservationLost {
+        binding: Box<StoreRuntimeBindingV1>,
+    },
+    GraphOwnerAttachmentRetiring {
+        binding: Box<StoreRuntimeBindingV1>,
     },
     ProfilePinTokenExhausted {
         key: Box<StoreRuntimeKey>,
@@ -1000,11 +1415,44 @@ struct RetainedGraphPublication {
     binding: StoreRuntimeBindingV1,
     verified_locator: VerifiedStoreLocatorV1,
     canonical_path: PathBuf,
+    /// The one non-client attachment transferred to the owning graph-runtime
+    /// registry. Its state is separate from ordinary graph operation leases.
+    owner_attachment: Option<GraphStoreOwnerAttachmentState>,
     /// One entry per independently issued graph lease. Clones share the
     /// returned lease object and therefore release one exact token at last
     /// drop rather than being inferred from reference counts.
     lease_tokens: BTreeSet<u64>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphStoreOwnerAttachmentState {
+    MapOwned {
+        owner_id: GraphStoreOwnerIdentityV1,
+        attachment_id: GraphStoreOwnerAttachmentIdV1,
+    },
+    OwnerReserved {
+        owner_id: GraphStoreOwnerIdentityV1,
+        attachment_id: GraphStoreOwnerAttachmentIdV1,
+        reservation_id: GraphStoreOwnerAttachmentReservationIdV1,
+    },
+    Committed {
+        owner_id: GraphStoreOwnerIdentityV1,
+        attachment_id: GraphStoreOwnerAttachmentIdV1,
+        reservation_id: GraphStoreOwnerAttachmentReservationIdV1,
+    },
+}
+
+/// Exact identity allocated for one graph-runtime map owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct GraphStoreOwnerIdentityV1(u64);
+
+/// Exact identity allocated for the map-owned Store attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct GraphStoreOwnerAttachmentIdV1(u64);
+
+/// Exact retirement fence allocated for the graph map attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct GraphStoreOwnerAttachmentReservationIdV1(u64);
 
 enum RegistryEntry {
     Opening(open::OpeningRuntime),
@@ -1028,6 +1476,9 @@ struct RegistryState {
     next_eviction_attempt: u64,
     next_publication: u64,
     next_graph_lease_token: u64,
+    next_graph_owner_id: u64,
+    next_graph_owner_attachment_id: u64,
+    next_graph_owner_attachment_reservation_id: u64,
     next_profile_pin_token: u64,
 }
 

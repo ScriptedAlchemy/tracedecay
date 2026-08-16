@@ -6,26 +6,61 @@ use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1};
 
 use super::capacity::drain_and_close_physical;
 use super::{
-    CommittingRuntime, FaultedRuntime, ReadyRuntime, RegistryEntry, RetiringRuntime,
-    StoreRuntimeKey, StoreRuntimeOwnerAttachment, StoreRuntimeRegistry,
+    CanonicalGraphStoreOwnerRetirementTargetV1, CommittingRuntime,
+    DatabaseRuntimeOwnerAttachmentReservationIdentityV1, FaultedRuntime, ReadyRuntime,
+    RegistryEntry, RetiringRuntime, StoreRuntimeKey, StoreRuntimeOwnerAttachment,
+    StoreRuntimeOwnerAttachmentRetirementReservationV1, StoreRuntimeRegistry,
     StoreRuntimeRegistryFailure,
 };
-use crate::db::DatabaseAuthority;
+use crate::db::{DatabaseAuthority, DatabaseOwnerRetirementReservationV1};
 
 /// Exact registered runtime and originating authority selected for retirement.
 ///
 /// The authority is part of target identity: a matching shard/incarnation with
 /// a foreign authority never reserves the live attachment.
-#[derive(Clone)]
 pub struct StoreRuntimeRetirementTarget {
     binding: StoreRuntimeBindingV1,
     authority: DatabaseAuthority,
+    owner_attachment: Option<Box<dyn StoreRuntimeOwnerAttachmentRetirementReservationV1>>,
+    graph_owner_attachment: Option<CanonicalGraphStoreOwnerRetirementTargetV1>,
 }
 
 impl StoreRuntimeRetirementTarget {
     #[must_use]
     pub fn new(binding: StoreRuntimeBindingV1, authority: DatabaseAuthority) -> Self {
-        Self { binding, authority }
+        Self {
+            binding,
+            authority,
+            owner_attachment: None,
+            graph_owner_attachment: None,
+        }
+    }
+
+    pub(crate) fn with_database_owner_attachment(
+        binding: StoreRuntimeBindingV1,
+        authority: DatabaseAuthority,
+        owner_attachment: Box<dyn StoreRuntimeOwnerAttachmentRetirementReservationV1>,
+    ) -> Self {
+        Self {
+            binding,
+            authority,
+            owner_attachment: Some(owner_attachment),
+            graph_owner_attachment: None,
+        }
+    }
+
+    pub(crate) fn with_owner_attachments(
+        binding: StoreRuntimeBindingV1,
+        authority: DatabaseAuthority,
+        owner_attachment: Box<dyn StoreRuntimeOwnerAttachmentRetirementReservationV1>,
+        graph_owner_attachment: CanonicalGraphStoreOwnerRetirementTargetV1,
+    ) -> Self {
+        Self {
+            binding,
+            authority,
+            owner_attachment: Some(owner_attachment),
+            graph_owner_attachment: Some(graph_owner_attachment),
+        }
     }
 
     #[must_use]
@@ -37,6 +72,74 @@ impl StoreRuntimeRetirementTarget {
     pub fn authority(&self) -> &DatabaseAuthority {
         &self.authority
     }
+
+    fn owner_attachment_identity(
+        &self,
+    ) -> Option<&DatabaseRuntimeOwnerAttachmentReservationIdentityV1> {
+        self.owner_attachment
+            .as_ref()
+            .map(|reservation| reservation.identity())
+    }
+
+    fn graph_owner_attachment(&self) -> Option<&CanonicalGraphStoreOwnerRetirementTargetV1> {
+        self.graph_owner_attachment.as_ref()
+    }
+
+    fn graph_owner_attachment_mut(
+        &mut self,
+    ) -> Option<&mut CanonicalGraphStoreOwnerRetirementTargetV1> {
+        self.graph_owner_attachment.as_mut()
+    }
+
+    fn outcome_target(&self) -> Self {
+        Self::new(self.binding.clone(), self.authority.clone())
+    }
+
+    fn commit_owner_attachment(&mut self) -> Result<(), StoreRuntimeRegistryFailure> {
+        match self.owner_attachment.as_mut() {
+            Some(reservation) => reservation.commit(),
+            None => Ok(()),
+        }
+    }
+
+    fn terminalize_graph_owner_attachment(
+        &mut self,
+        registry: &StoreRuntimeRegistry,
+        state: &mut super::RegistryState,
+    ) -> Result<(), StoreRuntimeRegistryFailure> {
+        match self.graph_owner_attachment_mut() {
+            Some(target) => target.terminalize_locked(registry, state),
+            None => Ok(()),
+        }
+    }
+
+    fn remove_graph_owner_attachment_after_store_close(
+        &mut self,
+        registry: &StoreRuntimeRegistry,
+        state: &mut super::RegistryState,
+    ) -> Result<(), StoreRuntimeRegistryFailure> {
+        match self.graph_owner_attachment_mut() {
+            Some(target) => target.remove_after_store_close_locked(registry, state),
+            None => Ok(()),
+        }
+    }
+
+    fn terminalize_graph_owner_attachment_after_commit_failure(
+        &mut self,
+        registry: &StoreRuntimeRegistry,
+    ) {
+        let Some(target) = self.graph_owner_attachment_mut() else {
+            return;
+        };
+        let mut state = registry.lock_state();
+        target.terminalize_after_commit_failure_locked(registry, &mut state);
+    }
+
+    fn terminalize_after_commit_failure(&mut self) {
+        if let Some(reservation) = self.owner_attachment.as_mut() {
+            reservation.terminalize_after_commit_failure();
+        }
+    }
 }
 
 impl fmt::Debug for StoreRuntimeRetirementTarget {
@@ -45,6 +148,74 @@ impl fmt::Debug for StoreRuntimeRetirementTarget {
             .debug_struct("StoreRuntimeRetirementTarget")
             .field("binding", &self.binding)
             .finish_non_exhaustive()
+    }
+}
+
+/// Exact owner reservations returned from one pre-native-close Store attempt.
+///
+/// This handoff keeps the database and graph-map reservations paired so a
+/// daemon owner slot can return to its retryable state without remounting or
+/// minting a new owner identity. It is unavailable after Store's irreversible
+/// commit boundary because terminal outcomes intentionally contain no owner
+/// reservations.
+pub struct DatabaseGraphOwnerRetirementHandoffV1 {
+    database_owner_reservation: DatabaseOwnerRetirementReservationV1,
+    graph_owner_target: CanonicalGraphStoreOwnerRetirementTargetV1,
+}
+
+impl DatabaseGraphOwnerRetirementHandoffV1 {
+    /// Returns the exact move-only reservations for one later Store attempt.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        DatabaseOwnerRetirementReservationV1,
+        CanonicalGraphStoreOwnerRetirementTargetV1,
+    ) {
+        (self.database_owner_reservation, self.graph_owner_target)
+    }
+
+    /// Abandons one pre-native-close retirement attempt, restoring database
+    /// owner issuance while preserving the exact graph-map target for a later
+    /// retirement of that same owner slot.
+    #[must_use]
+    pub fn cancel_to_ready_graph_target(self) -> CanonicalGraphStoreOwnerRetirementTargetV1 {
+        let Self {
+            database_owner_reservation,
+            graph_owner_target,
+        } = self;
+        drop(database_owner_reservation);
+        graph_owner_target
+    }
+}
+
+impl StoreRuntimeRetirementTarget {
+    /// Recovers the paired database and graph owner reservations after an
+    /// uncommitted Store refusal or cancellation.
+    ///
+    /// On a non-paired or foreign bridge target, returns the exact unchanged
+    /// Store target so its normal RAII restoration remains authoritative.
+    pub fn into_database_graph_owner_handoff(
+        mut self,
+    ) -> Result<DatabaseGraphOwnerRetirementHandoffV1, Self> {
+        let Some(owner_attachment) = self.owner_attachment.take() else {
+            return Err(self);
+        };
+        let Some(graph_owner_target) = self.graph_owner_attachment.take() else {
+            self.owner_attachment = Some(owner_attachment);
+            return Err(self);
+        };
+        match owner_attachment.try_into_database_owner_retirement_reservation() {
+            Ok(database_owner_reservation) => Ok(DatabaseGraphOwnerRetirementHandoffV1 {
+                database_owner_reservation,
+                graph_owner_target,
+            }),
+            Err(owner_attachment) => {
+                self.owner_attachment = Some(owner_attachment);
+                self.graph_owner_attachment = Some(graph_owner_target);
+                Err(self)
+            }
+        }
     }
 }
 
@@ -73,7 +244,11 @@ pub enum StoreRuntimeRetirementBlocker {
         binding: Box<StoreRuntimeBindingV1>,
         message: String,
     },
-    DatabaseFacades {
+    OwnerAttachmentReservation {
+        binding: Box<StoreRuntimeBindingV1>,
+        message: String,
+    },
+    DatabaseAttachments {
         binding: Box<StoreRuntimeBindingV1>,
         count: usize,
     },
@@ -115,7 +290,48 @@ pub enum StoreRuntimeRetirementBlocker {
 #[must_use]
 pub enum StoreRuntimeRetirementResult {
     Reserved(StoreRuntimeRetirementReservation),
-    Blocked(Vec<StoreRuntimeRetirementBlocker>),
+    Blocked(StoreRuntimeRetirementRefusal),
+}
+
+/// A pre-native-close retirement refusal that preserves every exact target.
+///
+/// Owner-attachment targets are move-only reservations. Returning them on a
+/// blocked preflight lets callers retry the same database and graph owner
+/// attachments after clearing a lease or cancellation fence; it never mints a
+/// new owner identity or remounts a runtime.
+#[derive(Debug)]
+pub struct StoreRuntimeRetirementRefusal {
+    blockers: Vec<StoreRuntimeRetirementBlocker>,
+    targets: Vec<StoreRuntimeRetirementTarget>,
+}
+
+impl StoreRuntimeRetirementRefusal {
+    fn new(
+        blockers: Vec<StoreRuntimeRetirementBlocker>,
+        targets: Vec<StoreRuntimeRetirementTarget>,
+    ) -> Self {
+        Self { blockers, targets }
+    }
+
+    #[must_use]
+    pub fn blockers(&self) -> &[StoreRuntimeRetirementBlocker] {
+        &self.blockers
+    }
+
+    #[must_use]
+    pub fn targets(&self) -> &[StoreRuntimeRetirementTarget] {
+        &self.targets
+    }
+
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<StoreRuntimeRetirementBlocker>,
+        Vec<StoreRuntimeRetirementTarget>,
+    ) {
+        (self.blockers, self.targets)
+    }
 }
 
 /// Per-target terminal result of physical retirement.
@@ -186,12 +402,11 @@ impl StoreRuntimeRegistry {
             }
         }
 
-        let mut pending = Vec::with_capacity(targets.len());
-        for target in targets {
+        for target in &targets {
             let key = StoreRuntimeKey::from_binding(&target.binding);
             let Some(entry) = state.entries.get(&key) else {
                 blockers.push(StoreRuntimeRetirementBlocker::Missing {
-                    binding: Box::new(target.binding),
+                    binding: Box::new(target.binding.clone()),
                 });
                 continue;
             };
@@ -199,32 +414,32 @@ impl StoreRuntimeRegistry {
                 RegistryEntry::Ready(ready) => ready,
                 RegistryEntry::Opening(_) | RegistryEntry::Evicting(_) => {
                     blockers.push(StoreRuntimeRetirementBlocker::RuntimeState {
-                        binding: Box::new(target.binding),
+                        binding: Box::new(target.binding.clone()),
                         state: RuntimeMaintenanceStateV1::Opening,
                     });
                     continue;
                 }
                 RegistryEntry::Retiring(_) => {
                     blockers.push(StoreRuntimeRetirementBlocker::Retiring {
-                        binding: Box::new(target.binding),
+                        binding: Box::new(target.binding.clone()),
                     });
                     continue;
                 }
                 RegistryEntry::Committing(_) => {
                     blockers.push(StoreRuntimeRetirementBlocker::Committing {
-                        binding: Box::new(target.binding),
+                        binding: Box::new(target.binding.clone()),
                     });
                     continue;
                 }
                 RegistryEntry::Faulted(_) => {
                     blockers.push(StoreRuntimeRetirementBlocker::Faulted {
-                        binding: Box::new(target.binding),
+                        binding: Box::new(target.binding.clone()),
                     });
                     continue;
                 }
                 RegistryEntry::DurabilityUncertain(_) => {
                     blockers.push(StoreRuntimeRetirementBlocker::DurabilityUncertain {
-                        binding: Box::new(target.binding),
+                        binding: Box::new(target.binding.clone()),
                     });
                     continue;
                 }
@@ -233,7 +448,7 @@ impl StoreRuntimeRegistry {
             let binding = ready.owner.binding();
             if binding != &target.binding {
                 blockers.push(StoreRuntimeRetirementBlocker::BindingMismatch {
-                    expected: Box::new(target.binding),
+                    expected: Box::new(target.binding.clone()),
                     actual: Box::new(binding.clone()),
                 });
                 continue;
@@ -267,18 +482,52 @@ impl StoreRuntimeRegistry {
                 continue;
             }
 
-            let database_facades = ready.owner.database_facades.load(Ordering::Acquire);
-            if database_facades != 0 {
-                blockers.push(StoreRuntimeRetirementBlocker::DatabaseFacades {
+            let owner_attachment = target.owner_attachment_identity();
+            if let Some(owner_attachment) = owner_attachment {
+                let reservation_matches_binding = owner_attachment.binding() == binding
+                    && owner_attachment.binding() == &target.binding;
+                let reservation_matches_locator =
+                    owner_attachment.locator().verified() == ready.owner.locator().verified();
+                let reservation_is_live = ready
+                    .owner
+                    .source
+                    .validate_database_owner_attachment_reservation(owner_attachment);
+                if !reservation_matches_binding
+                    || !reservation_matches_locator
+                    || reservation_is_live.is_err()
+                {
+                    blockers.push(StoreRuntimeRetirementBlocker::OwnerAttachmentReservation {
+                        binding: Box::new(binding.clone()),
+                        message: match reservation_is_live {
+                            Ok(()) => {
+                                "database owner attachment did not match the exact binding and locator"
+                                    .to_owned()
+                            }
+                            Err(error) => format!("{error:?}"),
+                        },
+                    });
+                    continue;
+                }
+            }
+            let database_attachments = ready
+                .owner
+                .source
+                .retirement_database_attachment_blockers(owner_attachment);
+            if database_attachments != 0 {
+                blockers.push(StoreRuntimeRetirementBlocker::DatabaseAttachments {
                     binding: Box::new(binding.clone()),
-                    count: database_facades,
+                    count: database_attachments,
                 });
             }
             let leases = ready.owner.runtime().retirement_lease_counts();
-            if leases.clients != 0 {
+            let client_leases = ready
+                .owner
+                .source
+                .retirement_client_lease_blockers(&leases.client_tokens);
+            if client_leases != 0 {
                 blockers.push(StoreRuntimeRetirementBlocker::ClientLeases {
                     binding: Box::new(binding.clone()),
-                    count: leases.clients,
+                    count: client_leases,
                 });
             }
             if leases.operations != 0 {
@@ -313,15 +562,121 @@ impl StoreRuntimeRegistry {
                     count: graph_leases,
                 });
             }
-            pending.push(PendingRetirement {
-                target,
-                key,
-                owner: Arc::clone(&ready.owner),
-            });
+            let graph_map_owner_present = state
+                .graph_publications
+                .get(&key)
+                .is_some_and(|retained| retained.owner_attachment.is_some());
+            match (graph_map_owner_present, target.graph_owner_attachment()) {
+                (true, Some(graph_owner_attachment)) => {
+                    if !graph_owner_attachment.matches_binding(&target.binding) {
+                        blockers.push(StoreRuntimeRetirementBlocker::OwnerAttachmentReservation {
+                            binding: Box::new(binding.clone()),
+                            message:
+                                "graph map owner did not match the exact Store retirement target"
+                                    .to_owned(),
+                        });
+                    } else if let Err(error) =
+                        graph_owner_attachment.validate_map_owned_locked(self, &state)
+                    {
+                        blockers.push(StoreRuntimeRetirementBlocker::OwnerAttachmentReservation {
+                            binding: Box::new(binding.clone()),
+                            message: format!("{error:?}"),
+                        });
+                    }
+                }
+                (true, None) | (false, Some(_)) => {
+                    blockers.push(StoreRuntimeRetirementBlocker::OwnerAttachmentReservation {
+                        binding: Box::new(binding.clone()),
+                        message: "graph map owner did not match an exact Store retirement target"
+                            .to_owned(),
+                    });
+                }
+                (false, None) => {}
+            }
         }
 
         if !blockers.is_empty() {
-            return StoreRuntimeRetirementResult::Blocked(blockers);
+            drop(state);
+            return StoreRuntimeRetirementResult::Blocked(StoreRuntimeRetirementRefusal::new(
+                blockers, targets,
+            ));
+        }
+
+        let mut pending: Vec<PendingRetirement> = Vec::with_capacity(targets.len());
+        let mut targets = targets.into_iter();
+        while let Some(target) = targets.next() {
+            let key = StoreRuntimeKey::from_binding(&target.binding);
+            let owner = match state.entries.get(&key) {
+                Some(RegistryEntry::Ready(ready)) => Ok(Arc::clone(&ready.owner)),
+                None => Err(StoreRuntimeRetirementBlocker::Missing {
+                    binding: Box::new(target.binding.clone()),
+                }),
+                Some(RegistryEntry::Opening(_)) | Some(RegistryEntry::Evicting(_)) => {
+                    Err(StoreRuntimeRetirementBlocker::RuntimeState {
+                        binding: Box::new(target.binding.clone()),
+                        state: RuntimeMaintenanceStateV1::Opening,
+                    })
+                }
+                Some(RegistryEntry::Retiring(_)) => Err(StoreRuntimeRetirementBlocker::Retiring {
+                    binding: Box::new(target.binding.clone()),
+                }),
+                Some(RegistryEntry::Committing(_)) => {
+                    Err(StoreRuntimeRetirementBlocker::Committing {
+                        binding: Box::new(target.binding.clone()),
+                    })
+                }
+                Some(RegistryEntry::Faulted(_)) => Err(StoreRuntimeRetirementBlocker::Faulted {
+                    binding: Box::new(target.binding.clone()),
+                }),
+                Some(RegistryEntry::DurabilityUncertain(_)) => {
+                    Err(StoreRuntimeRetirementBlocker::DurabilityUncertain {
+                        binding: Box::new(target.binding.clone()),
+                    })
+                }
+            };
+            let owner = match owner {
+                Ok(owner) => owner,
+                Err(blocker) => {
+                    let mut retry_targets = pending
+                        .into_iter()
+                        .map(|retirement| retirement.target)
+                        .collect::<Vec<_>>();
+                    retry_targets.push(target);
+                    retry_targets.extend(targets);
+                    blockers.push(blocker);
+                    drop(state);
+                    return StoreRuntimeRetirementResult::Blocked(
+                        StoreRuntimeRetirementRefusal::new(blockers, retry_targets),
+                    );
+                }
+            };
+            pending.push(PendingRetirement { target, key, owner });
+        }
+
+        for position in 0..pending.len() {
+            let reservation = pending[position]
+                .target
+                .graph_owner_attachment_mut()
+                .map(|target| target.reserve_locked(self, &mut state));
+            if let Some(Err(error)) = reservation {
+                for prior in &mut pending[..position] {
+                    if let Some(target) = prior.target.graph_owner_attachment_mut() {
+                        let _ = target.restore_locked(self, &mut state);
+                    }
+                }
+                blockers.push(StoreRuntimeRetirementBlocker::OwnerAttachmentReservation {
+                    binding: Box::new(pending[position].target.binding().clone()),
+                    message: format!("{error:?}"),
+                });
+                drop(state);
+                let targets = pending
+                    .into_iter()
+                    .map(|retirement| retirement.target)
+                    .collect();
+                return StoreRuntimeRetirementResult::Blocked(StoreRuntimeRetirementRefusal::new(
+                    blockers, targets,
+                ));
+            }
         }
 
         for retirement in &pending {
@@ -341,10 +696,10 @@ impl StoreRuntimeRegistry {
 
     fn begin_retirement_commit(
         &self,
-        pending: &[PendingRetirement],
-    ) -> Result<(), StoreRuntimeRegistryFailure> {
-        let mut state = self.lock_state();
-        for retirement in pending {
+        pending: &mut [PendingRetirement],
+    ) -> Result<Option<String>, StoreRuntimeRegistryFailure> {
+        let state = self.lock_state();
+        for retirement in pending.iter() {
             let Some(RegistryEntry::Retiring(retiring)) = state.entries.get(&retirement.key) else {
                 return Err(StoreRuntimeRegistryFailure::RetirementReservationLost {
                     key: Box::new(retirement.key.clone()),
@@ -357,8 +712,55 @@ impl StoreRuntimeRegistry {
                     key: Box::new(retirement.key.clone()),
                 });
             }
+            if let Some(graph_owner_attachment) = retirement.target.graph_owner_attachment() {
+                graph_owner_attachment.validate_reserved_locked(self, &state)?;
+            }
         }
-        for retirement in pending {
+        drop(state);
+
+        for retirement in pending.iter() {
+            if let Some(owner_attachment) = retirement.target.owner_attachment.as_ref() {
+                owner_attachment.preflight_commit()?;
+            }
+        }
+
+        // The owner attachment is the irreversible authority fence. Keep the
+        // registry in `Retiring` until every fallible owner commit has either
+        // succeeded or yielded terminal truth; a global `Committing` state
+        // must never race ahead of that exact attachment decision.
+        let mut commit_failure = None;
+        for retirement in pending.iter_mut() {
+            if let Err(error) = retirement.target.commit_owner_attachment() {
+                commit_failure = Some(format!("{error:?}"));
+                break;
+            }
+        }
+        if commit_failure.is_none() {
+            let mut state = self.lock_state();
+            for retirement in pending.iter_mut() {
+                if let Err(error) = retirement
+                    .target
+                    .terminalize_graph_owner_attachment(self, &mut state)
+                {
+                    commit_failure = Some(format!("{error:?}"));
+                    break;
+                }
+            }
+        }
+        if commit_failure.is_some() {
+            for terminal in pending.iter_mut() {
+                terminal
+                    .target
+                    .terminalize_graph_owner_attachment_after_commit_failure(self);
+                terminal.target.terminalize_after_commit_failure();
+            }
+        }
+
+        // The reservation exclusively owns the `Retiring` entries it placed.
+        // Do not introduce a post-owner-commit fallible path that could leave
+        // terminal attachment truth paired with a rollback-capable registry.
+        let mut state = self.lock_state();
+        for retirement in pending.iter() {
             state.entries.insert(
                 retirement.key.clone(),
                 RegistryEntry::Committing(CommittingRuntime {
@@ -366,27 +768,30 @@ impl StoreRuntimeRegistry {
                 }),
             );
         }
-        Ok(())
+        Ok(commit_failure)
     }
 
     fn finish_retirement_target(
         &self,
-        retirement: PendingRetirement,
+        retirement: &mut PendingRetirement,
         success: bool,
         durability_uncertain: bool,
     ) -> Result<(), StoreRuntimeRegistryFailure> {
         let mut state = self.lock_state();
         let Some(RegistryEntry::Committing(committing)) = state.entries.get(&retirement.key) else {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationLost {
-                key: Box::new(retirement.key),
+                key: Box::new(retirement.key.clone()),
             });
         };
         if !Arc::ptr_eq(&committing.owner, &retirement.owner) {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationLost {
-                key: Box::new(retirement.key),
+                key: Box::new(retirement.key.clone()),
             });
         }
         if success {
+            retirement
+                .target
+                .remove_graph_owner_attachment_after_store_close(self, &mut state)?;
             state.entries.remove(&retirement.key);
             if retirement.key.is_profile()
                 && state
@@ -398,21 +803,28 @@ impl StoreRuntimeRegistry {
             }
         } else {
             let faulted = FaultedRuntime {
-                owner: retirement.owner,
+                owner: Arc::clone(&retirement.owner),
             };
             let entry = if durability_uncertain {
                 RegistryEntry::DurabilityUncertain(faulted)
             } else {
                 RegistryEntry::Faulted(faulted)
             };
-            state.entries.insert(retirement.key, entry);
+            state.entries.insert(retirement.key.clone(), entry);
         }
         Ok(())
     }
 
-    fn restore_retiring_batch(&self, pending: &mut Vec<PendingRetirement>) {
+    fn restore_retiring_batch(
+        &self,
+        pending: &mut Vec<PendingRetirement>,
+    ) -> Vec<StoreRuntimeRetirementTarget> {
+        let mut restored = std::mem::take(pending);
         let mut state = self.lock_state();
-        for retirement in pending.drain(..) {
+        for retirement in &mut restored {
+            if let Some(graph_owner_attachment) = retirement.target.graph_owner_attachment_mut() {
+                let _ = graph_owner_attachment.restore_locked(self, &mut state);
+            }
             let restore = matches!(
                 state.entries.get(&retirement.key),
                 Some(RegistryEntry::Retiring(retiring_entry))
@@ -421,26 +833,36 @@ impl StoreRuntimeRegistry {
             );
             if restore {
                 state.entries.insert(
-                    retirement.key,
+                    retirement.key.clone(),
                     RegistryEntry::Ready(ReadyRuntime {
-                        owner: retirement.owner,
+                        owner: Arc::clone(&retirement.owner),
                     }),
                 );
             }
         }
+        drop(state);
+        restored
+            .into_iter()
+            .map(|retirement| retirement.target)
+            .collect()
     }
 }
 
 impl StoreRuntimeRetirementReservation {
-    /// Cancels this uncommitted reservation and restores its exact ready
-    /// entries. A consumed reservation cannot be cancelled or committed again.
-    pub fn cancel(&mut self) -> Result<(), StoreRuntimeRegistryFailure> {
+    /// Cancels this uncommitted reservation, restores its exact ready entries,
+    /// and returns the original targets for a later attempt.
+    ///
+    /// Once [`Self::commit`] crosses the owner-attachment fence, terminal
+    /// outcomes—not reusable targets—describe the physical-close result.
+    pub fn cancel(
+        &mut self,
+    ) -> Result<Vec<StoreRuntimeRetirementTarget>, StoreRuntimeRegistryFailure> {
         if !self.armed {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed);
         }
-        self.registry.restore_retiring_batch(&mut self.pending);
+        let targets = self.registry.restore_retiring_batch(&mut self.pending);
         self.armed = false;
-        Ok(())
+        Ok(targets)
     }
 
     /// Irreversibly commits the reservation before any physical close begins.
@@ -450,12 +872,31 @@ impl StoreRuntimeRetirementReservation {
         if !self.armed {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed);
         }
-        self.registry.begin_retirement_commit(&self.pending)?;
+        if let Some(message) = self.registry.begin_retirement_commit(&mut self.pending)? {
+            let pending = std::mem::take(&mut self.pending);
+            self.armed = false;
+            let mut outcomes = Vec::with_capacity(pending.len());
+            for mut retirement in pending {
+                let target = retirement.target.outcome_target();
+                let error =
+                    match self
+                        .registry
+                        .finish_retirement_target(&mut retirement, false, false)
+                    {
+                        Ok(()) => StoreRuntimeRegistryFailure::OwnerRetirementCommitFailed {
+                            message: message.clone(),
+                        },
+                        Err(error) => error,
+                    };
+                outcomes.push(StoreRuntimeRetirementOutcome::Faulted { target, error });
+            }
+            return Ok(StoreRuntimeRetirementCommit { outcomes });
+        }
         let pending = std::mem::take(&mut self.pending);
         self.armed = false;
 
         let mut outcomes = Vec::with_capacity(pending.len());
-        for retirement in pending {
+        for mut retirement in pending {
             let close = match retirement
                 .owner
                 .runtime()
@@ -496,22 +937,29 @@ impl StoreRuntimeRetirementReservation {
             };
             match close {
                 Ok(()) => {
-                    let target = retirement.target.clone();
-                    self.registry
-                        .finish_retirement_target(retirement, true, false)?;
-                    outcomes.push(StoreRuntimeRetirementOutcome::Closed { target });
+                    let target = retirement.target.outcome_target();
+                    match self
+                        .registry
+                        .finish_retirement_target(&mut retirement, true, false)
+                    {
+                        Ok(()) => outcomes.push(StoreRuntimeRetirementOutcome::Closed { target }),
+                        Err(error) => {
+                            outcomes.push(StoreRuntimeRetirementOutcome::Faulted { target, error })
+                        }
+                    }
                 }
                 Err((error, durability_uncertain)) => {
                     let _ = retirement
                         .owner
                         .runtime()
                         .transition(RuntimeMaintenanceStateV1::Faulted);
-                    let target = retirement.target.clone();
-                    self.registry.finish_retirement_target(
-                        retirement,
+                    let target = retirement.target.outcome_target();
+                    let terminal_error = self.registry.finish_retirement_target(
+                        &mut retirement,
                         false,
                         durability_uncertain,
-                    )?;
+                    );
+                    let error = terminal_error.err().unwrap_or(error);
                     if durability_uncertain {
                         outcomes.push(StoreRuntimeRetirementOutcome::DurabilityUncertain {
                             target,
@@ -530,7 +978,7 @@ impl StoreRuntimeRetirementReservation {
 impl Drop for StoreRuntimeRetirementReservation {
     fn drop(&mut self) {
         if self.armed {
-            self.registry.restore_retiring_batch(&mut self.pending);
+            let _ = self.registry.restore_retiring_batch(&mut self.pending);
             self.armed = false;
         }
     }
@@ -546,12 +994,14 @@ fn authorities_match(left: &DatabaseAuthority, right: &DatabaseAuthority) -> boo
 mod tests {
     use std::fmt::Debug;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
+    use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
     use tracedecay_store::{
         RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1, RuntimePublicationIdV1,
         StoreAuthorityEpochV1, StoreClientIdV1, StoreIncarnationV1, StoreRuntimeBindingV1,
         StoreRuntimeRegistryPublicationV1, StoreShardIdV1, VerifiedStoreLocatorV1,
+        canonical_store_locator_digest,
     };
 
     use super::*;
@@ -582,14 +1032,20 @@ mod tests {
 
         fn resolve_graph<'a>(
             &'a self,
-            _key: &'a StoreRuntimeKey,
+            key: &'a StoreRuntimeKey,
         ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
         {
-            Box::pin(async {
-                Err(StoreRuntimeRegistryFailure::ResolverFailed {
-                    message: "retirement fixture never resolves a graph store".to_owned(),
-                })
-            })
+            let path = std::path::PathBuf::from(format!(
+                "/retirement-graph/{:?}/{}",
+                key.shard_id.scope,
+                key.incarnation.get()
+            ));
+            let locator = VerifiedStoreLocatorV1::new(
+                key.shard_id.clone(),
+                key.incarnation,
+                canonical_store_locator_digest(&path).unwrap(),
+            );
+            Box::pin(async move { Ok(ResolvedStoreLocator::new(locator, path)) })
         }
     }
 
@@ -652,6 +1108,61 @@ mod tests {
         }
     }
 
+    struct FailingOwnerAttachmentReservation {
+        identity: super::super::DatabaseRuntimeOwnerAttachmentReservationIdentityV1,
+        _attachment: super::super::DatabaseRuntimeAttachment,
+        fail_preflight: bool,
+        fail_commit: bool,
+        terminalized: Arc<AtomicBool>,
+    }
+
+    impl Drop for FailingOwnerAttachmentReservation {
+        fn drop(&mut self) {
+            if !self.terminalized.load(Ordering::SeqCst) {
+                let _ = self.identity.restore();
+            }
+        }
+    }
+
+    impl StoreRuntimeOwnerAttachmentRetirementReservationV1 for FailingOwnerAttachmentReservation {
+        fn identity(&self) -> &super::super::DatabaseRuntimeOwnerAttachmentReservationIdentityV1 {
+            &self.identity
+        }
+
+        fn try_into_database_owner_retirement_reservation(
+            self: Box<Self>,
+        ) -> Result<
+            crate::db::DatabaseOwnerRetirementReservationV1,
+            Box<dyn StoreRuntimeOwnerAttachmentRetirementReservationV1>,
+        > {
+            Err(self)
+        }
+
+        fn preflight_commit(&self) -> Result<(), StoreRuntimeRegistryFailure> {
+            self.identity.validate()?;
+            if self.fail_preflight {
+                return Err(StoreRuntimeRegistryFailure::OwnerRetirementCommitFailed {
+                    message: "injected owner preflight failure".to_owned(),
+                });
+            }
+            Ok(())
+        }
+
+        fn commit(&mut self) -> Result<(), StoreRuntimeRegistryFailure> {
+            self.identity.commit()?;
+            if self.fail_commit {
+                return Err(StoreRuntimeRegistryFailure::OwnerRetirementCommitFailed {
+                    message: "injected owner commit failure".to_owned(),
+                });
+            }
+            Ok(())
+        }
+
+        fn terminalize_after_commit_failure(&mut self) {
+            self.terminalized.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn id<T>(value: &str) -> T
     where
         T: TryFrom<String>,
@@ -705,7 +1216,7 @@ mod tests {
         let verified = VerifiedStoreLocatorV1::new(
             binding.shard_id.clone(),
             binding.incarnation,
-            LocatorDigest::new(format!("sha256:{}", "r".repeat(64))).unwrap(),
+            canonical_store_locator_digest(authority.canonical_database_path()).unwrap(),
         );
         let locator = super::super::RuntimeLocatorRecord::new(
             key.clone(),
@@ -729,7 +1240,10 @@ mod tests {
             )
             .unwrap(),
             database_authority: Some(authority),
-            database_facades: std::sync::atomic::AtomicUsize::new(0),
+            database_attachments: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            next_database_attachment_id: std::sync::atomic::AtomicU64::new(1),
+            next_database_owner_id: std::sync::atomic::AtomicU64::new(1),
+            next_database_attachment_reservation_id: std::sync::atomic::AtomicU64::new(1),
         });
         let owner = Arc::new(StoreRuntimeOwnerAttachment { source });
         let mut state = registry.lock_state();
@@ -758,6 +1272,296 @@ mod tests {
                 .clone()
                 .expect("retirement fixture installs an authority"),
         )
+    }
+
+    fn failing_owner_target(
+        binding: &StoreRuntimeBindingV1,
+        owner: &StoreRuntimeOwnerAttachment,
+        fail_preflight: bool,
+        fail_commit: bool,
+        terminalized: Arc<AtomicBool>,
+    ) -> StoreRuntimeRetirementTarget {
+        let attachment = owner
+            .issue_client_lease()
+            .unwrap()
+            .into_database_attachment()
+            .unwrap();
+        let owner_id = attachment.allocate_owner_identity().unwrap();
+        let identity = attachment.reserve_for_owner(owner_id).unwrap();
+        StoreRuntimeRetirementTarget::with_database_owner_attachment(
+            binding.clone(),
+            owner.database_authority.clone().unwrap(),
+            Box::new(FailingOwnerAttachmentReservation {
+                identity,
+                _attachment: attachment,
+                fail_preflight,
+                fail_commit,
+                terminalized,
+            }),
+        )
+    }
+
+    fn stale_owner_target(
+        binding: &StoreRuntimeBindingV1,
+        owner: &StoreRuntimeOwnerAttachment,
+    ) -> StoreRuntimeRetirementTarget {
+        let attachment = owner
+            .issue_client_lease()
+            .unwrap()
+            .into_database_attachment()
+            .unwrap();
+        let owner_id = attachment.allocate_owner_identity().unwrap();
+        let mut identity = attachment.reserve_for_owner(owner_id).unwrap();
+        identity.owner_id =
+            super::super::DatabaseRuntimeOwnerIdentityV1(owner_id.0.checked_add(1).unwrap());
+        StoreRuntimeRetirementTarget::with_database_owner_attachment(
+            binding.clone(),
+            owner.database_authority.clone().unwrap(),
+            Box::new(FailingOwnerAttachmentReservation {
+                identity,
+                _attachment: attachment,
+                fail_preflight: false,
+                fail_commit: false,
+                terminalized: Arc::new(AtomicBool::new(false)),
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn paired_graph_owner_target_reserves_and_restores_with_the_database_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = registry();
+        let authority = authority(directory.path(), "paired-graph-owner");
+        let (binding, owner) = install_ready(
+            &registry,
+            project_shard("project.paired-graph-owner"),
+            authority,
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let (graph_owner, graph_target) = registry
+            .attach_graph_store_owner(StoreRuntimeKey::from_binding(&binding))
+            .await
+            .unwrap();
+        let database_attachment = owner
+            .issue_client_lease()
+            .unwrap()
+            .into_database_attachment()
+            .unwrap();
+        let database_owner_id = database_attachment.allocate_owner_identity().unwrap();
+        let database_identity = database_attachment
+            .reserve_for_owner(database_owner_id)
+            .unwrap();
+        let target = StoreRuntimeRetirementTarget::with_owner_attachments(
+            binding.clone(),
+            owner.database_authority.clone().unwrap(),
+            Box::new(FailingOwnerAttachmentReservation {
+                identity: database_identity,
+                _attachment: database_attachment,
+                fail_preflight: false,
+                fail_commit: false,
+                terminalized: Arc::new(AtomicBool::new(false)),
+            }),
+            graph_target,
+        );
+
+        let StoreRuntimeRetirementResult::Reserved(mut reservation) =
+            registry.reserve_retirement_batch(vec![target])
+        else {
+            panic!("the exact paired owner attachments must reserve together");
+        };
+        {
+            let state = registry.lock_state();
+            let publication = state
+                .graph_publications
+                .get(&StoreRuntimeKey::from_binding(&binding))
+                .expect("reserved graph owner publication");
+            assert!(matches!(
+                publication.owner_attachment,
+                Some(super::super::GraphStoreOwnerAttachmentState::OwnerReserved { .. })
+            ));
+        }
+
+        reservation.cancel().unwrap();
+        {
+            let state = registry.lock_state();
+            let publication = state
+                .graph_publications
+                .get(&StoreRuntimeKey::from_binding(&binding))
+                .expect("cancelled graph owner publication");
+            assert!(matches!(
+                publication.owner_attachment,
+                Some(super::super::GraphStoreOwnerAttachmentState::MapOwned { .. })
+            ));
+        }
+        drop(graph_owner);
+    }
+
+    #[tokio::test]
+    async fn two_exact_owner_targets_survive_blocked_and_cancelled_retries() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = registry();
+        let (first_binding, first_owner) = install_ready(
+            &registry,
+            project_shard("project.retry-owner-first"),
+            authority(directory.path(), "retry-owner-first"),
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let (second_binding, second_owner) = install_ready(
+            &registry,
+            project_shard("project.retry-owner-second"),
+            authority(directory.path(), "retry-owner-second"),
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let (first_graph_owner, first_graph_target) = registry
+            .attach_graph_store_owner(StoreRuntimeKey::from_binding(&first_binding))
+            .await
+            .unwrap();
+        let (second_graph_owner, second_graph_target) = registry
+            .attach_graph_store_owner(StoreRuntimeKey::from_binding(&second_binding))
+            .await
+            .unwrap();
+        let expected_first_graph_owner = {
+            let state = registry.lock_state();
+            state
+                .graph_publications
+                .get(&StoreRuntimeKey::from_binding(&first_binding))
+                .expect("first graph publication exists")
+                .owner_attachment
+        };
+        let expected_second_graph_owner = {
+            let state = registry.lock_state();
+            state
+                .graph_publications
+                .get(&StoreRuntimeKey::from_binding(&second_binding))
+                .expect("second graph publication exists")
+                .owner_attachment
+        };
+
+        let first_database_attachment = first_owner
+            .issue_client_lease()
+            .unwrap()
+            .into_database_attachment()
+            .unwrap();
+        let first_database_identity = first_database_attachment
+            .reserve_for_owner(first_database_attachment.allocate_owner_identity().unwrap())
+            .unwrap();
+        let expected_first_database_identity = first_database_identity.clone();
+        let second_database_attachment = second_owner
+            .issue_client_lease()
+            .unwrap()
+            .into_database_attachment()
+            .unwrap();
+        let second_database_identity = second_database_attachment
+            .reserve_for_owner(
+                second_database_attachment
+                    .allocate_owner_identity()
+                    .unwrap(),
+            )
+            .unwrap();
+        let expected_second_database_identity = second_database_identity.clone();
+        let first_target = StoreRuntimeRetirementTarget::with_owner_attachments(
+            first_binding.clone(),
+            first_owner.database_authority.clone().unwrap(),
+            Box::new(FailingOwnerAttachmentReservation {
+                identity: first_database_identity,
+                _attachment: first_database_attachment,
+                fail_preflight: false,
+                fail_commit: false,
+                terminalized: Arc::new(AtomicBool::new(false)),
+            }),
+            first_graph_target,
+        );
+        let second_target = StoreRuntimeRetirementTarget::with_owner_attachments(
+            second_binding.clone(),
+            second_owner.database_authority.clone().unwrap(),
+            Box::new(FailingOwnerAttachmentReservation {
+                identity: second_database_identity,
+                _attachment: second_database_attachment,
+                fail_preflight: false,
+                fail_commit: false,
+                terminalized: Arc::new(AtomicBool::new(false)),
+            }),
+            second_graph_target,
+        );
+        let blocker = first_owner.issue_client_lease().unwrap();
+
+        let StoreRuntimeRetirementResult::Blocked(refusal) =
+            registry.reserve_retirement_batch(vec![first_target, second_target])
+        else {
+            panic!("the live client must block both exact owner targets before reservation");
+        };
+        assert!(refusal.blockers().iter().any(|blocker| matches!(
+            blocker,
+            StoreRuntimeRetirementBlocker::ClientLeases { binding, count: 1 }
+                if binding.as_ref() == &first_binding
+        )));
+        let (_, retry_targets) = refusal.into_parts();
+        assert_eq!(retry_targets.len(), 2);
+        assert_eq!(
+            retry_targets[0]
+                .owner_attachment_identity()
+                .expect("first target retains its database owner attachment")
+                .attachment_id,
+            expected_first_database_identity.attachment_id
+        );
+        assert_eq!(
+            retry_targets[1]
+                .owner_attachment_identity()
+                .expect("second target retains its database owner attachment")
+                .attachment_id,
+            expected_second_database_identity.attachment_id
+        );
+        drop(blocker);
+
+        let StoreRuntimeRetirementResult::Reserved(mut reservation) =
+            registry.reserve_retirement_batch(retry_targets)
+        else {
+            panic!("the exact targets must reserve once their blocker releases");
+        };
+        let retry_targets = reservation.cancel().unwrap();
+        assert_eq!(retry_targets.len(), 2);
+        assert_eq!(
+            retry_targets[0]
+                .owner_attachment_identity()
+                .expect("cancelled first target retains its database owner attachment")
+                .attachment_id,
+            expected_first_database_identity.attachment_id
+        );
+        assert_eq!(
+            retry_targets[1]
+                .owner_attachment_identity()
+                .expect("cancelled second target retains its database owner attachment")
+                .attachment_id,
+            expected_second_database_identity.attachment_id
+        );
+        {
+            let state = registry.lock_state();
+            assert_eq!(
+                state
+                    .graph_publications
+                    .get(&StoreRuntimeKey::from_binding(&first_binding))
+                    .expect("first graph publication remains after cancellation")
+                    .owner_attachment,
+                expected_first_graph_owner
+            );
+            assert_eq!(
+                state
+                    .graph_publications
+                    .get(&StoreRuntimeKey::from_binding(&second_binding))
+                    .expect("second graph publication remains after cancellation")
+                    .owner_attachment,
+                expected_second_graph_owner
+            );
+        }
+
+        let StoreRuntimeRetirementResult::Reserved(reservation) =
+            registry.reserve_retirement_batch(retry_targets)
+        else {
+            panic!("cancelled exact owner targets must reserve on the second retry");
+        };
+        drop(reservation);
+        drop(first_graph_owner);
+        drop(second_graph_owner);
     }
 
     fn active_lease(binding: &StoreRuntimeBindingV1, lease_id: &str) -> RuntimeLeaseV1 {
@@ -795,12 +1599,12 @@ mod tests {
         ]);
         assert!(matches!(
             result,
-            StoreRuntimeRetirementResult::Blocked(blockers)
-                if blockers.iter().any(|blocker| matches!(
+            StoreRuntimeRetirementResult::Blocked(refusal)
+                if refusal.blockers().iter().any(|blocker| matches!(
                     blocker,
                     StoreRuntimeRetirementBlocker::BindingMismatch { expected, actual }
                         if expected.as_ref() == &foreign && actual.as_ref() == &binding
-                )) && blockers.iter().any(|blocker| matches!(
+                )) && refusal.blockers().iter().any(|blocker| matches!(
                     blocker,
                     StoreRuntimeRetirementBlocker::AuthorityMismatch { binding: actual }
                         if actual.as_ref() == &binding
@@ -810,6 +1614,136 @@ mod tests {
             panic!("all-or-none preflight must leave the matching runtime ready");
         };
         drop(lease);
+    }
+
+    #[test]
+    fn owner_preflight_failure_rolls_back_every_target_before_committing_any() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = registry();
+        let first_authority = authority(directory.path(), "preflight-first");
+        let second_authority = authority(directory.path(), "preflight-second");
+        let (first_binding, first_owner) = install_ready(
+            &registry,
+            profile_shard("profile.preflight-first"),
+            first_authority,
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let (second_binding, second_owner) = install_ready(
+            &registry,
+            profile_shard("profile.preflight-second"),
+            second_authority,
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let terminalized = Arc::new(AtomicBool::new(false));
+        let StoreRuntimeRetirementResult::Reserved(mut reservation) = registry
+            .reserve_retirement_batch(vec![
+                failing_owner_target(
+                    &first_binding,
+                    &first_owner,
+                    true,
+                    false,
+                    Arc::clone(&terminalized),
+                ),
+                target(&second_binding, &second_owner),
+            ])
+        else {
+            panic!("preflight fixture must reserve both targets before commit");
+        };
+
+        assert!(matches!(
+            reservation.commit(),
+            Err(StoreRuntimeRegistryFailure::OwnerRetirementCommitFailed { .. })
+        ));
+        assert!(!terminalized.load(Ordering::SeqCst));
+        drop(reservation);
+        assert!(matches!(
+            registry.lookup(&first_binding),
+            StoreRuntimeLookup::Ready(_)
+        ));
+        assert!(matches!(
+            registry.lookup(&second_binding),
+            StoreRuntimeLookup::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn stale_foreign_owner_identity_cannot_reclassify_the_canonical_attachment() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = registry();
+        let authority = authority(directory.path(), "foreign-owner");
+        let (binding, owner) = install_ready(
+            &registry,
+            profile_shard("profile.foreign-owner"),
+            authority,
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+
+        let result = registry.reserve_retirement_batch(vec![stale_owner_target(&binding, &owner)]);
+        assert!(matches!(
+            result,
+            StoreRuntimeRetirementResult::Blocked(refusal)
+                if refusal.blockers().iter().any(|blocker| matches!(
+                    blocker,
+                    StoreRuntimeRetirementBlocker::OwnerAttachmentReservation { .. }
+                ))
+        ));
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn owner_commit_failure_is_terminal_truth_for_the_entire_batch() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = registry();
+        let first_authority = authority(directory.path(), "commit-first");
+        let second_authority = authority(directory.path(), "commit-second");
+        let (first_binding, first_owner) = install_ready(
+            &registry,
+            profile_shard("profile.commit-first"),
+            first_authority,
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let (second_binding, second_owner) = install_ready(
+            &registry,
+            profile_shard("profile.commit-second"),
+            second_authority,
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let terminalized = Arc::new(AtomicBool::new(false));
+        let StoreRuntimeRetirementResult::Reserved(mut reservation) = registry
+            .reserve_retirement_batch(vec![
+                failing_owner_target(
+                    &first_binding,
+                    &first_owner,
+                    false,
+                    true,
+                    Arc::clone(&terminalized),
+                ),
+                target(&second_binding, &second_owner),
+            ])
+        else {
+            panic!("commit fixture must reserve both targets");
+        };
+
+        let commit = reservation.commit().unwrap();
+        assert!(terminalized.load(Ordering::SeqCst));
+        assert!(commit.outcomes().iter().all(|outcome| matches!(
+            outcome,
+            StoreRuntimeRetirementOutcome::Faulted {
+                error: StoreRuntimeRegistryFailure::OwnerRetirementCommitFailed { .. },
+                ..
+            }
+        )));
+        assert!(matches!(
+            registry.lookup(&first_binding),
+            StoreRuntimeLookup::Faulted { .. }
+        ));
+        assert!(matches!(
+            registry.lookup(&second_binding),
+            StoreRuntimeLookup::Faulted { .. }
+        ));
     }
 
     #[test]
@@ -835,11 +1769,11 @@ mod tests {
         let blocked = registry.reserve_retirement_batch(vec![target(&binding, &owner)]);
         assert!(matches!(
             blocked,
-            StoreRuntimeRetirementResult::Blocked(blockers)
-                if blockers.iter().any(|blocker| matches!(
+            StoreRuntimeRetirementResult::Blocked(refusal)
+                if refusal.blockers().iter().any(|blocker| matches!(
                     blocker,
                     StoreRuntimeRetirementBlocker::ClientLeases { count: 2, .. }
-                )) && blockers.iter().any(|blocker| matches!(
+                )) && refusal.blockers().iter().any(|blocker| matches!(
                     blocker,
                     StoreRuntimeRetirementBlocker::RuntimeLeases { count: 1, .. }
                 ))
@@ -871,15 +1805,16 @@ mod tests {
         let facade = owner
             .issue_client_lease()
             .unwrap()
-            .into_database_attachment();
+            .into_database_attachment()
+            .unwrap();
 
         let blocked = registry.reserve_retirement_batch(vec![target(&binding, &owner)]);
         assert!(matches!(
             blocked,
-            StoreRuntimeRetirementResult::Blocked(blockers)
-                if blockers.iter().any(|blocker| matches!(
+            StoreRuntimeRetirementResult::Blocked(refusal)
+                if refusal.blockers().iter().any(|blocker| matches!(
                     blocker,
-                    StoreRuntimeRetirementBlocker::DatabaseFacades { count: 1, .. }
+                    StoreRuntimeRetirementBlocker::DatabaseAttachments { count: 1, .. }
                 ))
         ));
 
@@ -918,6 +1853,7 @@ mod tests {
                     binding: binding.clone(),
                     verified_locator: owner.verified_locator().clone(),
                     canonical_path: owner.canonical_path().to_path_buf(),
+                    owner_attachment: None,
                     lease_tokens: [1].into_iter().collect(),
                 },
             );
@@ -925,17 +1861,17 @@ mod tests {
         let blocked = registry.reserve_retirement_batch(vec![target(&binding, &owner)]);
         assert!(matches!(
             blocked,
-            StoreRuntimeRetirementResult::Blocked(blockers)
-                if blockers.iter().any(|blocker| matches!(
+            StoreRuntimeRetirementResult::Blocked(refusal)
+                if refusal.blockers().iter().any(|blocker| matches!(
                     blocker,
                     StoreRuntimeRetirementBlocker::OperationLeases { count: 1, .. }
-                )) && blockers.iter().any(|blocker| matches!(
+                )) && refusal.blockers().iter().any(|blocker| matches!(
                     blocker,
                     StoreRuntimeRetirementBlocker::ProfilePins { count: 1, .. }
-                )) && blockers.iter().any(|blocker| matches!(
+                )) && refusal.blockers().iter().any(|blocker| matches!(
                     blocker,
                     StoreRuntimeRetirementBlocker::RetainedGraphLeases { count: 1, .. }
-                )) && !blockers.iter().any(|blocker| matches!(
+                )) && !refusal.blockers().iter().any(|blocker| matches!(
                     blocker,
                     StoreRuntimeRetirementBlocker::ClientLeases { .. }
                 ))

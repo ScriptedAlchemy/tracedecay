@@ -1,7 +1,6 @@
 //! Unadvertised daemon-owned operations used by one-shot CLI commands.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -266,7 +265,9 @@ async fn dispatch_admin_cli(
             let provider_scope = context.provider_usage_scope()?;
             cost_summary(
                 context.require_accounting_db()?,
-                context.registered_project_session_db.map(Arc::as_ref),
+                context
+                    .registered_project_session_db
+                    .map(|database| database.as_ref()),
                 provider_scope.as_ref(),
                 context.project_root(),
                 &range,
@@ -312,8 +313,12 @@ async fn dispatch_admin_cli(
         AdminCliAction::AnalyticsDiagnostics { all, no_sync } => {
             crate::analytics_bridge::analytics_diagnostics_with_db(
                 context.require_accounting_db()?,
-                context.registered_project_session_db.map(Arc::as_ref),
-                context.registered_user_session_db.map(Arc::as_ref),
+                context
+                    .registered_project_session_db
+                    .map(|database| database.as_ref()),
+                context
+                    .registered_user_session_db
+                    .map(|database| database.as_ref()),
                 context.project_root(),
                 all,
                 no_sync,

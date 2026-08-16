@@ -1,5 +1,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -407,6 +408,47 @@ pub trait RetainedGraphStoreLeaseV1: Send + Sync + fmt::Debug {
     fn verified_locator(&self) -> &VerifiedStoreLocatorV1;
     fn canonical_path(&self) -> &Path;
 }
+
+/// Identity-only authority retained by the one graph-runtime map owner.
+///
+/// This is deliberately not a graph client lease. The owning map moves the
+/// non-cloneable concrete attachment into its registry. It can synchronously
+/// ask its Store authority to issue a separately tracked
+/// [`RetainedGraphStoreLeaseV1`] for one ordinary graph operation, but it
+/// cannot expose a runtime handle or mint a lease from identity fields.
+pub trait RetainedGraphStoreOwnerAttachmentV1: Send + Sync + fmt::Debug {
+    fn binding(&self) -> &StoreRuntimeBindingV1;
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1;
+    fn canonical_path(&self) -> &Path;
+    fn issue_operation_lease(
+        &self,
+    ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>;
+}
+
+/// A map-owner attachment could not issue an ordinary graph operation lease.
+///
+/// The variants intentionally distinguish the retirement fence from a stale
+/// or unavailable attachment so graph registries can preserve the conflict
+/// without learning Store registry internals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetainedGraphStoreOwnerOperationLeaseErrorV1 {
+    Retiring,
+    Unavailable,
+    TokenExhausted,
+}
+
+impl fmt::Display for RetainedGraphStoreOwnerOperationLeaseErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::Retiring => "graph map owner is retiring",
+            Self::Unavailable => "graph map owner attachment is unavailable",
+            Self::TokenExhausted => "graph operation lease token space is exhausted",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for RetainedGraphStoreOwnerOperationLeaseErrorV1 {}
 
 impl VerifiedStoreLocatorV1 {
     pub fn new(

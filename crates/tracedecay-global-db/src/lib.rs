@@ -12,10 +12,9 @@
 //! `retrieval_content`), and `tracedecay-semantic` (resource ceilings, default
 //! embedding model). All three are proven acyclic — `cargo tree -p <dep> -e
 //! normal` never names this crate. `RuntimeExternalSourceStore` and
-//! `GlobalDbObservationStore` are deliberately root-owned adapters, not
-//! methods here: [`RegisteredGlobalDb::runtime`] and `authority` expose the
-//! ingredients so the composition root builds what it owns, instead of this
-//! crate naming a root type.
+//! `GlobalDbObservationStore` is deliberately a root-owned adapter. It takes
+//! a guarded database client issued by the registered owner, so the composition
+//! root retains its own typed client without receiving raw runtime authority.
 
 use tracedecay_sessions::runtime::SessionMessageSearchResult;
 pub use tracedecay_store::ParseOffset;
@@ -50,6 +49,8 @@ pub use observability_rollup::{
     ObservabilityRollupRetentionReceiptV1, ensure_observability_rollup_schema,
 };
 pub use observation_adapter::GlobalDbObservationStore;
+pub use observation_projection::{project_observation, rebuild_projection};
+#[cfg(test)]
 pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
 pub use tracedecay_domain::CoverageStateV1;
 mod observation_store;
@@ -116,6 +117,7 @@ pub use registered::{
     DeliveryAttemptClaimV1, DeliverySourceReceiptReadV1, DurableDeliverySettlementReceiptV1,
     MAX_PENDING_RECEIPTED_DELIVERIES_V1, MAX_WORK_ATTEMPT_DELIVERY_FANOUTS_V1,
     PendingDeliverySourceReceiptV1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
+    RegisteredGlobalDbOwnerV1, RegisteredGlobalDbWeakLeaseIssuerV1,
     RegisteredGlobalDbWriteTransaction, RegisteredWorkApplicationServicesV1,
     RegisteredWorkProductServicesV1, RegisteredWorkflowApplicationServicesV1,
     WorkAttemptDeliveryCensusReadV1,
@@ -129,7 +131,9 @@ pub use remote_deletion::{
 pub use session_temporal::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
-pub use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+pub use tracedecay_runtime_core::store_runtime::{
+    VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1,
+};
 pub use transcript::TranscriptPersistenceError;
 
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;

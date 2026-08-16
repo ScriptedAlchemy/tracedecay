@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::global_db::RegisteredGlobalDbLeaseV1;
 
 /// Database authorities retained by the owning MCP server for its lifetime.

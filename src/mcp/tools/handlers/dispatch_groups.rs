@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use serde_json::Value;
 use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, ResultContractRef, SafeDiagnostic,
@@ -349,7 +347,7 @@ pub(super) async fn dispatch_info_tools(
                 args,
                 server_stats,
                 scope_prefix,
-                active_project_session_db.map(Arc::as_ref),
+                active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                 options.code_index_freshness_reader.as_ref(),
             )
             .await
@@ -432,7 +430,7 @@ pub(super) async fn dispatch_admin_tools(
             hook_runtime::handle_hook_runtime(
                 cg,
                 args,
-                options.global_db.map(std::sync::Arc::as_ref),
+                options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                 options.accounting_db,
                 options.session_authorities,
             )
@@ -469,7 +467,7 @@ pub(super) async fn dispatch_admin_tools(
             admin_project::handle_admin_project(
                 cg,
                 args,
-                options.global_db.map(std::sync::Arc::as_ref),
+                options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                 options.automation_scheduler_reconciler,
                 options.profile_root,
                 options.daemon_invocation_service,
@@ -605,7 +603,7 @@ pub(super) async fn dispatch_analysis_tools(
                 args,
                 options.diagnostics_cache,
                 options.diagnostics_lsp.as_deref(),
-                active_project_session_db.map(Arc::as_ref),
+                active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
             )
             .await
         }

@@ -2,21 +2,17 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-#[cfg(test)]
-use tracedecay_rusqlite_runtime::exact_sql::{
-    ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
-};
 
 use tracedecay_runtime_core::{
     db::{
-        DatabaseAuthority,
-        engine::{
-            Connection, Executor, IntoParams, QueryExecutor, ReadConnection, ReadSnapshot, Rows,
-            Transaction, TransactionBehavior, WalCheckpointExecutor,
-        },
+        Database, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot, DatabaseOwnerErrorV1,
+        DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1, DatabaseOwnerWeakLeaseIssuerErrorV1,
+        DatabaseOwnerWeakLeaseIssuerV1, DatabaseRuntimeClientV1, DatabaseStorageTelemetryHandle,
+        DatabaseWriteTransaction,
+        engine::{Executor, IntoParams, QueryExecutor, Rows},
     },
     errors::TraceDecayError,
-    store_runtime::{VerifiedGraphRuntimePortV1, registry::StoreRuntimeClientLease},
+    store_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1},
 };
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
 
@@ -28,11 +24,131 @@ pub use delivery_settlement::{
     PendingDeliverySourceReceiptV1, WorkAttemptDeliveryCensusReadV1,
 };
 
+/// The sole map owner for one registered global-database publication.
+///
+/// It can issue independently counted client leases, but cannot be cloned or
+/// recovered from one. Daemon maps retain this owner; all request and worker
+/// paths retain only [`RegisteredGlobalDbLeaseV1`].
+pub struct RegisteredGlobalDbOwnerV1 {
+    database: DatabaseOwnerV1,
+}
+
+/// Cloneable, weak issuance route for one registered global-database owner.
+///
+/// This route retains no database client, raw runtime, or SQL authority. Each
+/// command must issue its own [`RegisteredGlobalDbLeaseV1`], which keeps the
+/// exact owner lifecycle and Store retirement fence authoritative.
+#[derive(Clone)]
+pub struct RegisteredGlobalDbWeakLeaseIssuerV1 {
+    database: DatabaseOwnerWeakLeaseIssuerV1,
+}
+
+impl RegisteredGlobalDbOwnerV1 {
+    /// Validates the final schema installed during physical Store open before
+    /// the owner becomes visible to any caller. The temporary issuance is
+    /// dropped before the owner is returned, so it never becomes a hidden
+    /// retirement blocker.
+    pub async fn migrate_and_attach(
+        database: DatabaseOwnerV1,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
+        let temporary = database.issue_lease().map_err(registered_owner_error)?;
+        let registered = RegisteredGlobalDb::from_database(temporary);
+        registered.validate_authority_schema_contract().await?;
+        registered.rearm_queued_projection_retries().await?;
+        drop(registered);
+        Ok(Self { database })
+    }
+
+    /// Returns the resumable convergence plan for an already admitted schema
+    /// without retaining an unowned client lease.
+    pub async fn migrate_and_attach_for_daemon(
+        database: DatabaseOwnerV1,
+    ) -> tracedecay_runtime_core::errors::Result<(
+        Self,
+        super::schema_stages::RegisteredSchemaConvergence,
+    )> {
+        let temporary = database.issue_lease().map_err(registered_owner_error)?;
+        let registered = RegisteredGlobalDb::from_database(temporary);
+        registered.validate_authority_schema_contract().await?;
+        registered.rearm_queued_projection_retries().await?;
+        drop(registered);
+        Ok((
+            Self { database },
+            super::schema_stages::RegisteredSchemaConvergence::for_existing_client(),
+        ))
+    }
+
+    /// Issues a read-write client when the underlying map owner is writable.
+    /// Each call owns one fresh Store client token; clones of the result share
+    /// only that issuance.
+    pub fn issue_lease(&self) -> Result<RegisteredGlobalDbLeaseV1, DatabaseOwnerErrorV1> {
+        Ok(RegisteredGlobalDbLeaseV1::from_database(
+            RegisteredGlobalDb::from_database(self.database.issue_lease()?),
+        ))
+    }
+
+    /// Issues a mode-reduced client that can never regain write authority.
+    pub fn issue_read_only_lease(&self) -> Result<RegisteredGlobalDbLeaseV1, DatabaseOwnerErrorV1> {
+        Ok(RegisteredGlobalDbLeaseV1::from_database(
+            RegisteredGlobalDb::from_database(self.database.issue_read_only_lease()?),
+        ))
+    }
+
+    /// Creates a cloneable route for command-scoped registered leases without
+    /// retaining this owner or a counted Store client.
+    #[must_use]
+    pub fn weak_lease_issuer(&self) -> RegisteredGlobalDbWeakLeaseIssuerV1 {
+        RegisteredGlobalDbWeakLeaseIssuerV1 {
+            database: self.database.weak_lease_issuer(),
+        }
+    }
+
+    /// Starts the exact database-owner reservation used by daemon map
+    /// retirement. The daemon alone composes it with the graph owner target.
+    pub fn reserve_retirement(
+        &self,
+    ) -> Result<DatabaseOwnerRetirementReservationV1, DatabaseOwnerErrorV1> {
+        self.database.reserve_retirement()
+    }
+
+    pub fn registered_binding(&self) -> &StoreRuntimeBindingV1 {
+        self.database.registered_binding()
+    }
+
+    pub fn registered_verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        self.database.registered_verified_locator()
+    }
+}
+
+impl RegisteredGlobalDbWeakLeaseIssuerV1 {
+    /// Issues one fresh registered-database lease while the exact map owner
+    /// remains ready. The returned lease retains schema authority only through
+    /// the guarded database facade; no raw authority escapes this route.
+    pub fn issue_lease(
+        &self,
+    ) -> Result<RegisteredGlobalDbLeaseV1, DatabaseOwnerWeakLeaseIssuerErrorV1> {
+        Ok(RegisteredGlobalDbLeaseV1::from_database(
+            RegisteredGlobalDb::from_database(self.database.issue_lease()?),
+        ))
+    }
+
+    /// Exact non-retaining Store identity for target registration and removal.
+    #[must_use]
+    pub fn registered_binding(&self) -> &StoreRuntimeBindingV1 {
+        self.database.registered_binding()
+    }
+
+    /// Exact non-retaining locator identity for target validation.
+    #[must_use]
+    pub fn registered_verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        self.database.registered_verified_locator()
+    }
+}
+
 /// Cloneable client authority for a registered global database.
 ///
-/// The token keeps the registered database and its runtime client lease alive
-/// until every clone is dropped. The raw shared owner remains private to this
-/// crate, so a caller cannot bypass the registered lifetime boundary.
+/// The token keeps exactly one owner-issued guarded [`Database`] client alive
+/// until every clone is dropped. It never exposes the owner or raw runtime.
 #[derive(Clone)]
 pub struct RegisteredGlobalDbLeaseV1 {
     token: Arc<RegisteredGlobalDbLeaseToken>,
@@ -76,11 +192,8 @@ impl RegisteredGlobalDbLeaseV1 {
 }
 
 pub struct RegisteredGlobalDb {
-    read_connection: ReadConnection,
-    write_connection: Connection,
-    runtime: StoreRuntimeClientLease,
-    authority: DatabaseAuthority,
-    project_graph: OnceLock<Arc<dyn VerifiedGraphRuntimePortV1>>,
+    database: Database,
+    project_graph: OnceLock<VerifiedGraphRuntimeWeakProxyV1>,
     session_relation_graph: OnceLock<(
         crate::session_temporal::relations::SessionRelationScope,
         tracedecay_graph_db::GraphDbLeaseV1,
@@ -92,7 +205,7 @@ pub struct RegisteredGlobalDb {
 #[derive(Clone)]
 pub struct RegisteredWorkTopologyV1 {
     source: tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
+    runtime: VerifiedGraphRuntimeWeakProxyV1,
 }
 
 impl RegisteredWorkTopologyV1 {
@@ -133,7 +246,7 @@ impl RegisteredWorkTopologyV1 {
 #[derive(Clone)]
 pub struct RegisteredWorkflowTopologyV1 {
     source: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
-    runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
+    runtime: VerifiedGraphRuntimeWeakProxyV1,
 }
 
 impl RegisteredWorkflowTopologyV1 {
@@ -388,100 +501,53 @@ impl RegisteredWorkflowApplicationServicesV1 {
 }
 
 impl RegisteredGlobalDb {
-    /// Creates the registered schema at its final shape (or verifies an
-    /// existing store already carries it) before validating and exposing the
-    /// registered global database facade. No path is reopened, and no store is
-    /// stepped forward from an older shape: a store at any other shape is a
-    /// typed refusal from [`super::ensure_registered_schema`].
-    pub async fn migrate_and_attach(
-        runtime: StoreRuntimeClientLease,
-        expected_binding: tracedecay_store::StoreRuntimeBindingV1,
-        expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
-        authority: DatabaseAuthority,
-    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
-        let write_connection =
-            registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
-        crate::registered_legacy_relations::reject_legacy_session_relation_shape(
-            &write_connection,
-            &expected_binding,
-        )
-        .await?;
-        super::ensure_registered_schema(&write_connection).await?;
-        Self::finish_attach(runtime, write_connection, authority).await
-    }
-
-    /// Installs only admission-critical schema before publishing a daemon
-    /// runtime. The returned plan owns resumable historical convergence.
-    pub async fn migrate_and_attach_for_daemon(
-        runtime: StoreRuntimeClientLease,
-        expected_binding: tracedecay_store::StoreRuntimeBindingV1,
-        expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
-        authority: DatabaseAuthority,
-    ) -> tracedecay_runtime_core::errors::Result<(
-        RegisteredGlobalDbLeaseV1,
-        super::schema_stages::RegisteredSchemaConvergence,
-    )> {
-        let write_connection =
-            registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
-        crate::registered_legacy_relations::reject_legacy_session_relation_shape(
-            &write_connection,
-            &expected_binding,
-        )
-        .await?;
-        let convergence =
-            super::schema_stages::ensure_registered_schema_for_admission(&write_connection).await?;
-        let database = Self::finish_attach(runtime, write_connection, authority).await?;
-        Ok((database, convergence))
-    }
-
     pub async fn converge_schema(
         &self,
         convergence: super::schema_stages::RegisteredSchemaConvergence,
     ) -> tracedecay_runtime_core::errors::Result<()> {
-        super::schema_stages::converge_registered_schema(&self.write_connection, convergence).await
+        super::schema_stages::converge_registered_schema(&self.database, convergence).await
     }
 
     pub async fn release_connection_memory(&self) -> tracedecay_runtime_core::errors::Result<()> {
-        self.write_connection
-            .execute_batch("PRAGMA shrink_memory")
-            .await
-            .map_err(|error| registered_error("release registered database memory", error))
+        self.database.release_connection_memory().await
     }
 
-    async fn finish_attach(
-        runtime: StoreRuntimeClientLease,
-        write_connection: Connection,
-        authority: DatabaseAuthority,
-    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
-        let read_connection = write_connection.read_only();
-        let database = Self {
-            read_connection,
-            write_connection,
-            runtime,
-            authority,
+    pub(crate) async fn checkpoint_database(&self) -> tracedecay_runtime_core::errors::Result<()> {
+        self.database.checkpoint().await
+    }
+
+    fn from_database(database: Database) -> Self {
+        Self {
+            database,
             project_graph: OnceLock::new(),
             session_relation_graph: OnceLock::new(),
-        };
-        database.validate_authority_schema_contract().await?;
-        // Retry backoff paces re-attempts within the mount that observed the
-        // projection failure; this fresh mount re-arms queued projections so
-        // the first catch-up pass replays commit-before-ack work immediately.
-        crate::observation_projection::rearm_queued_projection_retries(&database.write_connection)
-            .await
-            .map_err(|error| {
-                registered_error("rearm queued projection retries", error.durable_detail())
-            })?;
-        Ok(RegisteredGlobalDbLeaseV1::from_database(database))
+        }
     }
 
-    pub fn read_connection(&self) -> &ReadConnection {
-        &self.read_connection
+    pub fn read_connection(&self) -> DatabaseEngineReadConnection {
+        self.database.read_connection()
+    }
+
+    /// Creates an observation adapter bound to this exact guarded client.
+    /// The adapter retains the client token independently and cannot recover a
+    /// raw registry runtime or write authority.
+    pub fn observation_store(&self) -> crate::GlobalDbObservationStore {
+        crate::GlobalDbObservationStore::new(self.database.clone())
+    }
+
+    /// Retains this exact client for closed runtime read/submit requests.
+    ///
+    /// The returned capability has no raw Store runtime, connection, or
+    /// authority escape. Read-only registered leases retain the corresponding
+    /// mode reduction, so runtime submission remains denied for them.
+    pub fn runtime_client(&self) -> DatabaseRuntimeClientV1 {
+        self.database.runtime_client()
     }
 
     pub fn bind_project_graph_runtime(
         &self,
-        runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
-    ) -> Result<(), Arc<dyn VerifiedGraphRuntimePortV1>> {
+        runtime: VerifiedGraphRuntimeWeakProxyV1,
+    ) -> Result<(), VerifiedGraphRuntimeWeakProxyV1> {
         let session_shard = &self.binding().shard_id;
         let graph_binding = runtime.relational_binding();
         let graph_locator = runtime.relational_verified_locator();
@@ -498,22 +564,69 @@ impl RegisteredGlobalDb {
         if !exact {
             return Err(runtime);
         }
-        self.project_graph.set(runtime)
+        if let Some(bound) = self.project_graph.get() {
+            return if bound.shares_runtime_with(&runtime) {
+                Ok(())
+            } else {
+                Err(runtime)
+            };
+        }
+        match self.project_graph.set(runtime) {
+            Ok(()) => Ok(()),
+            Err(runtime) => {
+                if self
+                    .project_graph
+                    .get()
+                    .is_some_and(|bound| bound.shares_runtime_with(&runtime))
+                {
+                    Ok(())
+                } else {
+                    Err(runtime)
+                }
+            }
+        }
     }
 
-    pub fn project_graph_runtime(&self) -> Option<&Arc<dyn VerifiedGraphRuntimePortV1>> {
+    pub fn project_graph_runtime(&self) -> Option<&VerifiedGraphRuntimeWeakProxyV1> {
         self.project_graph.get()
     }
 
-    pub async fn read_snapshot(&self) -> tracedecay_runtime_core::db::engine::Result<ReadSnapshot> {
-        self.read_connection.read_snapshot().await
+    pub async fn read_snapshot(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<DatabaseEngineReadSnapshot> {
+        self.database
+            .begin_engine_read_snapshot("open registered database read snapshot")
+            .await
     }
 
     pub async fn snapshot_to(
         &self,
         destination: &Path,
     ) -> tracedecay_runtime_core::errors::Result<()> {
-        if destination == self.authority.canonical_database_path() {
+        self.prepare_snapshot_destination(destination)?;
+        self.database.snapshot_to(destination).await
+    }
+
+    /// Produces an interruption-aware snapshot over this exact guarded
+    /// registered database. The request probe cannot acquire a raw runtime or
+    /// authority; writer authorization remains inside the database facade.
+    pub async fn snapshot_to_interruptible(
+        &self,
+        destination: &Path,
+        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
+    ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt>
+    {
+        self.prepare_snapshot_destination(destination)?;
+        self.database
+            .snapshot_to_interruptible(destination, probe)
+            .await
+    }
+
+    fn prepare_snapshot_destination(
+        &self,
+        destination: &Path,
+    ) -> tracedecay_runtime_core::errors::Result<()> {
+        if destination == self.database.canonical_database_path() {
             return Err(registered_error(
                 "snapshot registered global database",
                 "snapshot destination must not be the canonical database",
@@ -534,7 +647,7 @@ impl RegisteredGlobalDb {
                 "snapshot destination has no parent directory",
             )
         })?;
-        if self.authority.canonical_database_path().parent() == Some(parent) {
+        if self.database.canonical_database_path().parent() == Some(parent) {
             return Err(registered_error(
                 "snapshot registered global database",
                 "snapshot destination must be outside the canonical database directory",
@@ -548,13 +661,7 @@ impl RegisteredGlobalDb {
                 )
             },
         )?;
-        self.runtime
-            .snapshot_to(destination.to_path_buf(), self.authority.clone())
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                registered_error("snapshot registered global database", format!("{error:?}"))
-            })
+        Ok(())
     }
 
     async fn validate_authority_schema_contract(
@@ -564,6 +671,28 @@ impl RegisteredGlobalDb {
             registered_error("begin registered authority schema validation", error)
         })?;
         super::schema_contract::validate_authority_schema_contract(&snapshot).await
+    }
+
+    async fn rearm_queued_projection_retries(&self) -> tracedecay_runtime_core::errors::Result<()> {
+        let transaction = self
+            .database
+            .begin_write_transaction("rearm queued projection retries")
+            .await?;
+        crate::observation_projection::rearm_queued_projection_retries(&transaction)
+            .await
+            .map_err(|error| {
+                registered_error("rearm queued projection retries", error.durable_detail())
+            })?;
+        transaction.commit().await
+    }
+
+    /// Rebuilds the registered observation projection through this client's
+    /// guarded database capability.
+    pub async fn rebuild_observation_projection(
+        &self,
+        frontier_sequence: u64,
+    ) -> tracedecay_store::ProjectionStoreResult<tracedecay_store::ProjectionRebuildOutcome> {
+        crate::observation_projection::rebuild_projection(&self.database, frontier_sequence).await
     }
 
     #[doc(hidden)]
@@ -580,91 +709,41 @@ impl RegisteredGlobalDb {
     pub fn writer_connection(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbWriterConnection<'_>> {
-        self.authority
-            .require_active_write_scope("open registered global database writer")?;
+        if !self.database.is_writable() {
+            return Err(registered_error(
+                "acquire registered global database writer",
+                "registered database client is read-only",
+            ));
+        }
         Ok(RegisteredGlobalDbWriterConnection {
-            connection: &self.write_connection,
-            authority: &self.authority,
+            database: &self.database,
         })
     }
 
     pub async fn begin_write_transaction(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbWriteTransaction<'_>> {
-        self.authority
-            .require_active_write_scope("begin registered global database transaction")?;
         let transaction = self
-            .write_connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|error| {
-                registered_error("begin registered global database transaction", error)
-            })?;
-        Ok(RegisteredGlobalDbWriteTransaction {
-            transaction,
-            authority: &self.authority,
-        })
+            .database
+            .begin_write_transaction("begin registered global database transaction")
+            .await?;
+        Ok(RegisteredGlobalDbWriteTransaction { transaction })
     }
 
     pub fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
-        self.runtime.binding()
+        self.database.registered_binding()
     }
 
-    /// The store runtime this registered database is mounted on.
-    ///
-    /// Exposed so the composition root can build the adapters it owns —
-    /// `RuntimeExternalSourceStore`, `GlobalDbObservationStore` — without this
-    /// crate naming a root type (see this crate's `lib.rs` module doc for the
-    /// "Dependency edges" note).
-    pub fn runtime(&self) -> &StoreRuntimeClientLease {
-        &self.runtime
-    }
-
-    /// The write authority guarding every mutation against this database.
-    ///
-    /// Companion to [`RegisteredGlobalDb::runtime`]; the root adapters take
-    /// the `(runtime, authority)` pair by clone.
-    pub fn authority(&self) -> &DatabaseAuthority {
-        &self.authority
-    }
-
-    fn workflow_storage_handle(
-        &self,
-    ) -> tracedecay_runtime_core::errors::Result<
-        tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle,
-    > {
-        let handle = self
-            .runtime
-            .authorized_exact_sql_handle(self.authority.clone())
-            .map_err(|error| {
-                registered_error("attach registered workflow storage", format!("{error:?}"))
-            })?;
-        validate_registered_identity(
-            handle.binding(),
-            handle.verified_locator(),
-            self.runtime.binding(),
-            self.runtime.locator().verified(),
-        )?;
-        Ok(handle)
+    /// Exact non-retaining locator identity for this guarded database client.
+    pub fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        self.database.registered_verified_locator()
     }
 
     pub fn work_storage(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
     {
-        let handle = self
-            .runtime
-            .authorized_exact_sql_handle(self.authority.clone())
-            .map_err(|error| {
-                registered_error("attach registered Work storage", format!("{error:?}"))
-            })?;
-        validate_registered_identity(
-            handle.binding(),
-            handle.verified_locator(),
-            self.runtime.binding(),
-            self.runtime.locator().verified(),
-        )?;
-        Ok(tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(handle))
+        self.database.work_storage()
     }
 
     pub fn authorized_scope_set_storage(
@@ -672,26 +751,7 @@ impl RegisteredGlobalDb {
     ) -> tracedecay_runtime_core::errors::Result<
         tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage,
     > {
-        let handle = self
-            .runtime
-            .authorized_exact_sql_handle(self.authority.clone())
-            .map_err(|error| {
-                registered_error(
-                    "attach registered authorized scope-set storage",
-                    format!("{error:?}"),
-                )
-            })?;
-        validate_registered_identity(
-            handle.binding(),
-            handle.verified_locator(),
-            self.runtime.binding(),
-            self.runtime.locator().verified(),
-        )?;
-        Ok(
-            tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage::from_registered(
-                handle,
-            ),
-        )
+        self.database.authorized_scope_set_storage()
     }
 
     pub fn work_application_services(
@@ -787,9 +847,7 @@ impl RegisteredGlobalDb {
     ) -> tracedecay_runtime_core::errors::Result<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     > {
-        let storage = self.workflow_storage_handle()?;
-        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority::from_registered(storage)
-            .map_err(workflow_storage_error)
+        self.database.workflow_storage()
     }
 
     pub fn workflow_application_services(
@@ -817,58 +875,26 @@ impl RegisteredGlobalDb {
     ) -> tracedecay_runtime_core::errors::Result<
         tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority,
     > {
-        let storage = self.workflow_storage_handle()?;
-        tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority::from_registered(storage)
-            .map_err(|error| {
-                registered_error(
-                    "attach registered handoff-open storage",
-                    format!("{error:?}"),
-                )
-            })
+        self.database.handoff_open_storage()
     }
 
     pub fn storage_telemetry_handle(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<
-        tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle,
-    > {
-        self.runtime.telemetry_read_handle().map_err(|error| {
-            registered_error(
-                "attach registered storage telemetry reader",
-                format!("{error:?}"),
-            )
-        })
+    ) -> tracedecay_runtime_core::errors::Result<DatabaseStorageTelemetryHandle> {
+        self.database.storage_telemetry_handle()
     }
 
-    // Root-owned adapter, deliberately not built here: `external_source_store`
-    // returned `crate::application::external_source_store::
-    // RuntimeExternalSourceStore`. The composition root builds it from
-    // `runtime().clone()` and `authority().clone()`.
-
-    pub fn storage_page_counts(&self) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
-        self.runtime
-            .storage_page_counts(std::time::Duration::from_secs(5))
-            .map_err(|error| {
-                registered_error(
-                    "read registered global database page counts",
-                    format!("{error:?}"),
-                )
-            })
+    pub async fn storage_page_counts(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
+        self.database.storage_page_counts().await
     }
 
     pub async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u64,
     ) -> tracedecay_runtime_core::errors::Result<()> {
-        self.runtime
-            .run_bounded_incremental_compaction(max_pages, self.authority.clone())
-            .await
-            .map_err(|error| {
-                registered_error(
-                    "run registered global database incremental compaction",
-                    format!("{error:?}"),
-                )
-            })
+        self.database.run_incremental_vacuum(max_pages).await
     }
 
     pub async fn run_session_lcm_retention(
@@ -887,22 +913,14 @@ impl RegisteredGlobalDb {
                 "registered sessions database has no storage root",
             )
         })?;
-        let authority = self.authority.clone();
-        tracedecay_sessions::runtime::lcm::retention::run_session_retention_authorized(
-            &self.write_connection,
+        tracedecay_sessions::runtime::lcm::retention::run_session_retention(
+            &self.database,
             storage_root,
             provider,
             session_id,
             config,
             mode,
             now,
-            &move |intent| {
-                authority
-                    .require_active_write_scope(intent)
-                    .map_err(|error| {
-                        tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string())
-                    })
-            },
         )
         .await
         .map_err(|error| registered_error("run registered session retention", error))
@@ -917,25 +935,18 @@ impl RegisteredGlobalDb {
     ) -> tracedecay_runtime_core::errors::Result<
         super::observation::retention::ObservationRetentionReport,
     > {
-        let authority = self.authority.clone();
-        super::observation::retention::run_observation_retention_authorized(
-            &self.write_connection,
+        super::observation::retention::run_observation_retention(
+            &self.database,
             generation,
             config,
             mode,
             now,
-            &move |intent| authority.require_active_write_scope(intent),
         )
         .await
     }
 
-    // Root-owned adapter, deliberately not built here: `observation_store`
-    // returned `crate::store::observation::GlobalDbObservationStore<'_>`, the
-    // root implementation of `tracedecay_store::ObservationStore`. The
-    // composition root builds it from `runtime()` and `authority()`.
-
     pub fn db_path(&self) -> &Path {
-        self.authority.canonical_database_path()
+        self.database.canonical_database_path()
     }
 
     pub fn git_index_transaction_store(
@@ -945,13 +956,8 @@ impl RegisteredGlobalDb {
     }
 }
 
-// `impl ExactSqlWriteAuthority for DatabaseAuthority` moved into
-// `tracedecay_runtime_core::db::access`: both the trait and the type are
-// now foreign to this crate, so the orphan rule forbids it here.
-
 pub struct RegisteredGlobalDbWriterConnection<'a> {
-    connection: &'a Connection,
-    authority: &'a DatabaseAuthority,
+    database: &'a Database,
 }
 
 impl RegisteredGlobalDbWriterConnection<'_> {
@@ -963,8 +969,10 @@ impl RegisteredGlobalDbWriterConnection<'_> {
     where
         P: IntoParams,
     {
-        self.require_active("execute registered global database statement")?;
-        self.connection.execute(sql, params).await
+        self.database
+            .execute_write_engine("execute registered global database statement", sql, params)
+            .await
+            .map_err(engine_error)
     }
 
     pub async fn query<P>(
@@ -975,37 +983,22 @@ impl RegisteredGlobalDbWriterConnection<'_> {
     where
         P: IntoParams,
     {
-        self.require_active("query registered global database writer")?;
-        self.connection.query(sql, params).await
+        self.database.read_connection().query(sql, params).await
     }
 
     pub async fn execute_batch(
         &self,
         sql: &str,
     ) -> tracedecay_runtime_core::db::engine::Result<()> {
-        self.require_active("execute registered global database batch")?;
-        self.connection.execute_batch(sql).await
-    }
-
-    fn require_active(&self, intent: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
-        self.authority
-            .require_active_write_scope(intent)
-            .map_err(|error| {
-                tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
-            })
-    }
-}
-
-impl WalCheckpointExecutor for RegisteredGlobalDbWriterConnection<'_> {
-    async fn checkpoint_wal_truncate(&self) -> tracedecay_runtime_core::db::engine::Result<Rows> {
-        self.require_active("checkpoint registered global database WAL")?;
-        self.connection.checkpoint_wal_truncate().await
+        self.database
+            .execute_write_batch("execute registered global database batch", sql)
+            .await
+            .map_err(engine_error)
     }
 }
 
 pub struct RegisteredGlobalDbWriteTransaction<'a> {
-    transaction: Transaction,
-    authority: &'a DatabaseAuthority,
+    transaction: DatabaseWriteTransaction<'a>,
 }
 
 impl QueryExecutor for RegisteredGlobalDbWriteTransaction<'_> {
@@ -1035,63 +1028,6 @@ impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
 
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         RegisteredGlobalDbWriteTransaction::execute_batch(self, sql).await
-    }
-}
-
-impl tracedecay_sessions::runtime::store_port::SessionWriteTxn
-    for RegisteredGlobalDbWriteTransaction<'_>
-{
-    #[allow(clippy::manual_async_fn)]
-    fn commit(self) -> impl Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send {
-        async move {
-            RegisteredGlobalDbWriteTransaction::commit(self)
-                .await
-                .map_err(|error| registered_error("commit registered session transaction", error))
-        }
-    }
-
-    #[allow(clippy::manual_async_fn)]
-    fn rollback(self) -> impl Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send {
-        async move {
-            RegisteredGlobalDbWriteTransaction::rollback(self)
-                .await
-                .map_err(|error| {
-                    registered_error("roll back registered session transaction", error)
-                })
-        }
-    }
-}
-
-impl tracedecay_sessions::runtime::store_port::SessionStoreAuthority for RegisteredGlobalDb {
-    type WriteTxn<'txn>
-        = RegisteredGlobalDbWriteTransaction<'txn>
-    where
-        Self: 'txn;
-
-    fn shard_id(&self) -> &tracedecay_store::StoreShardIdV1 {
-        &self.binding().shard_id
-    }
-
-    fn db_path(&self) -> &Path {
-        RegisteredGlobalDb::db_path(self)
-    }
-
-    #[allow(clippy::manual_async_fn)]
-    fn read_snapshot(
-        &self,
-    ) -> impl Future<Output = tracedecay_runtime_core::errors::Result<ReadSnapshot>> + Send {
-        async move {
-            RegisteredGlobalDb::read_snapshot(self)
-                .await
-                .map_err(|error| registered_error("open registered session read snapshot", error))
-        }
-    }
-
-    fn begin_write_transaction(
-        &self,
-    ) -> impl Future<Output = tracedecay_runtime_core::errors::Result<Self::WriteTxn<'_>>> + Send
-    {
-        RegisteredGlobalDb::begin_write_transaction(self)
     }
 }
 
@@ -1145,8 +1081,12 @@ impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor
         path: &Path,
         database_name: &str,
     ) -> tracedecay_runtime_core::db::engine::Result<()> {
-        self.require_active("attach registered consolidation input")?;
-        self.transaction.attach_database(path, database_name).await
+        tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor::attach_database(
+            &self.transaction,
+            path,
+            database_name,
+        )
+        .await
     }
 }
 
@@ -1159,7 +1099,6 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
     where
         P: IntoParams,
     {
-        self.require_active("execute registered global database transaction")?;
         self.transaction.execute(sql, params).await
     }
 
@@ -1171,7 +1110,6 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
     where
         P: IntoParams,
     {
-        self.require_active("query registered global database transaction")?;
         self.transaction.query(sql, params).await
     }
 
@@ -1179,143 +1117,16 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         &self,
         sql: &str,
     ) -> tracedecay_runtime_core::db::engine::Result<()> {
-        self.require_active("execute registered global database transaction batch")?;
         self.transaction.execute_batch(sql).await
     }
 
     pub async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
-        if let Err(error) = self
-            .authority
-            .require_active_write_scope("commit registered global database transaction")
-        {
-            let rollback = self.transaction.rollback().await;
-            return match rollback {
-                Ok(()) => Err(
-                    tracedecay_runtime_core::db::engine::Error::invalid_operation(
-                        error.to_string(),
-                    ),
-                ),
-                Err(rollback_error) => Err(
-                    tracedecay_runtime_core::db::engine::Error::invalid_operation(format!(
-                        "{error}; rollback after authority loss failed: {rollback_error}"
-                    )),
-                ),
-            };
-        }
-        self.transaction.commit().await
+        self.transaction.commit().await.map_err(engine_error)
     }
 
     pub async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
-        self.transaction.rollback().await
+        self.transaction.rollback().await.map_err(engine_error)
     }
-
-    fn require_active(&self, intent: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
-        self.authority
-            .require_active_write_scope(intent)
-            .map_err(|error| {
-                tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
-            })
-    }
-}
-
-fn registered_connection(
-    runtime: &StoreRuntimeClientLease,
-    expected_binding: &tracedecay_store::StoreRuntimeBindingV1,
-    expected_locator: &tracedecay_store::VerifiedStoreLocatorV1,
-    authority: &DatabaseAuthority,
-) -> tracedecay_runtime_core::errors::Result<Connection> {
-    validate_registered_locator(runtime, expected_binding, expected_locator, authority)?;
-    let handle = runtime
-        .authorized_exact_sql_handle(authority.clone())
-        .map_err(|error| {
-            registered_error(
-                "attach registered global database runtime",
-                format!("{error:?}"),
-            )
-        })?;
-    validate_registered_identity(
-        handle.binding(),
-        handle.verified_locator(),
-        expected_binding,
-        expected_locator,
-    )?;
-    Ok(Connection::attach(handle))
-}
-
-fn validate_registered_locator(
-    runtime: &StoreRuntimeClientLease,
-    expected_binding: &tracedecay_store::StoreRuntimeBindingV1,
-    expected_locator: &tracedecay_store::VerifiedStoreLocatorV1,
-    authority: &DatabaseAuthority,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    validate_registered_identity(
-        runtime.binding(),
-        runtime.locator().verified(),
-        expected_binding,
-        expected_locator,
-    )?;
-    validate_registered_path(runtime.locator().path(), authority)?;
-    let current_file_identity = tracedecay_runtime_core::db::sqlite_generation_identity(
-        authority.canonical_database_path(),
-    )
-    .map_err(|error| {
-        registered_error(
-            "verify registered global database file identity",
-            sqlite_identity_error_message(error),
-        )
-    })?;
-    validate_opened_file_identity(runtime.opened_file_identity(), current_file_identity)
-}
-
-fn validate_opened_file_identity(
-    opened_file_identity: Option<u64>,
-    current_file_identity: u64,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    let opened_file_identity = opened_file_identity.ok_or_else(|| {
-        registered_error(
-            "bind registered global database runtime",
-            "registry attachment has no opened SQLite file identity",
-        )
-    })?;
-    if current_file_identity != opened_file_identity {
-        return Err(registered_error(
-            "bind registered global database runtime",
-            "database file identity changed after registry attachment",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_registered_identity(
-    actual_binding: &tracedecay_store::StoreRuntimeBindingV1,
-    actual_locator: &tracedecay_store::VerifiedStoreLocatorV1,
-    expected_binding: &tracedecay_store::StoreRuntimeBindingV1,
-    expected_locator: &tracedecay_store::VerifiedStoreLocatorV1,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    if actual_binding != expected_binding || actual_locator != expected_locator {
-        return Err(registered_error(
-            "bind registered global database runtime",
-            "registry binding or verified locator does not match expected typed authority",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_registered_path(
-    runtime_path: &std::path::Path,
-    authority: &DatabaseAuthority,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    if runtime_path != authority.canonical_database_path() {
-        return Err(registered_error(
-            "bind registered global database runtime",
-            format!(
-                "registry locator {} does not match database authority {}",
-                runtime_path.display(),
-                authority.canonical_database_path().display()
-            ),
-        ));
-    }
-    Ok(())
 }
 
 fn registered_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
@@ -1325,42 +1136,15 @@ fn registered_error(operation: &str, error: impl std::fmt::Display) -> TraceDeca
     }
 }
 
-fn workflow_storage_error(
-    error: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError,
-) -> TraceDecayError {
-    match error {
-        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError::ResetRequired => {
-            TraceDecayError::reset_required(
-                "workflow",
-                "persisted workflow schema does not match the final workflow authority",
-            )
-        }
-        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError::Unavailable => {
-            registered_error(
-                "attach registered workflow storage",
-                "workflow storage is unavailable",
-            )
-        }
-    }
+fn registered_owner_error(error: DatabaseOwnerErrorV1) -> TraceDecayError {
+    registered_error(
+        "issue registered global database client",
+        format!("{error:?}"),
+    )
 }
 
-fn sqlite_identity_error_message(
-    error: tracedecay_runtime_core::db::SqliteFileIdentityError,
-) -> &'static str {
-    match error {
-        tracedecay_runtime_core::db::SqliteFileIdentityError::Open => {
-            "could not open SQLite file identity"
-        }
-        tracedecay_runtime_core::db::SqliteFileIdentityError::Inspect => {
-            "could not inspect SQLite file identity"
-        }
-        tracedecay_runtime_core::db::SqliteFileIdentityError::Identify => {
-            "could not identify SQLite file"
-        }
-        tracedecay_runtime_core::db::SqliteFileIdentityError::Unavailable => {
-            "SQLite file identity is unavailable"
-        }
-    }
+fn engine_error(error: TraceDecayError) -> tracedecay_runtime_core::db::engine::Error {
+    tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
 }
 
 #[cfg(test)]
@@ -1369,21 +1153,109 @@ mod workflow_schema_tests;
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::BTreeMap,
-        fs,
-        sync::{Arc, Condvar, Mutex},
-        time::Duration,
-    };
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, atomic::AtomicBool};
 
-    use tempfile::TempDir;
-    use tracedecay_domain::LocatorDigest;
+    use tracedecay_domain::ProjectId;
+    use tracedecay_graph_db::{
+        GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
+        VerifiedGraphSnapshot,
+    };
+    use tracedecay_runtime_core::db::{
+        Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+    };
+    use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
     use tracedecay_runtime_core::store_runtime::registry::{
         StoreRuntimeRetirementBlocker, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementResult,
     };
-    use tracedecay_store::{StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
+    use tracedecay_store::{
+        FactReadControl, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+        RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1,
+        StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    };
 
-    use super::*;
+    use super::RegisteredGlobalDb;
+
+    struct TestRegisteredGraphRuntime {
+        binding: StoreRuntimeBindingV1,
+        locator: VerifiedStoreLocatorV1,
+    }
+
+    impl VerifiedGraphRuntimePortV1 for TestRegisteredGraphRuntime {
+        fn relational_binding(&self) -> &StoreRuntimeBindingV1 {
+            &self.binding
+        }
+
+        fn relational_verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+            &self.locator
+        }
+
+        fn cancel_reconciliation(&self) {}
+
+        fn publish_verified_manifest(
+            &self,
+            _manifest: &GraphGenerationManifest,
+            _idempotency_key: GraphIdempotencyKey,
+            _cancelled: Arc<AtomicBool>,
+        ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+            Err(GraphDbError::unavailable("test publication is unavailable"))
+        }
+
+        fn reconcile_verified_manifest(
+            &self,
+            _manifest: &GraphGenerationManifest,
+            _idempotency_key: GraphIdempotencyKey,
+        ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+            Err(GraphDbError::unavailable(
+                "test reconciliation is unavailable",
+            ))
+        }
+
+        fn verified_snapshot(
+            &self,
+            _projection: &GraphProjectionIdentity,
+            _read_control: FactReadControl,
+        ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+            Ok(None)
+        }
+    }
+
+    struct ActiveSnapshotProbe {
+        cancellation: RuntimeCancellationIdentityV1,
+        deadline: RuntimeDeadlineV1,
+    }
+
+    impl RuntimeRequestProbeV1 for ActiveSnapshotProbe {
+        fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+            &self.cancellation
+        }
+
+        fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+            &self.deadline
+        }
+
+        fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+            None
+        }
+
+        fn try_begin_commit(&self) -> bool {
+            false
+        }
+    }
+
+    fn active_snapshot_probe() -> Arc<dyn RuntimeRequestProbeV1> {
+        Arc::new(ActiveSnapshotProbe {
+            cancellation: RuntimeCancellationIdentityV1 {
+                cancellation_id: RuntimeCancellationIdV1::new("cancellation.global-snapshot")
+                    .expect("valid global snapshot cancellation identity"),
+                generation: 1,
+            },
+            deadline: RuntimeDeadlineV1 {
+                deadline_id: RuntimeDeadlineIdV1::new("deadline.global-snapshot")
+                    .expect("valid global snapshot deadline identity"),
+            },
+        })
+    }
 
     #[tokio::test]
     async fn registered_database_lease_keeps_runtime_alive_after_map_owner_drops() {
@@ -1391,50 +1263,50 @@ mod tests {
             "registered-global-db-lease-foreign-survival",
         )
         .await;
-        let (map_owner, database, retirement, _directory, scope) = fixture.into_parts();
-        let mut owners = BTreeMap::from([("profile", map_owner)]);
-        let foreign: RegisteredGlobalDbLeaseV1 = owners
+        let (map_lease, database, retirement, _directory, scope) = fixture.into_parts();
+        let foreign = map_lease.clone();
+        assert!(foreign.shares_client_with(&map_lease));
+        let mut owners = BTreeMap::from([("profile", database)]);
+        let independent = owners
             .get("profile")
             .expect("map owner contains the registered database")
-            .clone();
-        assert!(
-            foreign.shares_client_with(
-                owners
-                    .get("profile")
-                    .expect("map owner retains the same client token")
-            )
-        );
+            .issue_lease()
+            .expect("owner issues independently counted client");
+        assert!(!foreign.shares_client_with(&independent));
+        drop(independent);
+        drop(map_lease);
 
         owners.clear();
         drop(owners);
-        drop(database);
         drop(scope);
 
-        match retirement
+        let targets = match retirement
             .registry()
             .reserve_retirement_batch(vec![retirement.retirement_target()])
         {
-            StoreRuntimeRetirementResult::Blocked(blockers) => {
+            StoreRuntimeRetirementResult::Blocked(refusal) => {
                 assert!(matches!(
-                    blockers.as_slice(),
+                    refusal.blockers(),
                     [StoreRuntimeRetirementBlocker::ClientLeases { binding, count }]
                         if binding.as_ref() == retirement.binding() && *count == 1
                 ));
+                assert!(matches!(
+                    refusal.targets(),
+                    [target] if target.binding() == retirement.binding()
+                ));
+                refusal.into_parts().1
             }
             StoreRuntimeRetirementResult::Reserved(_) => {
                 panic!("foreign registered database lease must refuse retirement")
             }
-        }
+        };
 
         drop(foreign);
 
-        let mut reservation = match retirement
-            .registry()
-            .reserve_retirement_batch(vec![retirement.retirement_target()])
-        {
+        let mut reservation = match retirement.registry().reserve_retirement_batch(targets) {
             StoreRuntimeRetirementResult::Reserved(reservation) => reservation,
-            StoreRuntimeRetirementResult::Blocked(blockers) => {
-                panic!("dropped registered database lease must permit retirement: {blockers:?}")
+            StoreRuntimeRetirementResult::Blocked(refusal) => {
+                panic!("dropped registered database lease must permit retirement: {refusal:?}")
             }
         };
         let committed = reservation
@@ -1454,241 +1326,123 @@ mod tests {
         assert_eq!(reopened.locator().verified(), retirement.locator());
     }
 
-    #[derive(Default)]
-    struct AuthorityGate {
-        state: Mutex<AuthorityGateState>,
-        changed: Condvar,
-    }
-
-    #[derive(Default)]
-    struct AuthorityGateState {
-        armed: bool,
-        arrived: bool,
-        released: bool,
-    }
-
-    impl AuthorityGate {
-        fn arm(&self) {
-            self.state.lock().unwrap().armed = true;
-        }
-
-        fn wait_until_arrived(&self) {
-            let state = self.state.lock().unwrap();
-            let (state, timeout) = self
-                .changed
-                .wait_timeout_while(state, Duration::from_secs(5), |state| !state.arrived)
-                .unwrap();
-            assert!(
-                state.arrived,
-                "writer actor never reached authority gate (timed_out={})",
-                timeout.timed_out()
-            );
-        }
-
-        fn release(&self) {
-            let mut state = self.state.lock().unwrap();
-            state.released = true;
-            self.changed.notify_all();
-        }
-    }
-
-    struct GatedAuthority {
-        authority: DatabaseAuthority,
-        gate: Arc<AuthorityGate>,
-    }
-
-    impl ExactSqlWriteAuthority for GatedAuthority {
-        fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
-            {
-                let mut state = self.gate.state.lock().unwrap();
-                if state.armed {
-                    state.arrived = true;
-                    self.gate.changed.notify_all();
-                    let (state_after_wait, timeout) = self
-                        .gate
-                        .changed
-                        .wait_timeout_while(state, Duration::from_secs(5), |state| !state.released)
-                        .unwrap();
-                    if timeout.timed_out() && !state_after_wait.released {
-                        return Err(ExactSqlError::AuthorityDenied(
-                            "test authority gate timed out".to_owned(),
-                        ));
-                    }
-                }
-            }
-            self.authority.verify(intent)
-        }
-    }
-
-    #[test]
-    fn registered_locator_mismatch_is_denied() {
-        let directory = TempDir::new().unwrap();
-        let authority_path = directory.path().join("authority.db");
-        let other_path = directory.path().join("other.db");
-        fs::write(&authority_path, []).unwrap();
-        fs::write(&other_path, []).unwrap();
-        let authority =
-            DatabaseAuthority::acquire_test(&authority_path, "test registered locator").unwrap();
-
-        let result = validate_registered_path(&other_path.canonicalize().unwrap(), &authority);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn registered_locator_validation_never_creates_missing_path() {
-        let directory = TempDir::new().unwrap();
-        let authority_path = directory.path().join("authority.db");
-        let missing_path = directory.path().join("must-not-be-created.db");
-        fs::write(&authority_path, []).unwrap();
-        let authority =
-            DatabaseAuthority::acquire_test(&authority_path, "test registered no-create").unwrap();
-
-        let result = validate_registered_path(&missing_path, &authority);
-
-        assert!(result.is_err());
-        assert!(!missing_path.exists());
-    }
-
-    #[test]
-    fn same_path_cannot_substitute_a_different_typed_binding() {
-        fn binding(project: &str) -> StoreRuntimeBindingV1 {
-            serde_json::from_value(serde_json::json!({
-                "shard_id": {
-                    "brain_id": "brain.registered-test",
-                    "profile_id": "profile.registered-test",
-                    "scope": { "kind": "project", "project_id": project }
-                },
-                "incarnation": 1,
-                "authority_epoch": 7
-            }))
-            .unwrap()
-        }
-
-        let actual = binding("project.actual");
-        let expected = binding("project.expected");
-        let actual_locator = VerifiedStoreLocatorV1::new(
-            actual.shard_id.clone(),
-            StoreIncarnationV1::new(1).unwrap(),
-            LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
-        );
-        let expected_locator = VerifiedStoreLocatorV1::new(
-            expected.shard_id.clone(),
-            StoreIncarnationV1::new(1).unwrap(),
-            LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+    #[tokio::test]
+    async fn weak_registered_owner_issuer_mints_fresh_guarded_command_leases() {
+        let fixture = crate::tests::harness::RegisteredGlobalDbRetirementHarnessV1::open(
+            "weak-registered-global-db-owner-issuer",
+        )
+        .await;
+        let (map_lease, database, _retirement, _directory, _scope) = fixture.into_parts();
+        let issuer = database.weak_lease_issuer();
+        assert_eq!(issuer.registered_binding(), map_lease.binding());
+        assert_eq!(
+            issuer.registered_verified_locator(),
+            map_lease.verified_locator()
         );
 
-        assert!(
-            validate_registered_identity(&actual, &actual_locator, &expected, &expected_locator,)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn missing_or_replaced_opened_file_identity_is_denied() {
-        assert!(validate_opened_file_identity(None, 7).is_err());
-        assert!(validate_opened_file_identity(Some(6), 7).is_err());
-        assert!(validate_opened_file_identity(Some(7), 7).is_ok());
+        let first = issuer
+            .issue_lease()
+            .expect("ready registered owner issues a guarded command lease");
+        let first_clone = first.clone();
+        let second = issuer
+            .issue_lease()
+            .expect("each command receives a fresh guarded lease");
+        assert!(first.shares_client_with(&first_clone));
+        assert!(!first.shares_client_with(&second));
     }
 
     #[tokio::test]
-    async fn issued_registered_writer_rejects_scope_loss_before_sql_dispatch() {
-        let profile = TempDir::new().unwrap();
-        let database_path = profile.path().join("projects/project/sessions.db");
-        fs::create_dir_all(database_path.parent().unwrap()).unwrap();
-        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-            profile.path(),
-            1,
-            "registered-issued-writer",
+    async fn registered_project_graph_binding_retains_only_the_database_weak_proxy() {
+        let directory = tempfile::tempdir().expect("registered weak graph proxy directory");
+        let project_id = ProjectId::new("project.registered-weak-graph")
+            .expect("valid registered weak graph project identity");
+        let graph_path = directory.path().join("project/memory.db");
+        let sessions_path = directory.path().join("project/sessions.db");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(
+            graph_path.parent().expect("graph database parent"),
         )
-        .unwrap();
-        let connection = tracedecay_runtime_core::db::engine::TestConnection::open(&database_path);
-        let authority =
-            DatabaseAuthority::for_runtime(&database_path, "registered issued writer").unwrap();
-        let writer = RegisteredGlobalDbWriterConnection {
-            connection: &connection,
-            authority: &authority,
-        };
-        drop(scope);
+        .expect("create registered weak graph project directory");
+        let graph_authority = DatabaseAuthority::acquire_test(
+            &graph_path,
+            "open registered weak graph project runtime",
+        )
+        .expect("project graph database authority");
+        let (graph_database, _) = Database::publish_registered_test_runtime(
+            &graph_path,
+            &graph_authority,
+            TestDatabaseRuntimeMode::Initialize,
+            TestDatabaseRuntimeScope::Project {
+                project_id: project_id.clone(),
+            },
+        )
+        .await
+        .expect("publish project graph database");
+        let runtime: Arc<dyn VerifiedGraphRuntimePortV1> = Arc::new(TestRegisteredGraphRuntime {
+            binding: graph_database.registered_binding().clone(),
+            locator: graph_database.registered_verified_locator().clone(),
+        });
+        let weak_runtime = Arc::downgrade(&runtime);
+        graph_database
+            .bind_memory_graph_runtime(Arc::clone(&runtime))
+            .expect("bind exact project graph runtime");
+        let proxy = graph_database
+            .memory_graph_runtime()
+            .expect("database issues the exact weak graph proxy");
 
-        let error = writer
-            .execute(
-                "CREATE TABLE stale_registered_writer_must_not_persist (value INTEGER)",
-                (),
-            )
-            .await
-            .expect_err("issued registered writer must not outlive daemon scope");
+        let sessions_authority = DatabaseAuthority::acquire_test(
+            &sessions_path,
+            "open registered weak graph sessions runtime",
+        )
+        .expect("project sessions database authority");
+        let (sessions_database, _) = Database::publish_registered_test_runtime(
+            &sessions_path,
+            &sessions_authority,
+            TestDatabaseRuntimeMode::Initialize,
+            TestDatabaseRuntimeScope::ProjectSessions { project_id },
+        )
+        .await
+        .expect("publish project sessions database");
+        let registered = RegisteredGlobalDb::from_database(sessions_database);
+        assert!(
+            registered.bind_project_graph_runtime(proxy.clone()).is_ok(),
+            "database-issued weak graph proxy must bind"
+        );
+        assert!(
+            registered.bind_project_graph_runtime(proxy).is_ok(),
+            "binding the same weak runtime must be idempotent"
+        );
 
-        assert!(error.to_string().contains("active daemon"));
-        let mut rows = connection
-            .query(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                tracedecay_runtime_core::db::engine::params![
-                    "stale_registered_writer_must_not_persist"
-                ],
-            )
-            .await
-            .unwrap();
-        assert!(rows.next().await.unwrap().is_none());
+        drop(runtime);
+        assert!(weak_runtime.upgrade().is_none());
+        let projection = GraphProjectionIdentity::new(
+            tracedecay_graph_db::GraphNamespace::new("registered-weak-proxy")
+                .expect("valid registered weak proxy namespace"),
+            tracedecay_graph_db::GraphProjectionId::new("availability")
+                .expect("valid registered weak proxy projection"),
+        );
+        assert!(matches!(
+            registered
+                .project_graph_runtime()
+                .expect("registered graph proxy remains bound")
+                .verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false)),),
+            Err(GraphDbError::Unavailable { .. })
+        ));
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn queued_registered_write_rechecks_authority_inside_writer_actor() {
-        let profile = TempDir::new().unwrap();
-        let database_path = profile.path().join("projects/project/queued.db");
-        fs::create_dir_all(database_path.parent().unwrap()).unwrap();
-        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-            profile.path(),
-            1,
-            "queued-registered-writer",
+    #[tokio::test]
+    async fn registered_database_interruptible_snapshot_returns_the_canonical_receipt() {
+        let fixture = crate::tests::harness::RegisteredGlobalDbRetirementHarnessV1::open(
+            "registered-global-db-interruptible-snapshot",
         )
-        .unwrap();
-        let authority =
-            DatabaseAuthority::for_runtime(&database_path, "queued registered writer").unwrap();
-        let gate = Arc::new(AuthorityGate::default());
-        let connection =
-            tracedecay_runtime_core::db::engine::TestConnection::open_with_write_authority(
-                &database_path,
-                Arc::new(GatedAuthority {
-                    authority: authority.clone(),
-                    gate: Arc::clone(&gate),
-                }),
-            );
-        connection
-            .execute_batch("CREATE TABLE queued_write (value INTEGER NOT NULL)")
-            .await
-            .unwrap();
-        let holder = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .unwrap();
-        let writer = RegisteredGlobalDbWriterConnection {
-            connection: &connection,
-            authority: &authority,
-        };
-        gate.arm();
+        .await;
+        let (database, _owner, _retirement, directory, _scope) = fixture.into_parts();
+        let destination = directory.path().join("backup/registered-snapshot.db");
 
-        let queued_write = writer.execute("INSERT INTO queued_write VALUES (1)", ());
-        let release_holder = async {
-            holder.rollback().await.unwrap();
-            let waiting_gate = Arc::clone(&gate);
-            tokio::task::spawn_blocking(move || waiting_gate.wait_until_arrived())
-                .await
-                .unwrap();
-            drop(scope);
-            gate.release();
-        };
-        let (result, ()) = tokio::join!(queued_write, release_holder);
-
-        let error = result.expect_err("queued write must recheck revoked daemon authority");
-        assert!(error.to_string().contains("active daemon"));
-        let mut rows = connection
-            .query("SELECT count(*) FROM queued_write", ())
+        let receipt = database
+            .snapshot_to_interruptible(&destination, active_snapshot_probe())
             .await
-            .unwrap();
-        assert_eq!(
-            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-            0
-        );
+            .expect("guarded registered database produces an interruptible snapshot");
+        assert!(destination.is_file());
+        assert!(receipt.destination_bytes > 0);
     }
 }

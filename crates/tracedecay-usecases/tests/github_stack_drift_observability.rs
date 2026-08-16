@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,

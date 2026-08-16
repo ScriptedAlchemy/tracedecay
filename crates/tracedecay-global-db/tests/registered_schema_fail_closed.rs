@@ -20,18 +20,29 @@
 //! Deleting or weakening this test removes the only executable proof that a
 //! production process still refuses an unregistered shard.
 
-use tracedecay_runtime_core::db::engine::TestConnection;
+use tracedecay_runtime_core::db::{
+    Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+};
 use tracedecay_runtime_core::errors::TraceDecayError;
 
 #[tokio::test]
 async fn unregistered_installer_refuses_to_initialize_a_registered_shard() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let connection = TestConnection::open(&directory.path().join("registered.db"));
+    let path = directory.path().join("registered.db");
+    let authority = DatabaseAuthority::acquire_test(&path, "fail-closed registered installer")
+        .expect("test authority");
 
-    let error =
-        tracedecay_runtime_core::ports::registered_schema::ensure_registered_schema(&connection)
-            .await
-            .expect_err("an unregistered installer must fail closed, never converge silently");
+    let error = match Database::publish_registered_test_runtime(
+        &path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+        TestDatabaseRuntimeScope::ProfileSessions,
+    )
+    .await
+    {
+        Ok(_) => panic!("an unregistered installer must fail closed, never converge silently"),
+        Err(error) => error,
+    };
 
     assert!(
         matches!(error, TraceDecayError::Database { .. }),

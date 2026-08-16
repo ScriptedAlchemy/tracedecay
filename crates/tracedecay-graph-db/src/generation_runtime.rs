@@ -831,7 +831,7 @@ mod tests {
             cancellation: Arc::new(NeverCancelled),
         })
         .unwrap();
-        let database = owner.lease();
+        let database = owner.issue_lease().unwrap();
         (owner, database)
     }
 
@@ -899,7 +899,7 @@ mod tests {
             cancellation: Arc::new(NeverCancelled),
         })
         .unwrap();
-        let database = owner.lease();
+        let database = owner.issue_lease().unwrap();
         let manifest = GraphGenerationManifest::new(
             GraphProjectionIdentity::new(
                 GraphNamespace::new("one-pass").unwrap(),

@@ -50,7 +50,7 @@ impl WorkHistoryReadPortV1 for WorkSqliteStorage {
     ) -> Result<WorkHistoryV1, HistoryError> {
         let scope = context.authorized_scope();
         let journal =
-            load_journal(&self.handle, scope).ok_or(HistoryError::EventAuthorityUnavailable)?;
+            load_journal(self.handle(), scope).ok_or(HistoryError::EventAuthorityUnavailable)?;
         // Events outside the selection fall outside it; they do not poison the
         // ones inside. The page is served over the covered prefix and carries
         // the disclosure that says what was left out, so a caller can never

@@ -29,7 +29,7 @@ impl WorkProductAttemptAdmissionPortV1 for WorkSqliteStorage {
         require_declared_authority(admission)?;
         require_request_active(&admission.product_context)?;
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| AdmissionError::Unavailable)?;
         let outcome = admit_attempt_in_transaction(&transaction, admission);
@@ -58,7 +58,7 @@ impl WorkProductAttemptAdmissionPortV1 for WorkSqliteStorage {
         require_declared_authority(&admission.admission)?;
         require_request_active(&admission.admission.product_context)?;
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| AdmissionError::Unavailable)?;
         let outcome = admit_retry_in_transaction(&transaction, admission);
@@ -93,7 +93,7 @@ impl WorkProductAttemptAdmissionPortV1 for WorkSqliteStorage {
         require_declared_authority(&admission.admission)?;
         require_request_active(&admission.admission.product_context)?;
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| AdmissionError::Unavailable)?;
         let outcome = admit_synthesis_in_transaction(&transaction, admission);

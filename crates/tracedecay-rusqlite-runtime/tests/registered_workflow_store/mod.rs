@@ -7,6 +7,7 @@ use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
+use tracedecay_rusqlite_runtime::repository::RetainedExactSqlCapability;
 use tracedecay_rusqlite_runtime::workflow::install_workflow_schema;
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
@@ -17,6 +18,8 @@ use tracedecay_store::{
 };
 
 struct NoTypedWrites;
+
+struct WorkflowStoreTestRetentionGuard;
 
 impl StorageOperationExecutor for NoTypedWrites {
     fn execute(
@@ -63,6 +66,9 @@ impl RegisteredWorkflowStore {
         {
             let connection = Connection::open(&path).expect("open workflow store");
             install_workflow_schema(&connection).expect("install workflow schema");
+            connection
+                .execute_batch(tracedecay_rusqlite_runtime::handoff::HANDOFF_OPEN_SCHEMA_V1)
+                .expect("install handoff-open schema");
             setup(&connection);
         }
         let path = path.canonicalize().expect("canonicalize workflow store");
@@ -112,8 +118,11 @@ impl RegisteredWorkflowStore {
         }
     }
 
-    pub fn storage(&self) -> &ExactSqlHandle {
-        &self.storage
+    pub fn retained_exact_sql(&self) -> RetainedExactSqlCapability {
+        RetainedExactSqlCapability::from_authorized_handle_with_guard(
+            self.storage.clone(),
+            WorkflowStoreTestRetentionGuard,
+        )
     }
 
     /// Opens a short-lived connection for assertions that inspect stored rows

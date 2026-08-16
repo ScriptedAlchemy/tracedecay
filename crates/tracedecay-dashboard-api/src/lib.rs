@@ -151,7 +151,9 @@ use tracedecay_agent_hosts::automation::backend;
 use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::db::{Database, DatabaseEngineConnection};
+use tracedecay_runtime_core::db::{
+    Database, DatabaseEngineReadConnection, DatabaseStorageTelemetryHandle,
+};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{StorageMode, StoreLayout};
 
@@ -329,14 +331,14 @@ pub struct DashboardState {
     /// Immutable authoritative owner for every memory operation served here.
     pub memory_owner: FactOwnerV1,
     /// Active code-graph database. This can be branch-specific.
-    pub graph_conn: DatabaseEngineConnection,
-    /// Keeps every project-database authority alive as long as cloned raw
-    /// connections remain reachable through this state.
+    pub graph_conn: DatabaseEngineReadConnection,
+    /// Keeps every project-database authority alive as long as guarded
+    /// capabilities remain reachable through this state.
     pub _database_guards: Vec<Arc<Database>>,
     /// Read-only telemetry handle attached to the retained active graph runtime.
     /// This remains distinct from project memory when those stores use
     /// different files.
-    pub graph_telemetry_handle: Option<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle>,
+    pub graph_telemetry_handle: Option<DatabaseStorageTelemetryHandle>,
     /// Display path of the active code-graph database.
     pub graph_db_path: String,
     /// Authoritative project-memory handle and process-local writer lane.
@@ -709,9 +711,12 @@ async fn build_state_inner(
         project_graph,
         project_graph_resolver,
         memory_owner,
-        graph_conn: mem_db.engine_conn(),
+        graph_conn: mem_db.read_connection(),
         _database_guards: vec![mem_db.clone()],
-        graph_telemetry_handle: cg.storage_telemetry_handle().ok(),
+        graph_telemetry_handle: cg
+            .dashboard_database_guard()
+            .storage_telemetry_handle()
+            .ok(),
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_db,
         mem_db_path,
@@ -2168,7 +2173,7 @@ mod authority_tests {
                 project_graph: None,
                 project_graph_resolver: None,
                 memory_owner,
-                graph_conn: database.engine_conn(),
+                graph_conn: database.read_connection(),
                 _database_guards: vec![Arc::clone(&database)],
                 graph_telemetry_handle: database.storage_telemetry_handle().ok(),
                 graph_db_path: layout.graph_db_path.display().to_string(),

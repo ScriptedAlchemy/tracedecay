@@ -1418,13 +1418,14 @@ mod tests {
         historical_projection_delta_required, projection_audit_checkpoint_through_sequence,
         validate_projection_authority_suffix,
     };
-    use crate::ensure_registered_schema;
+    use crate::tests::harness::{RegisteredGlobalDbTestFixture, open_registered_test_fixture};
+    use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{
         Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
     };
 
     struct CountingQuery<'a> {
-        inner: &'a TestConnection,
+        inner: &'a RegisteredGlobalDbTestFixture,
         queries: AtomicUsize,
     }
 
@@ -1512,8 +1513,12 @@ mod tests {
     #[tokio::test]
     async fn invariant_receipt_probes_have_covering_indexes() {
         let directory = TempDir::new().unwrap();
-        let connection = TestConnection::open(&directory.path().join("sessions.db"));
-        ensure_registered_schema(&connection).await.unwrap();
+        let connection = open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
 
         let mut rows = connection
             .query(
@@ -1556,8 +1561,12 @@ mod tests {
     #[tokio::test]
     async fn incomplete_exhaustive_checkpoint_does_not_rescan_projection_tables() {
         let directory = TempDir::new().unwrap();
-        let connection = TestConnection::open(&directory.path().join("sessions.db"));
-        ensure_registered_schema(&connection).await.unwrap();
+        let connection = open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
         let counting = CountingQuery {
             inner: &connection,
             queries: AtomicUsize::new(0),
@@ -1631,8 +1640,12 @@ mod tests {
         const OBSERVATIONS: usize = 128;
 
         let directory = TempDir::new().unwrap();
-        let connection = TestConnection::open(&directory.path().join("sessions.db"));
-        ensure_registered_schema(&connection).await.unwrap();
+        let connection = open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
         for index in 0..OBSERVATIONS {
             let observation = skipped_observation(index);
             let receipt = observation.receipt();

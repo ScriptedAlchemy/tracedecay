@@ -10,7 +10,10 @@ use tracedecay_query::retrieval::QUERY_CURSOR_TTL_MICROS_V1;
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
-use tracedecay_runtime_core::db::engine::{Executor, ReadSnapshot, params};
+use tracedecay_runtime_core::db::{
+    DatabaseEngineReadSnapshot,
+    engine::{Executor, params},
+};
 use tracedecay_temporal_query::cursor::{CURSOR_CLOCK_SKEW_MICROS, CURSOR_LIFETIME_MICROS};
 use tracedecay_temporal_query::ports::{
     CursorKeyError, CursorSignature, InMemoryCursorAuthenticator, SessionCursorAuthenticator,
@@ -196,7 +199,7 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
 
 impl GlobalDbCursorKeyProvider {
     pub async fn from_registered_active(
-        read: &ReadSnapshot,
+        read: &DatabaseEngineReadSnapshot,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {
         let mut rows = read
             .query(
@@ -235,14 +238,14 @@ impl GlobalDbCursorKeyProvider {
     }
 
     pub async fn from_registered_key_ref(
-        read: &ReadSnapshot,
+        read: &DatabaseEngineReadSnapshot,
         expected: SignedCursorKeyRefV1,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {
         Self::from_registered_key_ref_at(read, expected, now_micros().0).await
     }
 
     pub async fn from_registered_snapshot(
-        read: &ReadSnapshot,
+        read: &DatabaseEngineReadSnapshot,
         snapshot: &TemporalExecutionSnapshot,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {
         let expected = snapshot
@@ -253,7 +256,7 @@ impl GlobalDbCursorKeyProvider {
     }
 
     async fn from_registered_key_ref_at(
-        read: &ReadSnapshot,
+        read: &DatabaseEngineReadSnapshot,
         expected: SignedCursorKeyRefV1,
         now_micros: i64,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {

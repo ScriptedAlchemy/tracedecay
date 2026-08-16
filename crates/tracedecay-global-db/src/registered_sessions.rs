@@ -704,7 +704,7 @@ impl RegisteredGlobalDb {
 }
 
 async fn search_workflow_facts(
-    snapshot: &tracedecay_runtime_core::db::engine::ReadSnapshot,
+    snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
     provider: &str,
     project_key: Option<&str>,
     query: &str,

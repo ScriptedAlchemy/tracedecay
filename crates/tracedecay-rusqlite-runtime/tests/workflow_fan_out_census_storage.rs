@@ -304,7 +304,7 @@ fn durable_plan(
 }
 
 fn open_authority(store: &RegisteredWorkflowStore) -> WorkflowSqliteAuthority {
-    WorkflowSqliteAuthority::from_registered(store.storage().clone()).unwrap()
+    WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap()
 }
 
 #[test]

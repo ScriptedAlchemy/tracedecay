@@ -92,22 +92,16 @@ impl ContractFixture {
     async fn bind(
         &self,
         project_id: &ProjectId,
-    ) -> (
-        Arc<crate::db::Database>,
-        RegisteredGlobalDbLeaseV1,
-        Arc<dyn VerifiedGraphRuntimePortV1>,
-    ) {
+    ) -> (Arc<crate::db::Database>, RegisteredGlobalDbLeaseV1) {
         let (project_database, sessions) = self.mount_unbound(project_id).await;
         let runtime = project_database
             .memory_graph_runtime()
-            .expect("bound project graph runtime");
+            .expect("database-issued weak graph proxy");
         assert!(
-            sessions
-                .bind_project_graph_runtime(Arc::clone(&runtime))
-                .is_ok(),
-            "bind project graph runtime once"
+            sessions.bind_project_graph_runtime(runtime).is_ok(),
+            "bind project graph proxy once"
         );
-        (project_database, sessions, runtime)
+        (project_database, sessions)
     }
 }
 
@@ -171,6 +165,41 @@ fn snapshot_through_trait(
     port.verified_snapshot(projection, FactReadControl::new(Arc::new(|| false)))
 }
 
+fn mounted_graph_operation(
+    database: &crate::db::Database,
+) -> crate::db::MemoryGraphRuntimeOperationV1 {
+    database
+        .issue_memory_graph_runtime_operation()
+        .expect("mounted database issues one graph operation")
+}
+
+fn publish_through_database(
+    database: &crate::db::Database,
+    manifest: &GraphGenerationManifest,
+    idempotency_key: GraphIdempotencyKey,
+    cancelled: bool,
+) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+    let operation = mounted_graph_operation(database);
+    publish_through_trait(operation.runtime(), manifest, idempotency_key, cancelled)
+}
+
+fn reconcile_through_database(
+    database: &crate::db::Database,
+    manifest: &GraphGenerationManifest,
+    idempotency_key: GraphIdempotencyKey,
+) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+    let operation = mounted_graph_operation(database);
+    reconcile_through_trait(operation.runtime(), manifest, idempotency_key)
+}
+
+fn snapshot_through_database(
+    database: &crate::db::Database,
+    projection: &GraphProjectionIdentity,
+) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+    let operation = mounted_graph_operation(database);
+    snapshot_through_trait(operation.runtime(), projection)
+}
+
 #[tokio::test]
 async fn runtime_binding_is_absent_before_bind_and_rejects_double_bind() {
     let fixture = ContractFixture::new("binding").await;
@@ -180,72 +209,108 @@ async fn runtime_binding_is_absent_before_bind_and_rejects_double_bind() {
 
     let runtime = project_database
         .memory_graph_runtime()
-        .expect("retained project graph runtime");
+        .expect("database-issued weak graph proxy");
     assert!(
-        sessions
-            .bind_project_graph_runtime(Arc::clone(&runtime))
-            .is_ok(),
-        "first runtime binding"
+        sessions.bind_project_graph_runtime(runtime.clone()).is_ok(),
+        "first graph proxy binding"
     );
     let rejected = sessions
-        .bind_project_graph_runtime(Arc::clone(&runtime))
-        .expect_err("second runtime binding must be rejected");
+        .bind_project_graph_runtime(runtime.clone())
+        .expect_err("second graph proxy binding must be rejected");
 
-    assert!(Arc::ptr_eq(
-        sessions.project_graph_runtime().expect("bound runtime"),
-        &runtime
-    ));
-    assert!(Arc::ptr_eq(&rejected, &runtime));
+    let first = mounted_graph_operation(&project_database);
+    let second = mounted_graph_operation(&project_database);
+    for operation in [&first, &second] {
+        assert_eq!(
+            operation.runtime().relational_binding(),
+            project_database.registered_binding()
+        );
+        assert_eq!(
+            operation.runtime().relational_verified_locator(),
+            project_database.registered_verified_locator()
+        );
+    }
+    let bound = sessions
+        .project_graph_runtime()
+        .expect("bound graph proxy remains available");
+    assert_eq!(bound.relational_binding(), runtime.relational_binding());
+    assert_eq!(
+        bound.relational_verified_locator(),
+        runtime.relational_verified_locator()
+    );
+    assert_eq!(rejected.relational_binding(), runtime.relational_binding());
+    assert_eq!(
+        rejected.relational_verified_locator(),
+        runtime.relational_verified_locator()
+    );
 }
 
 #[tokio::test]
-async fn memory_database_rejects_foreign_verified_runtime_bindings() {
+async fn memory_graph_operations_remain_isolated_by_exact_relational_identity() {
     let fixture = ContractFixture::new("memory-binding").await;
     let first_id = project_id("memory-binding-first");
     let second_id = project_id("memory-binding-second");
     let (first_database, first_sessions) = fixture.mount_unbound(&first_id).await;
     let (second_database, _) = fixture.mount_unbound(&second_id).await;
-    let second = second_database
-        .memory_graph_runtime()
-        .expect("second project graph runtime");
-    assert!(
-        first_database
-            .bind_memory_graph_runtime(Arc::clone(&second))
-            .is_err()
+    let first = mounted_graph_operation(&first_database);
+    let second = mounted_graph_operation(&second_database);
+    assert_ne!(
+        first.runtime().relational_binding(),
+        second.runtime().relational_binding()
     );
-    assert!(first_sessions.bind_project_graph_runtime(second).is_err());
+    assert_ne!(
+        first.runtime().relational_verified_locator(),
+        second.runtime().relational_verified_locator()
+    );
+    let second_proxy = second_database
+        .memory_graph_runtime()
+        .expect("second project graph proxy");
+    assert!(
+        first_sessions
+            .bind_project_graph_runtime(second_proxy)
+            .is_err(),
+        "a second project's proxy cannot bind to this session database"
+    );
 
     let profile_database = fixture
         .registry
         .profile_memory()
         .await
         .expect("profile memory database");
-    let profile = profile_database
-        .memory_graph_runtime()
-        .expect("profile memory graph runtime");
-    assert!(
-        first_database
-            .bind_memory_graph_runtime(Arc::clone(&profile))
-            .is_err()
+    let profile = mounted_graph_operation(&profile_database);
+    assert_ne!(
+        first.runtime().relational_binding(),
+        profile.runtime().relational_binding()
     );
-    assert!(first_sessions.bind_project_graph_runtime(profile).is_err());
-
-    let mounted = first_database
+    assert_ne!(
+        first.runtime().relational_verified_locator(),
+        profile.runtime().relational_verified_locator()
+    );
+    let profile_proxy = profile_database
         .memory_graph_runtime()
-        .expect("project memory graph runtime");
-    assert!(first_database.bind_memory_graph_runtime(mounted).is_ok());
+        .expect("profile graph proxy");
+    assert!(
+        first_sessions
+            .bind_project_graph_runtime(profile_proxy)
+            .is_err(),
+        "a profile proxy cannot bind to a project session database"
+    );
+
+    let own_proxy = first_database
+        .memory_graph_runtime()
+        .expect("first project graph proxy");
+    assert!(first_sessions.bind_project_graph_runtime(own_proxy).is_ok());
 }
 
 #[tokio::test]
 async fn read_only_memory_database_rejects_a_writer_graph_runtime() {
     let fixture = ContractFixture::new("read-only-binding").await;
     let project_id = project_id("read-only-binding");
-    let (_, sessions, runtime) = fixture.bind(&project_id).await;
+    let (database, _sessions) = fixture.bind(&project_id).await;
     let projection = projection("read-only-binding");
     let manifest = manifest(&projection, "read-only-binding", "1");
-    let initial =
-        publish_through_trait(runtime.as_ref(), &manifest, key("read-only-binding"), false)
-            .expect("initial writer publication");
+    let initial = publish_through_database(&database, &manifest, key("read-only-binding"), false)
+        .expect("initial writer publication");
     let read_only = fixture
         .registry
         .project_memory_read_only(project_id.clone(), fixture.project_roots(&project_id))
@@ -253,22 +318,13 @@ async fn read_only_memory_database_rejects_a_writer_graph_runtime() {
         .expect("read-only project memory database");
 
     assert!(!read_only.is_writable());
-    assert!(read_only.memory_graph_runtime().is_none());
-    assert!(
-        read_only
-            .bind_memory_graph_runtime(Arc::clone(&runtime))
-            .is_err()
-    );
-    assert!(read_only.memory_graph_runtime().is_none());
-    let retained = snapshot_through_trait(
-        sessions
-            .project_graph_runtime()
-            .expect("writer graph runtime")
-            .as_ref(),
-        &projection,
-    )
-    .expect("verified snapshot after rejected read-only bind")
-    .expect("initial verified head");
+    assert!(matches!(
+        read_only.issue_memory_graph_runtime_operation(),
+        Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
+    ));
+    let retained = snapshot_through_database(&database, &projection)
+        .expect("verified snapshot after rejected read-only bind")
+        .expect("initial verified head");
     assert_eq!(retained.verified_head(), initial.verified_head());
 }
 
@@ -276,8 +332,17 @@ async fn read_only_memory_database_rejects_a_writer_graph_runtime() {
 async fn bound_verified_port_does_not_retain_the_database_facade() {
     let fixture = ContractFixture::new("no-database-cycle").await;
     let project_id = project_id("no-database-cycle");
-    let (database, sessions, runtime) = fixture.bind(&project_id).await;
+    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
     let weak_database = Arc::downgrade(&database);
+    {
+        let operation = mounted_graph_operation(&database);
+        assert!(matches!(
+            &operation.runtime().relational_binding().shard_id.scope,
+            StoreShardScopeV1::Project {
+                project_id: bound_project,
+            } if bound_project == &project_id
+        ));
+    }
     database
         .memory_graph_reconciliation_task_owner()
         .expect("bound graph runtime task owner")
@@ -285,34 +350,23 @@ async fn bound_verified_port_does_not_retain_the_database_facade() {
         .await
         .expect("join initial reconciliation task");
 
-    drop((database, sessions, fixture));
+    drop((database, fixture));
 
     assert!(weak_database.upgrade().is_none());
-    assert!(matches!(
-        &runtime.relational_binding().shard_id.scope,
-        StoreShardScopeV1::Project {
-            project_id: bound_project,
-        } if bound_project == &project_id
-    ));
 }
 
 #[tokio::test]
 async fn publish_denies_pre_cancel_without_consuming_the_publication() {
     let fixture = ContractFixture::new("pre-cancel").await;
     let project_id = project_id("pre-cancel");
-    let (_, sessions, _) = fixture.bind(&project_id).await;
+    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
     let projection = projection("pre-cancel");
     let manifest = manifest(&projection, "pre-cancel", "1");
-    let port = sessions
-        .project_graph_runtime()
-        .expect("bound project graph runtime")
-        .as_ref();
-
     assert!(matches!(
-        publish_through_trait(port, &manifest, key("pre-cancel"), true),
+        publish_through_database(&database, &manifest, key("pre-cancel"), true),
         Err(GraphDbError::Cancelled)
     ));
-    let published = publish_through_trait(port, &manifest, key("pre-cancel"), false)
+    let published = publish_through_database(&database, &manifest, key("pre-cancel"), false)
         .expect("cancelled attempt must not consume publication");
     assert_eq!(published.generation(), &manifest.generation);
 }
@@ -321,17 +375,12 @@ async fn publish_denies_pre_cancel_without_consuming_the_publication() {
 async fn exact_publication_replay_returns_the_same_verified_head() {
     let fixture = ContractFixture::new("exact-replay").await;
     let project_id = project_id("exact-replay");
-    let (_, sessions, _) = fixture.bind(&project_id).await;
+    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
     let projection = projection("exact-replay");
     let initial_manifest = manifest(&projection, "exact-replay", "1");
-    let port = sessions
-        .project_graph_runtime()
-        .expect("bound project graph runtime")
-        .as_ref();
-
-    let first = reconcile_through_trait(port, &initial_manifest, key("exact-replay"))
+    let first = reconcile_through_database(&database, &initial_manifest, key("exact-replay"))
         .expect("initial lifecycle reconciliation");
-    let replay = reconcile_through_trait(port, &initial_manifest, key("exact-replay"))
+    let replay = reconcile_through_database(&database, &initial_manifest, key("exact-replay"))
         .expect("exact lifecycle reconciliation replay");
     let changed = manifest(&projection, "exact-replay", "changed");
 
@@ -339,10 +388,10 @@ async fn exact_publication_replay_returns_the_same_verified_head() {
     assert_eq!(replay.generation(), first.generation());
     assert_eq!(replay.verified_head(), first.verified_head());
     assert!(matches!(
-        reconcile_through_trait(port, &changed, key("exact-replay")),
+        reconcile_through_database(&database, &changed, key("exact-replay")),
         Err(GraphDbError::Conflict)
     ));
-    let retained = snapshot_through_trait(port, &projection)
+    let retained = snapshot_through_database(&database, &projection)
         .expect("verified snapshot after changed-input conflict")
         .expect("initial verified head remains available");
     assert_eq!(retained.verified_head(), first.verified_head());
@@ -352,20 +401,17 @@ async fn exact_publication_replay_returns_the_same_verified_head() {
 async fn stale_republication_conflicts_after_a_new_head_wins() {
     let fixture = ContractFixture::new("stale-republication").await;
     let project_id = project_id("stale-republication");
-    let (_, sessions, _) = fixture.bind(&project_id).await;
+    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
     let projection = projection("stale-republication");
     let first = manifest(&projection, "stale-first", "1");
     let second = manifest(&projection, "stale-second", "2");
-    let port = sessions
-        .project_graph_runtime()
-        .expect("bound project graph runtime")
-        .as_ref();
-
-    publish_through_trait(port, &first, key("stale-first"), false).expect("first publication");
-    publish_through_trait(port, &second, key("stale-second"), false).expect("new head publication");
+    publish_through_database(&database, &first, key("stale-first"), false)
+        .expect("first publication");
+    publish_through_database(&database, &second, key("stale-second"), false)
+        .expect("new head publication");
 
     assert!(matches!(
-        publish_through_trait(port, &first, key("stale-first"), false),
+        publish_through_database(&database, &first, key("stale-first"), false),
         Err(GraphDbError::Conflict)
     ));
 }
@@ -380,19 +426,14 @@ async fn stale_republication_conflicts_after_a_new_head_wins() {
 async fn first_publish_of_a_fresh_projection_installs_the_verified_head() {
     let fixture = ContractFixture::new("first-publish").await;
     let project_id = project_id("first-publish");
-    let (_, sessions, _) = fixture.bind(&project_id).await;
+    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
     let projection = projection("first-publish");
     let manifest = manifest(&projection, "first-publish", "1");
-    let port = sessions
-        .project_graph_runtime()
-        .expect("bound project graph runtime")
-        .as_ref();
-
-    let published = publish_through_trait(port, &manifest, key("first-publish"), false)
+    let published = publish_through_database(&database, &manifest, key("first-publish"), false)
         .expect("first publish must journal the replay and install the verified head");
     assert_eq!(published.generation(), &manifest.generation);
 
-    let head = snapshot_through_trait(port, &projection)
+    let head = snapshot_through_database(&database, &projection)
         .expect("verified snapshot read after the first publish")
         .expect("verified head must be visible after the first publish");
     assert_eq!(head.generation(), &manifest.generation);
@@ -406,14 +447,10 @@ async fn first_publish_of_a_fresh_projection_installs_the_verified_head() {
 async fn never_published_projection_is_a_typed_empty_snapshot() {
     let fixture = ContractFixture::new("missing-projection").await;
     let project_id = project_id("missing-projection");
-    let (_, sessions, _) = fixture.bind(&project_id).await;
-    let port = sessions
-        .project_graph_runtime()
-        .expect("bound project graph runtime")
-        .as_ref();
+    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
 
     assert!(matches!(
-        snapshot_through_trait(port, &projection("never-published")),
+        snapshot_through_database(&database, &projection("never-published")),
         Ok(None)
     ));
 }
@@ -423,32 +460,18 @@ async fn project_graph_publications_are_isolated_by_project_shard() {
     let fixture = ContractFixture::new("project-isolation").await;
     let first_id = project_id("isolation-first");
     let second_id = project_id("isolation-second");
-    let (_, first_sessions, _) = fixture.bind(&first_id).await;
-    let (_, second_sessions, _) = fixture.bind(&second_id).await;
+    let (first_database, _first_sessions) = fixture.mount_unbound(&first_id).await;
+    let (second_database, _second_sessions) = fixture.mount_unbound(&second_id).await;
     let projection = projection("project-isolation");
     let manifest = manifest(&projection, "project-isolation", "1");
 
-    publish_through_trait(
-        first_sessions
-            .project_graph_runtime()
-            .expect("first project runtime")
-            .as_ref(),
-        &manifest,
-        key("project-isolation"),
-        false,
-    )
-    .expect("first project publication");
+    publish_through_database(&first_database, &manifest, key("project-isolation"), false)
+        .expect("first project publication");
 
     // The second shard never published this projection, so it must observe
     // the typed empty start — never the first shard's head.
     assert!(matches!(
-        snapshot_through_trait(
-            second_sessions
-                .project_graph_runtime()
-                .expect("second project runtime")
-                .as_ref(),
-            &projection,
-        ),
+        snapshot_through_database(&second_database, &projection),
         Ok(None)
     ));
 }
@@ -460,17 +483,11 @@ async fn exact_shard_retirement_leaves_sibling_live_and_remounts_fresh() {
     let second_id = project_id("retire-second");
     let (first_database, first_sessions) = fixture.mount_unbound(&first_id).await;
     let (second_database, _second_sessions) = fixture.mount_unbound(&second_id).await;
-    let first_runtime = first_database
-        .memory_graph_runtime()
-        .expect("first bound memory graph runtime");
-    let second_runtime = second_database
-        .memory_graph_runtime()
-        .expect("second bound memory graph runtime");
     let first_projection = projection("retire-first");
     let second_projection = projection("retire-second");
     let first_manifest = manifest(&first_projection, "retire-first", "1");
     let second_manifest = manifest(&second_projection, "retire-second", "1");
-    let first_shard = first_database.retained_runtime().binding().shard_id.clone();
+    let first_shard = first_database.registered_binding().shard_id.clone();
 
     fixture
         .registry
@@ -478,35 +495,24 @@ async fn exact_shard_retirement_leaves_sibling_live_and_remounts_fresh() {
         .await
         .expect("retire exact first-shard reconciliation owner");
     assert!(matches!(
-        reconcile_through_trait(first_runtime.as_ref(), &first_manifest, key("retire-first")),
+        reconcile_through_database(&first_database, &first_manifest, key("retire-first")),
         Err(GraphDbError::Cancelled)
     ));
-    reconcile_through_trait(
-        second_runtime.as_ref(),
-        &second_manifest,
-        key("retire-second"),
-    )
-    .expect("sibling reconciliation remains live");
+    reconcile_through_database(&second_database, &second_manifest, key("retire-second"))
+        .expect("sibling reconciliation remains live");
 
     fixture
         .registry
         .drop_project_runtime_caches(&first_id)
         .await;
-    drop((first_database, first_sessions, first_runtime));
+    drop((first_database, first_sessions));
     let remounted = fixture
         .registry
         .project_memory(first_id.clone(), fixture.project_roots(&first_id))
         .await
         .expect("same project remounts with a fresh lifecycle");
-    let remounted_runtime = remounted
-        .memory_graph_runtime()
-        .expect("remounted memory graph runtime");
-    reconcile_through_trait(
-        remounted_runtime.as_ref(),
-        &first_manifest,
-        key("retire-first-remounted"),
-    )
-    .expect("remounted reconciliation lifecycle is fresh");
+    reconcile_through_database(&remounted, &first_manifest, key("retire-first-remounted"))
+        .expect("remounted reconciliation lifecycle is fresh");
 }
 
 #[cfg(unix)]
@@ -515,10 +521,7 @@ async fn exact_shard_retirement_closes_retained_graph_after_root_is_absent() {
     let fixture = ContractFixture::new("absent-root-retirement").await;
     let project_id = project_id("absent-root-retirement");
     let (database, _sessions) = fixture.mount_unbound(&project_id).await;
-    let runtime = database
-        .memory_graph_runtime()
-        .expect("bound memory graph runtime");
-    let shard = database.retained_runtime().binding().shard_id.clone();
+    let shard = database.registered_binding().shard_id.clone();
     let graph_manifest = manifest(
         &projection("absent-root-retirement"),
         "absent-root-retirement",
@@ -533,11 +536,7 @@ async fn exact_shard_retirement_closes_retained_graph_after_root_is_absent() {
         .expect("retained graph identity closes after its filesystem root is absent");
 
     assert!(matches!(
-        reconcile_through_trait(
-            runtime.as_ref(),
-            &graph_manifest,
-            key("absent-root-retirement")
-        ),
+        reconcile_through_database(&database, &graph_manifest, key("absent-root-retirement")),
         Err(GraphDbError::Cancelled)
     ));
 }
@@ -611,24 +610,13 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
 async fn linked_worktree_roots_share_the_project_graph_runtime_authority() {
     let fixture = ContractFixture::new("linked-worktrees").await;
     let project_id = project_id("linked-worktrees");
-    let (project_database, sessions, _) = fixture.bind(&project_id).await;
-    let linked_runtime = project_database
-        .memory_graph_runtime()
-        .expect("linked worktree project graph runtime");
+    let (project_database, _sessions) = fixture.mount_unbound(&project_id).await;
     let projection = projection("linked-worktrees");
     let manifest = manifest(&projection, "linked-worktrees", "1");
 
-    publish_through_trait(
-        sessions
-            .project_graph_runtime()
-            .expect("primary worktree runtime")
-            .as_ref(),
-        &manifest,
-        key("linked-worktrees"),
-        false,
-    )
-    .expect("primary worktree publication");
-    let linked_snapshot = snapshot_through_trait(linked_runtime.as_ref(), &projection)
+    publish_through_database(&project_database, &manifest, key("linked-worktrees"), false)
+        .expect("primary worktree publication");
+    let linked_snapshot = snapshot_through_database(&project_database, &projection)
         .expect("linked worktree reads shared project graph")
         .expect("published verified head");
 
@@ -660,13 +648,10 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
         .project_memory(project_id.clone(), [project_root.clone()])
         .await
         .expect("project memory database");
-    let project_runtime = project_database
-        .memory_graph_runtime()
-        .expect("project graph runtime");
     let project_projection = projection("verified-restart-project");
     let project_manifest = manifest(&project_projection, "verified-restart-project", "1");
-    let project_snapshot = publish_through_trait(
-        project_runtime.as_ref(),
+    let project_snapshot = publish_through_database(
+        &project_database,
         &project_manifest,
         key("verified-restart-project"),
         false,
@@ -679,13 +664,10 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
         .profile_memory()
         .await
         .expect("profile memory database");
-    let profile_runtime = profile_database
-        .memory_graph_runtime()
-        .expect("profile graph runtime");
     let profile_projection = projection("verified-restart-profile");
     let profile_manifest = manifest(&profile_projection, "verified-restart-profile", "1");
-    let profile_snapshot = publish_through_trait(
-        profile_runtime.as_ref(),
+    let profile_snapshot = publish_through_database(
+        &profile_database,
         &profile_manifest,
         key("verified-restart-profile"),
         false,
@@ -693,14 +675,7 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
     .expect("profile publication");
     let profile_head = profile_snapshot.verified_head().clone();
     drop(profile_snapshot);
-    drop((
-        project_runtime,
-        profile_runtime,
-        project_database,
-        profile_database,
-        registry,
-        scope,
-    ));
+    drop((project_database, profile_database, registry, scope));
 
     let _restarted_scope =
         crate::db::enter_daemon_database_scope(&profile_root, 32, "verified graph restart reopen")
@@ -712,24 +687,20 @@ async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
         .project_memory(project_id.clone(), [project_root])
         .await
         .expect("restarted project memory database");
-    let restarted_project = restarted_project_database
-        .memory_graph_runtime()
-        .expect("restarted project graph runtime");
-    let recovered_project = snapshot_through_trait(restarted_project.as_ref(), &project_projection)
-        .expect("recover project verified head")
-        .expect("project verified head");
+    let recovered_project =
+        snapshot_through_database(&restarted_project_database, &project_projection)
+            .expect("recover project verified head")
+            .expect("project verified head");
     assert_eq!(recovered_project.verified_head(), &project_head);
 
     let restarted_profile_database = restarted
         .profile_memory()
         .await
         .expect("restarted profile memory database");
-    let restarted_profile = restarted_profile_database
-        .memory_graph_runtime()
-        .expect("restarted profile graph runtime");
-    let recovered_profile = snapshot_through_trait(restarted_profile.as_ref(), &profile_projection)
-        .expect("recover profile verified head")
-        .expect("profile verified head");
+    let recovered_profile =
+        snapshot_through_database(&restarted_profile_database, &profile_projection)
+            .expect("recover profile verified head")
+            .expect("profile verified head");
     assert_eq!(recovered_profile.verified_head(), &profile_head);
 }
 
@@ -765,7 +736,7 @@ impl RuntimeRequestProbeV1 for NeverInterruptedProbe {
 async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
     let fixture = ContractFixture::new("resume-journaled").await;
     let project_id = project_id("resume-journaled");
-    let (project_database, sessions, _) = fixture.bind(&project_id).await;
+    let (project_database, _sessions) = fixture.mount_unbound(&project_id).await;
     let projection = projection("resume-journaled");
     let initial_manifest = manifest(&projection, "resume-journaled", "1");
 
@@ -829,19 +800,20 @@ async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
     ));
     drop(storage);
 
-    let port = sessions
-        .project_graph_runtime()
-        .expect("bound project graph runtime")
-        .as_ref();
     let changed = manifest(&projection, "resume-journaled", "changed");
     assert!(matches!(
-        publish_through_trait(port, &changed, key("resume-journaled"), false),
+        publish_through_database(&project_database, &changed, key("resume-journaled"), false),
         Err(GraphDbError::Conflict)
     ));
-    let published = publish_through_trait(port, &initial_manifest, key("resume-journaled"), false)
-        .expect("journaled publication must resume to a verified snapshot");
+    let published = publish_through_database(
+        &project_database,
+        &initial_manifest,
+        key("resume-journaled"),
+        false,
+    )
+    .expect("journaled publication must resume to a verified snapshot");
     assert_eq!(published.generation(), &initial_manifest.generation);
-    let snapshot = snapshot_through_trait(port, &projection)
+    let snapshot = snapshot_through_database(&project_database, &projection)
         .expect("verified snapshot after the resume")
         .expect("published verified head");
     assert_eq!(snapshot.generation(), &initial_manifest.generation);
@@ -851,16 +823,16 @@ async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
 async fn registry_drop_cancels_retained_trait_runtime_operations() {
     let fixture = ContractFixture::new("lifecycle-cancellation").await;
     let project_id = project_id("lifecycle-cancellation");
-    let (_, sessions, runtime) = fixture.bind(&project_id).await;
+    let (database, _sessions) = fixture.mount_unbound(&project_id).await;
     let projection = projection("lifecycle-cancellation");
     let manifest = manifest(&projection, "lifecycle-cancellation", "1");
-    assert!(sessions.project_graph_runtime().is_some());
+    let operation = mounted_graph_operation(&database);
 
     drop(fixture);
 
     assert!(matches!(
         publish_through_trait(
-            runtime.as_ref(),
+            operation.runtime(),
             &manifest,
             key("lifecycle-cancellation"),
             false,
@@ -868,11 +840,15 @@ async fn registry_drop_cancels_retained_trait_runtime_operations() {
         Err(GraphDbError::Cancelled)
     ));
     assert!(matches!(
-        reconcile_through_trait(runtime.as_ref(), &manifest, key("lifecycle-cancellation"),),
+        reconcile_through_trait(
+            operation.runtime(),
+            &manifest,
+            key("lifecycle-cancellation"),
+        ),
         Err(GraphDbError::Cancelled)
     ));
     assert!(matches!(
-        snapshot_through_trait(runtime.as_ref(), &projection),
+        snapshot_through_trait(operation.runtime(), &projection),
         Err(GraphDbError::Cancelled)
     ));
 }

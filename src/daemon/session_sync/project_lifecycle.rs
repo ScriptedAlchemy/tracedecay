@@ -72,7 +72,7 @@ impl SessionSyncProjectContext {
         database: &RegisteredGlobalDbLeaseV1,
     ) -> Result<(), String> {
         let shard = &database.binding().shard_id;
-        let locator = database.runtime().locator().verified();
+        let locator = database.verified_locator();
         if shard.brain_id != self.brain_id
             || shard.profile_id != self.profile_id
             || locator != &self.project_sessions_locator
@@ -277,7 +277,7 @@ impl DaemonSessionSyncService {
         let project_gate = self.project_gate(&scope);
         let project = project_gate.lock().await;
         let project_sessions = config.project_sessions.clone();
-        let project_sessions_locator = project_sessions.runtime().locator().verified().clone();
+        let project_sessions_locator = project_sessions.verified_locator().clone();
         let context = Arc::new(SessionSyncProjectContext {
             brain_id: config.brain_id,
             profile_id: config.profile_id,

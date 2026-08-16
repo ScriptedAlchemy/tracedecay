@@ -856,7 +856,7 @@ async fn summed_store_bytes(state: &DashboardState) -> Option<u64> {
         total = total.saturating_add(bytes);
         any = true;
     }
-    if let Some(bytes) = store_total_bytes(&state.mem_db.engine_conn()).await {
+    if let Some(bytes) = store_total_bytes(&state.mem_db.read_connection()).await {
         total = total.saturating_add(bytes);
         any = true;
     }
@@ -937,7 +937,7 @@ pub(crate) async fn dashboard_state_fixture(
         memory_owner: FactOwnerV1::Project {
             project_id: project_identity,
         },
-        graph_conn: database.engine_conn(),
+        graph_conn: database.read_connection(),
         _database_guards: vec![Arc::clone(&database)],
         graph_telemetry_handle: database.storage_telemetry_handle().ok(),
         graph_db_path: database_path.display().to_string(),
@@ -990,7 +990,7 @@ mod tests {
         crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(path, "dashboard registry fixture")
             .expect("registry authority");
-        let (database, _) = Database::publish_registered_test_runtime(
+        let fixture = Database::publish_registered_test_runtime_with_retirement_control(
             path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
@@ -998,17 +998,13 @@ mod tests {
         )
         .await
         .expect("registered profile database runtime");
-        let runtime = database.retained_runtime().clone();
-        let binding = runtime.binding().clone();
-        let locator = runtime.locator().verified().clone();
-        let authority = runtime
-            .database_authority("attach dashboard registry fixture")
-            .expect("registered runtime authority");
-        tracedecay_global_db::RegisteredGlobalDb::migrate_and_attach(
-            runtime, binding, locator, authority,
-        )
-        .await
-        .expect("registered dashboard fixture")
+        let (database, runtime, _retirement) = fixture.into_parts();
+        drop(runtime);
+        tracedecay_global_db::RegisteredGlobalDbOwnerV1::migrate_and_attach(database)
+            .await
+            .expect("registered dashboard fixture")
+            .issue_lease()
+            .expect("issue registered dashboard fixture lease")
     }
 
     fn scope() -> DashboardScopeV1 {

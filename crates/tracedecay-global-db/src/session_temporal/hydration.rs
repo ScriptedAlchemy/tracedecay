@@ -8,7 +8,7 @@ use tracedecay_domain::{
     AnchorDurabilityClass, DurableObservationV1, HydrationStateV1, ObservationScopeV1,
     PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord, SessionId,
 };
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::{DatabaseEngineReadSnapshot, engine::params};
 use tracedecay_store::SessionMessageRecord;
 use zeroize::Zeroizing;
 
@@ -24,7 +24,6 @@ use tracedecay_query::temporal::ports::{
     ExecutionControl, TemporalExecutionSnapshot, TemporalPortError, TemporalRetrievalScope,
     TemporalSourceAccess,
 };
-use tracedecay_runtime_core::db::engine;
 use tracedecay_sessions::runtime::lcm::payload::read_verified_payload_content;
 use tracedecay_sessions::runtime::lcm::{LcmStorageKind, raw};
 
@@ -286,7 +285,7 @@ struct SessionHydrationRelationAuthority<'snapshot> {
 impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
     #[cfg(test)]
     pub const fn new_registered(
-        read: &'snapshot engine::ReadSnapshot,
+        read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
     ) -> Self {
         Self {
@@ -297,7 +296,7 @@ impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
     }
 
     pub const fn new_registered_with_relations(
-        read: &'snapshot engine::ReadSnapshot,
+        read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
         scope: &'snapshot SessionRelationScope,
         store: SessionRelationGraphStore,
@@ -316,14 +315,14 @@ pub type GlobalDbTemporalHydrationPort<'snapshot> =
 impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>> {
     #[cfg(test)]
     pub const fn for_registered_snapshot(
-        read: &'snapshot engine::ReadSnapshot,
+        read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
     ) -> Self {
         Self::new(GlobalDbHydrationBackend::new_registered(read, storage_root))
     }
 
     pub const fn for_registered_snapshot_with_relations(
-        read: &'snapshot engine::ReadSnapshot,
+        read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
         scope: &'snapshot SessionRelationScope,
         store: SessionRelationGraphStore,
@@ -1333,7 +1332,10 @@ mod tests {
         SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1, SessionId, TemporalModeV1, UtcMicros,
     };
-    use tracedecay_runtime_core::db::engine::{Executor, ReadSnapshot, params};
+    use tracedecay_runtime_core::db::{
+        DatabaseEngineReadSnapshot,
+        engine::{Executor, params},
+    };
     use tracedecay_store::{
         AnchoredObservationWrite, ObservationStore, ObservationWrite,
         build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
@@ -1348,7 +1350,7 @@ mod tests {
     use tracedecay_query::temporal::resolution::ValidatedAuthorization;
 
     struct RegisteredHydrationRead {
-        read: ReadSnapshot,
+        read: DatabaseEngineReadSnapshot,
         storage_root: PathBuf,
     }
 

@@ -24,11 +24,8 @@ use tracedecay_store::{
     GitIndexTransactionTerminalWriteV1, MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
 };
 
-#[cfg(test)]
-use crate::db::engine::TestConnection;
 use crate::global_db::{
-    GitIndexReadExecutor, GlobalDbGitIndexTransactionStore, RegisteredGlobalDb,
-    RegisteredGlobalDbLeaseV1,
+    GitIndexReadExecutor, GlobalDbGitIndexTransactionStore, RegisteredGlobalDbLeaseV1,
 };
 
 /// The actor queue is intentionally finite: saturation fails closed instead of
@@ -86,10 +83,9 @@ pub(crate) struct DaemonGitIndexTransactionStore {
 }
 
 enum ActorDatabase {
-    Registered(RegisteredGlobalDbLeaseV1),
-    #[cfg(test)]
-    Engine {
-        database: Box<TestConnection>,
+    Registered {
+        database: RegisteredGlobalDbLeaseV1,
+        #[cfg(test)]
         gc_observer: Option<Arc<PreviewGcTestObserver>>,
     },
 }
@@ -97,11 +93,7 @@ enum ActorDatabase {
 impl ActorDatabase {
     fn git_index_transaction_store(&self) -> GlobalDbGitIndexTransactionStore<'_> {
         match self {
-            Self::Registered(database) => database.git_index_transaction_store(),
-            #[cfg(test)]
-            Self::Engine { database, .. } => {
-                GlobalDbGitIndexTransactionStore::for_engine_test(database)
-            }
+            Self::Registered { database, .. } => database.git_index_transaction_store(),
         }
     }
 
@@ -119,7 +111,7 @@ impl ActorDatabase {
         limit: usize,
     ) -> GitIndexTransactionStoreResult<crate::global_db::GitIndexPreviewInputGcResult> {
         #[cfg(test)]
-        if let Self::Engine {
+        if let Self::Registered {
             gc_observer: Some(observer),
             ..
         } = self
@@ -151,26 +143,20 @@ impl DaemonGitIndexTransactionStore {
     pub(crate) fn open(
         database: RegisteredGlobalDbLeaseV1,
     ) -> GitIndexTransactionStoreResult<Self> {
-        Self::open_actor(ActorDatabase::Registered(database))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn open_engine_test(
-        database: TestConnection,
-    ) -> GitIndexTransactionStoreResult<Self> {
-        Self::open_actor(ActorDatabase::Engine {
-            database: Box::new(database),
+        Self::open_actor(ActorDatabase::Registered {
+            database,
+            #[cfg(test)]
             gc_observer: None,
         })
     }
 
     #[cfg(test)]
-    fn open_engine_test_with_gc_observer(
-        database: TestConnection,
+    fn open_with_gc_observer(
+        database: RegisteredGlobalDbLeaseV1,
         observer: Arc<PreviewGcTestObserver>,
     ) -> GitIndexTransactionStoreResult<Self> {
-        Self::open_actor(ActorDatabase::Engine {
-            database: Box::new(database),
+        Self::open_actor(ActorDatabase::Registered {
+            database,
             gc_observer: Some(observer),
         })
     }
@@ -766,31 +752,31 @@ impl GitIndexTransactionStore for SharedDaemonGitIndexTransactionStore {
 
 #[cfg(test)]
 mod gc_tests {
-    use std::path::Path;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
-    use tempfile::TempDir;
-
     use super::*;
+    use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
 
-    fn initialized_database(path: &Path) -> TestConnection {
-        let database = TestConnection::open(path);
+    fn registered_database(label: &str) -> RegisteredGlobalDbHarness {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("schema runtime");
-        runtime.block_on(async {
-            let transaction = database
-                .transaction_with_behavior(crate::db::engine::TransactionBehavior::Immediate)
-                .await
-                .expect("schema transaction");
-            crate::global_db::ensure_git_index_transaction_schema(&transaction)
-                .await
-                .expect("install Git transaction schema");
-            transaction.commit().await.expect("commit Git schema");
-        });
-        database
+            .expect("registered fixture runtime");
+        runtime.block_on(RegisteredGlobalDbHarness::open(label))
+    }
+
+    fn store_with_gc_observer(
+        label: &str,
+        observer: Arc<PreviewGcTestObserver>,
+    ) -> (RegisteredGlobalDbHarness, DaemonGitIndexTransactionStore) {
+        let database = registered_database(label);
+        let store = DaemonGitIndexTransactionStore::open_with_gc_observer(
+            database.registered.clone(),
+            observer,
+        )
+        .expect("registered store actor");
+        (database, store)
     }
 
     fn preview_input(
@@ -825,13 +811,9 @@ mod gc_tests {
 
     #[test]
     fn empty_store_has_zero_gc_writes_over_time() {
-        let directory = TempDir::new().expect("directory");
         let observer = Arc::new(PreviewGcTestObserver::default());
-        let _store = DaemonGitIndexTransactionStore::open_engine_test_with_gc_observer(
-            initialized_database(&directory.path().join("store.db")),
-            Arc::clone(&observer),
-        )
-        .expect("store actor");
+        let (_database, _store) =
+            store_with_gc_observer("git-index-gc-empty", Arc::clone(&observer));
 
         std::thread::sleep(Duration::from_millis(150));
 
@@ -840,13 +822,9 @@ mod gc_tests {
 
     #[test]
     fn one_expiry_causes_one_bounded_purge_and_then_sleeps() {
-        let directory = TempDir::new().expect("directory");
         let observer = Arc::new(PreviewGcTestObserver::default());
-        let store = DaemonGitIndexTransactionStore::open_engine_test_with_gc_observer(
-            initialized_database(&directory.path().join("store.db")),
-            Arc::clone(&observer),
-        )
-        .expect("store actor");
+        let (_database, store) =
+            store_with_gc_observer("git-index-gc-one-expiry", Arc::clone(&observer));
         let created_at = current_utc_micros().expect("clock");
         let input = preview_input(
             "one",
@@ -873,13 +851,8 @@ mod gc_tests {
 
     #[test]
     fn save_command_wake_lowers_the_known_expiry_deadline() {
-        let directory = TempDir::new().expect("directory");
         let observer = Arc::new(PreviewGcTestObserver::default());
-        let store = DaemonGitIndexTransactionStore::open_engine_test_with_gc_observer(
-            initialized_database(&directory.path().join("store.db")),
-            Arc::clone(&observer),
-        )
-        .expect("store actor");
+        let (_database, store) = store_with_gc_observer("git-index-gc-wake", Arc::clone(&observer));
         let created_at = current_utc_micros().expect("clock");
         store
             .save_preview_input(preview_input(
@@ -903,13 +876,12 @@ mod gc_tests {
 
     #[test]
     fn restart_reconstructs_expired_cleanup_deadline() {
-        let directory = TempDir::new().expect("directory");
-        let path = directory.path().join("store.db");
+        let database = registered_database("git-index-gc-restart");
         let now = current_utc_micros().expect("clock");
         // The input is created durable and already expired, and the daemon
         // actor that wrote it is gone: only the restarted actor can
-        // reconstruct the cleanup deadline. Seeding through the engine store
-        // keeps the pre-restart daemon GC from racing the fixture under load.
+        // reconstruct the cleanup deadline. Seeding through the registered
+        // store keeps the pre-restart daemon GC from racing the fixture.
         let created_at = UtcMicros(now.0.saturating_sub(1_000_000));
         let input = preview_input(
             "restart",
@@ -917,26 +889,25 @@ mod gc_tests {
             UtcMicros(created_at.0.saturating_add(100_000)),
         );
         let preview_id = input.preview_id.clone();
-        {
-            let database = initialized_database(&path);
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("seed runtime");
-            runtime
-                .block_on(
-                    GlobalDbGitIndexTransactionStore::for_engine_test(&database)
-                        .save_preview_input(input),
-                )
-                .expect("save preview input");
-        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("seed runtime");
+        runtime
+            .block_on(
+                database
+                    .registered
+                    .git_index_transaction_store()
+                    .save_preview_input(input),
+            )
+            .expect("save preview input");
 
         let observer = Arc::new(PreviewGcTestObserver::default());
-        let store = DaemonGitIndexTransactionStore::open_engine_test_with_gc_observer(
-            TestConnection::open(&path),
+        let store = DaemonGitIndexTransactionStore::open_with_gc_observer(
+            database.registered.clone(),
             Arc::clone(&observer),
         )
-        .expect("restarted store actor");
+        .expect("restarted registered store actor");
         wait_for_attempts(&observer, 1);
 
         assert!(matches!(
@@ -952,14 +923,10 @@ mod gc_tests {
 
     #[test]
     fn failed_due_gc_waits_for_command_and_never_fabricates_success() {
-        let directory = TempDir::new().expect("directory");
         let observer = Arc::new(PreviewGcTestObserver::default());
         observer.fail_purge.store(true, Ordering::SeqCst);
-        let store = DaemonGitIndexTransactionStore::open_engine_test_with_gc_observer(
-            initialized_database(&directory.path().join("store.db")),
-            Arc::clone(&observer),
-        )
-        .expect("store actor");
+        let (_database, store) =
+            store_with_gc_observer("git-index-gc-failure", Arc::clone(&observer));
         let created_at = current_utc_micros().expect("clock");
         let input = preview_input(
             "failure",

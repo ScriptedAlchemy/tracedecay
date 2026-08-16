@@ -399,7 +399,7 @@ async fn install_final_schema_before_publication(
         StoreShardScopeV1::Profile
         | StoreShardScopeV1::ProfileSessions
         | StoreShardScopeV1::ProjectSessions { .. } => {
-            crate::ports::registered_schema::ensure_registered_schema(&connection)
+            crate::ports::registered_schema::install_from_authorized_connection(connection)
                 .await
                 .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "create initialized global/session schema",

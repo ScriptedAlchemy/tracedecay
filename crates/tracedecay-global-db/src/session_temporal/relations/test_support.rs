@@ -8,7 +8,11 @@ use super::SessionRelationGraphStore;
 
 pub(crate) fn memory_relation_store() -> SessionRelationGraphStore {
     let owner = GraphDbOwner::memory(Arc::new(NeverCancelled)).expect("memory relation graph");
-    SessionRelationGraphStore::new(owner.lease())
+    SessionRelationGraphStore::new(
+        owner
+            .issue_lease()
+            .expect("issue memory relation graph lease"),
+    )
 }
 
 /// Derives a canonical `sha256:`-tagged occurrence identity from a readable

@@ -1420,7 +1420,8 @@ impl HostAdmissionTestRuntimeV1 {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
-            .await?;
+            .await
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         tracedecay_sessions::runtime::lcm::compression::lifecycle_state(
             &snapshot,
             provider,

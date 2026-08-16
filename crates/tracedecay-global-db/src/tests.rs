@@ -1,7 +1,4 @@
 #[cfg(test)]
-use std::sync::Arc;
-
-#[cfg(test)]
 use super::{
     AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb, RemoteDeletionCleanupState,
     RemoteDeletionFailureCode, RemoteDeletionPhase, RemoteDeletionTarget, RemoteDeletionTombstone,
@@ -445,12 +442,15 @@ async fn concurrent_registered_mounts_singleflight_to_one_runtime() {
         harness.mount(),
         harness.mount(),
     );
-    // Each mount attaches its own `RegisteredGlobalDb` adapter, but the
-    // published database runtime underneath must be one shared allocation —
-    // the singleflight production's runtime slot guarantees.
+    // Each mount receives its own counted client lease while retaining the
+    // exact same registered binding and locator from the one daemon runtime.
     for mounted in [&second, &third, &fourth] {
-        assert!(first.runtime().shares_runtime_with(mounted.runtime()));
+        assert!(!first.shares_client_with(mounted));
         assert_eq!(first.binding(), mounted.binding());
+        assert_eq!(
+            first.session_relation_graph_identity().is_ok(),
+            mounted.session_relation_graph_identity().is_ok()
+        );
     }
 }
 

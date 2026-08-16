@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::PoisonError;
 
 use sha2::{Digest, Sha256};

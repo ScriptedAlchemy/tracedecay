@@ -8,6 +8,7 @@ use tracedecay_application::{
 use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
 };
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::context::{
     BranchId, ProfileId, RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId,

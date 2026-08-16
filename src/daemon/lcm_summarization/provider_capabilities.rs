@@ -13,7 +13,10 @@ use std::time::Duration;
 use serde_json::Value;
 use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationFactV1};
 
-use crate::db::engine::{QueryExecutor, ReadSnapshot, params};
+use crate::db::{
+    DatabaseEngineReadSnapshot,
+    engine::{QueryExecutor, params},
+};
 use tracedecay_sessions::runtime::lcm::{LcmError, LcmSummaryRequest};
 
 use super::{AuthoritativeSummary, SummaryResolutionError};
@@ -60,7 +63,7 @@ pub(super) trait NativeSummaryRecognizerV1: Sync {
     /// whatever corroborating lookup that provider's evidence demands.
     fn recognizes<'a>(
         &self,
-        snapshot: &'a ReadSnapshot,
+        snapshot: &'a DatabaseEngineReadSnapshot,
         candidate: &'a NativeSummaryCandidate<'a>,
     ) -> NativeSummaryRecognitionFuture<'a>;
 }
@@ -78,7 +81,7 @@ impl NativeSummaryRecognizerV1 for CodexNativeCompactionV1 {
 
     fn recognizes<'a>(
         &self,
-        _snapshot: &'a ReadSnapshot,
+        _snapshot: &'a DatabaseEngineReadSnapshot,
         candidate: &'a NativeSummaryCandidate<'a>,
     ) -> NativeSummaryRecognitionFuture<'a> {
         let recognized = candidate.kind == Some("summary")
@@ -106,7 +109,7 @@ impl NativeSummaryRecognizerV1 for CursorNativeCompactionV1 {
 
     fn recognizes<'a>(
         &self,
-        _snapshot: &'a ReadSnapshot,
+        _snapshot: &'a DatabaseEngineReadSnapshot,
         candidate: &'a NativeSummaryCandidate<'a>,
     ) -> NativeSummaryRecognitionFuture<'a> {
         let recognized = candidate
@@ -130,7 +133,7 @@ impl NativeSummaryRecognizerV1 for ClaudeNativeCompactionV1 {
 
     fn recognizes<'a>(
         &self,
-        snapshot: &'a ReadSnapshot,
+        snapshot: &'a DatabaseEngineReadSnapshot,
         candidate: &'a NativeSummaryCandidate<'a>,
     ) -> NativeSummaryRecognitionFuture<'a> {
         Box::pin(async move {

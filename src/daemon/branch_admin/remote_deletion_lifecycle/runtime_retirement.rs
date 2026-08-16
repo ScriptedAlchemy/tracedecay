@@ -1,7 +1,5 @@
-use std::path::Path;
-use std::sync::Arc;
-
 use crate::errors::Result;
+use std::path::Path;
 
 use super::super::{StoreAdministration, remote_recovery_lifecycle};
 

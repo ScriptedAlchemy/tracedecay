@@ -34,10 +34,6 @@ impl SessionTemporalRefreshTestAuthority {
         self.database.as_ref()
     }
 
-    fn database_identity(&self) -> usize {
-        std::sync::Arc::as_ptr(&self.database) as usize
-    }
-
     fn project<'a>(
         &'a self,
         projector: &'a dyn projector::SessionTemporalRefreshProjector,

@@ -8,10 +8,9 @@
 //!
 //! `tracedecay-global-db` depends on this crate (session runtime, retrieval
 //! content, `lcm::contracts`); the edge cannot run the other way without a
-//! cycle. The registered database is reached through the narrower
-//! [`runtime::store_port::SessionStoreAuthority`] and
-//! [`runtime::ingest::SessionIngestAuthority`] ports instead of the concrete
-//! `RegisteredGlobalDb` type.
+//! cycle. The registered database is reached through narrower session-runtime
+//! ports, including [`runtime::ingest::SessionIngestAuthority`], instead of
+//! the concrete `RegisteredGlobalDb` type.
 //!
 //! ## Sealed benchmark provenance
 //!

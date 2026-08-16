@@ -130,10 +130,6 @@ impl VerifiedGraphRuntimePortV1 for VerifiedSnapshotRuntime {
         self.cancelled.store(true, Ordering::Release);
     }
 
-    fn close_reconciliation(&self) -> Result<(), GraphDbError> {
-        Ok(())
-    }
-
     fn publish_verified_manifest(
         &self,
         manifest: &GraphGenerationManifest,

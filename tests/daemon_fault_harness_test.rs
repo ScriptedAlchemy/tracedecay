@@ -33,7 +33,7 @@ use common::{isolated_lcm_db_path, open_lcm_db, spawn_tracedecay_daemon_with, te
 
 const GENERATION: u64 = 23;
 
-fn observation_store(db: &common::LcmTestRuntime) -> GlobalDbObservationStore<'_> {
+fn observation_store(db: &common::LcmTestRuntime) -> GlobalDbObservationStore {
     db.observation_store()
         .expect("registered profile observation store")
 }

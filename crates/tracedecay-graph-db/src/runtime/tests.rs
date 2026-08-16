@@ -22,7 +22,8 @@ fn memory_db() -> GraphDbLeaseV1 {
         cancellation: Arc::new(NeverCancelled),
     })
     .unwrap()
-    .lease()
+    .issue_lease()
+    .unwrap()
 }
 
 #[test]
@@ -49,7 +50,7 @@ fn owner_close_releases_the_physical_database_after_durability_uncertainty() {
         cancellation: Arc::new(NeverCancelled),
     })
     .unwrap();
-    let handle = owner.lease();
+    let handle = owner.issue_lease().unwrap();
     handle.inner.poisoned.store(true, Ordering::Release);
 
     assert!(matches!(
@@ -76,7 +77,7 @@ fn poisoned_database_lock_makes_close_terminally_uncertain() {
         cancellation: Arc::new(NeverCancelled),
     })
     .unwrap();
-    let lease = owner.lease();
+    let lease = owner.issue_lease().unwrap();
     let poison = lease.clone();
 
     assert!(
@@ -310,7 +311,8 @@ fn walsync_db(dir: &tempfile::TempDir) -> GraphDbLeaseV1 {
         cancellation: Arc::new(NeverCancelled),
     })
     .unwrap()
-    .lease()
+    .issue_lease()
+    .unwrap()
 }
 
 fn vector_batch(value: &str) -> GraphWriteBatch {

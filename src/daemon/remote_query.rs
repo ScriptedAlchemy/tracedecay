@@ -76,7 +76,7 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
             .registered_query_target(&command.repository_scope.project_id)
             .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
         validate_snapshot(command, &snapshot, &target)?;
-        let publication = target.publication().clone();
+        let publication = target.publication();
 
         let operation = ObservationReadOperationV1::Observation {
             observation_id: command.observation_id.clone(),
@@ -142,7 +142,7 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
             .registered_query_target(&command.repository_scope.project_id)
             .map_err(|_| RemoteExactObservationQueryErrorV1::StaleFence)?;
         validate_snapshot(command, &current_snapshot, &current_target)?;
-        if current_snapshot != snapshot || current_target.publication() != &publication {
+        if current_snapshot != snapshot || current_target.publication() != publication {
             return Err(RemoteExactObservationQueryErrorV1::StaleFence);
         }
 
@@ -308,7 +308,7 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
 fn validate_snapshot(
     command: &RemoteExactObservationQueryCommandV1,
     snapshot: &RemoteQueryAuthoritySnapshotV1,
-    target: &tracedecay_runtime_core::store_runtime::registry::StoreRuntimeClientLease,
+    target: &tracedecay_runtime_core::db::DatabaseRuntimeClientV1,
 ) -> Result<(), RemoteExactObservationQueryErrorV1> {
     let CurrentRemoteAuthorityStateV1::Available(current) = &snapshot.authority else {
         return Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable);

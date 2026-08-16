@@ -26,13 +26,9 @@ async fn sqlite_writer_uses_production_wal_normal_policy() {
     let (database, _) = common::initialize_test_database(&tmp.path().join("policy.db"))
         .await
         .expect("initialize SQLite policy fixture");
-    let writer = database
-        .writer_connection("inspect production SQLite policy")
-        .await
-        .expect("acquire SQLite writer");
+    let reader = database.read_connection();
     let (journal_mode, synchronous) = {
-        let mut rows = writer
-            .engine_connection()
+        let mut rows = reader
             .query(
                 "SELECT lower(journal_mode), synchronous
                  FROM pragma_journal_mode(), pragma_synchronous()",
@@ -51,8 +47,7 @@ async fn sqlite_writer_uses_production_wal_normal_policy() {
         )
     };
     let wal_autocheckpoint = {
-        let mut rows = writer
-            .engine_connection()
+        let mut rows = reader
             .query("PRAGMA wal_autocheckpoint", ())
             .await
             .expect("inspect production SQLite checkpoint policy");

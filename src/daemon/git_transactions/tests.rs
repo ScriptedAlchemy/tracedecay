@@ -37,6 +37,7 @@ use super::{
     DaemonGitAuthorityStateV1, DaemonGitIndexTransactionPort, DaemonGitIndexTransactionService,
     DaemonGitIndexTransactionServiceRegistry,
 };
+use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
 
 #[test]
 fn same_repository_mutations_never_enter_the_native_section_together() {
@@ -338,8 +339,7 @@ fn test_port(
     native_modes: impl IntoIterator<Item = NativeMode>,
     recovery_modes: impl IntoIterator<Item = RecoveryMode>,
 ) -> TestHarness {
-    let directory = tempfile::tempdir().expect("store directory");
-    let store = test_store(&directory);
+    let (database, store) = test_store();
     let preview = preview();
     store
         .save_preview_input(preview_input(&preview))
@@ -355,7 +355,7 @@ fn test_port(
     let policy_calls = Arc::clone(&policy.calls);
     let policy_evaluated_at = Arc::clone(&policy.evaluated_at);
     TestHarness {
-        _directory: directory,
+        _database: database,
         port: DaemonGitIndexTransactionPort::new(
             store,
             native,
@@ -584,8 +584,7 @@ fn cancellation_after_native_entry_does_not_rewrite_the_terminal_outcome() {
 
 #[test]
 fn terminal_replay_bypasses_preview_expiry_before_policy_or_native_execution() {
-    let directory = tempfile::tempdir().expect("store directory");
-    let store = test_store(&directory);
+    let (_database, store) = test_store();
     let preview = preview_with_expiry(fixture_time(14));
     let request = apply_request(&preview, "idempotency.expired-replay");
     seed_terminal_abort(&store, &preview, &request);
@@ -613,8 +612,7 @@ fn terminal_replay_bypasses_preview_expiry_before_policy_or_native_execution() {
 
 #[test]
 fn unstarted_apply_reports_expired_private_input_without_entering_native_git() {
-    let directory = tempfile::tempdir().expect("store directory");
-    let store = test_store(&directory);
+    let (_database, store) = test_store();
     let preview = preview_with_expiry(fixture_time(14));
     store
         .save_preview_input(preview_input(&preview))
@@ -718,8 +716,7 @@ fn indeterminate_recovery_keeps_durable_quarantine_without_native_replay() {
 
 #[test]
 fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
-    let directory = tempfile::tempdir().expect("store directory");
-    let store = test_store(&directory);
+    let (_database, store) = test_store();
     let preview = preview();
     let request = apply_request(&preview, "idempotency.fixture");
     seed_prepared_transaction(&store, &preview, &request);
@@ -758,8 +755,7 @@ fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
 
 #[test]
 fn startup_service_recovers_before_exposing_the_mutation_port() {
-    let directory = tempfile::tempdir().expect("store directory");
-    let store = test_store(&directory);
+    let (_database, store) = test_store();
     let preview = preview();
     let request = apply_request(&preview, "idempotency.startup-service");
     seed_prepared_transaction(&store, &preview, &request);
@@ -790,8 +786,8 @@ fn startup_service_recovers_before_exposing_the_mutation_port() {
 
 #[test]
 fn startup_recovery_failure_returns_no_mutation_service() {
-    let directory = tempfile::tempdir().expect("store directory");
-    let store = StartupUnavailableStore(test_store(&directory));
+    let (_database, store) = test_store();
+    let store = StartupUnavailableStore(store);
     let native = FakeNative::new([], []);
     let apply_calls = Arc::clone(&native.apply_calls);
 
@@ -853,14 +849,13 @@ fn quarantine_clears_only_after_a_proven_recovery_receipt() {
 #[tokio::test]
 async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
     let directory = tempfile::tempdir().expect("project directory");
-    let database_path = directory.path().join("canonical-project.db");
-    rusqlite::Connection::open(&database_path).expect("canonical project database");
+    let database = RegisteredGlobalDbHarness::open("git-index-owner-singleton").await;
     let registry = DaemonGitIndexTransactionServiceRegistry::default();
     let project_id = id::<ProjectId>("project.singleton.fixture");
 
     let first = registry
-        .ensure_engine_test(
-            database_path.clone(),
+        .ensure(
+            database.registered.clone(),
             directory.path().to_path_buf(),
             project_id.clone(),
             fixture_time(20),
@@ -868,8 +863,8 @@ async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
         .await
         .expect("first project service");
     let second = registry
-        .ensure_engine_test(
-            database_path,
+        .ensure(
+            database.registered.clone(),
             directory.path().to_path_buf(),
             project_id,
             fixture_time(21),
@@ -883,13 +878,12 @@ async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
 #[tokio::test]
 async fn daemon_owner_shutdown_fences_admission_clears_services_and_joins_store_actor() {
     let directory = tempfile::tempdir().expect("project directory");
-    let database_path = directory.path().join("canonical-project.db");
-    rusqlite::Connection::open(&database_path).expect("canonical project database");
+    let database = RegisteredGlobalDbHarness::open("git-index-owner-shutdown").await;
     let registry = DaemonGitIndexTransactionServiceRegistry::default();
     let project_id = id::<ProjectId>("project.shutdown.fixture");
     let service = registry
-        .ensure_engine_test(
-            database_path.clone(),
+        .ensure(
+            database.registered.clone(),
             directory.path().to_path_buf(),
             project_id.clone(),
             fixture_time(20),
@@ -916,8 +910,8 @@ async fn daemon_owner_shutdown_fences_admission_clears_services_and_joins_store_
     ));
     assert!(matches!(
         registry
-            .ensure_engine_test(
-                database_path,
+            .ensure(
+                database.registered.clone(),
                 directory.path().to_path_buf(),
                 project_id,
                 fixture_time(21),
@@ -935,13 +929,12 @@ async fn daemon_owner_shutdown_fences_admission_clears_services_and_joins_store_
 async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
     let directory = tempfile::tempdir().expect("project directory");
     let alternate = tempfile::tempdir().expect("alternate worktree directory");
-    let database_path = directory.path().join("canonical-project.db");
-    rusqlite::Connection::open(&database_path).expect("canonical project database");
+    let database = RegisteredGlobalDbHarness::open("git-index-owner-worktrees").await;
     let registry = DaemonGitIndexTransactionServiceRegistry::default();
     let project_id = id::<ProjectId>("project.singleton.fixture");
     let primary = registry
-        .ensure_engine_test(
-            database_path.clone(),
+        .ensure(
+            database.registered.clone(),
             directory.path().to_path_buf(),
             project_id.clone(),
             fixture_time(20),
@@ -949,8 +942,8 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
         .await
         .expect("first project service");
     let linked = registry
-        .ensure_engine_test(
-            database_path,
+        .ensure(
+            database.registered.clone(),
             alternate.path().to_path_buf(),
             project_id,
             fixture_time(21),
@@ -994,13 +987,12 @@ async fn daemon_owner_resolves_symlink_alias_to_the_canonical_mounted_root() {
     let alias_parent = tempfile::tempdir().expect("alias parent");
     let alias = alias_parent.path().join("worktree-alias");
     symlink(directory.path(), &alias).expect("worktree root symlink alias");
-    let database_path = directory.path().join("canonical-project.db");
-    rusqlite::Connection::open(&database_path).expect("canonical project database");
+    let database = RegisteredGlobalDbHarness::open("git-index-owner-alias").await;
     let registry = DaemonGitIndexTransactionServiceRegistry::default();
     let project_id = id::<ProjectId>("project.alias.fixture");
     let first = registry
-        .ensure_engine_test(
-            database_path.clone(),
+        .ensure(
+            database.registered.clone(),
             directory.path().to_path_buf(),
             project_id.clone(),
             fixture_time(30),
@@ -1008,7 +1000,12 @@ async fn daemon_owner_resolves_symlink_alias_to_the_canonical_mounted_root() {
         .await
         .expect("mount through real root");
     let second = registry
-        .ensure_engine_test(database_path, alias, project_id, fixture_time(31))
+        .ensure(
+            database.registered.clone(),
+            alias,
+            project_id,
+            fixture_time(31),
+        )
         .await
         .expect("reuse through symlink alias");
     assert!(

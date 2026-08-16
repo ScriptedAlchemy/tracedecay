@@ -3,7 +3,6 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 
 use tracedecay_domain::{BrainId, FactOwnerV1, ProjectId, UserProfileId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;

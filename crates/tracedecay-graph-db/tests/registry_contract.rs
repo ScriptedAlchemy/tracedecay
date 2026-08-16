@@ -6,11 +6,12 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry,
-    GraphDbRegistryConfig, GraphDbRegistryStatus, GraphDbRetirementOutcome,
-    GraphDbRetirementTarget, GraphEntity, GraphEntityId, GraphMutation, GraphNamespace,
-    GraphProjectionId, GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
-    GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
+    GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbOwnerRegistrationV1,
+    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphDbRegistryStatus,
+    GraphDbRetirementOutcome, GraphDbRetirementTarget, GraphEntity, GraphEntityId, GraphMutation,
+    GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphRelationKind,
+    GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
+    TraversalRequest,
 };
 use tracedecay_runtime_core::storage;
 use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeKey;
@@ -20,6 +21,7 @@ use tracedecay_runtime_core::store_runtime::resolver::{
 };
 use tracedecay_store::{
     BrainId, CodeShardScopeV1, LocatorDigest, ProjectId, RepositoryId, RetainedGraphStoreLeaseV1,
+    RetainedGraphStoreOwnerAttachmentV1, RetainedGraphStoreOwnerOperationLeaseErrorV1,
     StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
     UserProfileId, VerifiedStoreLocatorV1, WorktreeId, canonical_store_locator_digest,
 };
@@ -43,6 +45,32 @@ impl RetainedGraphStoreLeaseV1 for TestGraphLease {
 
     fn canonical_path(&self) -> &std::path::Path {
         &self.canonical_path
+    }
+}
+
+impl RetainedGraphStoreOwnerAttachmentV1 for TestGraphLease {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &std::path::Path {
+        &self.canonical_path
+    }
+
+    fn issue_operation_lease(
+        &self,
+    ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>
+    {
+        Ok(Arc::new(Self {
+            binding: self.binding.clone(),
+            verified_locator: self.verified_locator.clone(),
+            canonical_path: self.canonical_path.clone(),
+            drop_counter: self.drop_counter.clone(),
+        }))
     }
 }
 
@@ -175,11 +203,27 @@ fn graph_path(root: &std::path::Path) -> std::path::PathBuf {
     root.join("graph.grafeo")
 }
 
-fn retirement_target(registration: &GraphDbRegistration) -> GraphDbRetirementTarget {
-    GraphDbRetirementTarget::new(
-        registration.authority_lease.binding().clone(),
-        registration.authority_lease.verified_locator().clone(),
-    )
+fn owner_registration(registration: GraphDbRegistration) -> GraphDbOwnerRegistrationV1 {
+    let authority_attachment = Box::new(TestGraphLease {
+        binding: registration.authority_lease.binding().clone(),
+        verified_locator: registration.authority_lease.verified_locator().clone(),
+        canonical_path: registration.authority_lease.canonical_path().to_path_buf(),
+        drop_counter: None,
+    });
+    GraphDbOwnerRegistrationV1 {
+        operation: registration,
+        authority_attachment,
+    }
+}
+
+fn retirement_target(
+    registry: &GraphDbRegistry,
+    registration: &GraphDbRegistration,
+) -> GraphDbRetirementTarget {
+    registry
+        .resolve_owner_attachment(owner_registration(registration.clone()))
+        .unwrap()
+        .retirement_target()
 }
 
 fn sidecar_wal_path(path: &std::path::Path) -> std::path::PathBuf {
@@ -580,8 +624,7 @@ fn retirement_reservation_denies_new_resolves_and_drop_restores_ready_entry() {
     let temporary = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let request = registration(identity("profile-a", "project-a"), temporary.path());
-    let target = retirement_target(&request);
-    drop(registry.resolve(request.clone()).unwrap());
+    let target = retirement_target(&registry, &request);
 
     let reservation = registry.reserve_retirement_batch(vec![target]).unwrap();
     assert_eq!(
@@ -611,13 +654,17 @@ fn retirement_batch_is_all_or_nothing_when_any_exact_entry_has_a_client() {
     let first = registry.resolve(first_request.clone()).unwrap();
     drop(registry.resolve(second_request.clone()).unwrap());
 
-    assert!(matches!(
-        registry.reserve_retirement_batch(vec![
-            retirement_target(&first_request),
-            retirement_target(&second_request),
-        ]),
-        Err(GraphDbError::Conflict)
-    ));
+    let first_target = retirement_target(&registry, &first_request);
+    let second_target = retirement_target(&registry, &second_request);
+    let refusal = match registry
+        .reserve_retirement_batch(vec![first_target.clone(), second_target.clone()])
+    {
+        Err(refusal) => refusal,
+        Ok(_reservation) => panic!("an active client must refuse graph retirement"),
+    };
+    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    let (_, retry_targets) = refusal.into_parts();
+    assert_eq!(retry_targets, vec![first_target, second_target]);
     assert_eq!(
         registry.status(&first_request).unwrap(),
         Some(GraphDbRegistryStatus::Ready)
@@ -632,22 +679,22 @@ fn retirement_batch_is_all_or_nothing_when_any_exact_entry_has_a_client() {
 #[test]
 fn retirement_reservation_rejects_foreign_identity_without_transitioning_entry() {
     let temporary = TempDir::new().unwrap();
+    let foreign_temporary = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let request = registration(identity("profile-a", "project-a"), temporary.path());
+    let foreign_registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let foreign_request =
+        registration(identity("profile-a", "project-a"), foreign_temporary.path());
     drop(registry.resolve(request.clone()).unwrap());
-    let foreign_binding = StoreRuntimeBindingV1::new(
-        request.authority_lease.binding().shard_id.clone(),
-        request.authority_lease.binding().incarnation,
-        StoreAuthorityEpochV1::new(2).unwrap(),
-    );
+    let foreign_target = retirement_target(&foreign_registry, &foreign_request);
 
-    assert!(matches!(
-        registry.reserve_retirement_batch(vec![GraphDbRetirementTarget::new(
-            foreign_binding,
-            request.authority_lease.verified_locator().clone(),
-        )]),
-        Err(GraphDbError::Conflict)
-    ));
+    let refusal = match registry.reserve_retirement_batch(vec![foreign_target.clone()]) {
+        Err(refusal) => refusal,
+        Ok(_reservation) => panic!("a foreign graph retirement target must be refused"),
+    };
+    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    let (_, retry_targets) = refusal.into_parts();
+    assert_eq!(retry_targets, vec![foreign_target]);
     assert_eq!(
         registry.status(&request).unwrap(),
         Some(GraphDbRegistryStatus::Ready)
@@ -663,22 +710,21 @@ fn cancelled_retirement_commit_restores_all_preclose_entries() {
     let second_request = registration(identity("profile-a", "project-b"), second_root.path());
     drop(registry.resolve(first_request.clone()).unwrap());
     drop(registry.resolve(second_request.clone()).unwrap());
+    let first_target = retirement_target(&registry, &first_request);
+    let second_target = retirement_target(&registry, &second_request);
     let mut reservation = registry
-        .reserve_retirement_batch(vec![
-            retirement_target(&first_request),
-            retirement_target(&second_request),
-        ])
+        .reserve_retirement_batch(vec![first_target.clone(), second_target.clone()])
         .unwrap();
 
-    assert_eq!(
-        reservation
-            .commit(
-                Arc::new(Cancelled),
-                std::time::Instant::now() + Duration::from_secs(30)
-            )
-            .unwrap_err(),
-        GraphDbError::Cancelled
-    );
+    let refusal = reservation
+        .commit(
+            Arc::new(Cancelled),
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap_err();
+    assert_eq!(refusal.error(), &GraphDbError::Cancelled);
+    let (_, retry_targets) = refusal.into_parts();
+    assert_eq!(retry_targets, vec![first_target, second_target]);
     assert_eq!(
         registry.status(&first_request).unwrap(),
         Some(GraphDbRegistryStatus::Ready)
@@ -687,15 +733,14 @@ fn cancelled_retirement_commit_restores_all_preclose_entries() {
         registry.status(&second_request).unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
-    assert_eq!(
-        reservation
-            .commit(
-                Arc::new(NeverCancelled),
-                std::time::Instant::now() + Duration::from_secs(30),
-            )
-            .unwrap_err(),
-        GraphDbError::Conflict
-    );
+    let refusal = reservation
+        .commit(
+            Arc::new(NeverCancelled),
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap_err();
+    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    assert!(refusal.targets().is_empty());
 }
 
 #[test]
@@ -707,8 +752,8 @@ fn retirement_commit_reports_every_closed_exact_entry() {
     let second_request = registration(identity("profile-a", "project-b"), second_root.path());
     drop(registry.resolve(first_request.clone()).unwrap());
     drop(registry.resolve(second_request.clone()).unwrap());
-    let first_target = retirement_target(&first_request);
-    let second_target = retirement_target(&second_request);
+    let first_target = retirement_target(&registry, &first_request);
+    let second_target = retirement_target(&registry, &second_request);
     let mut reservation = registry
         .reserve_retirement_batch(vec![first_target.clone(), second_target.clone()])
         .unwrap();
@@ -728,15 +773,14 @@ fn retirement_commit_reports_every_closed_exact_entry() {
     );
     assert_eq!(registry.status(&first_request).unwrap(), None);
     assert_eq!(registry.status(&second_request).unwrap(), None);
-    assert_eq!(
-        reservation
-            .commit(
-                Arc::new(NeverCancelled),
-                std::time::Instant::now() + Duration::from_secs(30),
-            )
-            .unwrap_err(),
-        GraphDbError::Conflict
-    );
+    let refusal = reservation
+        .commit(
+            Arc::new(NeverCancelled),
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap_err();
+    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    assert!(refusal.targets().is_empty());
 }
 
 #[test]
@@ -806,7 +850,7 @@ fn stale_binding_cannot_close_or_rebind_the_registered_store() {
     );
     assert_eq!(
         registry
-            .reopen_for_harness(registration(stale, temp.path()))
+            .reopen_for_harness(owner_registration(registration(stale, temp.path())))
             .unwrap_err(),
         GraphDbError::Conflict
     );
@@ -901,7 +945,9 @@ fn single_file_reopens_with_identical_traversal() {
     assert!(registry.close(&request).unwrap());
     assert!(graph_path(temp.path()).is_file());
     assert!(!sidecar_wal_path(&graph_path(temp.path())).exists());
-    let reopened = registry.reopen_for_harness(request).unwrap();
+    let reopened = registry
+        .reopen_for_harness(owner_registration(request))
+        .unwrap();
     let result = reopened
         .traverse(TraversalRequest {
             namespace: GraphNamespace::new("project").unwrap(),
@@ -1211,7 +1257,7 @@ fn reset_required_fault_is_retained_and_cannot_reopen() {
 
     std::fs::remove_file(&graph_path).unwrap();
     assert!(matches!(
-        registry.reopen_for_harness(request.clone()),
+        registry.reopen_for_harness(owner_registration(request.clone())),
         Err(GraphDbError::ResetRequired { .. })
     ));
     assert_eq!(

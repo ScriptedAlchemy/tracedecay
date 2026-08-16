@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tracedecay_agent_hosts::ports::project_runtime::ProjectRuntime;
 pub use tracedecay_code_index::is_test_file;
-use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_runtime_core::storage::StoreLayout;
 use tracedecay_usecases::configuration::UserSettingsDaemonClient;
@@ -18,9 +18,7 @@ pub trait DashboardProjectRuntime: Send + Sync {
     fn automation_runtime(&self) -> &(dyn ProjectRuntime + 'static);
     fn dashboard_db_path(&self) -> PathBuf;
     fn dashboard_database_guard(&self) -> Arc<Database>;
-    fn storage_telemetry_handle(
-        &self,
-    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle>;
+    fn storage_telemetry_handle(&self) -> Result<DatabaseStorageTelemetryHandle>;
     fn retention_config(&self) -> RetentionConfig;
     fn user_settings_client(&self) -> Arc<dyn UserSettingsDaemonClient>;
 }

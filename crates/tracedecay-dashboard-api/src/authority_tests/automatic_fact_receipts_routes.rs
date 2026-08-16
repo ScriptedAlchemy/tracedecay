@@ -142,7 +142,7 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
             tracedecay_store::ProjectMemoryAutomaticFactStateV1::Quarantined
         );
         let projected = crate::util::query_i64_result(
-            &fixture.state.mem_db.engine_conn(),
+            &fixture.state.mem_db.read_connection(),
             "SELECT COUNT(*) FROM memory_v2_current_facts",
             (),
         )

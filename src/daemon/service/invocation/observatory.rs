@@ -1,7 +1,5 @@
 //! Daemon-owned execution for the canonical project Observatory read.
 
-use std::sync::Arc;
-
 use super::*;
 
 struct RegisteredObservatoryReadPort {

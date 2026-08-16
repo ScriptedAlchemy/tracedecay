@@ -14,6 +14,7 @@ use tracedecay_domain::{
 use crate::exact_sql::{
     ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,
 };
+use crate::repository::RetainedExactSqlCapability;
 
 pub(crate) mod capacity;
 mod duplicate_adjudication;
@@ -39,12 +40,21 @@ pub(crate) use sql::*;
 /// different transaction or authority behaviour.
 #[derive(Clone)]
 pub struct WorkSqliteStorage {
-    pub(crate) handle: ExactSqlHandle,
+    retained: RetainedExactSqlCapability,
 }
 
 impl WorkSqliteStorage {
-    pub fn from_registered(handle: ExactSqlHandle) -> Self {
-        Self { handle }
+    #[must_use]
+    pub fn from_retained_exact_sql(retained: RetainedExactSqlCapability) -> Self {
+        Self { retained }
+    }
+
+    pub(crate) fn handle(&self) -> &ExactSqlHandle {
+        self.retained.handle()
+    }
+
+    pub(crate) fn retained_exact_sql(&self) -> RetainedExactSqlCapability {
+        self.retained.clone()
     }
 
     pub fn owner_cursor(
@@ -73,7 +83,7 @@ impl WorkSqliteStorage {
         &self,
         authority: &WorkAuthority,
     ) -> Result<Vec<WorkEvent>, WorkStorageError> {
-        events::load_registered_authority_events(&self.handle, authority)
+        events::load_registered_authority_events(self.handle(), authority)
     }
 
     pub fn resume_cursor(

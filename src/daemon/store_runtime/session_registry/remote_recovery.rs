@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock, Weak, mpsc};
@@ -20,11 +19,12 @@ use tracedecay_rusqlite_runtime::remote::{
 use tracedecay_store::{RemoteWriterFenceInstallV1, StoreShardIdV1};
 
 use super::{
-    DatabaseAuthority, DestructiveMaintenanceReservation, DestructiveMaintenanceTarget,
     LocalProfileIdentityAuthorityV1, LocalStoreLocatorResolutionV1, LocalStoreRuntimeResolverV1,
-    ProfileAuthorityPin, RegisteredGlobalDbLeaseV1, Result, StoreRuntimeKey, StoreRuntimeRegistry,
-    registry_open_error, session_registry_error,
+    ProfileAuthorityPin, ProjectRuntimeOwnerRegistryV1, Result, StoreRuntimeKey,
+    StoreRuntimeRegistry, session_registry_error,
 };
+use crate::db::DatabaseAuthority;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 
 const BACKUP_MANIFEST_VERSION: &str = "tracedecay.remote-backup.v1";
 const CONTROL_POLL: Duration = Duration::from_millis(10);
@@ -37,7 +37,7 @@ mod publication;
 mod support;
 
 use publication::RestorePublicationV1;
-pub(super) use publication::remote_restore_activated_open_identity;
+pub(in crate::daemon::store_runtime::session_registry) use publication::remote_restore_activated_open_identity;
 
 use artifacts::{
     BackupSnapshotV1, RemoteBackupManifestV1, classify_runtime_error, converge_interrupted_restore,
@@ -58,7 +58,7 @@ pub(super) struct RemoteRecoveryPublicationContextV1 {
     graph_registry: GraphDbRegistry,
     graph_lifecycle_cancelled: Arc<AtomicBool>,
     profile_pin: ProfileAuthorityPin,
-    project_sessions: Arc<tokio::sync::Mutex<BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>>>,
+    project_owners: ProjectRuntimeOwnerRegistryV1,
     replay: Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
     session_sync_service:
         Arc<OnceLock<Weak<crate::daemon::session_sync::DaemonSessionSyncService>>>,
@@ -81,7 +81,7 @@ impl RemoteRecoveryPublicationContextV1 {
         graph_registry: GraphDbRegistry,
         graph_lifecycle_cancelled: Arc<AtomicBool>,
         profile_pin: ProfileAuthorityPin,
-        project_sessions: Arc<tokio::sync::Mutex<BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>>>,
+        project_owners: ProjectRuntimeOwnerRegistryV1,
         replay: Arc<
             crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1,
         >,
@@ -104,7 +104,7 @@ impl RemoteRecoveryPublicationContextV1 {
             graph_registry,
             graph_lifecycle_cancelled,
             profile_pin,
-            project_sessions,
+            project_owners,
             replay,
             session_sync_service,
             project_lifecycle,
@@ -141,6 +141,30 @@ impl RemoteRecoveryPublicationContextV1 {
             })
     }
 
+    async fn retire_project_session_sync(&self, project_id: &ProjectId) -> Result<()> {
+        self.session_sync_service("retire remote recovery project session sync")?
+            .retire_project(self.identity.profile_id(), project_id)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                session_registry_error("retire remote recovery project session sync", error)
+            })
+    }
+
+    async fn rebind_project_session_sync(
+        &self,
+        project_id: &ProjectId,
+        database: &RegisteredGlobalDbLeaseV1,
+    ) -> Result<()> {
+        self.session_sync_service("rebind remote recovery project session sync")?
+            .rebind_project(self.identity.profile_id(), project_id, database)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                session_registry_error("rebind remote recovery project session sync", error)
+            })
+    }
+
     async fn authorize_project_recovery(
         &self,
         project_id: &ProjectId,
@@ -148,119 +172,6 @@ impl RemoteRecoveryPublicationContextV1 {
         self.project_lifecycle()?
             .authorize_project_recovery(project_id)
             .await
-    }
-
-    async fn abort_and_remount_restore(
-        &self,
-        mounted: &mut BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>,
-        project_id: ProjectId,
-        expected_opened_file_identity: u64,
-        reservation: DestructiveMaintenanceReservation,
-        operation: &'static str,
-        failure: String,
-    ) -> Result<RestorePublicationV1> {
-        reservation.abort_preserved().map_err(|release_failure| {
-            session_registry_error(
-                operation,
-                format!("{failure}; release failed: {release_failure:?}"),
-            )
-        })?;
-        let restored = self
-            .mount_project_sessions(project_id.clone(), expected_opened_file_identity)
-            .await
-            .map_err(|remount| {
-                session_registry_error(operation, format!("{failure}; remount failed: {remount}"))
-            })?;
-        self.publish_mounted(mounted, project_id, restored).await?;
-        Ok(RestorePublicationV1::RolledBack)
-    }
-
-    async fn finish_published_restore(
-        &self,
-        mut mounted: tokio::sync::OwnedMutexGuard<BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>>,
-        project_id: ProjectId,
-        destination: &Path,
-        rollback: &Path,
-        reservation: DestructiveMaintenanceReservation,
-        expected_published_identity: u64,
-        expected_rollback_identity: u64,
-    ) -> Result<RestorePublicationV1> {
-        publication::quarantine_sqlite_sidecars(
-            destination,
-            &rollback.with_extension("unverified.sqlite3"),
-        )?;
-        PrivateStoreIo::sync_sqlite_family(destination).map_err(|error| {
-            session_registry_error("sync published remote restore", error.to_string())
-        })?;
-        PrivateStoreIo::sync_sqlite_family(rollback).map_err(|error| {
-            session_registry_error("sync remote restore rollback", error.to_string())
-        })?;
-        reservation.finish_deleted().map_err(|error| {
-            session_registry_error("release published remote restore", format!("{error:?}"))
-        })?;
-        match self
-            .mount_project_sessions(project_id.clone(), expected_published_identity)
-            .await
-        {
-            Ok(restored) => {
-                self.publish_quarantined_mounted(
-                    &mut mounted,
-                    project_id,
-                    restored,
-                    destination,
-                    RestorePublicationV1::Published,
-                )
-                .await?;
-                Ok(RestorePublicationV1::Published)
-            }
-            Err(publication_error) => {
-                publication::mark_remote_restore_rollback_required(
-                    destination,
-                    rollback,
-                    expected_rollback_identity,
-                    expected_published_identity,
-                )?;
-                drop(mounted);
-                let rollback = self
-                    .rollback_published_restore(
-                        &project_id,
-                        destination,
-                        rollback,
-                        expected_published_identity,
-                        expected_rollback_identity,
-                    )
-                    .await;
-                if let Err(rollback) = rollback {
-                    return Err(session_registry_error(
-                        "rollback rejected remote restore",
-                        format!("validation={publication_error}; rollback failed: {rollback}"),
-                    ));
-                }
-                mounted = Arc::clone(&self.project_sessions).lock_owned().await;
-                let restored = self
-                    .mount_project_sessions(project_id.clone(), expected_rollback_identity)
-                    .await
-                    .map_err(|remount| {
-                        session_registry_error(
-                            "restore project sessions after rejected publication",
-                            format!("validation={publication_error}; remount failed: {remount}"),
-                        )
-                    })?;
-                self.publish_quarantined_mounted(
-                    &mut mounted,
-                    project_id,
-                    restored,
-                    destination,
-                    RestorePublicationV1::RolledBack,
-                )
-                .await?;
-                tracing::warn!(
-                    error = %publication_error,
-                    "restored database failed registered reattach and was rolled back"
-                );
-                Ok(RestorePublicationV1::RolledBack)
-            }
-        }
     }
 }
 

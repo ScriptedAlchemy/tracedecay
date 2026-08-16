@@ -1068,7 +1068,7 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         "the topology metrics route must reject an uncredentialed read"
     );
 
-    let (status, initial) = poll_past_warming("operation.work.topology_metrics", || {
+    let (status, initial) = poll_past_warming("operation.work.topology_metrics", &mut || {
         post_envelope(&agent, &route, &fixture, &request)
     });
     assert_canonical_envelope("operation.work.topology_metrics", status, &initial);
@@ -1118,7 +1118,7 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         "a restarted topology metrics route must still reject an uncredentialed read"
     );
     let (status, restored) =
-        poll_past_warming("operation.work.topology_metrics after restart", || {
+        poll_past_warming("operation.work.topology_metrics after restart", &mut || {
             post_envelope(&agent, &restored_route, &fixture, &request)
         });
     assert_canonical_envelope(

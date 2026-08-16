@@ -160,7 +160,7 @@ use super::binding::{
 use super::{LegacyToolCompatibilityOwner, ToolResult};
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{

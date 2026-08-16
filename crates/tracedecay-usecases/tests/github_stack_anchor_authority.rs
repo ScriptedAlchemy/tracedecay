@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tracedecay_application::retrieval::{
     GitTopologyAnchorAuthorityV2, GitTopologyAnchorPublicationOutcomeV2,
     GitTopologyAnchorPublicationV2, GitTopologyAnchorResolutionOutcomeV2,

@@ -77,13 +77,13 @@ fn watermark(value: &str) -> GraphWatermark {
 }
 
 fn memory_db() -> GraphDbLeaseV1 {
-    GraphDbOwner::memory(live()).unwrap().lease()
+    GraphDbOwner::memory(live()).unwrap().issue_lease().unwrap()
 }
 
 #[test]
 fn only_the_owner_can_close_shared_operation_handles() {
     let owner = GraphDbOwner::memory(live()).unwrap();
-    let handle = owner.lease();
+    let handle = owner.issue_lease().unwrap();
     let peer = handle.clone();
 
     assert!(handle.snapshot().is_ok());
@@ -1530,7 +1530,7 @@ fn wrong_tracedecay_format_requires_reset() {
 #[test]
 fn closed_handle_fails_typed() {
     let owner = GraphDbOwner::memory(live()).unwrap();
-    let db = owner.lease();
+    let db = owner.issue_lease().unwrap();
     owner.close().unwrap();
     assert_eq!(
         db.apply_unverified(batch("code", "g1", "w1", Vec::new()))

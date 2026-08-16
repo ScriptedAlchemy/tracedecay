@@ -153,20 +153,44 @@ fn runtime_healthy_requires_all_signals_observed_for_complete_coverage() {
 #[tokio::test]
 async fn observation_authority_audit_observes_the_real_invariant_pass() {
     let directory = tempfile::TempDir::new().expect("authority audit fixture root");
+    let uninitialized_path = directory.path().join("uninitialized.db");
     let database_path = directory.path().join("registry.db");
-    let connection = crate::db::engine::TestConnection::open(&database_path);
+    crate::daemon::store_runtime::register_registered_schema_installer();
+    let uninitialized_authority = crate::db::DatabaseAuthority::acquire_test(
+        &uninitialized_path,
+        "doctor uninitialized authority audit fixture",
+    )
+    .expect("doctor authority audit database authority");
+    let (uninitialized, _) = crate::db::Database::publish_test_runtime(
+        &uninitialized_path,
+        &uninitialized_authority,
+        crate::db::TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .expect("open uninitialized doctor audit fixture");
 
     assert!(
-        !observation_authority_audit_passed(&connection).await,
+        !observation_authority_audit_passed(&uninitialized.read_connection()).await,
         "a store without the registered authority schema must fail the audit it ran"
     );
+    drop(uninitialized);
 
-    crate::global_db::schema_stages::ensure_registered_schema(&connection)
-        .await
-        .expect("install the registered authority schema");
+    let authority = crate::db::DatabaseAuthority::acquire_test(
+        &database_path,
+        "doctor registered authority audit fixture",
+    )
+    .expect("doctor registered audit database authority");
+    let (database, _) = crate::db::Database::publish_registered_test_runtime(
+        &database_path,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::Initialize,
+        crate::db::TestDatabaseRuntimeScope::ProfileSessions,
+    )
+    .await
+    .expect("install the registered authority schema");
 
     assert!(
-        observation_authority_audit_passed(&connection).await,
+        observation_authority_audit_passed(&database.read_connection()).await,
         "a converged registered authority must report a passing audit rather than \
          unavailable audit data"
     );

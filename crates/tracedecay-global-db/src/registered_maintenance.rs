@@ -1,46 +1,11 @@
-use tracedecay_runtime_core::db::engine::WalCheckpointExecutor;
 use tracedecay_runtime_core::errors::TraceDecayError;
 
-use crate::{RegisteredGlobalDb, global_db_operation_error, global_db_operation_message};
+use crate::RegisteredGlobalDb;
 
 impl RegisteredGlobalDb {
     /// Checkpoints the registered store's WAL through its authorized writer.
     pub async fn checkpoint_result(&self) -> Result<(), TraceDecayError> {
-        let writer = self.writer_connection().map_err(|error| {
-            global_db_operation_error("open registered WAL checkpoint writer", error)
-        })?;
-        let mut rows = writer
-            .checkpoint_wal_truncate()
-            .await
-            .map_err(|error| global_db_operation_error("checkpoint registered WAL", error))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error("read registered WAL checkpoint", error))?
-            .ok_or_else(|| {
-                global_db_operation_message(
-                    "checkpoint registered WAL",
-                    "WAL checkpoint returned no status row",
-                )
-            })?;
-        let busy: i64 = row
-            .get(0)
-            .map_err(|error| global_db_operation_error("read registered WAL checkpoint", error))?;
-        let log_frames: i64 = row
-            .get(1)
-            .map_err(|error| global_db_operation_error("read registered WAL checkpoint", error))?;
-        let checkpointed_frames: i64 = row
-            .get(2)
-            .map_err(|error| global_db_operation_error("read registered WAL checkpoint", error))?;
-        if busy != 0 || checkpointed_frames < log_frames {
-            return Err(global_db_operation_message(
-                "checkpoint registered WAL",
-                format!(
-                    "WAL checkpoint incomplete: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
-                ),
-            ));
-        }
-        Ok(())
+        self.checkpoint_database().await
     }
 
     pub async fn checkpoint(&self) {

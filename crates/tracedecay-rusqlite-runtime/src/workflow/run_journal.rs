@@ -68,7 +68,7 @@ fn rebuild(history: &[WorkflowRunEvent]) -> Result<WorkflowRunProjection, Workfl
 impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
     fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
         let transaction = self
-            .storage
+            .handle()
             .begin_immediate()
             .map_err(run_journal_unavailable)?;
         let history = history_tx(&transaction, run_id)?;
@@ -90,7 +90,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         let sequence = i64::try_from(request.event.sequence())
             .map_err(|_| WorkflowRunStorageError::Unavailable)?;
         let transaction = self
-            .storage
+            .handle()
             .begin_immediate()
             .map_err(run_journal_unavailable)?;
         let history = match history_tx(&transaction, request.event.run_id()) {
@@ -151,7 +151,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
 
     fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError> {
         let transaction = self
-            .storage
+            .handle()
             .begin_immediate()
             .map_err(run_journal_unavailable)?;
         let rows = query_tx(
@@ -183,7 +183,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         after: Option<&WorkflowActiveRunRecoveryCursorV1>,
     ) -> Result<WorkflowActiveRunRecoveryPageV1, WorkflowRunStorageError> {
         let transaction = self
-            .storage
+            .handle()
             .begin_immediate()
             .map_err(run_journal_unavailable)?;
         let page_limit = i64::try_from(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 + 1)
@@ -315,7 +315,7 @@ impl WorkflowArtifactStorePort for WorkflowSqliteAuthority {
         let byte_length = i64::try_from(payload.artifact().byte_length())
             .map_err(|_| WorkflowArtifactStoreError::Oversized)?;
         let transaction = self
-            .storage
+            .handle()
             .begin_immediate()
             .map_err(artifact_store_unavailable)?;
         let existing = match stored_payload_tx(&transaction, digest) {
@@ -358,7 +358,7 @@ impl WorkflowArtifactStorePort for WorkflowSqliteAuthority {
         artifact: &WorkArtifactRefV1,
     ) -> Result<WorkflowArtifactPayload, WorkflowArtifactStoreError> {
         let transaction = self
-            .storage
+            .handle()
             .begin_immediate()
             .map_err(artifact_store_unavailable)?;
         let stored = stored_payload_tx(&transaction, artifact.digest().as_str());

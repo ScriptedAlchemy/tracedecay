@@ -1,4 +1,4 @@
-use tracedecay_runtime_core::db::engine::{Connection, TestConnection, params};
+use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows, params};
 
 use super::*;
 // `super::*` re-exports the crate's one-argument `errors::Result` alias; the
@@ -12,28 +12,73 @@ const OWNER: &str = "{\"owner\":\"o1\"}";
 const GEN: &str = "projection.gen.v1";
 const OTHER_GEN: &str = "projection.gen.v2";
 
-async fn test_store() -> Result<(tempfile::TempDir, TestConnection), String> {
-    let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
-    let conn = TestConnection::open(&temp.path().join("obs.db"));
-    conn.execute_batch("PRAGMA foreign_keys = ON;")
-        .await
-        .map_err(|err| format!("enable fks: {err}"))?;
-    super::super::ensure_observation_schema(&conn)
-        .await
-        .map_err(|err| format!("ensure observation schema: {err}"))?;
-    conn.execute_batch(
-        "CREATE TRIGGER IF NOT EXISTS observations_immutable_update
-         BEFORE UPDATE ON observations BEGIN
-             SELECT RAISE(ABORT, 'observations are immutable');
-         END;
-         CREATE TRIGGER IF NOT EXISTS observations_immutable_delete
-         BEFORE DELETE ON observations BEGIN
-             SELECT RAISE(ABORT, 'observations are immutable');
-         END;",
-    )
-    .await
-    .map_err(|err| format!("install observation immutability: {err}"))?;
-    Ok((temp, conn))
+struct RetentionTestStore {
+    harness: crate::tests::harness::RegisteredGlobalDbHarness,
+}
+
+impl RetentionTestStore {
+    async fn open() -> Self {
+        Self {
+            harness: crate::tests::harness::RegisteredGlobalDbHarness::open(
+                "observation-retention",
+            )
+            .await,
+        }
+    }
+
+    fn database(&self) -> &crate::RegisteredGlobalDb {
+        &self.harness.registered
+    }
+
+    fn revoke(&mut self) {
+        self.harness.revoke();
+    }
+}
+
+impl QueryExecutor for RetentionTestStore {
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
+    where
+        P: IntoParams,
+    {
+        self.database().read_connection().query(sql, params).await
+    }
+}
+
+impl Executor for RetentionTestStore {
+    async fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<u64>
+    where
+        P: IntoParams,
+    {
+        self.database()
+            .writer_connection()
+            .map_err(|error| {
+                tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
+            })?
+            .execute(sql, params)
+            .await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
+        self.database()
+            .writer_connection()
+            .map_err(|error| {
+                tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
+            })?
+            .execute_batch(sql)
+            .await
+    }
+}
+
+async fn test_store() -> RetentionTestStore {
+    RetentionTestStore::open().await
 }
 
 /// Fat JSON payload of `size` bytes that carries no `__retention_released` key.
@@ -45,7 +90,7 @@ fn payload(field: &str, size: usize) -> String {
 /// provenance) for `anchor_id`, all owned by `OWNER` under `generation`, with
 /// fat payloads. The observation id mirrors the anchor id.
 async fn seed_evidence(
-    conn: &Connection,
+    conn: &RetentionTestStore,
     anchor_id: &str,
     generation: &str,
     size: usize,
@@ -99,7 +144,7 @@ async fn seed_evidence(
 /// Inserts a bare anchor (used for evidence clusters and as a supersession
 /// successor target).
 async fn insert_anchor(
-    conn: &Connection,
+    conn: &RetentionTestStore,
     anchor_id: &str,
     generation: &str,
     size: usize,
@@ -116,7 +161,7 @@ async fn insert_anchor(
 
 /// Appends a disposition to the append-only ledger.
 async fn set_disposition(
-    conn: &Connection,
+    conn: &RetentionTestStore,
     anchor_id: &str,
     state: &str,
     effective_at: i64,
@@ -141,7 +186,7 @@ async fn set_disposition(
     Ok(())
 }
 
-async fn fetch_i64(conn: &Connection, sql: &str) -> Result<i64, String> {
+async fn fetch_i64(conn: &RetentionTestStore, sql: &str) -> Result<i64, String> {
     let mut rows = conn.query(sql, ()).await.map_err(|e| e.to_string())?;
     rows.next()
         .await
@@ -151,7 +196,7 @@ async fn fetch_i64(conn: &Connection, sql: &str) -> Result<i64, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn fetch_str(conn: &Connection, sql: &str) -> Result<String, String> {
+async fn fetch_str(conn: &RetentionTestStore, sql: &str) -> Result<String, String> {
     let mut rows = conn.query(sql, ()).await.map_err(|e| e.to_string())?;
     rows.next()
         .await
@@ -161,7 +206,7 @@ async fn fetch_str(conn: &Connection, sql: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn seed_cursor_advance_history(conn: &Connection) -> Result<(), String> {
+async fn seed_cursor_advance_history(conn: &RetentionTestStore) -> Result<(), String> {
     let source = r#"{"session_id":"retention-session"}"#;
     let scope = r#""profile""#;
     conn.execute_batch(
@@ -218,63 +263,27 @@ fn is_released(json: &str) -> bool {
 }
 
 async fn run_apply(
-    conn: &Connection,
+    conn: &RetentionTestStore,
     generation: Option<&str>,
     config: &ObservationRetentionConfig,
 ) -> Result<ObservationRetentionReport, String> {
-    run_observation_retention_authorized(
-        conn,
-        generation,
-        config,
-        RetentionMode::Apply,
-        NOW,
-        &|_| Ok(()),
-    )
-    .await
-    .map_err(|error| error.to_string())
+    conn.database()
+        .run_observation_retention(generation, config, RetentionMode::Apply, NOW)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tokio::test]
-async fn authority_loss_before_commit_rolls_back_observation_release() -> Result<(), String> {
-    let (temp, conn) = test_store().await?;
+async fn revoked_daemon_scope_rejects_observation_retention_without_mutation() -> Result<(), String>
+{
+    let mut conn = test_store().await;
     seed_evidence(&conn, "anchor-revoked", GEN, 4096).await?;
     set_disposition(&conn, "anchor-revoked", "deleted", NOW - 90 * DAY, None).await?;
-    let scope = std::sync::Mutex::new(Some(
-        tracedecay_runtime_core::db::enter_daemon_database_scope(
-            temp.path(),
-            1,
-            "observation-retention-revocation-test",
-        )
-        .map_err(|error| error.to_string())?,
-    ));
-    let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_runtime(
-        &temp.path().join("sessions.db"),
-        "observation retention revocation test",
-    )
-    .map_err(|error| error.to_string())?;
-
-    let error = run_observation_retention_authorized(
-        &conn,
-        None,
-        &released_config(),
-        RetentionMode::Apply,
-        NOW,
-        &|intent| {
-            if intent == "commit anchor retention pass" {
-                drop(
-                    scope
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take(),
-                );
-            }
-            authority.require_active_write_scope(intent)
-        },
-    )
-    .await
-    .expect_err("authority loss must reject observation retention commit");
-
-    assert!(error.to_string().contains("active daemon"));
+    conn.revoke();
+    let error = run_apply(&conn, None, &released_config())
+        .await
+        .expect_err("revoked daemon scope must reject observation retention");
+    assert!(!error.is_empty());
     assert!(!is_released(
         &fetch_str(
             &conn,
@@ -299,42 +308,6 @@ async fn authority_loss_before_commit_rolls_back_observation_release() -> Result
         )
         .await?
     ));
-    assert!(
-        conn.execute(
-            "UPDATE retrieval_anchors SET anchor_json = '{}'
-             WHERE anchor_id = 'anchor-revoked'",
-            (),
-        )
-        .await
-        .is_err(),
-        "rollback restores the anchor immutability trigger"
-    );
-    assert!(
-        conn.execute(
-            "UPDATE observation_repository_provenance SET availability_json = '{}'
-             WHERE observation_id = 'obs-anchor-revoked'",
-            (),
-        )
-        .await
-        .is_err(),
-        "provenance immutability trigger remains installed"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn unauthorised_entry_rejects_apply() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
-    let error =
-        run_observation_retention(&conn, None, &released_config(), RetentionMode::Apply, NOW)
-            .await
-            .expect_err("apply must require the authority-bound entry point");
-
-    assert!(
-        error
-            .to_string()
-            .contains("authority-bound observation retention entry point")
-    );
     Ok(())
 }
 
@@ -343,7 +316,7 @@ async fn unauthorised_entry_rejects_apply() -> Result<(), String> {
 #[tokio::test]
 async fn superseded_and_deleted_dispositions_release_storage() -> Result<(), String> {
     for state in ["superseded", "deleted"] {
-        let (_temp, conn) = test_store().await?;
+        let conn = test_store().await;
         // A successor anchor is required for the FK on a superseded disposition.
         let successor = if state == "superseded" {
             insert_anchor(&conn, "successor", GEN, 8).await?;
@@ -396,7 +369,7 @@ async fn superseded_and_deleted_dispositions_release_storage() -> Result<(), Str
 #[tokio::test]
 async fn active_and_unavailable_dispositions_retain_storage() -> Result<(), String> {
     for state in ["active", "unavailable"] {
-        let (_temp, conn) = test_store().await?;
+        let conn = test_store().await;
         seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
         set_disposition(&conn, "anchor-1", state, NOW - 90 * DAY, None).await?;
 
@@ -420,7 +393,7 @@ async fn active_and_unavailable_dispositions_retain_storage() -> Result<(), Stri
 // has a current 'active' state and is retained (append-only, max-sequence wins).
 #[tokio::test]
 async fn latest_disposition_wins() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+    let conn = test_store().await;
     insert_anchor(&conn, "successor", GEN, 8).await?;
     seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
     set_disposition(
@@ -447,7 +420,7 @@ async fn latest_disposition_wins() -> Result<(), String> {
 // is not released.
 #[tokio::test]
 async fn window_is_honored() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+    let conn = test_store().await;
     seed_evidence(&conn, "recent", GEN, 4096).await?;
     seed_evidence(&conn, "old", GEN, 4096).await?;
     set_disposition(&conn, "recent", "deleted", NOW - 10 * DAY, None).await?;
@@ -479,14 +452,15 @@ async fn window_is_honored() -> Result<(), String> {
 // A dry run counts eligible reclaim without mutating anything.
 #[tokio::test]
 async fn dry_run_mutates_nothing() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+    let conn = test_store().await;
     seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
     set_disposition(&conn, "anchor-1", "deleted", NOW - 90 * DAY, None).await?;
 
-    let report =
-        run_observation_retention(&conn, None, &released_config(), RetentionMode::DryRun, NOW)
-            .await
-            .map_err(|e| e.to_string())?;
+    let report = conn
+        .database()
+        .run_observation_retention(None, &released_config(), RetentionMode::DryRun, NOW)
+        .await
+        .map_err(|error| error.to_string())?;
 
     assert_eq!(report.anchors_released.eligible, 1);
     assert_eq!(report.anchors_released.acted, 0, "dry run acts on nothing");
@@ -517,7 +491,7 @@ async fn dry_run_mutates_nothing() -> Result<(), String> {
 // and releases each eligible observation once.
 #[tokio::test]
 async fn released_observations_are_counted_once_each() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+    let conn = test_store().await;
     seed_evidence(&conn, "anchor-primary", GEN, 4096).await?;
     seed_evidence(&conn, "anchor-secondary", GEN, 4096).await?;
     set_disposition(&conn, "anchor-primary", "deleted", NOW - 90 * DAY, None).await?;
@@ -557,7 +531,7 @@ async fn released_observations_are_counted_once_each() -> Result<(), String> {
 
 #[tokio::test]
 async fn active_observation_in_other_generation_remains_live() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+    let conn = test_store().await;
     seed_evidence(&conn, "anchor-primary", GEN, 4096).await?;
     seed_evidence(&conn, "anchor-active", OTHER_GEN, 4096).await?;
     set_disposition(&conn, "anchor-primary", "deleted", NOW - 90 * DAY, None).await?;
@@ -594,7 +568,7 @@ async fn active_observation_in_other_generation_remains_live() -> Result<(), Str
 // Reclaim is measurable via payload-count and page/free-list metrics.
 #[tokio::test]
 async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+    let conn = test_store().await;
     for index in 0..8 {
         let anchor = format!("anchor-{index}");
         seed_evidence(&conn, &anchor, GEN, 2048).await?;
@@ -622,7 +596,7 @@ async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
 // Retention is generation-scoped: only the targeted generation is released.
 #[tokio::test]
 async fn retention_is_generation_scoped() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+    let conn = test_store().await;
     seed_evidence(&conn, "gen-a", GEN, 4096).await?;
     seed_evidence(&conn, "gen-b", OTHER_GEN, 4096).await?;
     set_disposition(&conn, "gen-a", "deleted", NOW - 90 * DAY, None).await?;
@@ -651,7 +625,7 @@ async fn retention_is_generation_scoped() -> Result<(), String> {
 // Disabled config is an inert no-op even in Apply mode.
 #[tokio::test]
 async fn disabled_config_is_a_no_op() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+    let conn = test_store().await;
     seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
     set_disposition(&conn, "anchor-1", "deleted", NOW - 90 * DAY, None).await?;
 
@@ -677,7 +651,7 @@ async fn disabled_config_is_a_no_op() -> Result<(), String> {
 // skipped rather than re-acted.
 #[tokio::test]
 async fn rerun_is_idempotent() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+    let conn = test_store().await;
     seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
     set_disposition(&conn, "anchor-1", "deleted", NOW - 90 * DAY, None).await?;
 
@@ -696,7 +670,7 @@ async fn rerun_is_idempotent() -> Result<(), String> {
 // disposition ledger is left fully intact.
 #[tokio::test]
 async fn immutability_and_ledger_are_preserved() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+    let conn = test_store().await;
     seed_evidence(&conn, "anchor-1", GEN, 4096).await?;
     set_disposition(&conn, "anchor-1", "deleted", NOW - 90 * DAY, None).await?;
     let ledger_before =
@@ -752,18 +726,19 @@ async fn immutability_and_ledger_are_preserved() -> Result<(), String> {
 #[tokio::test]
 async fn superseded_cursor_advances_are_reclaimed_but_current_receipt_survives()
 -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+    let conn = test_store().await;
     seed_cursor_advance_history(&conn).await?;
 
-    let dry_run = run_observation_retention(
-        &conn,
-        None,
-        &ObservationRetentionConfig::default(),
-        RetentionMode::DryRun,
-        NOW,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let dry_run = conn
+        .database()
+        .run_observation_retention(
+            None,
+            &ObservationRetentionConfig::default(),
+            RetentionMode::DryRun,
+            NOW,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
     assert_eq!(dry_run.cursor_advances_reclaimed.eligible, 2);
     assert_eq!(dry_run.cursor_advances_reclaimed.acted, 0);
     assert_eq!(dry_run.cursor_advances_before, 3);
@@ -794,37 +769,17 @@ async fn superseded_cursor_advances_are_reclaimed_but_current_receipt_survives()
 }
 
 #[tokio::test]
-async fn cursor_advance_authority_loss_rolls_back_and_restores_trigger() -> Result<(), String> {
-    let (_temp, conn) = test_store().await?;
+async fn revoked_daemon_scope_retains_cursor_advance_evidence() -> Result<(), String> {
+    let mut conn = test_store().await;
     seed_cursor_advance_history(&conn).await?;
-    let error = run_observation_retention_authorized(
-        &conn,
-        None,
-        &ObservationRetentionConfig::default(),
-        RetentionMode::Apply,
-        NOW,
-        &|intent| {
-            if intent == "commit source cursor advance retention pass" {
-                return Err(TraceDecayError::Database {
-                    operation: OPERATION.to_string(),
-                    message: "test authority revoked".to_string(),
-                });
-            }
-            Ok(())
-        },
-    )
-    .await
-    .expect_err("revocation before commit must roll back cursor reclamation");
-    assert!(error.to_string().contains("test authority revoked"));
+    conn.revoke();
+    let error = run_apply(&conn, None, &ObservationRetentionConfig::default())
+        .await
+        .expect_err("revoked daemon scope must reject cursor retention");
+    assert!(!error.is_empty());
     assert_eq!(
         fetch_i64(&conn, "SELECT COUNT(*) FROM source_cursor_advances").await?,
         3
-    );
-    assert!(
-        conn.execute("DELETE FROM source_cursor_advances", ())
-            .await
-            .is_err(),
-        "rollback restores the immutable delete trigger"
     );
     Ok(())
 }

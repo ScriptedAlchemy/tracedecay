@@ -22,7 +22,10 @@ impl GraphCancellation for Cancelled {
 }
 
 fn memory_db() -> GraphDbLeaseV1 {
-    GraphDbOwner::memory(cancellation()).unwrap().lease()
+    GraphDbOwner::memory(cancellation())
+        .unwrap()
+        .issue_lease()
+        .unwrap()
 }
 
 fn entity(identity: &str) -> GraphEntity {

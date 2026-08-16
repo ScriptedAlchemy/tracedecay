@@ -143,7 +143,7 @@ async fn admit_canonical_effect(
     ordinal: u64,
     text: &str,
 ) {
-    let store = crate::store::GlobalDbObservationStore::with_runtime(db.runtime(), db.authority());
+    let store = db.observation_store();
     store
         .persist_observation(anchored_write(canonical_observation(
             session_id, ordinal, text,
@@ -219,7 +219,7 @@ fn empty_projection_effect(recovery: &SessionRefreshRecoveryV1) -> SessionTempor
 
 struct EmptyProjector {
     calls: std::sync::atomic::AtomicUsize,
-    database: std::sync::Mutex<Option<usize>>,
+    database: std::sync::Mutex<Option<RegisteredGlobalDbLeaseV1>>,
 }
 
 impl EmptyProjector {
@@ -238,7 +238,7 @@ impl SessionTemporalRefreshProjector for EmptyProjector {
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         self.calls.fetch_add(1, Ordering::AcqRel);
-        *self.database.lock().unwrap() = Some(Arc::as_ptr(database) as usize);
+        *self.database.lock().unwrap() = Some(database.clone());
         Box::pin(async move { Ok(empty_projection_effect(&recovery)) })
     }
 }
@@ -579,9 +579,13 @@ async fn restart_resumes_each_committed_boundary_without_writer_fallback() {
         .await;
     assert_eq!(first.projected_batches, 1);
     assert_eq!(projector.calls.load(Ordering::Acquire), 1);
-    assert_eq!(
-        *projector.database.lock().unwrap(),
-        Some(authority.database_identity())
+    assert!(
+        projector
+            .database
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|database| database.shares_client_with(&authority.database))
     );
 
     let restarted_state = Arc::new(SessionTemporalRefreshWakeState::default());

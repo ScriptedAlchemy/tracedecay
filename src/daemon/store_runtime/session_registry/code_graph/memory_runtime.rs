@@ -11,7 +11,6 @@ use tracedecay_graph_db::{
 use tracedecay_runtime_core::store::memory::{
     ProjectMemoryGraphReconciliationScheduleV1, schedule_project_memory_graph_reconciliation,
 };
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeKey;
 use tracedecay_store::{
     FactReadControl, GraphPublicationInputDigestV1, GraphPublicationKeyV1, StoreShardIdV1,
     StoreShardScopeV1,
@@ -39,6 +38,10 @@ pub(in crate::daemon::store_runtime::session_registry) fn schedule_bound_memory_
     match schedule_project_memory_graph_reconciliation(database.clone()) {
         ProjectMemoryGraphReconciliationScheduleV1::Scheduled
         | ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled => Ok(()),
+        ProjectMemoryGraphReconciliationScheduleV1::Retiring => Err(session_registry_error(
+            "schedule verified memory graph reconciliation",
+            "memory graph reconciliation is fenced for runtime retirement".to_owned(),
+        )),
         ProjectMemoryGraphReconciliationScheduleV1::NotMounted => Err(session_registry_error(
             "schedule verified memory graph reconciliation",
             "writable memory database has no bound verified graph runtime".to_owned(),
@@ -80,10 +83,6 @@ impl tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1
         self.lifecycle_cancelled.store(true, Ordering::Release);
     }
 
-    fn close_reconciliation(&self) -> std::result::Result<(), GraphDbError> {
-        RetainedVerifiedGraphRuntimeV1::close_reconciliation(self)
-    }
-
     fn publish_verified_manifest(
         &self,
         manifest: &GraphGenerationManifest,
@@ -119,7 +118,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) async fn retain_memory_graph_runtime(
         &self,
         shard_id: StoreShardIdV1,
-        database: Arc<crate::db::Database>,
+        database: crate::db::DatabaseOwnerV1,
     ) -> Result<RetainedVerifiedGraphRuntimeV1> {
         if !matches!(
             &shard_id.scope,
@@ -132,31 +131,30 @@ impl DaemonSessionRuntimeRegistryV1 {
                 "memory graph scope does not match the active profile authority".to_owned(),
             ));
         }
-        if database.retained_runtime().binding().shard_id != shard_id {
+        if database.registered_binding().shard_id != shard_id {
             return Err(session_registry_error(
                 "retain verified memory graph authority",
                 "memory graph shard does not match the retained relational runtime".to_owned(),
             ));
         }
-        let publication_storage = database.graph_publication_storage()?;
-        let relational_binding = database.retained_runtime().binding().clone();
-        let relational_verified_locator = database.retained_runtime().locator().verified().clone();
-        let authority = self
-            .registry
-            .retain_graph_store(StoreRuntimeKey::new(shard_id, self.incarnation))
-            .await
-            .map_err(|failure| {
-                session_registry_error(
-                    "retain verified memory graph authority",
-                    format!("{failure:?}"),
-                )
-            })?;
+        let relational_binding = database.registered_binding().clone();
+        let relational_verified_locator = database.registered_verified_locator().clone();
+        let (graph, store_target) = super::graph_attachment::open_session_relation_owner(
+            &self.registry,
+            &self.graph_registry,
+            &self.graph_lifecycle_cancelled,
+            self.incarnation,
+            shard_id,
+        )
+        .await?;
         Ok(RetainedVerifiedGraphRuntimeV1 {
             graph_registry: self.graph_registry.clone(),
-            authority,
-            publication_storage,
+            database,
+            graph,
+            store_target: Mutex::new(Some(store_target)),
             relational_binding,
             relational_verified_locator,
+            operation_admission: Mutex::new(super::MemoryGraphOperationAdmissionV1::Ready),
             publication_gate: Mutex::new(()),
             lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
         })

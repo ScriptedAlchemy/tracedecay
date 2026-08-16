@@ -13,7 +13,7 @@ impl RemoteSqliteStorageV1 {
         brain_id: &BrainId,
     ) -> Result<RemoteStorageStatusSnapshotV1, RemoteSqliteStorageErrorV1> {
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT
                 SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN state = 'quarantined' THEN 1 ELSE 0 END)
@@ -26,7 +26,7 @@ impl RemoteSqliteStorageV1 {
         Ok(RemoteStorageStatusSnapshotV1 {
             pending_spool_items,
             quarantined_spool_items,
-            authority: load_authority_state(&self.handle, brain_id)?,
+            authority: load_authority_state(self.handle(), brain_id)?,
         })
     }
 }

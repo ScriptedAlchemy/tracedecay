@@ -30,7 +30,9 @@ use super::record_canonical_observation_effect;
 use crate::session_temporal::GlobalDbSessionTemporalStore;
 use crate::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
+    open_registered_test_database_fixture,
 };
+use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
 
 fn fixture_session(value: &str) -> SessionId {
@@ -882,9 +884,16 @@ async fn recorded_effect(
 
 async fn open_effect_store(name: &str) -> (TempDir, TestConnection) {
     let directory = TempDir::new().unwrap();
-    let connection = TestConnection::open(&directory.path().join(format!("{name}.db")));
-    crate::ensure_registered_schema(&connection).await.unwrap();
-    (directory, connection)
+    let database_path = directory.path().join(format!("{name}.db"));
+    drop(
+        open_registered_test_database_fixture(
+            &database_path,
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap(),
+    );
+    (directory, TestConnection::open(&database_path))
 }
 
 /// Case 1 — fresh insert. The write path no longer reads the row back, so this

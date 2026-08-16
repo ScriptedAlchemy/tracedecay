@@ -1801,7 +1801,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
             if current_index.code_generation_id != *identity.generation_id() {
                 return diagnostics_unavailable(finished_at, OmissionReason::Stale);
             }
-            let query = DiagnosticsQuery::new(self.database.conn());
+            let query = DiagnosticsQuery::new(self.database.clone());
             let current = query.current_generation().await;
             let Some(current_generation) = current.generation else {
                 return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);

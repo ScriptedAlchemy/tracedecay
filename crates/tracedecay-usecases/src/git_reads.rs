@@ -20,7 +20,7 @@ use tracedecay_domain::{
     GitIndexPreviewId, ManifestDigest, RootScopeOutcomeV1, ScopeOutcome, ScopePartialReasonV1,
     ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, UtcMicros,
 };
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
 use tracedecay_graph_db::{GraphCancellation, GraphDbError};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_store::FactReadControl;

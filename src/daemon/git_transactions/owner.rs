@@ -21,20 +21,17 @@ use tracedecay_domain::{
 use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassifierV1};
 use tracedecay_tool_catalog::CapabilityId;
 
-use crate::catalog_composition::build_application_catalog_snapshot;
-#[cfg(test)]
-use crate::db::engine::{TestConnection, TransactionBehavior};
-use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
-use tracedecay_usecases::configuration::ConfigurationControlStore;
-
 use super::{
     CurrentGitIndexPolicyStateV1, DaemonGitIndexTransactionService,
     DaemonProjectGitIndexPreviewAssembler, FixedDaemonGitIndexExecutor, GitIndexPolicyRecheckPort,
     GitIndexTransactionStoreRegistry, RepositoryMutationQueue,
     SharedDaemonGitIndexTransactionStore, canonicalize_repository_root,
 };
+use crate::catalog_composition::build_application_catalog_snapshot;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
+use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_usecases::ProjectSourceAccessSnapshot;
+use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 const GIT_POLICY_REVISION: u64 = 2;
 
@@ -137,7 +134,7 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
             .map_err(|_| GitIndexTransactionPortError::PolicyDenied)?;
         let resolution = resolve_restrictive_capabilities(
             granted_capabilities,
-            access_rules,
+            &access_rules,
             &CapabilityResolutionContextV1 {
                 actor: self.access.requester.clone(),
                 operation: None,
@@ -462,41 +459,6 @@ impl DaemonGitIndexTransactionServiceRegistry {
             project_id,
             observed_at,
             || self.stores.ensure(database),
-        )
-        .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn ensure_engine_test(
-        &self,
-        database_path: PathBuf,
-        repository_root: PathBuf,
-        project_id: ProjectId,
-        observed_at: UtcMicros,
-    ) -> Result<Arc<DaemonProjectGitIndexTransactionService>, GitIndexTransactionPortError> {
-        let database_path = database_path
-            .canonicalize()
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-        let database = TestConnection::open(&database_path);
-        let transaction = database
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-        crate::global_db::ensure_git_index_transaction_schema(&transaction)
-            .await
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-        drop(database);
-        let store_path = database_path.clone();
-        self.ensure_with(
-            database_path,
-            repository_root,
-            project_id,
-            observed_at,
-            || self.stores.ensure_engine_test(store_path),
         )
         .await
     }

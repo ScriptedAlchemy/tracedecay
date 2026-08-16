@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};

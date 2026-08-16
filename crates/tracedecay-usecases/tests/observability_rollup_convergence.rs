@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_application::{

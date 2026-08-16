@@ -129,36 +129,27 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         linked_graph.db_path(),
         "linked worktrees must share one project store authority"
     );
-    assert_eq!(
-        primary_graph.db().retained_runtime().runtime_identity(),
-        linked_graph.db().retained_runtime().runtime_identity(),
-        "linked worktree facades must share one physical store runtime"
-    );
-    assert_eq!(
-        primary_graph
-            .db()
-            .retained_runtime()
-            .publication()
-            .publication_id,
-        linked_graph
-            .db()
-            .retained_runtime()
-            .publication()
-            .publication_id,
-        "linked worktrees must share one registry publication, not merely one facade slot"
-    );
-    assert!(
-        matches!(
-            primary_graph
-                .db()
-                .retained_runtime()
-                .binding()
-                .shard_id
-                .scope,
-            tracedecay_store::StoreShardScopeV1::Project { .. }
-        ),
-        "the mutable graph writer must be owned by project identity; worktree identity is snapshot provenance"
-    );
+    {
+        let primary_runtime = primary_graph.db().runtime_client();
+        let linked_runtime = linked_graph.db().runtime_client();
+        let primary_publication = primary_runtime.publication();
+        let linked_publication = linked_runtime.publication();
+        assert_eq!(
+            primary_publication, linked_publication,
+            "linked worktree facades must share one physical store runtime"
+        );
+        assert_eq!(
+            primary_publication.publication_id, linked_publication.publication_id,
+            "linked worktrees must share one registry publication, not merely one facade slot"
+        );
+        assert!(
+            matches!(
+                primary_runtime.binding().shard_id.scope,
+                tracedecay_store::StoreShardScopeV1::Project { .. }
+            ),
+            "the mutable graph writer must be owned by project identity; worktree identity is snapshot provenance"
+        );
+    }
     assert_eq!(
         primary_graph.store_layout().graph_db_path,
         linked_graph.store_layout().graph_db_path,
@@ -320,12 +311,12 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     assert_eq!(
         reopened_linked_graph
             .db()
-            .retained_runtime()
+            .runtime_client()
             .publication()
             .publication_id,
         primary_graph
             .db()
-            .retained_runtime()
+            .runtime_client()
             .publication()
             .publication_id,
         "reopening an exact linked route must not publish a second database owner"
