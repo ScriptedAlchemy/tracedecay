@@ -988,7 +988,7 @@ pub mod work_rollup_harness {
         WorkRunControlAuthorityV1, WorkRunControlReasonV1, WorkTopologyGenerationRefV1,
         WorkflowStepId, WorktreeId, canonical_sha256,
     };
-    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+    use tracedecay_global_db::{RegisteredGlobalDb, tests::harness::RegisteredGlobalDbTestRuntime};
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
     use tracedecay_usecases::observability::{
         BoundedObservabilityProducerV1, ObservabilityProducerIdentityV1,
@@ -1031,7 +1031,6 @@ pub mod work_rollup_harness {
         pub total_elapsed: Duration,
     }
 
-    #[derive(Clone, Debug)]
     struct PreparedWorkRollupCase {
         _pin: tracedecay_runtime_core::config::PinnedUserDataDir,
         _runtime: RegisteredGlobalDbTestRuntime,
@@ -1641,10 +1640,8 @@ pub mod work_rollup_harness {
 
     #[cfg(target_os = "linux")]
     fn linux_cgroup_memory_events() -> Option<(u64, u64)> {
-        let cgroup_path = std::fs::read_to_string("/proc/self/cgroup")
-            .ok()?
-            .lines()
-            .find_map(|line| line.strip_prefix("0::"))?;
+        let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+        let cgroup_path = cgroup.lines().find_map(|line| line.strip_prefix("0::"))?;
         let events_path = std::path::Path::new("/sys/fs/cgroup")
             .join(cgroup_path.trim_start_matches('/'))
             .join("memory.events");
