@@ -418,7 +418,6 @@ impl BranchNamingPolicyV1 {
             BranchCollisionPolicyV1::Reject
             | BranchCollisionPolicyV1::AppendMonotonicOrdinal { .. } => {}
         }
-        let _ = self.separator.as_char();
         Ok(())
     }
 }

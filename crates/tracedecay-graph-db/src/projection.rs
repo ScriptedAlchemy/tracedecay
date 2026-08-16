@@ -32,14 +32,6 @@ impl GraphCancellation for NeverCancelled {
     }
 }
 
-struct CanonicalCheckedBatchCancellation;
-
-impl GraphCancellation for CanonicalCheckedBatchCancellation {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-}
-
 macro_rules! opaque_id {
     ($name:ident) => {
         #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -346,7 +338,7 @@ impl GraphWriteBatch {
             source_generation,
             next_watermark,
             mutations,
-            cancellation: Arc::new(CanonicalCheckedBatchCancellation),
+            cancellation: Arc::new(NeverCancelled),
         })
     }
 

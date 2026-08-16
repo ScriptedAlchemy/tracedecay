@@ -215,9 +215,3 @@ crate::canonical_text::validated_string_newtype!(
     GitIndexReceiptId => "git index receipt id",
     GitIndexIdempotencyKey => "git index idempotency key",
 );
-
-impl Default for GitIndexPreviewId {
-    fn default() -> Self {
-        Self("preview.pending".to_owned())
-    }
-}

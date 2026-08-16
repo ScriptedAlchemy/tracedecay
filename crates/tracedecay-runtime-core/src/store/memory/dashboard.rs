@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
-use crate::memory::encoding::{HolographicEncoder, HolographicEncodingError};
+use crate::memory::encoding::HolographicEncoder;
 use crate::memory::entities::normalize_entity;
 
 use tracedecay_domain::{FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1};
@@ -30,6 +30,7 @@ use super::primitives::{
 use super::projection::{
     load_project_memory_projection_controlled_tx, load_project_memory_projections_controlled_tx,
 };
+use super::scoring::project_memory_holographic_error;
 
 #[derive(Clone)]
 struct EntityAggregate {
@@ -41,14 +42,6 @@ fn dashboard_fact_summary(
     projection: ProjectMemoryFactProjectionV1,
 ) -> ProjectMemoryDashboardFactSummaryV1 {
     ProjectMemoryDashboardFactSummaryV1 { fact: projection }
-}
-
-fn holographic_error(error: HolographicEncodingError) -> FactStoreError {
-    match error {
-        HolographicEncodingError::DimensionMismatch { expected, actual } => {
-            FactStoreError::HolographicDimensionMismatch { expected, actual }
-        }
-    }
 }
 
 async fn dashboard_canonical_fact_count_tx(
@@ -610,7 +603,7 @@ pub(super) async fn dashboard_project_memory_vector_points_tx(
                         Some(
                             encoder
                                 .encode_fact(fact.content(), entities)
-                                .map_err(holographic_error)?,
+                                .map_err(project_memory_holographic_error)?,
                         ),
                         entities
                             .iter()

@@ -24,7 +24,9 @@ use crate::db::Database;
 use crate::db::engine::params;
 
 use super::envelope::finish_read_snapshot;
-use super::graph_manifest::{MemoryGraphSource, SourceRelation, build_manifest, source_watermark};
+use super::graph_manifest::{
+    MemoryGraphSource, SourceRelation, build_manifest, ensure_source_read_active, source_watermark,
+};
 use super::primitives::{
     OwnerKey, row_optional_string, row_string, storage_error, storage_message,
 };
@@ -406,13 +408,6 @@ pub(super) fn validate_rooted_relations(
 fn ensure_not_cancelled(read_control: &FactReadControl) -> FactStoreResult<()> {
     if read_control.interrupted() {
         return Err(FactStoreError::GraphCancelled);
-    }
-    Ok(())
-}
-
-fn ensure_source_read_active(read_control: Option<&FactReadControl>) -> FactStoreResult<()> {
-    if read_control.is_some_and(FactReadControl::interrupted) {
-        return Err(FactStoreError::ReadCancelled);
     }
     Ok(())
 }

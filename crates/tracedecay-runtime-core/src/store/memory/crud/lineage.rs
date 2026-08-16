@@ -2,7 +2,7 @@
 
 use super::super::primitives::{
     COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, identity_collision, parse_payload_access,
-    payload_access_label, requires_payload_purge, row_exists, row_exists_params, row_f64, row_i64,
+    payload_access_label, requires_payload_purge, row_exists, row_f64, row_i64,
     row_optional_string, row_string, storage_error, storage_message, to_json,
 };
 use super::DEFAULT_TRUST;
@@ -148,7 +148,7 @@ async fn owned_assertion_exists(
     fact_id: &FactId,
     assertion_id: &FactAssertionId,
 ) -> FactStoreResult<bool> {
-    row_exists_params(
+    row_exists(
         transaction,
         "SELECT 1 FROM memory_v2_assertions
          WHERE assertion_id = ?1 AND fact_id = ?2 AND owner_kind = ?3
@@ -170,7 +170,7 @@ async fn owned_evidence_exists(
     fact_id: &FactId,
     evidence_id: &FactEvidenceId,
 ) -> FactStoreResult<bool> {
-    row_exists_params(
+    row_exists(
         transaction,
         "SELECT 1 FROM memory_v2_evidence
          WHERE evidence_id = ?1 AND fact_id = ?2 AND owner_kind = ?3
@@ -191,7 +191,7 @@ async fn owned_fact_exists(
     owner: &OwnerKey,
     fact_id: &FactId,
 ) -> FactStoreResult<bool> {
-    row_exists_params(
+    row_exists(
         transaction,
         "SELECT 1 FROM memory_v2_facts
          WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3

@@ -29,13 +29,6 @@ pub enum HydrationStageError {
     Contract(String),
 }
 
-/// The bounded hydration plan derived from the final ranked set.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HydrationPlanV1 {
-    pub anchors: Vec<RetrievalAnchorId>,
-    pub budget: RetrievalBudget,
-}
-
 /// Request-execution state sampled before each authorized hydration step.
 /// Implementations may read a cancellation token or a monotonic clock, but
 /// must not expose source payload.
@@ -63,23 +56,6 @@ pub enum HydrationPreflightOutcomeV1 {
     Unavailable(HydrationUnavailableV1),
     BudgetExceeded,
     Cancelled,
-}
-
-/// The late hydration stage contract (Plan 15: recheck authorization and
-/// hydrate final context for the selected anchors through each owning store;
-/// record one receipt per anchor).
-pub trait LateHydrationStage {
-    /// Derive the bounded hydration plan for the selected ranked candidates.
-    fn plan(&self, selected: &[RankedCandidate], budget: &RetrievalBudget) -> HydrationPlanV1;
-
-    /// Execute the plan against the pinned request, re-checking
-    /// authorization per anchor and emitting one receipt per anchor.
-    fn hydrate(
-        &self,
-        request: &RetrievalRequest,
-        plan: &HydrationPlanV1,
-        control: &dyn HydrationExecutionControlV1,
-    ) -> Result<Vec<HydrationReceipt>, HydrationStageError>;
 }
 
 /// Internal authorization result. `Denied` is intentionally absent from the
@@ -194,17 +170,6 @@ impl HydrationExecutionControlV1 for SystemHydrationExecutionControl {
 impl<'a, S> CanonicalLateHydration<'a, S> {
     pub fn new(source: &'a mut S) -> Self {
         Self { source }
-    }
-
-    pub fn plan(selected: &[RankedCandidate], budget: &RetrievalBudget) -> HydrationPlanV1 {
-        HydrationPlanV1 {
-            anchors: selected
-                .iter()
-                .take(budget.max_hydrated_results as usize)
-                .map(|ranked| ranked.candidate.anchor_id.clone())
-                .collect(),
-            budget: *budget,
-        }
     }
 
     pub fn hydrate<P>(

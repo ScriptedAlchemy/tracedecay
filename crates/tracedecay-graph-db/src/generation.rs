@@ -39,12 +39,11 @@ pub use replay::{
     GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
     SemanticVectorGenerationReplay,
 };
-use replay::{checked_decode_replay_source, validate_sealed_replay};
+use replay::validate_sealed_replay;
 pub(crate) use replay::{
-    metadata_manifest_from_replay, validate_metadata_binding, validate_supplied_manifest_binding,
+    checked_decode_replay_source, metadata_manifest_from_replay, validate_metadata_binding,
+    validate_supplied_manifest_binding,
 };
-
-pub(crate) use replay::checked_decode_replay_source as decode_replay_source_checked;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

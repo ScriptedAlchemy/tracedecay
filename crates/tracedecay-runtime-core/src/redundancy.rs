@@ -1,5 +1,4 @@
-// Rust guideline compliant 2026-05-25
-//! AST-level functional duplicate detection (issue #83).
+//! AST-level functional duplicate detection.
 //!
 //! Computes four kinds of fingerprint per function/method body:
 //!

@@ -33,8 +33,8 @@ use super::envelope::{
     project_memory_lookup_operation_receipt_tx, project_memory_record_operation_receipt_tx,
 };
 use super::primitives::{
-    OwnerKey, PROJECT_MEMORY_READ_OPERATION, PROJECT_MEMORY_WRITE_OPERATION, project_memory_now,
-    storage_error, storage_message,
+    OwnerKey, PROJECT_MEMORY_READ_OPERATION, PROJECT_MEMORY_WRITE_OPERATION,
+    ensure_project_memory_read_active, project_memory_now, storage_error, storage_message,
 };
 use super::projection::{
     load_project_memory_projections_controlled_tx, load_project_memory_projections_tx,
@@ -46,16 +46,6 @@ use super::scoring::{
     project_memory_term_coverage, project_memory_tokens,
 };
 use crate::memory::encoding::HolographicEncoder;
-
-pub(super) fn ensure_project_memory_search_not_cancelled(
-    read_control: &FactReadControl,
-) -> FactStoreResult<()> {
-    if read_control.interrupted() {
-        Err(FactStoreError::ReadCancelled)
-    } else {
-        Ok(())
-    }
-}
 
 fn project_memory_search_scores(
     query_tokens: &[String],
@@ -141,7 +131,7 @@ async fn project_memory_rank_facts_tx(
     graph_coverage: ProjectMemoryFactSearchGraphCoverageV1,
     read_control: &FactReadControl,
 ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let min_trust = query
         .filter()
         .min_trust()
@@ -151,7 +141,7 @@ async fn project_memory_rank_facts_tx(
         .map(|candidates| std::mem::take(&mut candidates.fts_scores))
         .unwrap_or_default();
     let mut facts = if let Some(candidates) = candidates.take() {
-        ensure_project_memory_search_not_cancelled(read_control)?;
+        ensure_project_memory_read_active(read_control)?;
         let projections = load_project_memory_projections_controlled_tx(
             transaction,
             query.owner(),
@@ -159,7 +149,7 @@ async fn project_memory_rank_facts_tx(
             read_control,
         )
         .await?;
-        ensure_project_memory_search_not_cancelled(read_control)?;
+        ensure_project_memory_read_active(read_control)?;
         projections
             .into_iter()
             .filter_map(|projection| match projection {
@@ -177,7 +167,7 @@ async fn project_memory_rank_facts_tx(
         )
         .await?
     };
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let now = project_memory_now()?;
     let mut ranked = Vec::with_capacity(facts.len());
     match query.kind() {
@@ -191,7 +181,7 @@ async fn project_memory_rank_facts_tx(
                 .encode_fact(text, &tokens)
                 .map_err(project_memory_holographic_error)?;
             for fact in facts.drain(..) {
-                ensure_project_memory_search_not_cancelled(read_control)?;
+                ensure_project_memory_read_active(read_control)?;
                 let (scores, why) = project_memory_search_scores(
                     &tokens,
                     &encoder,
@@ -218,7 +208,7 @@ async fn project_memory_rank_facts_tx(
                 storage_message(PROJECT_MEMORY_READ_OPERATION, "probe query is missing")
             })?;
             for fact in facts.drain(..) {
-                ensure_project_memory_search_not_cancelled(read_control)?;
+                ensure_project_memory_read_active(read_control)?;
                 if !project_memory_matches_entity(&fact, entity) {
                     continue;
                 }
@@ -236,7 +226,7 @@ async fn project_memory_rank_facts_tx(
         }
         ProjectMemoryFactSearchKindV1::Related { entity } => {
             for fact in facts.drain(..) {
-                ensure_project_memory_search_not_cancelled(read_control)?;
+                ensure_project_memory_read_active(read_control)?;
                 let trust = project_memory_millionths(fact.trust().as_f64());
                 let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
                 ranked.push((
@@ -251,7 +241,7 @@ async fn project_memory_rank_facts_tx(
         }
         ProjectMemoryFactSearchKindV1::Reason { entities } => {
             for fact in facts.drain(..) {
-                ensure_project_memory_search_not_cancelled(read_control)?;
+                ensure_project_memory_read_active(read_control)?;
                 if !project_memory_matches_all_entities(&fact, &entities) {
                     continue;
                 }
@@ -268,9 +258,9 @@ async fn project_memory_rank_facts_tx(
             }
         }
     }
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     rank_and_seek(&mut ranked, query.after());
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let has_more = ranked.len() > query.limit();
     ranked.truncate(query.limit());
     let next_after = if has_more {
@@ -340,7 +330,7 @@ async fn project_memory_candidates_snapshot(
     query: &ProjectMemoryFactSearchQuery,
     read_control: &FactReadControl,
 ) -> FactStoreResult<SearchCandidates> {
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let transaction = db
         .begin_memory_read_transaction(PROJECT_MEMORY_READ_OPERATION)
         .await
@@ -439,7 +429,7 @@ async fn project_memory_rank_snapshot(
     graph_coverage: ProjectMemoryFactSearchGraphCoverageV1,
     read_control: &FactReadControl,
 ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let transaction = db
         .begin_memory_read_transaction(PROJECT_MEMORY_READ_OPERATION)
         .await
@@ -460,15 +450,15 @@ pub(super) async fn search_project_memory_facts(
     query: &ProjectMemoryFactSearchQuery,
     read_control: &FactReadControl,
 ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let mut candidates = project_memory_candidates_snapshot(db, query, read_control).await?;
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let graph_coverage =
         project_memory_graph_assist(db, query, &mut candidates, read_control).await?;
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let page =
         project_memory_rank_snapshot(db, query, candidates, graph_coverage, read_control).await?;
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     Ok(page)
 }
 
@@ -483,15 +473,15 @@ pub(super) async fn related_project_memory_facts(
             "related query has the wrong kind",
         ));
     };
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let mut candidates = project_memory_candidates_snapshot(db, query, read_control).await?;
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let graph_coverage =
         project_memory_graph_assist(db, query, &mut candidates, read_control).await?;
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let page =
         project_memory_rank_snapshot(db, query, candidates, graph_coverage, read_control).await?;
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     Ok(page)
 }
 
@@ -500,7 +490,7 @@ pub(super) async fn find_project_memory_contradictions_tx(
     query: &ProjectMemoryFactContradictionQueryV1,
     read_control: &FactReadControl,
 ) -> FactStoreResult<ProjectMemoryFactContradictionPageV1> {
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     let mut facts = project_memory_available_facts_tx(
         transaction,
         query.owner(),
@@ -509,12 +499,12 @@ pub(super) async fn find_project_memory_contradictions_tx(
         read_control,
     )
     .await?;
-    ensure_project_memory_search_not_cancelled(read_control)?;
+    ensure_project_memory_read_active(read_control)?;
     facts.sort_by(|left, right| left.fact_id().cmp(right.fact_id()));
     let mut contradictions = Vec::new();
     'outer: for (index, left) in facts.iter().enumerate() {
         for right in facts.iter().skip(index + 1) {
-            ensure_project_memory_search_not_cancelled(read_control)?;
+            ensure_project_memory_read_active(read_control)?;
             let left_entities = left
                 .entities()
                 .iter()

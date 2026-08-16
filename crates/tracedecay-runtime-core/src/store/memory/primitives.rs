@@ -194,14 +194,6 @@ pub(super) async fn row_exists(
         .is_some())
 }
 
-pub(super) async fn row_exists_params(
-    transaction: &Transaction<'_>,
-    sql: &str,
-    values: impl crate::db::engine::IntoParams,
-) -> FactStoreResult<bool> {
-    row_exists(transaction, sql, values).await
-}
-
 pub(super) fn payload_access_label(state: PayloadAccessState) -> &'static str {
     match state {
         PayloadAccessState::Eligible => "eligible",

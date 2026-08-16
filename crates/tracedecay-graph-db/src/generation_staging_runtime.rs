@@ -7,7 +7,7 @@ use tracedecay_store::{
 
 use crate::generation::recovered_generation_digest_from_database;
 use crate::generation::{
-    GraphGenerationReplaySource, decode_replay_source_checked, validate_metadata_binding,
+    GraphGenerationReplaySource, checked_decode_replay_source, validate_metadata_binding,
 };
 use crate::lease::GenerationLocator;
 use crate::limits::{
@@ -435,7 +435,7 @@ pub(crate) fn validate_stage_publication_replay(
     {
         return Err(GraphDbError::Conflict);
     }
-    let source = decode_replay_source_checked(&replay.canonical_replay_source, check)?;
+    let source = checked_decode_replay_source(&replay.canonical_replay_source, check)?;
     let GraphGenerationReplaySource::SemanticVectorGeneration(source) = source else {
         return Err(GraphDbError::Conflict);
     };

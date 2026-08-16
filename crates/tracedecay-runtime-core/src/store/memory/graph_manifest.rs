@@ -138,7 +138,9 @@ pub(super) fn source_watermark(
     .map_err(|error| graph_error(owner, error))
 }
 
-fn ensure_source_read_active(read_control: Option<&FactReadControl>) -> FactStoreResult<()> {
+pub(super) fn ensure_source_read_active(
+    read_control: Option<&FactReadControl>,
+) -> FactStoreResult<()> {
     if read_control.is_some_and(FactReadControl::interrupted) {
         return Err(FactStoreError::ReadCancelled);
     }

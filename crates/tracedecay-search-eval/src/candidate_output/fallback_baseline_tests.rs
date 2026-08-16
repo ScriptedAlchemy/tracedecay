@@ -53,7 +53,7 @@ fn native_evaluation_rejects_a_digest_valid_fallback_with_the_wrong_baseline_ord
         None,
     )
     .expect("digest-valid unrelated fallback");
-    let fusion = fusion_profile(profile, &retrieval_budget(), true).expect("semantic fusion");
+    let fusion = fusion_profile(profile, true).expect("semantic fusion");
 
     let error = evaluate_native_query(SemanticNativeQueryInputV1 {
         profile_spec: profile,

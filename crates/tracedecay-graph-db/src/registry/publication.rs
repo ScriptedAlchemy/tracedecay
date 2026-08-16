@@ -109,7 +109,7 @@ impl GraphDbRegistry {
                     for dependency in &replay.publication.direct_dependency_generations {
                         retained.insert(locator_from_dependency(&registration, dependency)?);
                     }
-                    let source = crate::generation::decode_replay_source_checked(
+                    let source = crate::generation::checked_decode_replay_source(
                         &replay.publication.canonical_replay_source,
                         &|| check_all(&registration, context),
                     )?;
@@ -158,7 +158,7 @@ impl GraphDbRegistry {
                             }
                         })?;
                     let source =
-                        crate::generation::decode_replay_source_checked(source_payload, &|| {
+                        crate::generation::checked_decode_replay_source(source_payload, &|| {
                             check_all(&registration, context)
                         })?;
                     if let GraphGenerationReplaySource::SealedCodeGeneration(sealed) = &source
@@ -322,7 +322,7 @@ impl GraphDbRegistry {
                                 }
                             })?;
                         let source =
-                            crate::generation::decode_replay_source_checked(payload, &|| {
+                            crate::generation::checked_decode_replay_source(payload, &|| {
                                 check_all(&registration, context)
                             })?;
                         if let GraphGenerationReplaySource::SealedCodeGeneration(source) = source

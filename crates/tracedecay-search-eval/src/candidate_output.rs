@@ -1443,7 +1443,7 @@ fn retrieve_one_native_query(
     authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
 ) -> Result<QueryCandidateRowV1, CandidateOutputError> {
     let prepared = prepare_production_query(published, profile, query)?;
-    let mut fusion = fusion_profile(profile, &retrieval_budget(), true)?;
+    let mut fusion = fusion_profile(profile, true)?;
     let mut native = None;
     let semantic_allowed_chunks = published
         .generation
@@ -1787,7 +1787,7 @@ pub fn direct_evaluated_profile_material(
             CandidateOutputError::Contract(format!("unknown requested profile_id {profile_id}"))
         })?;
     Ok(DirectEvaluatedProfileMaterialV1 {
-        profile: fusion_profile(profile, &retrieval_budget(), true)?,
+        profile: fusion_profile(profile, true)?,
         diversity: evaluated_diversity_policy()?,
         rerank: evaluated_rerank_policy(profile)?,
     })
@@ -2178,7 +2178,7 @@ fn prepare_production_query(
         tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
     )?);
     let fallback_profile = query_fallback_profile(profile);
-    let fusion_profile = fusion_profile(&fallback_profile, &budget, false)?;
+    let fusion_profile = fusion_profile(&fallback_profile, false)?;
     let fallback_lanes = vec![
         CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
@@ -3216,7 +3216,6 @@ fn graph_seeds_from_outcomes(
 
 fn fusion_profile(
     profile: &ProfileSpecV1,
-    __budget: &RetrievalBudget,
     include_semantic: bool,
 ) -> Result<FusionProfile, CandidateOutputError> {
     let mut weights = BTreeMap::new();
@@ -4034,7 +4033,7 @@ mod tests {
         let query = workload.queries.first().expect("query");
         let prepared =
             prepare_production_query(&published, profile, query).expect("prepared query");
-        let fusion = fusion_profile(profile, &retrieval_budget(), true).expect("fusion");
+        let fusion = fusion_profile(profile, true).expect("fusion");
         let mut native = evaluate_native_query(SemanticNativeQueryInputV1 {
             profile_spec: profile,
             fusion_profile: &fusion,

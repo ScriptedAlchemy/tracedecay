@@ -40,7 +40,7 @@ impl SkillInstallTarget {
     }
 
     pub fn writes_prompt_index(self) -> bool {
-        !self.is_native_overlay() && self != Self::Hermes
+        !self.is_native_overlay()
     }
 
     pub fn prompt_label(self) -> &'static str {

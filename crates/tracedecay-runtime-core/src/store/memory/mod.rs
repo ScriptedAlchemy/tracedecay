@@ -52,9 +52,11 @@ use dashboard::{
     dashboard_project_memory_overview_tx, dashboard_project_memory_vector_points_tx,
 };
 use envelope::finish_read_snapshot;
-use primitives::{COMMIT_OPERATION, QUERY_OPERATION, storage_error};
+use primitives::{
+    COMMIT_OPERATION, QUERY_OPERATION, ensure_project_memory_read_active, storage_error,
+};
 use search::{
-    ensure_project_memory_search_not_cancelled, find_project_memory_contradictions_tx,
+    find_project_memory_contradictions_tx,
     probe_project_memory_facts_tx, reason_project_memory_facts_tx,
     record_project_memory_fact_retrieval_tx, related_project_memory_facts,
     search_project_memory_facts,
@@ -338,7 +340,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         query: ProjectMemoryFactSearchQuery,
         read_control: &FactReadControl,
     ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
-        ensure_project_memory_search_not_cancelled(read_control)?;
+        ensure_project_memory_read_active(read_control)?;
         let owned_read_control = read_control.clone();
         let page = self
             .project_memory_read(move |transaction| {
@@ -347,7 +349,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
                 })
             })
             .await?;
-        ensure_project_memory_search_not_cancelled(read_control)?;
+        ensure_project_memory_read_active(read_control)?;
         Ok(page)
     }
 
@@ -364,7 +366,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         query: ProjectMemoryFactSearchQuery,
         read_control: &FactReadControl,
     ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
-        ensure_project_memory_search_not_cancelled(read_control)?;
+        ensure_project_memory_read_active(read_control)?;
         let owned_read_control = read_control.clone();
         let page = self
             .project_memory_read(move |transaction| {
@@ -373,7 +375,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
                 })
             })
             .await?;
-        ensure_project_memory_search_not_cancelled(read_control)?;
+        ensure_project_memory_read_active(read_control)?;
         Ok(page)
     }
 

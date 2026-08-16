@@ -23,9 +23,10 @@ use tracedecay_store::{
 };
 
 use super::candidates::project_memory_probe_candidates_tx;
+use super::primitives::ensure_project_memory_read_active;
 use super::search::{
-    ensure_project_memory_search_not_cancelled, find_project_memory_contradictions_tx,
-    probe_project_memory_facts_tx, project_memory_graph_degradation,
+    find_project_memory_contradictions_tx, probe_project_memory_facts_tx,
+    project_memory_graph_degradation,
 };
 
 async fn database() -> (TempDir, Database) {
@@ -602,9 +603,9 @@ fn graph_degradation_and_cancellation_remain_typed() {
     );
     let (interrupted, read_control) = live_read_control(true);
     assert!(matches!(
-        ensure_project_memory_search_not_cancelled(&read_control),
+        ensure_project_memory_read_active(&read_control),
         Err(FactStoreError::ReadCancelled)
     ));
     interrupted.store(false, Ordering::Release);
-    assert!(ensure_project_memory_search_not_cancelled(&read_control).is_ok());
+    assert!(ensure_project_memory_read_active(&read_control).is_ok());
 }

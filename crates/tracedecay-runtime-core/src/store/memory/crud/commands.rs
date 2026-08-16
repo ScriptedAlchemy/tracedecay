@@ -7,7 +7,7 @@ use super::super::envelope::{
 };
 use super::super::primitives::{
     OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, project_memory_category_label,
-    project_memory_event_time, project_memory_now, row_exists_params, storage_error,
+    project_memory_event_time, project_memory_now, row_exists, storage_error,
     storage_message,
 };
 use super::super::projection::load_project_memory_projection_tx;
@@ -242,7 +242,7 @@ pub(super) async fn project_memory_commit_receipt_from_operation_tx(
     )?;
     let key = OwnerKey::new(owner)?;
     for event_id in canonical.committed_event_ids() {
-        if !row_exists_params(
+        if !row_exists(
             transaction,
             "SELECT 1 FROM memory_v2_lineage_events
              WHERE event_id = ?1 AND fact_id = ?2 AND owner_kind = ?3 AND project_id = ?4",
@@ -259,7 +259,7 @@ pub(super) async fn project_memory_commit_receipt_from_operation_tx(
         }
     }
     if let Some(assertion_id) = canonical.active_assertion_id()
-        && !row_exists_params(
+        && !row_exists(
             transaction,
             "SELECT 1 FROM memory_v2_assertions
              WHERE assertion_id = ?1 AND fact_id = ?2 AND owner_kind = ?3

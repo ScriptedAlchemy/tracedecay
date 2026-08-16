@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 use tracedecay_domain::{
-    CompactCandidate, EvidenceRole, FusedCandidate, LogicalCopyClusterId, OccurrenceProvenance,
-    RankingDecision, RankingDecisionKind, SourceOccurrenceId,
+    CompactCandidate, EvidenceRole, FusedCandidate, LogicalCopyClusterId, RankingDecision,
+    RankingDecisionKind, SourceOccurrenceId,
 };
 
 use super::ordering::compare_fused;
@@ -20,8 +20,6 @@ use super::ordering::compare_fused;
 /// Failures of the dedupe stage.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum DedupeStageError {
-    #[error("duplicate candidate rows for one source occurrence lack a collapse decision")]
-    UncollapsedDuplicate,
     #[error("a logical-copy relation lacks its evidence anchor")]
     CopyRelationWithoutEvidence,
     #[error("contract violation: {0}")]
@@ -41,16 +39,6 @@ pub struct DedupeDecisionV1 {
     pub collapsed_candidates: Vec<FusedCandidate>,
     pub copy_cluster: Option<LogicalCopyClusterId>,
     pub decision: RankingDecision,
-}
-
-/// The same-source duplicate collapse contract (Plan 15 pipeline step 4).
-pub trait SameSourceDedupeStage {
-    /// Collapse duplicate rows for the same source occurrence before fusion,
-    /// recording one decision per collapse.
-    fn collapse_same_source(
-        &self,
-        candidates: &[OccurrenceProvenance],
-    ) -> Result<Vec<DedupeDecisionV1>, DedupeStageError>;
 }
 
 /// The evidence-backed logical-copy collapse contract (Plan 15 pipeline
@@ -237,48 +225,6 @@ impl DeterministicDedupe {
         }
         independent.sort_by(compare_fused);
         Ok((independent, decisions))
-    }
-}
-
-impl SameSourceDedupeStage for DeterministicDedupe {
-    fn collapse_same_source(
-        &self,
-        candidates: &[OccurrenceProvenance],
-    ) -> Result<Vec<DedupeDecisionV1>, DedupeStageError> {
-        let mut grouped = BTreeMap::new();
-        for candidate in candidates {
-            grouped
-                .entry((
-                    candidate.source_occurrence_id.clone(),
-                    candidate.retriever_evidence_anchor.clone(),
-                ))
-                .or_insert_with(Vec::new)
-                .push(candidate);
-        }
-        Ok(grouped
-            .into_iter()
-            .filter_map(|((occurrence, evidence_anchor), duplicates)| {
-                (duplicates.len() > 1).then(|| {
-                    let decision = RankingDecision {
-                        kind: RankingDecisionKind::SameSourceDuplicateCollapse,
-                        retriever: None,
-                        policy_anchor: None,
-                        evidence_anchor: Some(evidence_anchor),
-                        detail: format!(
-                            "collapsed {} duplicate provenance rows",
-                            duplicates.len() - 1
-                        ),
-                    };
-                    DedupeDecisionV1 {
-                        kept_occurrence: occurrence.clone(),
-                        collapsed_occurrences: vec![occurrence; duplicates.len() - 1],
-                        collapsed_candidates: Vec::new(),
-                        copy_cluster: duplicates[0].logical_copy_cluster_id.clone(),
-                        decision,
-                    }
-                })
-            })
-            .collect())
     }
 }
 
