@@ -426,9 +426,10 @@ mod tests {
     use crate::store_runtime::registry::{
         LifecycleShardRuntimePublisher, PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot,
         ProfileAuthorityPinResult, PublishedShardRuntime, ResolvedStoreLocator,
-        ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeLookup, StoreRuntimeOpenBegin,
-        StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
-        StoreRuntimeRegistryConfig, StoreRuntimeRegistryFuture, StoreRuntimeResolver,
+        ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeClientLease,
+        StoreRuntimeLookup, StoreRuntimeOpenBegin, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
+        StoreRuntimeOpenResult, StoreRuntimeRegistryConfig, StoreRuntimeRegistryFuture,
+        StoreRuntimeResolver,
     };
     use crate::store_runtime::shard::ShardRuntime;
 
