@@ -975,6 +975,112 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
     }
 }
 
+#[test]
+fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
+    let mut fixture = ProductionDaemon::start();
+    // This pre-project horizon is intentionally outside every observation the
+    // daemon can create. A historical empty read must name absence for every
+    // descriptor rather than turn it into an all-zero success.
+    let request = serde_json::json!({
+        "horizon": { "since_micros": 1, "until_micros": 2 },
+        "max_events": 10_000,
+    });
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .into();
+    let route = fixture.external_url("/application/work/topology-metrics");
+
+    let anonymous = agent
+        .post(&route)
+        .header("origin", &fixture.origin)
+        .content_type("application/json")
+        .send(request.to_string())
+        .expect("anonymous operation.work.topology_metrics response");
+    assert_eq!(
+        anonymous.status().as_u16(),
+        StatusCode::UNAUTHORIZED.as_u16(),
+        "the topology metrics route must reject an uncredentialed read"
+    );
+
+    let (status, initial) = poll_past_warming("operation.work.topology_metrics", || {
+        post_envelope(&agent, &route, &fixture, &request)
+    });
+    assert_canonical_envelope("operation.work.topology_metrics", status, &initial);
+    assert_eq!(
+        initial["value"]["outcome"]["outcome"], "evidence",
+        "{initial}"
+    );
+    let initial_metrics = &initial["value"]["outcome"]["value"]["payload"];
+    assert_eq!(
+        initial_metrics["authorized_scope_ref"], fixture.project_id,
+        "{initial_metrics}"
+    );
+    assert_eq!(
+        initial_metrics["horizon"], request["horizon"],
+        "{initial_metrics}"
+    );
+    assert!(
+        initial_metrics["measurements"]
+            .as_array()
+            .is_some_and(|measurements| {
+                !measurements.is_empty()
+                    && measurements.iter().all(|measurement| {
+                        measurement["value"]["value"].is_null()
+                            && measurement["unavailable"] == "no_eligible_evidence"
+                            && measurement["value"]["unavailable_reason"] == "no_eligible_evidence"
+                    })
+            }),
+        "an empty authorized horizon must carry typed no-eligible-evidence descriptors: {initial_metrics}"
+    );
+
+    fixture.restart();
+    let restored_route = fixture.external_url("/application/work/topology-metrics");
+    let anonymous_after_restart = agent
+        .post(&restored_route)
+        .header("origin", &fixture.origin)
+        .content_type("application/json")
+        .send(request.to_string())
+        .expect("anonymous restarted operation.work.topology_metrics response");
+    assert_eq!(
+        anonymous_after_restart.status().as_u16(),
+        StatusCode::UNAUTHORIZED.as_u16(),
+        "a restarted topology metrics route must still reject an uncredentialed read"
+    );
+    let (status, restored) =
+        poll_past_warming("operation.work.topology_metrics after restart", || {
+            post_envelope(&agent, &restored_route, &fixture, &request)
+        });
+    assert_canonical_envelope(
+        "operation.work.topology_metrics after restart",
+        status,
+        &restored,
+    );
+    let restored_metrics = &restored["value"]["outcome"]["value"]["payload"];
+    assert_eq!(
+        restored_metrics["authorized_scope_ref"], fixture.project_id,
+        "{restored_metrics}"
+    );
+    assert_eq!(
+        restored_metrics["horizon"], request["horizon"],
+        "{restored_metrics}"
+    );
+    assert!(
+        restored_metrics["measurements"]
+            .as_array()
+            .is_some_and(|measurements| {
+                !measurements.is_empty()
+                    && measurements.iter().all(|measurement| {
+                        measurement["value"]["value"].is_null()
+                            && measurement["unavailable"] == "no_eligible_evidence"
+                            && measurement["value"]["unavailable_reason"] == "no_eligible_evidence"
+                    })
+            }),
+        "a restart must preserve typed absence instead of fabricating topology evidence: {restored_metrics}"
+    );
+}
+
 /// The dashboard Work journey past its verified task root.
 ///
 /// `the_work_surface_answers_real_requests_on_both_published_mounts` proves the
