@@ -4,9 +4,6 @@ pub mod formatter;
 /// Re-ranking of search candidates using structural signals.
 pub mod ranking;
 
-/// Section preview, retrieval handle, and structure for markdown symbols.
-pub mod markdown_sections;
-
 /// Cross-session cache backing `tracedecay_read`.
 pub mod read_cache;
 

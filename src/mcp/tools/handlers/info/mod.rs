@@ -38,6 +38,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::{Value, json};
+use tracedecay_usecases::context::markdown_sections::{
+    SectionEnrichment, is_markdown_file, section_summary_lines,
+};
 
 use crate::context::read_modes::{LineRange, ReadMode};
 use crate::context::source_read::{SourceReadRequest, read_source, resolve_indexed_source_file};
@@ -84,8 +87,6 @@ fn enrich_markdown_sections(
     display_file: &str,
     container: &mut Value,
 ) {
-    use crate::context::markdown_sections::{SectionEnrichment, is_markdown_file};
-
     if !is_markdown_file(display_file) {
         return;
     }
@@ -112,7 +113,7 @@ fn render_section_md(md: &mut Md, section: Option<&Value>) {
     let Some(section) = section else {
         return;
     };
-    for line in crate::context::markdown_sections::section_summary_lines(section) {
+    for line in section_summary_lines(section) {
         md.line(&format!("  {line}"));
     }
 }
