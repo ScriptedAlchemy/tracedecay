@@ -19,10 +19,11 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 
 import { fetchPayloadWrite, type PayloadWriteResult } from "./payload.ts";
-import { payloadQueryKey, usePayload } from "./usePayload.ts";
+import { usePayload } from "./usePayload.ts";
 import {
   scopeKey,
   scopeWritable,
+  scopedQueryKey,
   scopedUrl,
   useScope,
   type ScopeWritability,
@@ -115,8 +116,8 @@ export function useSchedulerControl() {
   // The status read's own key, from the authority that builds it, not a second
   // construction of it. `scopeKey(scope)` was the second construction and it
   // disagreed with the read under the all-projects default — see
-  // {@link payloadQueryKey}.
-  const statusKey = payloadQueryKey(
+  // {@link scopedQueryKey}.
+  const statusKey = scopedQueryKey(
     scope,
     automationSchedulerKey,
     schedulerStatusUrl,

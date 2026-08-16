@@ -1,17 +1,20 @@
 const WORK_QUERY_ROOT = 'work';
 
-export type WorkReadPart =
-  | 'snapshot'
-  | 'delta'
-  | 'list-attempts'
-  | 'topology'
-  | 'topology-metrics'
-  | 'views'
-  | 'retrieve-evidence'
-  | 'attempt-status'
-  | 'hydrate-artifacts'
-  | 'run-control'
-  | 'placement-status';
+const WORK_READ_PARTS = [
+  'snapshot',
+  'delta',
+  'list-attempts',
+  'topology',
+  'topology-metrics',
+  'views',
+  'retrieve-evidence',
+  'attempt-status',
+  'hydrate-artifacts',
+  'run-control',
+  'placement-status',
+] as const;
+
+export type WorkReadPart = (typeof WORK_READ_PARTS)[number];
 
 export function workQueryKey(
   scope: string,
@@ -30,19 +33,7 @@ export function workScopeInvalidationKeys(
   // read is in here for the same reason — its projections carry effort,
   // workload and live runtime state, and a version left standing across a
   // change would report another scope's graph beside this scope's board.
-  return [
-    [WORK_QUERY_ROOT, 'snapshot', scope],
-    [WORK_QUERY_ROOT, 'delta', scope],
-    [WORK_QUERY_ROOT, 'list-attempts', scope],
-    [WORK_QUERY_ROOT, 'topology', scope],
-    [WORK_QUERY_ROOT, 'topology-metrics', scope],
-    [WORK_QUERY_ROOT, 'views', scope],
-    [WORK_QUERY_ROOT, 'retrieve-evidence', scope],
-    [WORK_QUERY_ROOT, 'attempt-status', scope],
-    [WORK_QUERY_ROOT, 'hydrate-artifacts', scope],
-    [WORK_QUERY_ROOT, 'run-control', scope],
-    [WORK_QUERY_ROOT, 'placement-status', scope],
-  ];
+  return WORK_READ_PARTS.map((part) => [WORK_QUERY_ROOT, part, scope]);
 }
 
 export function workProjectInvalidationKeys(

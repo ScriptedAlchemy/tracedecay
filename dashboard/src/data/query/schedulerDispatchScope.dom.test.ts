@@ -24,9 +24,10 @@ import {
   schedulerStatusUrl,
   useSchedulerControl,
 } from "./automation.ts";
-import { payloadQueryKey, usePayload } from "./usePayload.ts";
+import { usePayload } from "./usePayload.ts";
 import {
   UNSCOPED_CACHE_KEY,
+  scopedQueryKey,
   useScope,
   type DashboardScope,
 } from "../scope/store.ts";
@@ -52,7 +53,7 @@ const ALL_PROJECTS: DashboardScope = { kind: "all" };
  */
 function statusKeyFor(scope: DashboardScope): unknown[] {
   return [
-    ...payloadQueryKey(scope, automationSchedulerKey, schedulerStatusUrl),
+    ...scopedQueryKey(scope, automationSchedulerKey, schedulerStatusUrl),
   ];
 }
 

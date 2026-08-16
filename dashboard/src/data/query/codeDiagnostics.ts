@@ -27,10 +27,11 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 
 import { fetchPayloadWrite, type PayloadWriteResult } from './payload.ts';
-import { payloadQueryKey, usePayload } from './usePayload.ts';
+import { usePayload } from './usePayload.ts';
 import {
   scopeKey,
   scopeWritable,
+  scopedQueryKey,
   scopedUrl,
   useScope,
   type ScopeWritability,
@@ -232,7 +233,7 @@ interface DiagnosticsDispatch {
 export function useDiagnosticsControl() {
   const scope = useScope((s) => s.scope);
   const client = useQueryClient();
-  const snapshotKey = payloadQueryKey(scope, codeDiagnosticsKey, codeDiagnosticsUrl);
+  const snapshotKey = scopedQueryKey(scope, codeDiagnosticsKey, codeDiagnosticsUrl);
   const writability = scopeWritable(scope);
   const mutation = useMutation<
     DiagnosticsControlResult,

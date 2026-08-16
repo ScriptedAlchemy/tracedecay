@@ -116,10 +116,6 @@ function localDefinitionRefs(schema: JsonSchema, refs = new Set<string>()): Set<
   return refs;
 }
 
-function quote(value: string): string {
-  return JSON.stringify(value);
-}
-
 function literal(value: unknown): string {
   return JSON.stringify(value);
 }
@@ -177,11 +173,11 @@ function resolveType(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: st
     const strings = schema.enum.filter((v): v is string => typeof v === "string");
     if (strings.length === schema.enum.length && strings.length > 0) {
       const sorted = [...strings].sort();
-      const tsUnion = sorted.map(quote).join(" | ");
+      const tsUnion = sorted.map(literal).join(" | ");
       if (sorted.length === 1) {
-        return { ts: quote(sorted[0] as string), zod: `z.literal(${quote(sorted[0] as string)})` };
+        return { ts: literal(sorted[0] as string), zod: `z.literal(${literal(sorted[0] as string)})` };
       }
-      const zodList = sorted.map(quote).join(", ");
+      const zodList = sorted.map(literal).join(", ");
       return { ts: tsUnion, zod: `z.enum([${zodList}])` };
     }
   }
@@ -319,7 +315,7 @@ function resolveTaggedUnion(schema: JsonSchema, ctx: ResolveCtx): { ts: string; 
   const tsVariants = variants.map((v) => resolveObject(v.schema, ctx).ts);
   const ts = tsVariants.map((t) => `\n  | ${t.replace(/\n/g, "\n  ")}`).join("");
 
-  const zod = `z.discriminatedUnion(${quote(discKey)}, [${variants
+  const zod = `z.discriminatedUnion(${literal(discKey)}, [${variants
     .map((variant) => resolveObject(variant.schema, ctx).zod)
     .join(", ")}])`;
 
@@ -340,7 +336,7 @@ function emitNamedDef(name: string, schema: JsonSchema): string {
     const obj = resolveObject(schema, ctx);
     const desc = schema.description ? `/** ${schema.description} */\n` : "";
     return [
-      `${desc}export interface ${name}<${genericParam}> ${obj.ts.replace(/^\{/, "{").replace(/: /g, ": ")}`,
+      `${desc}export interface ${name}<${genericParam}> ${obj.ts}`,
       "",
       `export function ${name}Schema<${genericParam}>(`,
       `  ${schemaVar}: z.ZodType<${genericParam}>,`,
@@ -366,14 +362,6 @@ function emitNamedDef(name: string, schema: JsonSchema): string {
     resolved.zod = `${resolved.zod}.catch("unsupported_schema")`;
   }
   const desc = schema.description ? `/** ${schema.description} */\n` : "";
-  const isObject =
-    schema.type === "object" || (!schema.type && schema.properties !== undefined);
-  if (isObject) {
-    return [
-      `${desc}export const ${name}Schema = ${resolved.zod};`,
-      `export type ${name} = z.infer<typeof ${name}Schema>;`,
-    ].join("\n");
-  }
   return [
     `${desc}export const ${name}Schema = ${resolved.zod};`,
     `export type ${name} = z.infer<typeof ${name}Schema>;`,
