@@ -518,10 +518,10 @@ mod tests {
         > {
             let attachment = Arc::clone(&self.attachment);
             Box::pin(async move {
-                let runtime = Arc::new(ShardRuntime::new(
+                let runtime = ShardRuntime::new(
                     request.binding().clone(),
                     matches!(request.binding().shard_id.scope, StoreShardScopeV1::Profile),
-                ));
+                );
                 runtime
                     .transition(RuntimeMaintenanceStateV1::Opening)
                     .and_then(|()| runtime.transition(RuntimeMaintenanceStateV1::Ready))

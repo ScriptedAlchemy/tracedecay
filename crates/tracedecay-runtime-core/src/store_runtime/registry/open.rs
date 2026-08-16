@@ -463,10 +463,10 @@ impl StoreRuntimeRegistry {
                     database_authority.clone(),
                 ))
                 .await?;
-            if published.logical().binding() != &binding {
+            if published.binding() != &binding {
                 return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
                     expected: Box::new(binding),
-                    actual: Box::new(published.logical().binding().clone()),
+                    actual: Box::new(published.binding().clone()),
                 });
             }
             Ok((published, locator, database_authority))
@@ -611,7 +611,7 @@ impl OpenAttemptGuard {
                         return;
                     }
                 };
-                match allocate_publication(&mut state, published.logical().binding().clone()) {
+                match allocate_publication(&mut state, published.binding().clone()) {
                     Ok(publication) => {
                         let (runtime, attachment) = published.into_parts();
                         let source = Arc::new(StoreRuntimeLeaseSource {

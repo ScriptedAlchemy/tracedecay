@@ -552,7 +552,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_close_refuses_facades_runtime_references_and_leases_before_closing() {
+    async fn exact_close_refuses_client_and_direct_leases_before_closing() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
         let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
@@ -561,18 +561,17 @@ mod tests {
         assert!(matches!(
             registry.close_exact(&binding, &authority).await,
             Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
-                external_handles: 1,
+                external_handles: 0,
                 external_runtime_references: 0,
-                client_leases: 0,
+                client_leases: 1,
                 ..
             })
         ));
         assert_eq!(
-            code.runtime().maintenance_state(),
+            code.health_snapshot().state,
             RuntimeMaintenanceStateV1::Ready
         );
 
-        let runtime = Arc::clone(code.runtime());
         let lease = active_lease(&binding);
         assert!(matches!(
             registry.acquire_lease(lease.clone()),
@@ -583,13 +582,12 @@ mod tests {
             registry.close_exact(&binding, &authority).await,
             Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
                 external_handles: 0,
-                external_runtime_references: 1,
+                external_runtime_references: 0,
                 client_leases: 1,
                 ..
             })
         ));
         assert!(registry.release_lease(&binding, &lease.lease_id));
-        drop(runtime);
 
         let proof = registry.close_exact(&binding, &authority).await.unwrap();
         assert_eq!(proof.binding(), &binding);
@@ -833,10 +831,10 @@ mod tests {
             Result<PublishedShardRuntime, StoreRuntimeRegistryFailure>,
         > {
             Box::pin(async move {
-                let runtime = Arc::new(ShardRuntime::new(
+                let runtime = ShardRuntime::new(
                     request.binding().clone(),
                     matches!(request.binding().shard_id.scope, StoreShardScopeV1::Profile),
-                ));
+                );
                 runtime
                     .transition(RuntimeMaintenanceStateV1::Opening)
                     .and_then(|()| runtime.transition(RuntimeMaintenanceStateV1::Ready))

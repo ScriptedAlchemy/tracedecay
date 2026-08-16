@@ -432,10 +432,24 @@ impl StoreRuntimeRegistry {
 }
 
 impl StoreRuntimeRetirementReservation {
+    /// Cancels this uncommitted reservation and restores its exact ready
+    /// entries. A consumed reservation cannot be cancelled or committed again.
+    pub fn cancel(&mut self) -> Result<(), StoreRuntimeRegistryFailure> {
+        if !self.armed {
+            return Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed);
+        }
+        self.registry.restore_retiring_batch(&mut self.pending);
+        self.armed = false;
+        Ok(())
+    }
+
     /// Irreversibly commits the reservation before any physical close begins.
     /// All post-reservation failures are retained as typed terminal states;
     /// they are never restored to `Ready`.
     pub fn commit(&mut self) -> Result<StoreRuntimeRetirementCommit, StoreRuntimeRegistryFailure> {
+        if !self.armed {
+            return Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed);
+        }
         self.registry.begin_retirement_commit(&self.pending)?;
         let pending = std::mem::take(&mut self.pending);
         self.armed = false;
@@ -1010,6 +1024,60 @@ mod tests {
         assert!(matches!(
             registry.lookup(&binding),
             StoreRuntimeLookup::DurabilityUncertain { .. }
+        ));
+    }
+
+    #[test]
+    fn reservations_are_one_shot_after_commit_or_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let committed_registry = registry();
+        let committed_authority = authority(directory.path(), "committed-once");
+        let (committed_binding, committed_owner) = install_ready(
+            &committed_registry,
+            profile_shard("profile.committed-once"),
+            committed_authority,
+            Arc::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let StoreRuntimeRetirementResult::Reserved(mut committed) = committed_registry
+            .reserve_retirement_batch(vec![target(&committed_binding, &committed_owner)])
+        else {
+            panic!("clean target must reserve for one-shot commit");
+        };
+        assert!(matches!(
+            committed.commit().unwrap().outcomes(),
+            [StoreRuntimeRetirementOutcome::Closed { .. }]
+        ));
+        assert!(matches!(
+            committed.commit(),
+            Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed)
+        ));
+
+        let cancelled_registry = registry();
+        let cancelled_authority = authority(directory.path(), "cancelled-once");
+        let (cancelled_binding, cancelled_owner) = install_ready(
+            &cancelled_registry,
+            profile_shard("profile.cancelled-once"),
+            cancelled_authority,
+            Arc::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let StoreRuntimeRetirementResult::Reserved(mut cancelled) = cancelled_registry
+            .reserve_retirement_batch(vec![target(&cancelled_binding, &cancelled_owner)])
+        else {
+            panic!("clean target must reserve for cancellation");
+        };
+        cancelled.cancel().unwrap();
+        assert!(matches!(
+            cancelled_registry.lookup(&cancelled_binding),
+            StoreRuntimeLookup::Ready(_)
+        ));
+        assert!(matches!(
+            cancelled.commit(),
+            Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed)
+        ));
+        assert!(matches!(
+            cancelled.cancel(),
+            Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed)
         ));
     }
 
