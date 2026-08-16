@@ -553,9 +553,13 @@ fn terminate_and_reap(child: &mut Child, process_group: u32) {
     }
     #[cfg(unix)]
     {
+        // Stop sleeping as soon as the child exits; the group kill below still
+        // runs so grandchildren that ignored SIGTERM cannot outlive the grace.
         let grace_deadline = Instant::now() + TERMINATION_GRACE;
         while Instant::now() < grace_deadline {
-            let _ = child.try_wait();
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
             thread::sleep(PROCESS_POLL_INTERVAL);
         }
         signal_process_tree(process_group, TerminationSignal::Kill);
