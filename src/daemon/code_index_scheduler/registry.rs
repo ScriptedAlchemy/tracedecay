@@ -59,6 +59,20 @@ fn cold_mount_final_commit_gate() -> &'static Mutex<Option<ColdMountFinalCommitG
     GATE.get_or_init(|| Mutex::new(None))
 }
 
+#[cfg(test)]
+struct ExistingSemanticScheduleReplacementGateV1 {
+    project_root: PathBuf,
+    entered: tokio::sync::oneshot::Sender<()>,
+}
+
+#[cfg(test)]
+fn existing_semantic_schedule_replacement_gate()
+-> &'static Mutex<Option<ExistingSemanticScheduleReplacementGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<Option<ExistingSemanticScheduleReplacementGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(None))
+}
+
 mod resident_memory;
 pub(super) mod watch_ingress;
 
@@ -703,6 +717,42 @@ impl CodeIndexSchedulerRegistryV1 {
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
             let _ = gate.release.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn observe_next_existing_semantic_schedule_replacement(
+        &self,
+        project_root: PathBuf,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let mut gate = existing_semantic_schedule_replacement_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            gate.is_none(),
+            "only one existing semantic schedule replacement gate may be armed at a time"
+        );
+        *gate = Some(ExistingSemanticScheduleReplacementGateV1 {
+            project_root,
+            entered,
+        });
+        entered_observed
+    }
+
+    #[cfg(test)]
+    fn observe_existing_semantic_schedule_replacement(project_root: &Path) {
+        let gate = {
+            let mut armed = existing_semantic_schedule_replacement_gate()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let matches_root = armed
+                .as_ref()
+                .is_some_and(|gate| gate.project_root == project_root);
+            if matches_root { armed.take() } else { None }
+        };
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
         }
     }
 
@@ -1779,6 +1829,8 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     async fn replace_existing_semantic_schedule(
+        &self,
+        project_root: &Path,
         scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
         serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
         project_id: ProjectId,
@@ -1786,8 +1838,11 @@ impl CodeIndexSchedulerRegistryV1 {
             tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
         >,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        #[cfg(test)]
+        Self::observe_existing_semantic_schedule_replacement(project_root);
         // Reconcile holds this mutex; wait in the blocking pool so remount
         // never parks a runtime worker or admission for other lanes.
+        let incumbent = Arc::clone(&scheduler);
         tokio::task::spawn_blocking(move || {
             let mut scheduler = scheduler
                 .lock()
@@ -1810,7 +1865,26 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
         .map_err(|_error| {
             CodeIndexSchedulerErrorV1::SemanticSchedule("hook task failed".to_owned())
-        })?
+        })?;
+
+        let retiring = self.retiring.lock().await;
+        if retiring.contains_key(project_root) {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler owner was retired while semantic schedule update waited; remount must retry"
+                    .to_owned(),
+            ));
+        }
+        let mounted = self.mounted.lock().await;
+        if !mounted
+            .get(project_root)
+            .is_some_and(|current| Arc::ptr_eq(&current.scheduler, &incumbent))
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler owner changed while semantic schedule update waited; remount must retry"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     async fn mount_worktree_inner(
@@ -1849,32 +1923,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 let serving_generation = Arc::clone(&existing.serving_generation);
                 drop(mounted);
                 drop(retiring);
-                // Reconcile holds this mutex; wait in the blocking pool so
-                // remount never parks a runtime worker or admission for other
-                // lanes.
-                tokio::task::spawn_blocking(move || {
-                    let mut scheduler = scheduler
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if scheduler.project_id() != &project_id {
-                        return Err(CodeIndexSchedulerErrorV1::Identity(
-                            "mounted worktree belongs to a different project identity".to_owned(),
-                        ));
-                    }
-                    scheduler.replace_semantic_schedule_hook(semantic_schedule);
-                    if let Some(latest) = serving_generation
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .as_ref()
-                    {
-                        let _ = scheduler.schedule_semantic_generation(latest.generation());
-                    }
-                    Ok(())
-                })
-                .await
-                .map_err(|_error| {
-                    CodeIndexSchedulerErrorV1::SemanticSchedule("hook task failed".to_owned())
-                })??;
+                self.replace_existing_semantic_schedule(
+                    &project_root,
+                    scheduler,
+                    serving_generation,
+                    project_id,
+                    semantic_schedule,
+                )
+                .await?;
                 return Ok(false);
             }
             let admission = self.admit_cold_mount(&project_root, mounted.len())?;
@@ -1969,21 +2025,32 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler is shutting down".to_owned(),
             ));
         }
+        if let Some(existing) = mounted.get(&project_root) {
+            // The scheduler Arc is the mounted owner's exact identity. It is
+            // rechecked after the asynchronous update so a retirement or
+            // replacement cannot turn this remount into a success for a
+            // detached worker.
+            let scheduler = Arc::clone(&existing.scheduler);
+            let serving_generation = Arc::clone(&existing.serving_generation);
+            drop(mounted);
+            drop(retiring);
+            self.replace_existing_semantic_schedule(
+                &project_root,
+                scheduler,
+                serving_generation,
+                worker_project_id,
+                semantic_schedule,
+            )
+            .await?;
+            return Ok(false);
+        }
         let at_capacity = mounted.len() >= self.max_worktrees;
         let entry = match mounted.entry(project_root) {
-            std::collections::btree_map::Entry::Occupied(existing) => {
-                let scheduler = Arc::clone(&existing.get().scheduler);
-                let serving_generation = Arc::clone(&existing.get().serving_generation);
-                drop(mounted);
-                drop(retiring);
-                Self::replace_existing_semantic_schedule(
-                    scheduler,
-                    serving_generation,
-                    worker_project_id,
-                    semantic_schedule,
-                )
-                .await?;
-                return Ok(false);
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "code-index scheduler owner changed before final mount commit; remount must retry"
+                        .to_owned(),
+                ));
             }
             std::collections::btree_map::Entry::Vacant(entry) => {
                 if at_capacity {

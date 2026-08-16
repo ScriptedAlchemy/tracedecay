@@ -1891,6 +1891,139 @@ async fn paused_cold_mount_rejects_a_root_retiring_before_final_commit() {
     registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retirement_parks_the_incumbent_while_a_same_root_remount_waits_on_its_scheduler() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    let root = fixture.path().canonicalize().expect("canonical root");
+    let (cold_commit_entered, release_cold_commit) = registry
+        .pause_next_cold_mount_before_final_commit(root.clone())
+        .await;
+    let cold_registry = registry.clone();
+    let cold_root = fixture.path().to_path_buf();
+    let cold_store = store.path().to_path_buf();
+    let cold_mount = tokio::spawn(async move {
+        cold_registry
+            .mount_worktree(test_project_id(), &cold_root, cold_store, None)
+            .await
+    });
+
+    cold_commit_entered
+        .await
+        .expect("first cold mount pauses before the final owner commit");
+    assert!(
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("incumbent mount succeeds")
+    );
+    let scheduler = registry
+        .scheduler_handle(&root)
+        .await
+        .expect("incumbent scheduler");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_scheduler_tx, release_scheduler_rx) = std::sync::mpsc::channel();
+    let held_scheduler = Arc::clone(&scheduler);
+    let lock_thread = std::thread::spawn(move || {
+        let scheduler = held_scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let wake = Arc::clone(&scheduler.wake);
+        held_tx.send(wake).expect("signal held scheduler");
+        release_scheduler_rx.recv().expect("release held scheduler");
+    });
+    let wake = held_rx.recv().expect("scheduler lock must be held");
+    wake.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let reconciling = registry
+                .mounted
+                .lock()
+                .await
+                .get(&root)
+                .is_some_and(|worktree| {
+                    worktree
+                        .reconcile_in_progress
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        != 0
+                });
+            if reconciling {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("incumbent worker blocks in its reconcile pass");
+
+    let replacement_entered = registry
+        .observe_next_existing_semantic_schedule_replacement(root.clone())
+        .await;
+    release_cold_commit
+        .send(())
+        .expect("release stale cold mount final commit");
+    replacement_entered
+        .await
+        .expect("same-root remount reaches its semantic replacement");
+
+    let roots = BTreeSet::from([root.clone()]);
+    let retirement = tokio::time::timeout(
+        Duration::from_millis(250),
+        registry.retire_project_roots_with_deadline(&roots, Duration::from_millis(25)),
+    )
+    .await;
+
+    release_scheduler_tx
+        .send(())
+        .expect("release incumbent scheduler");
+    lock_thread.join().expect("held scheduler thread joins");
+    let remount = cold_mount.await.expect("stale cold mount joins");
+
+    let parked_before_retry = {
+        let retiring = registry.retiring.lock().await;
+        let mounted = registry.mounted.lock().await;
+        (retiring.contains_key(&root), mounted.contains_key(&root))
+    };
+    let drained = registry
+        .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
+        .await;
+    let no_owner_remains = {
+        let retiring = registry.retiring.lock().await;
+        let mounted = registry.mounted.lock().await;
+        !retiring.contains_key(&root) && !mounted.contains_key(&root)
+    };
+    registry.shutdown().await;
+
+    assert!(
+        retirement.as_ref().is_ok_and(|drained| !*drained),
+        "retirement must reach and park the incumbent instead of waiting on the remount's registry lock: {retirement:?}"
+    );
+    assert!(matches!(
+        remount,
+        Err(super::CodeIndexSchedulerErrorV1::Identity(message))
+            if message.contains("retired while semantic schedule update waited")
+    ));
+    assert_eq!(
+        parked_before_retry,
+        (true, false),
+        "the retiring incumbent stays parked and the stale remount never installs a replacement"
+    );
+    assert!(
+        drained,
+        "the parked incumbent must drain after its scheduler releases"
+    );
+    assert!(
+        no_owner_remains,
+        "the refused remount must not leave a mounted or retiring orphan"
+    );
+}
+
 #[test]
 fn empty_generation_restart_preserves_project_identity() {
     // A file with a compiled language descriptor (so the snapshot has something
