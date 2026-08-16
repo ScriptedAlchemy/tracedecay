@@ -1855,8 +1855,6 @@ impl CodeIndexSchedulerRegistryV1 {
             tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
         >,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        #[cfg(test)]
-        Self::observe_existing_semantic_schedule_replacement(project_root);
         // Reconcile holds this mutex; wait in the blocking pool so remount
         // never parks a runtime worker or admission for other lanes.
         let incumbent = Arc::clone(&scheduler);
@@ -1940,6 +1938,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 let serving_generation = Arc::clone(&existing.serving_generation);
                 drop(mounted);
                 drop(retiring);
+                #[cfg(test)]
+                Self::observe_existing_semantic_schedule_replacement(&project_root);
                 self.replace_existing_semantic_schedule(
                     &project_root,
                     scheduler,
@@ -2051,6 +2051,8 @@ impl CodeIndexSchedulerRegistryV1 {
             let serving_generation = Arc::clone(&existing.serving_generation);
             drop(mounted);
             drop(retiring);
+            #[cfg(test)]
+            Self::observe_existing_semantic_schedule_replacement(&project_root);
             self.replace_existing_semantic_schedule(
                 &project_root,
                 scheduler,
