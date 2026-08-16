@@ -15,7 +15,7 @@ use tracedecay_domain::{
     TemporalValidityV1, ThreadId, UserProfileId, UtcMicros,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId, GraphLabel,
+    GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphEntity, GraphEntityId, GraphLabel,
     GraphNamespace, GraphProjectionId, GraphProjectionTelemetryRequest, GraphProperty,
     GraphPropertyName, GraphRelation, GraphRelationId, GraphRelationKind, GraphWatermark,
     NeverCancelled, ProjectionReplacement, SourceGeneration,
@@ -187,7 +187,7 @@ pub enum SessionRelationError {
 
 #[derive(Clone)]
 pub struct SessionRelationGraphStore {
-    database: Arc<GraphDb>,
+    database: GraphDbLeaseV1,
 }
 
 impl std::fmt::Debug for SessionRelationGraphStore {
@@ -200,7 +200,7 @@ impl std::fmt::Debug for SessionRelationGraphStore {
 
 impl SessionRelationGraphStore {
     #[must_use]
-    pub const fn new(database: Arc<GraphDb>) -> Self {
+    pub const fn new(database: GraphDbLeaseV1) -> Self {
         Self { database }
     }
 
