@@ -28,7 +28,9 @@ use tracedecay_usecases::session::{
 };
 
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
-use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use crate::global_db::session_temporal::{
+    HydratedOccurrenceReconstructionRequest, RegisteredGlobalDbSessionTemporalExecution,
+};
 use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use crate::tracedecay::TraceDecay;
 use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionRecord};
@@ -479,8 +481,10 @@ impl DaemonSessionRetrievalService {
     ) -> SessionRetrievalServiceOutcome {
         match outcome {
             SessionRetrievalOutcome::Complete { items, freshness } => {
-                let (page, skipped, _) = self.page(items).await;
-                complete_page_outcome(page, freshness, skipped)
+                match self.page(items).await {
+                    Ok((page, skipped, _)) => complete_page_outcome(page, freshness, skipped),
+                    Err(error) => self.rendering_error(error),
+                }
             }
             SessionRetrievalOutcome::CompleteZero { freshness } => {
                 SessionRetrievalServiceOutcome::CompleteZero {
@@ -496,14 +500,14 @@ impl DaemonSessionRetrievalService {
                 items,
                 freshness,
                 omitted,
-            } => {
-                let (page, _, rendering_omitted) = self.page(items).await;
-                SessionRetrievalServiceOutcome::Partial {
+            } => match self.page(items).await {
+                Ok((page, _, rendering_omitted)) => SessionRetrievalServiceOutcome::Partial {
                     page,
                     freshness,
                     omitted: omitted.saturating_add(rendering_omitted),
-                }
-            }
+                },
+                Err(error) => self.rendering_error(error),
+            },
             SessionRetrievalOutcome::WrongScope => SessionRetrievalServiceOutcome::WrongScope,
             SessionRetrievalOutcome::Locked => SessionRetrievalServiceOutcome::Locked,
             SessionRetrievalOutcome::Redacted => SessionRetrievalServiceOutcome::Redacted,
@@ -542,7 +546,52 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    async fn page(&self, items: Vec<TemporalKernelResult>) -> (SessionRetrievalPageView, u64, u64) {
+    fn rendering_error(
+        &self,
+        error: SessionTemporalExecutionError,
+    ) -> SessionRetrievalServiceOutcome {
+        match error {
+            SessionTemporalExecutionError::WrongScope => SessionRetrievalServiceOutcome::WrongScope,
+            SessionTemporalExecutionError::Locked => SessionRetrievalServiceOutcome::Locked,
+            SessionTemporalExecutionError::Redacted => SessionRetrievalServiceOutcome::Redacted,
+            SessionTemporalExecutionError::Deleted => SessionRetrievalServiceOutcome::Deleted,
+            SessionTemporalExecutionError::Denied => SessionRetrievalServiceOutcome::Denied,
+            SessionTemporalExecutionError::ResetRequired => {
+                SessionRetrievalServiceOutcome::ResetRequired {
+                    store_scope: self.root.store_scope,
+                }
+            }
+            SessionTemporalExecutionError::BudgetExhausted => {
+                SessionRetrievalServiceOutcome::BudgetExhausted
+            }
+            SessionTemporalExecutionError::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
+            SessionTemporalExecutionError::Stale { generation_lag } => {
+                SessionRetrievalServiceOutcome::Stale {
+                    temporal: self.empty_temporal(),
+                    freshness: SessionDataFreshness::Stored { generation_lag },
+                }
+            }
+            SessionTemporalExecutionError::Empty { freshness } => {
+                SessionRetrievalServiceOutcome::CompleteZero {
+                    temporal: self.empty_temporal(),
+                    freshness,
+                }
+            }
+            SessionTemporalExecutionError::Unavailable
+            | SessionTemporalExecutionError::Kernel(_) => {
+                SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(
+                        SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+                    ),
+                )
+            }
+        }
+    }
+
+    async fn page(
+        &self,
+        items: Vec<TemporalKernelResult>,
+    ) -> Result<(SessionRetrievalPageView, u64, u64), SessionTemporalExecutionError> {
         let mut results = Vec::new();
         let mut anchors = Vec::new();
         let mut explanations = Vec::new();
@@ -554,7 +603,9 @@ impl DaemonSessionRetrievalService {
         let mut skipped = 0u64;
         let mut rendering_omitted = 0u64;
         let mut sessions = PageSessionCache::default();
-        for item in items {
+        let mut batch = NonSummaryReconstructionInputs::default();
+        let mut queued_non_summary = Vec::with_capacity(items.len());
+        for item in &items {
             let item_watermarks = item.snapshot.watermarks();
             watermarks.generation = watermarks.generation.max(item_watermarks.generation);
             watermarks.source = watermarks.source.max(item_watermarks.source);
@@ -571,6 +622,23 @@ impl DaemonSessionRetrievalService {
             if item.next_cursor.is_some() {
                 cursor = item.next_cursor.clone();
             }
+            let mut queued = Vec::with_capacity(item.ranked.len());
+            for (rank, ranked) in item.ranked.iter().enumerate() {
+                let queued_for_batch = page_hydration_slot(rank, ranked, &item.hydrated)
+                    .ok()
+                    .is_some_and(|hydrated| batch.push(&item.snapshot, ranked, hydrated));
+                queued.push(queued_for_batch);
+            }
+            queued_non_summary.push(queued);
+        }
+        let reconstructed = if batch.is_empty() {
+            Vec::new()
+        } else {
+            let execution = self.registered_execution()?;
+            reconstruct_non_summary_results(&execution, batch.into_inputs()).await?
+        };
+        let mut reconstructed = reconstructed.into_iter();
+        for (item, queued) in items.iter().zip(queued_non_summary) {
             for (rank, ranked) in item.ranked.iter().enumerate() {
                 let hydrated = match page_hydration_slot(rank, ranked, &item.hydrated) {
                     Ok(hydrated) => hydrated,
@@ -580,19 +648,40 @@ impl DaemonSessionRetrievalService {
                         continue;
                     }
                 };
-                let Some(result) = self
-                    .hydrate_result(&item.snapshot, ranked, hydrated, &mut sessions)
-                    .await
-                else {
-                    skipped = skipped.saturating_add(1);
-                    rendering_omitted = rendering_omitted.saturating_add(1);
-                    coverage.unknown = coverage.unknown.saturating_add(1);
-                    omissions.push(SessionRetrievalOmissionView {
-                        rank: hydrated.rank(),
-                        anchor: ranked.anchor_id.clone(),
-                        reason: HydrationStateV1::RetainedButUnavailable,
-                    });
-                    continue;
+                let rendering = if ranked.evidence_role.as_deref() == Some("summary") {
+                    self.hydrate_summary_result(&item.snapshot, ranked, hydrated, &mut sessions)
+                        .await
+                        .map(PageRenderingResult::Rendered)
+                        .unwrap_or(PageRenderingResult::Omitted(
+                            HydrationStateV1::RetainedButUnavailable,
+                        ))
+                } else if queued.get(rank).copied().unwrap_or(false) {
+                    let reconstruction = reconstructed
+                        .next()
+                        .ok_or(SessionTemporalExecutionError::Unavailable)?;
+                    self.hydrate_non_summary_result(
+                        &item.snapshot,
+                        ranked,
+                        reconstruction,
+                        &mut sessions,
+                    )
+                    .await?
+                } else {
+                    PageRenderingResult::Omitted(HydrationStateV1::RetainedButUnavailable)
+                };
+                let result = match rendering {
+                    PageRenderingResult::Rendered(result) => result,
+                    PageRenderingResult::Omitted(reason) => {
+                        skipped = skipped.saturating_add(1);
+                        rendering_omitted = rendering_omitted.saturating_add(1);
+                        coverage.unknown = coverage.unknown.saturating_add(1);
+                        omissions.push(SessionRetrievalOmissionView {
+                            rank: hydrated.rank(),
+                            anchor: ranked.anchor_id.clone(),
+                            reason,
+                        });
+                        continue;
+                    }
                 };
                 anchors.push(ranked.anchor_id.clone());
                 explanations.push(SessionRetrievalExplanationView {
@@ -605,9 +694,12 @@ impl DaemonSessionRetrievalService {
                 results.push(result);
             }
         }
+        if reconstructed.next().is_some() {
+            return Err(SessionTemporalExecutionError::Unavailable);
+        }
         source_coverage.sort_by(|left, right| left.source_id().cmp(right.source_id()));
         source_coverage.dedup_by(|left, right| left.source_id() == right.source_id());
-        (
+        Ok((
             SessionRetrievalPageView {
                 results,
                 temporal: SessionTemporalMetadataView {
@@ -623,10 +715,10 @@ impl DaemonSessionRetrievalService {
             },
             skipped,
             rendering_omitted,
-        )
+        ))
     }
 
-    async fn hydrate_result(
+    async fn hydrate_summary_result(
         &self,
         snapshot: &TemporalExecutionSnapshot,
         ranked: &tracedecay_temporal_query::ranking::RankedCandidate,
@@ -682,20 +774,53 @@ impl DaemonSessionRetrievalService {
                 score: ranked.normalized_score_micros as f64 / 1_000_000.0,
             });
         }
-        let provider = ranked.source.as_deref()?;
-        let session_id = ranked.session.as_deref()?;
-        let message = self
-            .registered_execution()
-            .ok()?
-            .session_message_from_hydrated_occurrence(
-                snapshot,
-                &ranked.anchor_id,
-                provider,
-                session_id,
-                content,
-            )
-            .await
-            .ok()?;
+        None
+    }
+
+    async fn hydrate_non_summary_result(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        ranked: &tracedecay_temporal_query::ranking::RankedCandidate,
+        reconstruction: Result<
+            tracedecay_sessions::runtime::SessionMessageRecord,
+            SessionTemporalExecutionError,
+        >,
+        sessions: &mut PageSessionCache,
+    ) -> Result<PageRenderingResult, SessionTemporalExecutionError> {
+        let authorized_project_key = snapshot
+            .request()
+            .authorized_root()
+            .map(|root| root.project_key())
+            .ok_or(SessionTemporalExecutionError::Unavailable)?;
+        let provider = ranked
+            .source
+            .as_deref()
+            .ok_or(SessionTemporalExecutionError::Unavailable)?;
+        let session_id = ranked
+            .session
+            .as_deref()
+            .ok_or(SessionTemporalExecutionError::Unavailable)?;
+        let message = match reconstruction {
+            Ok(message) => message,
+            Err(SessionTemporalExecutionError::Unavailable) => {
+                return Ok(PageRenderingResult::Omitted(
+                    HydrationStateV1::RetainedButUnavailable,
+                ));
+            }
+            Err(SessionTemporalExecutionError::Locked) => {
+                return Ok(PageRenderingResult::Omitted(HydrationStateV1::Locked));
+            }
+            Err(SessionTemporalExecutionError::Redacted) => {
+                return Ok(PageRenderingResult::Omitted(HydrationStateV1::Redacted));
+            }
+            Err(SessionTemporalExecutionError::Deleted) => {
+                return Ok(PageRenderingResult::Omitted(HydrationStateV1::Deleted));
+            }
+            Err(SessionTemporalExecutionError::Denied) => {
+                return Ok(PageRenderingResult::Omitted(HydrationStateV1::Unauthorized));
+            }
+            Err(error) => return Err(error),
+        };
         let session = sessions
             .resolve(
                 self.database.as_ref(),
@@ -708,13 +833,122 @@ impl DaemonSessionRetrievalService {
             || message.session_id != session_id
             || session.project_key != authorized_project_key
         {
-            return None;
+            return Ok(PageRenderingResult::Omitted(
+                HydrationStateV1::RetainedButUnavailable,
+            ));
         }
-        Some(SessionMessageSearchResult {
+        Ok(PageRenderingResult::Rendered(SessionMessageSearchResult {
             session,
             message,
             score: ranked.normalized_score_micros as f64 / 1_000_000.0,
-        })
+        }))
+    }
+}
+
+enum PageRenderingResult {
+    Rendered(SessionMessageSearchResult),
+    Omitted(HydrationStateV1),
+}
+
+struct NonSummaryReconstructionInput<'a> {
+    snapshot: &'a TemporalExecutionSnapshot,
+    anchor_id: &'a tracedecay_domain::RetrievalAnchorId,
+    provider: &'a str,
+    session_id: &'a str,
+    content: &'a [u8],
+}
+
+trait NonSummaryReconstructionBatch {
+    async fn reconstruct_non_summary<'a>(
+        &self,
+        inputs: Vec<NonSummaryReconstructionInput<'a>>,
+    ) -> Result<
+        Vec<
+            Result<
+                tracedecay_sessions::runtime::SessionMessageRecord,
+                SessionTemporalExecutionError,
+            >,
+        >,
+        SessionTemporalExecutionError,
+    >;
+}
+
+impl NonSummaryReconstructionBatch for RegisteredGlobalDbSessionTemporalExecution<'_> {
+    async fn reconstruct_non_summary<'a>(
+        &self,
+        inputs: Vec<NonSummaryReconstructionInput<'a>>,
+    ) -> Result<
+        Vec<
+            Result<
+                tracedecay_sessions::runtime::SessionMessageRecord,
+                SessionTemporalExecutionError,
+            >,
+        >,
+        SessionTemporalExecutionError,
+    > {
+        self.session_messages_from_hydrated_occurrences(inputs.into_iter().map(|input| {
+            HydratedOccurrenceReconstructionRequest::new(
+                input.snapshot,
+                input.anchor_id,
+                input.provider,
+                input.session_id,
+                input.content,
+            )
+        }))
+        .await
+    }
+}
+
+async fn reconstruct_non_summary_results(
+    batch: &impl NonSummaryReconstructionBatch,
+    inputs: Vec<NonSummaryReconstructionInput<'_>>,
+) -> Result<
+    Vec<Result<tracedecay_sessions::runtime::SessionMessageRecord, SessionTemporalExecutionError>>,
+    SessionTemporalExecutionError,
+> {
+    batch.reconstruct_non_summary(inputs).await
+}
+
+#[derive(Default)]
+struct NonSummaryReconstructionInputs<'a> {
+    inputs: Vec<NonSummaryReconstructionInput<'a>>,
+}
+
+impl<'a> NonSummaryReconstructionInputs<'a> {
+    fn is_empty(&self) -> bool {
+        self.inputs.is_empty()
+    }
+
+    fn push(
+        &mut self,
+        snapshot: &'a TemporalExecutionSnapshot,
+        ranked: &'a RankedCandidate,
+        hydrated: &'a TemporalHydratedResult,
+    ) -> bool {
+        if ranked.evidence_role.as_deref() == Some("summary") {
+            return false;
+        }
+        let Some(content) = hydrated.content() else {
+            return false;
+        };
+        let Some(provider) = ranked.source.as_deref() else {
+            return false;
+        };
+        let Some(session_id) = ranked.session.as_deref() else {
+            return false;
+        };
+        self.inputs.push(NonSummaryReconstructionInput {
+            snapshot,
+            anchor_id: &ranked.anchor_id,
+            provider,
+            session_id,
+            content,
+        });
+        true
+    }
+
+    fn into_inputs(self) -> Vec<NonSummaryReconstructionInput<'a>> {
+        self.inputs
     }
 }
 

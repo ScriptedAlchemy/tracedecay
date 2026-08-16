@@ -1,138 +1,234 @@
 use super::*;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tracedecay_domain::RetrievalAnchorId;
+
+use tracedecay_domain::{RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1};
 use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
+use tracedecay_sessions::runtime::SessionMessageRecord;
+use tracedecay_temporal_query::ports::{
+    BindingDigest, KernelVersions, TemporalAuthorizedRoot, TemporalSnapshotRequest,
+    TemporalWatermarks,
+};
+use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+
+struct ReconstructionFixture {
+    anchor_id: RetrievalAnchorId,
+    provider: String,
+    session_id: String,
+    content: Vec<u8>,
+}
+
+struct RecordingNonSummaryReconstructionBatch {
+    snapshot_opens: Arc<AtomicUsize>,
+    responses: Mutex<Option<Vec<Result<SessionMessageRecord, SessionTemporalExecutionError>>>>,
+}
+
+impl NonSummaryReconstructionBatch for RecordingNonSummaryReconstructionBatch {
+    async fn reconstruct_non_summary<'a>(
+        &self,
+        inputs: Vec<NonSummaryReconstructionInput<'a>>,
+    ) -> Result<
+        Vec<Result<SessionMessageRecord, SessionTemporalExecutionError>>,
+        SessionTemporalExecutionError,
+    > {
+        assert_eq!(inputs.len(), 50, "one page must be admitted as one batch");
+        let root = inputs[0].snapshot.request().authorized_root();
+        assert!(root.is_some(), "batch inputs must carry a registered root");
+        for (rank, input) in inputs.iter().enumerate() {
+            assert_eq!(
+                input.snapshot.request().authorized_root(),
+                root,
+                "mixed registered roots must not share a reconstruction snapshot"
+            );
+            assert_eq!(
+                input.provider,
+                if rank % 2 == 0 { "codex" } else { "claude" },
+                "the batch retains each message provider identity"
+            );
+            assert_eq!(
+                input.session_id,
+                if rank % 2 == 0 {
+                    "codex-session"
+                } else {
+                    "claude-session"
+                },
+                "the batch retains each message session identity"
+            );
+            assert_eq!(
+                input.content,
+                format!("canonical content {rank}").as_bytes(),
+                "the reconstruction batch keeps canonical hydrated content"
+            );
+        }
+        if inputs[0].snapshot.request().cancellation_requested() {
+            return Err(SessionTemporalExecutionError::Cancelled);
+        }
+        self.snapshot_opens.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .responses
+            .lock()
+            .expect("recorded batch responses")
+            .take()
+            .expect("one authorized batch response"))
+    }
+}
+
+fn reconstruction_snapshot(cancelled: bool) -> TemporalExecutionSnapshot {
+    TemporalExecutionSnapshot::new_authorized(
+        TemporalSnapshotRequest::new(
+            SessionId::new("codex-session").expect("session"),
+            "root.batch",
+            "request.batch",
+            "access.batch",
+            TemporalModeV1::Current,
+            RetrievalGrainV1::LogicalMessage,
+        )
+        .expect("snapshot request")
+        .with_authorized_root(
+            TemporalAuthorizedRoot::profile("profile.batch", "store.batch", "root.batch")
+                .expect("registered root"),
+        )
+        .expect("root binding")
+        .with_cancellation_requested(cancelled),
+        TemporalWatermarks {
+            generation: 1,
+            source: 0,
+            projection: 0,
+            index: 0,
+            summary: 0,
+        },
+        KernelVersions {
+            schema: 1,
+            ranking: 1,
+            configuration_digest: BindingDigest::new("configuration", "batch-test")
+                .expect("configuration"),
+        },
+        None,
+        ValidatedAuthorization::Authorized,
+    )
+    .expect("snapshot")
+}
+
+fn reconstruction_inputs<'a>(
+    snapshot: &'a TemporalExecutionSnapshot,
+    fixtures: &'a [ReconstructionFixture],
+) -> Vec<NonSummaryReconstructionInput<'a>> {
+    fixtures
+        .iter()
+        .map(|fixture| NonSummaryReconstructionInput {
+            snapshot,
+            anchor_id: &fixture.anchor_id,
+            provider: fixture.provider.as_str(),
+            session_id: fixture.session_id.as_str(),
+            content: fixture.content.as_slice(),
+        })
+        .collect()
+}
 
 #[tokio::test]
 async fn fifty_non_summary_results_share_one_frozen_reconstruction_batch() {
     const RESULTS: usize = 50;
-    let snapshot_opens = Arc::new(AtomicUsize::new(0));
-    let batch = NonSummaryReconstructionBatch::recording(
-        Arc::clone(&snapshot_opens),
-        [
-            (
-                7,
-                "store.alpha",
-                "provider.alpha",
-                "session.alpha",
-                "anchor.07",
-                "available",
-            ),
-            (
-                11,
-                "store.beta",
-                "provider.beta",
-                "session.beta",
-                "anchor.11",
-                "denied",
-            ),
-            (
-                23,
-                "store.alpha",
-                "provider.alpha",
-                "session.alpha",
-                "anchor.23",
-                "redacted",
-            ),
-            (
-                31,
-                "store.beta",
-                "provider.beta",
-                "session.beta",
-                "anchor.31",
-                "unavailable",
-            ),
-        ],
-    );
-    let inputs = (0..RESULTS)
-        .map(|rank| {
-            let store = if rank % 2 == 0 {
-                "store.alpha"
+    let fixtures = (0..RESULTS)
+        .map(|rank| ReconstructionFixture {
+            anchor_id: RetrievalAnchorId::new(format!("anchor.{rank:02}")).expect("anchor"),
+            provider: if rank % 2 == 0 {
+                "codex".to_string()
             } else {
-                "store.beta"
-            };
-            let provider = if rank % 2 == 0 {
-                "provider.alpha"
+                "claude".to_string()
+            },
+            session_id: if rank % 2 == 0 {
+                "codex-session".to_string()
             } else {
-                "provider.beta"
-            };
-            let session = if rank % 2 == 0 {
-                "session.alpha"
-            } else {
-                "session.beta"
-            };
-            NonSummaryReconstructionBatch::input(
-                rank,
-                store,
-                provider,
-                session,
-                format!("anchor.{rank:02}"),
-                format!("message {rank}").into_bytes(),
-            )
+                "claude-session".to_string()
+            },
+            content: format!("canonical content {rank}").into_bytes(),
         })
         .collect::<Vec<_>>();
-
-    let rendered = batch
-        .render(inputs, NonSummaryReconstructionBatch::not_cancelled())
-        .await;
-
+    let responses = fixtures
+        .iter()
+        .enumerate()
+        .map(|(rank, candidate)| match rank {
+            11 => Err(SessionTemporalExecutionError::Denied),
+            23 => Err(SessionTemporalExecutionError::Redacted),
+            31 => Err(SessionTemporalExecutionError::Unavailable),
+            _ => Ok(SessionMessageRecord {
+                provider: candidate.provider.clone(),
+                message_id: format!("message.{rank:02}"),
+                session_id: candidate.session_id.clone(),
+                role: "assistant".to_string(),
+                timestamp: Some(i64::try_from(rank).expect("timestamp")),
+                ordinal: i64::try_from(rank).expect("ordinal"),
+                text: String::from_utf8(candidate.content.clone()).expect("content"),
+                kind: None,
+                model: None,
+                tool_names: None,
+                source_path: None,
+                source_offset: None,
+                metadata_json: None,
+            }),
+        })
+        .collect::<Vec<_>>();
+    let snapshot_opens = Arc::new(AtomicUsize::new(0));
+    let batch = RecordingNonSummaryReconstructionBatch {
+        snapshot_opens: Arc::clone(&snapshot_opens),
+        responses: Mutex::new(Some(responses)),
+    };
+    let snapshot = reconstruction_snapshot(false);
+    let reconstructed =
+        reconstruct_non_summary_results(&batch, reconstruction_inputs(&snapshot, &fixtures))
+            .await
+            .expect("authorized batch");
     assert_eq!(
         snapshot_opens.load(Ordering::SeqCst),
         1,
         "one page of non-summary results must open exactly one frozen reconstruction snapshot"
     );
     assert_eq!(
-        rendered.rendered_ranks(),
+        reconstructed
+            .iter()
+            .enumerate()
+            .filter_map(|(rank, result)| result.as_ref().ok().map(|_| rank))
+            .collect::<Vec<_>>(),
         (0..RESULTS)
             .filter(|rank| !matches!(rank, 11 | 23 | 31))
             .collect::<Vec<_>>(),
-        "available messages must retain ranked order without promoting a lower result"
+        "available messages must retain rank order without promoting a lower result"
     );
-    assert_eq!(
-        rendered.owner_store_for_rank(7),
-        Some("store.beta"),
-        "each reconstructed message must retain its own owning-store identity"
+    for (rank, expected_provider, expected_session) in [
+        (7, "claude", "claude-session"),
+        (8, "codex", "codex-session"),
+    ] {
+        let message = reconstructed[rank].as_ref().expect("available message");
+        assert_eq!(message.provider, expected_provider);
+        assert_eq!(message.session_id, expected_session);
+        assert_eq!(message.text, format!("canonical content {rank}"));
+    }
+    assert!(
+        reconstructed[11]
+            .as_ref()
+            .is_err_and(|error| matches!(error, SessionTemporalExecutionError::Denied))
     );
-    assert_eq!(
-        rendered.owner_store_for_rank(8),
-        Some("store.alpha"),
-        "adjacent messages may resolve through distinct owning stores"
+    assert!(
+        reconstructed[23]
+            .as_ref()
+            .is_err_and(|error| matches!(error, SessionTemporalExecutionError::Redacted))
     );
-    assert_eq!(
-        rendered.omission_for_rank(11),
-        Some(HydrationStateV1::Unauthorized),
-        "denial must remain a typed omission at its original rank"
-    );
-    assert_eq!(
-        rendered.omission_for_rank(23),
-        Some(HydrationStateV1::Redacted),
-        "redaction must remain typed instead of becoming a message"
-    );
-    assert_eq!(
-        rendered.omission_for_rank(31),
-        Some(HydrationStateV1::RetainedButUnavailable),
-        "an unavailable reconstruction must remain a typed omission"
+    assert!(
+        reconstructed[31]
+            .as_ref()
+            .is_err_and(|error| matches!(error, SessionTemporalExecutionError::Unavailable))
     );
 
-    let cancelled = batch
-        .render(
-            (0..RESULTS)
-                .map(|rank| {
-                    NonSummaryReconstructionBatch::input(
-                        rank,
-                        "store.alpha",
-                        "provider.alpha",
-                        "session.alpha",
-                        format!("cancelled.anchor.{rank:02}"),
-                        format!("cancelled message {rank}").into_bytes(),
-                    )
-                })
-                .collect(),
-            NonSummaryReconstructionBatch::cancelled(),
+    let cancelled_snapshot = reconstruction_snapshot(true);
+    assert!(matches!(
+        reconstruct_non_summary_results(
+            &batch,
+            reconstruction_inputs(&cancelled_snapshot, &fixtures),
         )
-        .await;
-    assert!(cancelled.is_cancelled());
+        .await,
+        Err(SessionTemporalExecutionError::Cancelled)
+    ));
     assert_eq!(
         snapshot_opens.load(Ordering::SeqCst),
         1,

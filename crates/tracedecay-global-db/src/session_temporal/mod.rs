@@ -176,34 +176,107 @@ pub struct RegisteredGlobalDbSessionTemporalExecution<'db> {
     db: &'db RegisteredGlobalDb,
 }
 
-impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
-    pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
-        Self { db }
-    }
+/// One non-summary message whose canonical record must be reconstructed from
+/// a temporal execution snapshot.
+///
+/// The request keeps the authorized snapshot with the message identity so a
+/// batch can prove every entry belongs to the same registered root before it
+/// admits a shared read snapshot.
+pub struct HydratedOccurrenceReconstructionRequest<'a> {
+    snapshot: &'a TemporalExecutionSnapshot,
+    anchor_id: &'a RetrievalAnchorId,
+    provider: &'a str,
+    session_id: &'a str,
+    content: &'a [u8],
+}
 
-    pub async fn session_message_from_hydrated_occurrence(
-        &self,
-        snapshot: &TemporalExecutionSnapshot,
-        anchor_id: &RetrievalAnchorId,
-        provider: &str,
-        session_id: &str,
-        content: &[u8],
-    ) -> Result<SessionMessageRecord, SessionTemporalExecutionError> {
-        let read = self
-            .db
-            .read_snapshot()
-            .await
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        hydration::session_message_from_hydrated_bytes(
-            &TemporalSqlRead::registered(&read),
+impl<'a> HydratedOccurrenceReconstructionRequest<'a> {
+    pub const fn new(
+        snapshot: &'a TemporalExecutionSnapshot,
+        anchor_id: &'a RetrievalAnchorId,
+        provider: &'a str,
+        session_id: &'a str,
+        content: &'a [u8],
+    ) -> Self {
+        Self {
             snapshot,
             anchor_id,
             provider,
             session_id,
             content,
-        )
-        .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)
+        }
+    }
+}
+
+impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
+    pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
+        Self { db }
+    }
+
+    /// Reconstruct ordered non-summary messages under one frozen registered
+    /// read snapshot. Every request must carry the exact same authorized root;
+    /// accepting a mixed-root batch would make a registered shard an implicit
+    /// cross-project cache.
+    pub async fn session_messages_from_hydrated_occurrences<'a>(
+        &self,
+        requests: impl IntoIterator<Item = HydratedOccurrenceReconstructionRequest<'a>>,
+    ) -> Result<
+        Vec<Result<SessionMessageRecord, SessionTemporalExecutionError>>,
+        SessionTemporalExecutionError,
+    > {
+        let requests = requests.into_iter().collect::<Vec<_>>();
+        let Some(first) = requests.first() else {
+            return Ok(Vec::new());
+        };
+        let Some(authorized_root) = first.snapshot.request().authorized_root() else {
+            return Err(SessionTemporalExecutionError::WrongScope);
+        };
+        if requests
+            .iter()
+            .any(|request| request.snapshot.request().authorized_root() != Some(authorized_root))
+        {
+            return Err(SessionTemporalExecutionError::WrongScope);
+        }
+        first
+            .snapshot
+            .request()
+            .execution_control()
+            .checkpoint()
+            .map_err(map_control_error)?;
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let read = TemporalSqlRead::registered(&read);
+        let mut messages = Vec::with_capacity(requests.len());
+        for request in requests {
+            request
+                .snapshot
+                .request()
+                .execution_control()
+                .checkpoint()
+                .map_err(map_control_error)?;
+            let message = hydration::session_message_from_hydrated_bytes(
+                &read,
+                request.snapshot,
+                request.anchor_id,
+                request.provider,
+                request.session_id,
+                request.content,
+            )
+            .await
+            .map_err(map_hydration_error);
+            match message {
+                Err(
+                    error @ (SessionTemporalExecutionError::Cancelled
+                    | SessionTemporalExecutionError::BudgetExhausted
+                    | SessionTemporalExecutionError::ResetRequired),
+                ) => return Err(error),
+                message => messages.push(message),
+            }
+        }
+        Ok(messages)
     }
 
     pub async fn resolve_lcm_describe_target(
@@ -888,6 +961,26 @@ fn map_kernel_execution_error(
         SessionTemporalExecutionError::ResetRequired
     } else {
         SessionTemporalExecutionError::Kernel(error)
+    }
+}
+
+fn map_hydration_error(
+    error: tracedecay_temporal_query::hydration::HydrationError,
+) -> SessionTemporalExecutionError {
+    match error {
+        tracedecay_temporal_query::hydration::HydrationError::Unavailable
+        | tracedecay_temporal_query::hydration::HydrationError::InvalidDenial => {
+            SessionTemporalExecutionError::Unavailable
+        }
+        tracedecay_temporal_query::hydration::HydrationError::ResetRequired { .. } => {
+            SessionTemporalExecutionError::ResetRequired
+        }
+        tracedecay_temporal_query::hydration::HydrationError::BudgetExceeded { .. } => {
+            SessionTemporalExecutionError::BudgetExhausted
+        }
+        tracedecay_temporal_query::hydration::HydrationError::Interrupted(error) => {
+            map_control_error(error)
+        }
     }
 }
 
