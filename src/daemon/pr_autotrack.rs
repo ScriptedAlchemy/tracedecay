@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracedecay_domain::ProjectId;
 
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
@@ -49,6 +50,7 @@ const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable
 const GIT_AUTHORITY_UNAVAILABLE: &str = "git_authority_unavailable";
 const INVALID_BRANCH_REF: &str = "invalid_branch_ref";
 const BRANCH_ACTIVATION_FAILED: &str = "branch_activation_failed";
+const BRANCH_LIFECYCLE_CONTENDED: &str = "branch_lifecycle_contended";
 
 fn scheduler_unavailable(detail: &str) -> String {
     format!("{CODE_INDEX_SCHEDULER_UNAVAILABLE}: {detail}")
@@ -67,6 +69,94 @@ pub struct ManualBranchActivation {
     pub outcome: crate::branch::BranchAddOutcome,
 }
 
+/// The exact Git and filesystem artifacts owned by one manually activated
+/// branch. The raw branch name remains the Git ref identity; only the
+/// filesystem path is hashed so distinct valid refs cannot alias on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManualBranchArtifactsV1 {
+    pub(crate) branch: String,
+    pub(crate) worktree: PathBuf,
+    pub(crate) tracking_ref: String,
+    pub(crate) label: String,
+}
+
+impl ManualBranchArtifactsV1 {
+    pub(crate) fn for_branch(data_root: &Path, branch: &str) -> Self {
+        let digest = hex::encode(Sha256::digest(branch.as_bytes()));
+        Self {
+            branch: branch.to_owned(),
+            worktree: data_root.join("branch-worktrees").join(digest),
+            tracking_ref: format!("refs/tracedecay/branch/{branch}"),
+            label: format!("tracedecay/track/{branch}"),
+        }
+    }
+
+    fn lifecycle_lock_path(&self, data_root: &Path) -> PathBuf {
+        let digest = hex::encode(Sha256::digest(self.branch.as_bytes()));
+        data_root
+            .join("branch-worktrees")
+            .join(".lifecycle")
+            .join(format!("{digest}.lock"))
+    }
+}
+
+/// Non-blocking exact-branch lifecycle gate. It deliberately spans activation,
+/// worktree replacement, scheduler mount, and metadata sealing; a concurrent
+/// caller receives a typed retryable contention rather than observing a
+/// partially replaced branch route.
+pub(crate) struct ManualBranchLifecycleLeaseV1 {
+    branch: String,
+    _lock: std::fs::File,
+}
+
+impl ManualBranchLifecycleLeaseV1 {
+    pub(crate) fn matches_branch(&self, branch: &str) -> bool {
+        self.branch == branch
+    }
+}
+
+pub(crate) fn try_acquire_manual_branch_lifecycle(
+    data_root: &Path,
+    branch: &str,
+) -> std::result::Result<ManualBranchLifecycleLeaseV1, ManualBranchActivationError> {
+    use fs2::FileExt;
+
+    let artifacts = ManualBranchArtifactsV1::for_branch(data_root, branch);
+    let lock_path = artifacts.lifecycle_lock_path(data_root);
+    let lock_directory = lock_path.parent().ok_or_else(|| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch lifecycle lock '{}' has no parent",
+            lock_path.display()
+        ))
+    })?;
+    std::fs::create_dir_all(lock_directory).map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "cannot create manual branch lifecycle lock directory: {error}"
+        ))
+    })?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            ManualBranchActivationError::activation_failed(format!(
+                "cannot open manual branch lifecycle lock '{}': {error}",
+                lock_path.display()
+            ))
+        })?;
+    lock.try_lock_exclusive().map_err(|error| {
+        ManualBranchActivationError::lifecycle_contended(format!(
+            "branch '{branch}' lifecycle is already active at '{}': {error}",
+            lock_path.display()
+        ))
+    })?;
+    Ok(ManualBranchLifecycleLeaseV1 {
+        branch: branch.to_owned(),
+        _lock: lock,
+    })
+}
+
 /// Typed failure for manual branch-head activation. Missing scheduler or
 /// identity is a project-route state, not a transport error or empty success.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +169,9 @@ pub enum ManualBranchActivationError {
     InvalidBranchRef { detail: String },
     /// Worktree preparation or scheduler mount failed after admission.
     ActivationFailed { detail: String },
+    /// An exact lifecycle owner is already activating, replacing, or retiring
+    /// the requested branch.
+    LifecycleContended { detail: String },
 }
 
 impl ManualBranchActivationError {
@@ -89,13 +182,16 @@ impl ManualBranchActivationError {
             Self::GitAuthorityUnavailable { .. } => GIT_AUTHORITY_UNAVAILABLE,
             Self::InvalidBranchRef { .. } => INVALID_BRANCH_REF,
             Self::ActivationFailed { .. } => BRANCH_ACTIVATION_FAILED,
+            Self::LifecycleContended { .. } => BRANCH_LIFECYCLE_CONTENDED,
         }
     }
 
     /// Whether a later retry with the same arguments can succeed.
     pub fn retryable(&self) -> bool {
         match self {
-            Self::SchedulerUnavailable { .. } | Self::ActivationFailed { .. } => true,
+            Self::SchedulerUnavailable { .. }
+            | Self::ActivationFailed { .. }
+            | Self::LifecycleContended { .. } => true,
             Self::GitAuthorityUnavailable { .. } | Self::InvalidBranchRef { .. } => false,
         }
     }
@@ -106,7 +202,8 @@ impl ManualBranchActivationError {
             Self::SchedulerUnavailable { detail }
             | Self::GitAuthorityUnavailable { detail }
             | Self::InvalidBranchRef { detail }
-            | Self::ActivationFailed { detail } => detail,
+            | Self::ActivationFailed { detail }
+            | Self::LifecycleContended { detail } => detail,
         }
     }
 
@@ -130,6 +227,12 @@ impl ManualBranchActivationError {
 
     fn activation_failed(detail: impl Into<String>) -> Self {
         Self::ActivationFailed {
+            detail: detail.into(),
+        }
+    }
+
+    fn lifecycle_contended(detail: impl Into<String>) -> Self {
+        Self::LifecycleContended {
             detail: detail.into(),
         }
     }
@@ -692,9 +795,7 @@ pub async fn activate_manual_branch(
 
 /// Deterministic linked-worktree path for a manually activated branch head.
 pub fn manual_branch_worktree_path(data_root: &Path, branch: &str) -> PathBuf {
-    data_root
-        .join("branch-worktrees")
-        .join(crate::branch::sanitize_branch_name(branch))
+    ManualBranchArtifactsV1::for_branch(data_root, branch).worktree
 }
 
 /// Activates an operator-requested branch head through the same worktree
@@ -705,6 +806,28 @@ pub(crate) async fn activate_manual_branch_head(
     schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     branch: &str,
 ) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
+    if schedulers.is_none() {
+        return Err(ManualBranchActivationError::scheduler_unavailable(
+            "code-index scheduler authority is unavailable for branch activation",
+        ));
+    }
+    let lifecycle = try_acquire_manual_branch_lifecycle(&graph.store_layout().data_root, branch)?;
+    activate_manual_branch_head_with_lifecycle(repo_root, graph, schedulers, branch, &lifecycle)
+        .await
+}
+
+pub(crate) async fn activate_manual_branch_head_with_lifecycle(
+    repo_root: &Path,
+    graph: &Arc<crate::tracedecay::TraceDecay>,
+    schedulers: Option<&CodeIndexSchedulerRegistryV1>,
+    branch: &str,
+    lifecycle: &ManualBranchLifecycleLeaseV1,
+) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
+    if !lifecycle.matches_branch(branch) {
+        return Err(ManualBranchActivationError::activation_failed(
+            "manual branch lifecycle lease does not match requested branch",
+        ));
+    }
     let command_control = default_pr_command_control();
     let administration = match schedulers {
         Some(schedulers) => PrStoreAdministration::with_control(schedulers, graph, command_control),
@@ -719,6 +842,7 @@ pub(crate) async fn activate_manual_branch_head(
         &graph.store_layout().data_root,
         branch,
         administration,
+        lifecycle,
     )
     .await
 }
@@ -728,6 +852,7 @@ async fn activate_manual_branch_with_administration(
     data_root: &Path,
     branch: &str,
     administration: PrStoreAdministration<'_>,
+    lifecycle: &ManualBranchLifecycleLeaseV1,
 ) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
     let Some(schedulers) = administration.schedulers else {
         return Err(ManualBranchActivationError::scheduler_unavailable(
@@ -745,8 +870,7 @@ async fn activate_manual_branch_with_administration(
         ));
     }
 
-    let sanitized = crate::branch::sanitize_branch_name(branch);
-    if sanitized.is_empty() || branch.starts_with('-') {
+    if branch.starts_with('-') || branch.is_empty() {
         return Err(ManualBranchActivationError::invalid_ref(format!(
             "branch '{branch}' is not a valid branch name"
         )));
@@ -769,8 +893,22 @@ async fn activate_manual_branch_with_administration(
         }
     };
 
-    let worktree = manual_branch_worktree_path(data_root, branch);
-    if worktree.is_dir() && schedulers.is_worktree_mounted(&worktree).await {
+    if !lifecycle.matches_branch(branch) {
+        return Err(ManualBranchActivationError::activation_failed(
+            "manual branch lifecycle lease changed before activation",
+        ));
+    }
+    let artifacts = ManualBranchArtifactsV1::for_branch(data_root, branch);
+    let worktree = artifacts.worktree.clone();
+    if worktree.is_dir()
+        && schedulers.is_worktree_mounted(&worktree).await
+        && manual_branch_artifacts_match(
+            repo_root,
+            &artifacts,
+            &head_sha,
+            administration.command_control,
+        )
+    {
         return Ok(ManualBranchActivation {
             branch: branch.to_string(),
             head_sha,
@@ -779,8 +917,37 @@ async fn activate_manual_branch_with_administration(
         });
     }
 
-    let tracking_ref = manual_branch_tracking_ref(&sanitized);
-    let label = manual_branch_label(branch);
+    let tracking_ref = artifacts.tracking_ref.clone();
+    let label = artifacts.label.clone();
+    if worktree.exists() {
+        let replacement_head = manual_branch_owned_head(
+            repo_root,
+            &artifacts,
+            administration.command_control,
+        )
+        .ok_or_else(|| {
+            ManualBranchActivationError::activation_failed(format!(
+                "existing manual worktree '{}' does not prove ownership for branch '{branch}'",
+                worktree.display()
+            ))
+        })?;
+        retire_worktree_mount(Some(schedulers), &worktree)
+            .await
+            .map_err(ManualBranchActivationError::activation_failed)?;
+        if !cleanup_owned_worktree(
+            repo_root,
+            &worktree,
+            &tracking_ref,
+            &label,
+            &replacement_head,
+            administration.command_control,
+        ) {
+            return Err(ManualBranchActivationError::activation_failed(format!(
+                "existing manual worktree '{}' changed before replacement",
+                worktree.display()
+            )));
+        }
+    }
     let repo = repo_root.to_path_buf();
     let wt = worktree.clone();
     let tref = tracking_ref.clone();
@@ -850,14 +1017,6 @@ async fn activate_manual_branch_with_administration(
     }
 }
 
-fn manual_branch_label(branch: &str) -> String {
-    format!("tracedecay/track/{branch}")
-}
-
-fn manual_branch_tracking_ref(sanitized: &str) -> String {
-    format!("refs/tracedecay/branch/{sanitized}")
-}
-
 fn resolve_branch_head(
     repo_root: &Path,
     branch: &str,
@@ -923,14 +1082,18 @@ async fn cleanup_failed_manual_track(
 ) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
     match retire_worktree_mount(administration.schedulers, worktree).await {
         Ok(()) => {
-            cleanup_owned_worktree(
+            if !cleanup_owned_worktree(
                 repo_root,
                 worktree,
                 tracking_ref,
                 label,
                 head_sha,
                 administration.command_control,
-            );
+            ) {
+                return Err(ManualBranchActivationError::activation_failed(format!(
+                    "{original}; incomplete branch worktree ownership changed before cleanup"
+                )));
+            }
             Err(original)
         }
         Err(cleanup_reason) => Err(ManualBranchActivationError::activation_failed(format!(
@@ -939,7 +1102,110 @@ async fn cleanup_failed_manual_track(
     }
 }
 
-async fn retire_worktree_mount(
+/// Retires the exact artifacts created by a newly activated manual branch when
+/// its subsequent metadata sealing fails. Callers retain the same lifecycle
+/// lease that covered activation, so no concurrent add or removal can replace
+/// the worktree between the ownership proof and cleanup.
+pub(crate) async fn cleanup_manual_branch_activation(
+    repo_root: &Path,
+    data_root: &Path,
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    activation: &ManualBranchActivation,
+    lifecycle: &ManualBranchLifecycleLeaseV1,
+) -> std::result::Result<(), ManualBranchActivationError> {
+    if !lifecycle.matches_branch(&activation.branch) {
+        return Err(ManualBranchActivationError::activation_failed(
+            "manual branch lifecycle lease does not match failed activation",
+        ));
+    }
+    let artifacts = ManualBranchArtifactsV1::for_branch(data_root, &activation.branch);
+    if artifacts.worktree != activation.worktree {
+        return Err(ManualBranchActivationError::activation_failed(format!(
+            "failed activation worktree '{}' does not match exact branch identity",
+            activation.worktree.display()
+        )));
+    }
+    retire_worktree_mount(Some(schedulers), &artifacts.worktree)
+        .await
+        .map_err(ManualBranchActivationError::activation_failed)?;
+    if !cleanup_owned_worktree(
+        repo_root,
+        &artifacts.worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &activation.head_sha,
+        &default_pr_command_control(),
+    ) {
+        return Err(ManualBranchActivationError::activation_failed(format!(
+            "failed activation for branch '{}' changed before exact cleanup",
+            activation.branch
+        )));
+    }
+    Ok(())
+}
+
+/// Retires only the manual artifacts proven by a persisted graph-source entry
+/// after branch metadata removal has committed. The source's exact worktree,
+/// synthetic ref, and OID are the ownership proof; a legacy entry without
+/// that proof is intentionally left untouched rather than guessing at Git
+/// artifacts.
+pub(crate) async fn cleanup_manual_branch_retirement(
+    repo_root: &Path,
+    data_root: &Path,
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    branch: &str,
+    source: &crate::branch_meta::BranchGraphSourceV1,
+    lifecycle: &ManualBranchLifecycleLeaseV1,
+) -> std::result::Result<(), ManualBranchActivationError> {
+    if !lifecycle.matches_branch(branch) {
+        return Err(ManualBranchActivationError::activation_failed(
+            "manual branch lifecycle lease does not match metadata retirement",
+        ));
+    }
+    if !manual_branch_source_owns_artifacts(data_root, branch, source) {
+        return Err(ManualBranchActivationError::activation_failed(format!(
+            "stored branch provenance does not own manual artifacts for '{branch}'"
+        )));
+    }
+    let artifacts = ManualBranchArtifactsV1::for_branch(data_root, branch);
+    let expected_worktree = artifacts
+        .worktree
+        .canonicalize()
+        .unwrap_or(artifacts.worktree.clone());
+    retire_worktree_mount(Some(schedulers), &expected_worktree)
+        .await
+        .map_err(ManualBranchActivationError::activation_failed)?;
+    if !cleanup_owned_worktree(
+        repo_root,
+        &expected_worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &source.source_oid,
+        &default_pr_command_control(),
+    ) {
+        return Err(ManualBranchActivationError::activation_failed(format!(
+            "manual artifacts for branch '{branch}' changed before exact retirement"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn manual_branch_source_owns_artifacts(
+    data_root: &Path,
+    branch: &str,
+    source: &crate::branch_meta::BranchGraphSourceV1,
+) -> bool {
+    let artifacts = ManualBranchArtifactsV1::for_branch(data_root, branch);
+    let worktree = artifacts
+        .worktree
+        .canonicalize()
+        .unwrap_or(artifacts.worktree);
+    source.worktree_root == worktree.to_string_lossy().as_ref()
+        && source.reference == format!("refs/heads/{}", artifacts.label)
+        && !source.source_oid.is_empty()
+}
+
+pub(crate) async fn retire_worktree_mount(
     schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     worktree: &Path,
 ) -> std::result::Result<(), String> {
@@ -960,18 +1226,39 @@ async fn retire_worktree_mount(
     Ok(())
 }
 
-fn cleanup_owned_worktree(
+pub(crate) fn cleanup_owned_worktree(
     repo_root: &Path,
     worktree: &Path,
     tracking_ref: &str,
     label: &str,
     expected_head: &str,
     command_control: &PrCommandControl,
-) {
-    remove_worktree(repo_root, worktree, command_control);
+) -> bool {
     let branch_ref = format!("refs/heads/{label}");
+    if !ref_points_to(repo_root, tracking_ref, expected_head, command_control)
+        || !ref_points_to(repo_root, &branch_ref, expected_head, command_control)
+        || (worktree.exists()
+            && !worktree_matches_branch_head(
+                repo_root,
+                worktree,
+                &branch_ref,
+                expected_head,
+                command_control,
+            ))
+    {
+        return false;
+    }
+    if worktree.exists() {
+        remove_worktree(repo_root, worktree, command_control);
+        if worktree.exists() {
+            return false;
+        }
+    }
     if ref_points_to(repo_root, &branch_ref, expected_head, command_control) {
         let _ = successful_git_with_control(repo_root, &["branch", "-D", label], command_control);
+    }
+    if ref_points_to(repo_root, &branch_ref, expected_head, command_control) {
+        return false;
     }
     if ref_points_to(repo_root, tracking_ref, expected_head, command_control) {
         let _ = successful_git_with_control(
@@ -980,6 +1267,58 @@ fn cleanup_owned_worktree(
             command_control,
         );
     }
+    !ref_points_to(repo_root, tracking_ref, expected_head, command_control)
+}
+
+fn manual_branch_artifacts_match(
+    repo_root: &Path,
+    artifacts: &ManualBranchArtifactsV1,
+    expected_head: &str,
+    command_control: &PrCommandControl,
+) -> bool {
+    let branch_ref = format!("refs/heads/{}", artifacts.label);
+    ref_points_to(
+        repo_root,
+        &artifacts.tracking_ref,
+        expected_head,
+        command_control,
+    ) && ref_points_to(repo_root, &branch_ref, expected_head, command_control)
+        && worktree_matches_branch_head(
+            repo_root,
+            &artifacts.worktree,
+            &branch_ref,
+            expected_head,
+            command_control,
+        )
+}
+
+fn manual_branch_owned_head(
+    repo_root: &Path,
+    artifacts: &ManualBranchArtifactsV1,
+    command_control: &PrCommandControl,
+) -> Option<String> {
+    let branch_ref = format!("refs/heads/{}", artifacts.label);
+    let head = ref_sha(repo_root, &artifacts.tracking_ref, command_control)?;
+    manual_branch_artifacts_match(repo_root, artifacts, &head, command_control)
+        .then_some(head)
+        .or_else(|| {
+            (!artifacts.worktree.exists()
+                && ref_points_to(repo_root, &branch_ref, &head, command_control))
+            .then_some(head)
+        })
+}
+
+fn worktree_matches_branch_head(
+    _repo_root: &Path,
+    worktree: &Path,
+    branch_ref: &str,
+    expected_head: &str,
+    command_control: &PrCommandControl,
+) -> bool {
+    ref_points_to(worktree, "HEAD", expected_head, command_control)
+        && successful_git_with_control(worktree, &["symbolic-ref", "-q", "HEAD"], command_control)
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .is_some_and(|reference| reference.trim() == branch_ref)
 }
 
 async fn reconcile_project_with_administration(

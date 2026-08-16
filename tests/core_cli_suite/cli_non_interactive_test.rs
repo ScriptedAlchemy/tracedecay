@@ -1778,7 +1778,7 @@ async fn automation_facts_list_reports_terminal_receipt_collection() {
 }
 
 #[test]
-fn branch_add_tracks_the_branch_on_the_single_project_store() {
+fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifacts() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
@@ -1866,6 +1866,40 @@ fn branch_add_tracks_the_branch_on_the_single_project_store() {
     assert!(
         !shard_root.join("branches").exists(),
         "branch add must not create a per-branch database"
+    );
+
+    let mut remove = tracedecay_command_without_daemon(home.path(), &project_root);
+    remove.args(["branch", "remove", "feature/new"]);
+    let remove_output = run_with_timeout(remove, cli_timeout());
+    assert!(
+        remove_output.status.success(),
+        "branch remove must retire the exact manually activated branch\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&remove_output.stdout),
+        String::from_utf8_lossy(&remove_output.stderr)
+    );
+    assert!(
+        !sealed_worktree.exists(),
+        "branch remove must delete the sealed linked worktree"
+    );
+    let tracking_ref = Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            "refs/tracedecay/branch/feature/new",
+        ])
+        .current_dir(&project_root)
+        .output()
+        .expect("git should verify the tracking ref");
+    assert!(
+        !tracking_ref.status.success(),
+        "branch remove must retire the exact raw branch tracking ref"
+    );
+    assert!(
+        !tracedecay::branch_meta::load_branch_meta(&shard_root)
+            .expect("branch metadata after removal")
+            .is_tracked("feature/new"),
+        "branch remove must retire its metadata only after exact provenance cleanup is selected"
     );
 }
 

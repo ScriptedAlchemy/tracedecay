@@ -545,6 +545,194 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature/a");
+    git(repo.path(), &["checkout", "-q", "-b", "feature_a", "main"]);
+    std::fs::write(
+        repo.path().join("src/underscored.rs"),
+        "pub fn underscored() {}\n",
+    )
+    .unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-qm", "underscored feature"]);
+    git(repo.path(), &["checkout", "-q", "main"]);
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .unwrap(),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let slashed = activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/a")
+        .await
+        .expect("slash branch activation");
+    let underscored =
+        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature_a")
+            .await
+            .expect("underscore branch activation");
+
+    assert_eq!(slashed.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_eq!(underscored.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_ne!(slashed.worktree, underscored.worktree);
+    assert_ne!(
+        manual_branch_worktree_path(&data_root, "feature/a"),
+        manual_branch_worktree_path(&data_root, "feature_a")
+    );
+    assert!(git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/feature/a"
+    ));
+    assert!(git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/feature_a"
+    ));
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_replaces_a_mounted_worktree_when_the_resolved_head_advances() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature/advance");
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .unwrap(),
+    );
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let initial =
+        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/advance")
+            .await
+            .expect("initial activation");
+
+    git(repo.path(), &["checkout", "-q", "feature/advance"]);
+    std::fs::write(
+        repo.path().join("src/advanced.rs"),
+        "pub fn advanced() {}\n",
+    )
+    .unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-qm", "advance branch head"]);
+    let advanced_head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    git(repo.path(), &["checkout", "-q", "main"]);
+
+    let replay =
+        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/advance")
+            .await
+            .expect("advanced branch activation");
+    let mounted_head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&replay.worktree)
+        .output()
+        .unwrap();
+
+    assert_eq!(replay.outcome, crate::branch::BranchAddOutcome::Added);
+    assert_ne!(initial.head_sha, replay.head_sha);
+    assert_eq!(
+        String::from_utf8_lossy(&advanced_head.stdout).trim(),
+        String::from_utf8_lossy(&mounted_head.stdout).trim(),
+        "a mounted stale worktree must be replaced with the newly resolved branch head"
+    );
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_branch_activation_refuses_exact_lifecycle_contention_before_mutating_git() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature/contended");
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .unwrap(),
+    );
+    let lifecycle =
+        try_acquire_manual_branch_lifecycle(&graph.store_layout().data_root, "feature/contended")
+            .expect("first lifecycle owner");
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+
+    let error =
+        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/contended")
+            .await
+            .expect_err("concurrent exact branch activation must be rejected");
+
+    assert!(matches!(
+        error,
+        ManualBranchActivationError::LifecycleContended { .. }
+    ));
+    assert!(!git_ref_exists(
+        repo.path(),
+        "refs/tracedecay/branch/feature/contended"
+    ));
+    drop(lifecycle);
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_manual_branch_sealing_retires_the_exact_mount_worktree_and_tracking_ref() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    init_manual_branch_repo(repo.path(), "feature/failure-cleanup");
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .unwrap(),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let lifecycle = try_acquire_manual_branch_lifecycle(&data_root, "feature/failure-cleanup")
+        .expect("lifecycle owner");
+    let activation = activate_manual_branch_head_with_lifecycle(
+        repo.path(),
+        &graph,
+        Some(&schedulers),
+        "feature/failure-cleanup",
+        &lifecycle,
+    )
+    .await
+    .expect("activation before synthetic sealing failure");
+
+    cleanup_manual_branch_activation(
+        repo.path(),
+        &data_root,
+        &schedulers,
+        &activation,
+        &lifecycle,
+    )
+    .await
+    .expect("failed sealing must clean activation-owned artifacts");
+
+    assert!(
+        !activation.worktree.exists(),
+        "the linked worktree must not leak after sealing failure"
+    );
+    assert!(
+        !git_ref_exists(
+            repo.path(),
+            "refs/tracedecay/branch/feature/failure-cleanup"
+        ),
+        "the exact tracking ref must not leak after sealing failure"
+    );
+    assert!(
+        !schedulers.is_worktree_mounted(&activation.worktree).await,
+        "the scheduler generation must retire with the failed worktree"
+    );
+    drop(lifecycle);
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_branch_fails_closed_without_scheduler_before_git_or_state_mutation() {
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature-denied");
