@@ -20,7 +20,9 @@ use super::{
     ExecutionTopologyEvidenceV1, ExecutionTopologyRollupStateErrorV1, ProjectionContext,
     TELEMETRY_DROP_EVENT_KIND_V1,
 };
-use crate::execution_topology_metrics::support::{unavailable_model_at, worse_state};
+use crate::execution_topology_metrics::support::{
+    append_missing_descriptor_measurements, unavailable_model_at, worse_state,
+};
 use crate::execution_topology_metrics::{
     EXECUTION_TOPOLOGY_EVENT_KINDS_V1, ExecutionGitHubStackCapabilityReadingV1,
     ExecutionMetricUnavailableV1, ExecutionTopologyDrillAnchorV1,
@@ -684,6 +686,15 @@ fn finalize_rollup_projection(
     mut measurements: Vec<super::super::ExecutionTopologyMeasurementV1>,
 ) -> ExecutionTopologyRollupProjectionV1 {
     suppress_low_support_cells(&mut measurements);
+    append_missing_descriptor_measurements(
+        &mut measurements,
+        &ProjectionContext {
+            horizon: horizon.clone(),
+            watermark: watermark.clone(),
+            complete,
+            source_state: family_coverage.state,
+        },
+    );
     if measurements.len() > MAX_EXECUTION_TOPOLOGY_CELLS_V1 {
         let mut capped = unavailable_model_at(
             authorized_scope_ref,

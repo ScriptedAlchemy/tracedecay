@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use tracedecay_domain::CoverageStateV1;
 
 use crate::observability::{
@@ -106,6 +108,56 @@ pub(super) fn measurement_with_local_support(
     local_support: u64,
 ) -> ExecutionTopologyMeasurementV1 {
     measurement(input).with_local_support(local_support)
+}
+
+/// Appends one dimensionless typed absence for every catalog descriptor a
+/// valid projection did not otherwise produce. Populated dimension cells stay
+/// intact; this only prevents conditionally projected descriptor families from
+/// disappearing when their eligible population is empty.
+pub(super) fn append_missing_descriptor_measurements(
+    measurements: &mut Vec<ExecutionTopologyMeasurementV1>,
+    context: &ProjectionContext,
+) {
+    let present = measurements
+        .iter()
+        .map(|measurement| {
+            (
+                measurement.value.metric.as_str(),
+                measurement.value.unit.as_str(),
+                measurement.value.denominator.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let coverage = MetricCoverageV1 {
+        eligible: context.complete.then_some(0),
+        observed: 0,
+        completed: 0,
+        censored: 0,
+        unknown: u64::from(!context.complete),
+        excluded: 0,
+        state: context.source_state,
+    };
+    let unavailable = if context.complete {
+        ExecutionMetricUnavailableV1::NoEligibleEvidence
+    } else {
+        ExecutionMetricUnavailableV1::CoverageFloorUnmet
+    };
+    for (metric, unit, denominator) in EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1 {
+        if present.contains(&(metric, unit, denominator)) {
+            continue;
+        }
+        measurements.push(measurement(MeasurementInput {
+            metric,
+            unit,
+            denominator,
+            evidence_class: MetricEvidenceClassV1::Measurement,
+            dimensions: Vec::new(),
+            coverage: coverage.clone(),
+            value: None,
+            unavailable: Some(unavailable),
+            context,
+        }));
+    }
 }
 
 pub(super) fn unavailable_model(
@@ -332,6 +384,68 @@ mod descriptor_tests {
                 .iter()
                 .all(|measurement| measurement.value.metric != unsupported)
         );
+    }
+
+    #[test]
+    fn known_empty_projection_keeps_every_descriptor_without_discarding_dimensions() {
+        let horizon = ObservabilityHorizonV1 {
+            since_micros: 0,
+            until_micros: 86_400_000_000,
+        };
+        let rollup =
+            crate::execution_topology_metrics::build_empty_execution_topology_daily_rollup(
+                "project.empty-topology-descriptors",
+                &horizon,
+                horizon.until_micros,
+            )
+            .unwrap();
+        let model = crate::execution_topology_metrics::project_execution_topology_fragments(
+            "project.empty-topology-descriptors",
+            &horizon,
+            horizon.until_micros,
+            &[rollup.fragment],
+        );
+        let expected = EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let actual = model
+            .measurements
+            .iter()
+            .map(|measurement| {
+                (
+                    measurement.value.metric.as_str(),
+                    measurement.value.unit.as_str(),
+                    measurement.value.denominator.as_str(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert!(
+            model.measurements.len() > expected.len(),
+            "the normal projection must retain its dimensional cells"
+        );
+        assert!(model.measurements.iter().all(|measurement| {
+            measurement.value.value.is_none()
+                && measurement.unavailable == Some(ExecutionMetricUnavailableV1::NoEligibleEvidence)
+        }));
+        for metric in [
+            "work_merge_success_ratio",
+            "work_blocked_cause_seconds",
+            "work_rerun_rate",
+            "work_delivery_duplicate_ratio",
+        ] {
+            assert!(
+                model.measurements.iter().any(|measurement| {
+                    measurement.value.metric == metric
+                        && measurement.dimensions.is_empty()
+                        && measurement.value.value.is_none()
+                        && measurement.unavailable
+                            == Some(ExecutionMetricUnavailableV1::NoEligibleEvidence)
+                }),
+                "known empty projection must retain a dimensionless typed absence for {metric}"
+            );
+        }
     }
 }
 

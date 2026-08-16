@@ -39,7 +39,7 @@ mod work_evidence;
 #[path = "work_route_exposure_conformance/work_task_session.rs"]
 mod work_task_session;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
@@ -1029,7 +1029,7 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         })
         .collect::<Vec<_>>();
     let descriptor_identities = |metrics: &Value| {
-        metrics["measurements"]
+        let reported = metrics["measurements"]
             .as_array()
             .expect("topology metrics measurements array")
             .iter()
@@ -1053,7 +1053,13 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
                         .to_owned(),
                 )
             })
-            .collect::<Vec<_>>()
+            .collect::<BTreeSet<_>>();
+        let stable = expected_descriptor_identities
+            .iter()
+            .filter(|identity| reported.contains(*identity))
+            .cloned()
+            .collect::<Vec<_>>();
+        (reported.len(), stable)
     };
 
     let anonymous = agent
@@ -1085,7 +1091,13 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         initial_metrics["horizon"], request["horizon"],
         "{initial_metrics}"
     );
-    let initial_descriptor_identities = descriptor_identities(initial_metrics);
+    let (initial_reported_descriptor_count, initial_descriptor_identities) =
+        descriptor_identities(initial_metrics);
+    assert_eq!(
+        initial_reported_descriptor_count,
+        expected_descriptor_identities.len(),
+        "an empty authorized horizon must not emit an unknown topology metric descriptor: {initial_metrics}"
+    );
     assert_eq!(
         initial_descriptor_identities, expected_descriptor_identities,
         "an empty authorized horizon must retain the complete canonical topology metric descriptor identity: {initial_metrics}"
@@ -1135,7 +1147,13 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         restored_metrics["horizon"], request["horizon"],
         "{restored_metrics}"
     );
-    let restored_descriptor_identities = descriptor_identities(restored_metrics);
+    let (restored_reported_descriptor_count, restored_descriptor_identities) =
+        descriptor_identities(restored_metrics);
+    assert_eq!(
+        restored_reported_descriptor_count,
+        expected_descriptor_identities.len(),
+        "a restarted topology metrics route must not emit an unknown metric descriptor: {restored_metrics}"
+    );
     assert_eq!(
         restored_descriptor_identities, expected_descriptor_identities,
         "a restarted topology metrics route must retain the complete canonical metric descriptor identity: {restored_metrics}"
