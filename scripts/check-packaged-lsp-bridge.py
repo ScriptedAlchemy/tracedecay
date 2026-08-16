@@ -51,7 +51,9 @@ def terminate(process: subprocess.Popen[bytes] | None) -> None:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait(timeout=5)
+        # SIGKILL cannot be refused; wait without a timeout so a slow reap
+        # here can never mask the real failure being propagated.
+        process.wait()
 
 
 def daemon_command(
