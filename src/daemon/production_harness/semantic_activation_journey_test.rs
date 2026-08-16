@@ -519,13 +519,44 @@ async fn search(
     )
 }
 
+/// Proves that semantic execution contributed to the actual source probe,
+/// rather than merely reporting a ready runtime or complete lane.
+pub(super) fn assert_semantic_probe_contribution(
+    payload: &Value,
+    probe_symbol: &str,
+    checkpoint: &str,
+) {
+    let results = payload["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{checkpoint} returned no result list: {payload}"));
+    let probe = results
+        .iter()
+        .find(|result| result["display"]["name"] == json!(probe_symbol))
+        .unwrap_or_else(|| {
+            panic!("{checkpoint} did not return source probe {probe_symbol}: {payload}")
+        });
+    let contributions = probe["candidate"]["contributions"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "{checkpoint} returned probe {probe_symbol} without candidate contributions: {probe}"
+            )
+        });
+    assert!(
+        contributions
+            .iter()
+            .any(|contribution| contribution["retriever"] == json!("semantic")),
+        "{checkpoint} returned probe {probe_symbol} without a semantic contribution: {probe}"
+    );
+}
+
 async fn semantic_runtime_status(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> Value {
     tool_payload(
         &harness
-            .call_tool(project, "tracedecay_runtime", json!({}))
+            .call_tool(project, "tracedecay_runtime", json!({"format": "json"}))
             .await
             .expect("public production runtime status"),
     )["semantic_runtime"]
@@ -688,6 +719,11 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     assert_code_generation_unchanged(&harness, &project, &first_code_id).await;
     let first_query = search(&harness, &project, true).await;
     assert_eq!(first_query["semantic"]["status"], "complete");
+    assert_semantic_probe_contribution(
+        &first_query,
+        "semantic_product_probe",
+        "first semantic activation",
+    );
     assert_eq!(
         first_query["code_generation"],
         json!(first_code.manifest().generation_id)
@@ -769,6 +805,11 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     );
     let second_query = search(&harness, &project, true).await;
     assert_eq!(second_query["semantic"]["status"], "complete");
+    assert_semantic_probe_contribution(
+        &second_query,
+        "semantic_product_probe",
+        "second semantic activation",
+    );
     assert_eq!(
         second_query["code_generation"],
         json!(second_code.manifest().generation_id)
@@ -818,6 +859,11 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     );
     let rolled_back_query = search(&harness, &project, true).await;
     assert_eq!(rolled_back_query["semantic"]["status"], "complete");
+    assert_semantic_probe_contribution(
+        &rolled_back_query,
+        "semantic_product_probe",
+        "semantic rollback",
+    );
     assert_eq!(
         rolled_back_query["code_generation"],
         json!(first_code.manifest().generation_id)
@@ -907,6 +953,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     .await
     .expect("daemon semantic activation recovery did not converge");
     assert_eq!(recovered["semantic"]["status"], "complete");
+    assert_semantic_probe_contribution(&recovered, "semantic_product_probe", "semantic retry");
     assert_eq!(recovered_status["state"], "ready");
     assert_eq!(
         recovered_status["receipt"]["activated_generation"],
