@@ -1,6 +1,8 @@
 /// Operational analyzer-process failure retained for daemon-local reporting.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AnalyzerRuntimeError {
+    #[error("analyzer unavailable")]
+    Unavailable,
     #[error("config error: {message}")]
     Config { message: String },
 }
@@ -14,6 +16,7 @@ impl AnalyzerRuntimeError {
 
     pub fn message(&self) -> &str {
         match self {
+            Self::Unavailable => "analyzer unavailable",
             Self::Config { message } => message,
         }
     }

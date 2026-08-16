@@ -414,6 +414,30 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         };
+        let request = LspSessionOpenRequest {
+            requested_root_uri,
+            workspace_folders,
+            client_revision,
+        };
+        let preflight = {
+            let mut registry = lsp_registry.lock().await;
+            let existing = std::mem::take(&mut *registry);
+            let endpoint = DaemonLspSessionEndpoint::with_registry(
+                AdmittedWorkspaceSessionAdmission {
+                    workspace: workspace.clone(),
+                },
+                existing,
+            );
+            let result = endpoint.preflight_open(&request, now_ms);
+            *registry = endpoint.into_registry();
+            result
+        };
+        if preflight.is_err() {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        }
         let (actor, scope_set_id, scope_set_digest) = match workspace_authority {
             CurrentLspWorkspaceAuthorityV1::Federated(authorized) => {
                 let Ok(Some(actor)) =
@@ -443,11 +467,6 @@ impl DaemonInvocationService {
                 };
                 (actor, None, None)
             }
-        };
-        let request = LspSessionOpenRequest {
-            requested_root_uri,
-            workspace_folders,
-            client_revision,
         };
         let access = {
             let mut registry = lsp_registry.lock().await;
