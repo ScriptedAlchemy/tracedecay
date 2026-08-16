@@ -54,9 +54,18 @@ impl StoreRuntimeRegistry {
             let mut selected = state.entries.values().filter_map(|entry| match entry {
                 RegistryEntry::Ready(ready) if ready.owner.locator().path() == path => ready
                     .owner
-                    .database_authority("close registered runtime by path")
-                    .ok()
-                    .map(|authority| (ready.owner.binding().clone(), authority)),
+                    .database_authority
+                    .as_ref()
+                    .and_then(|authority| {
+                        ready
+                            .owner
+                            .validate_database_write_authority(
+                                authority,
+                                "close registered runtime by path",
+                            )
+                            .ok()
+                            .map(|_| (ready.owner.binding().clone(), authority.clone()))
+                    }),
                 _ => None,
             });
             let first = selected.next();
