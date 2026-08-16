@@ -1567,7 +1567,7 @@ fn manual_branch_artifact_ownership(
     }
 }
 
-pub(crate) fn cleanup_owned_worktree(
+fn cleanup_owned_worktree(
     repo_root: &Path,
     worktree: &Path,
     tracking_ref: &str,
