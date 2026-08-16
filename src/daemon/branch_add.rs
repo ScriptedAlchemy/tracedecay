@@ -144,11 +144,50 @@ async fn activate_and_track_manual_branch(
         .map_err(|error| {
             TraceDecayError::project_route(error.reason_code(), error.retryable(), error.detail())
         })?;
+    let project_root = project_root.to_path_buf();
+    let graph = Arc::clone(graph);
+    let schedulers = schedulers.clone();
+    let branch = branch.to_owned();
+
+    // This operation owns the exact branch lifecycle lease through Git
+    // replacement, scheduler mount, metadata sealing, and rollback. A host
+    // request may be cancelled, but its bounded owner must finish before a
+    // retry can observe or replace this branch's artifacts.
+    tokio::spawn(async move {
+        activate_and_track_manual_branch_owned(
+            project_root,
+            graph,
+            schedulers,
+            branch,
+            data_root,
+            lifecycle,
+        )
+        .await
+    })
+    .await
+    .map_err(|error| {
+        TraceDecayError::project_route(
+            BRANCH_TRACKING_FAILED,
+            true,
+            format!("manual branch lifecycle owner stopped before completion: {error}"),
+        )
+    })?
+}
+
+#[cfg(unix)]
+async fn activate_and_track_manual_branch_owned(
+    project_root: std::path::PathBuf,
+    graph: Arc<crate::tracedecay::TraceDecay>,
+    schedulers: CodeIndexSchedulerRegistryV1,
+    branch: String,
+    data_root: std::path::PathBuf,
+    lifecycle: super::pr_autotrack::ManualBranchLifecycleLeaseV1,
+) -> Result<BranchAddOutcome, TraceDecayError> {
     let activation = super::pr_autotrack::activate_manual_branch_head_with_lifecycle(
-        project_root,
-        graph,
-        Some(schedulers),
-        branch,
+        &project_root,
+        &graph,
+        Some(&schedulers),
+        &branch,
         &lifecycle,
     )
     .await
@@ -156,11 +195,11 @@ async fn activate_and_track_manual_branch(
         TraceDecayError::project_route(error.reason_code(), error.retryable(), error.detail())
     })?;
     let tracked = track_exact_worktree_branch_with_lifecycle(
-        graph,
-        schedulers,
-        project_root,
+        &graph,
+        &schedulers,
+        &project_root,
         &activation.worktree,
-        branch,
+        &branch,
         &lifecycle,
     )
     .await;
@@ -168,9 +207,9 @@ async fn activate_and_track_manual_branch(
         Ok(outcome) => Ok(outcome),
         Err(error) if activation.outcome == BranchAddOutcome::Added => {
             super::pr_autotrack::cleanup_manual_branch_activation(
-                project_root,
+                &project_root,
                 &data_root,
-                schedulers,
+                &schedulers,
                 &activation,
                 &lifecycle,
             )
