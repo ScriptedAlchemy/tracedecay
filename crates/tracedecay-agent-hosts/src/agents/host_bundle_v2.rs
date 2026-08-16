@@ -6641,51 +6641,57 @@ mod tests {
     /// something `reinstall` fixes, or hides something it cannot.
     #[test]
     fn doctor_discovery_mirrors_the_repair_ownership_boundary() {
-        let bundle = manifest(HostKindV1::OpenCode, b"current");
-        let artifact = &bundle.artifacts[0];
-        let owned = Some(artifact.ownership_marker.clone());
-        let foreign = Some(expected_ownership_marker(
-            HostKindV1::Hermes,
-            HostBundleComponentV1::Core,
-        ));
+        for host in [HostKindV1::OpenCode, HostKindV1::CursorDesktop] {
+            let bundle = manifest(host, b"current");
+            let artifact = &bundle.artifacts[0];
+            let owned = Some(artifact.ownership_marker.clone());
+            let foreign = Some(expected_ownership_marker(
+                HostKindV1::Hermes,
+                HostBundleComponentV1::Core,
+            ));
 
-        for (marker, bytes, expected) in [
-            (
-                owned.clone(),
-                b"current".as_slice(),
-                HostBundleComponentDoctorStateV1::Current,
-            ),
-            (
-                owned.clone(),
-                b"drifted".as_slice(),
-                HostBundleComponentDoctorStateV1::Drifted,
-            ),
-            (
-                foreign,
-                b"drifted".as_slice(),
-                HostBundleComponentDoctorStateV1::OwnershipConflict,
-            ),
-            (
-                None,
-                b"drifted".as_slice(),
-                HostBundleComponentDoctorStateV1::OwnershipConflict,
-            ),
-        ] {
-            let mut observed = pre_v2_artifact(artifact, bytes, None);
-            observed.ownership_marker = marker;
-            observed.owned_artifact_digest = observed
-                .ownership_marker
-                .as_ref()
-                .map(|_| Sha256::digest(b"current").into());
+            for (marker, bytes, expected) in [
+                (
+                    owned.clone(),
+                    b"current".as_slice(),
+                    HostBundleComponentDoctorStateV1::Current,
+                ),
+                (
+                    owned.clone(),
+                    b"drifted".as_slice(),
+                    HostBundleComponentDoctorStateV1::Drifted,
+                ),
+                (
+                    foreign.clone(),
+                    b"drifted".as_slice(),
+                    HostBundleComponentDoctorStateV1::OwnershipConflict,
+                ),
+                (
+                    None,
+                    b"drifted".as_slice(),
+                    HostBundleComponentDoctorStateV1::OwnershipConflict,
+                ),
+            ] {
+                let mut observed = pre_v2_artifact(artifact, bytes, None);
+                observed.ownership_marker = marker;
+                observed.owned_artifact_digest = observed
+                    .ownership_marker
+                    .as_ref()
+                    .map(|_| Sha256::digest(b"current").into());
 
-            let state = doctor_artifact_state(&observed, artifact);
-            assert_eq!(state, expected, "observed {observed:?}");
-            assert_eq!(
-                plan_artifact_action(HostBundleLifecycleOpV1::Repair, artifact, Some(&observed))
+                let state = doctor_artifact_state(&observed, artifact);
+                assert_eq!(state, expected, "{host:?}: observed {observed:?}");
+                assert_eq!(
+                    plan_artifact_action(
+                        HostBundleLifecycleOpV1::Repair,
+                        artifact,
+                        Some(&observed)
+                    )
                     .is_err(),
-                state == HostBundleComponentDoctorStateV1::OwnershipConflict,
-                "planning and discovery must refuse the same observations"
-            );
+                    state == HostBundleComponentDoctorStateV1::OwnershipConflict,
+                    "{host:?}: planning and discovery must refuse the same observations"
+                );
+            }
         }
     }
 

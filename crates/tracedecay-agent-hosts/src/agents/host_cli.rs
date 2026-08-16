@@ -116,12 +116,9 @@ fn require_host_cli_from(
     lifecycle: &str,
     path_var: Option<&std::ffi::OsStr>,
 ) -> Result<PathBuf> {
-    resolve_on_path(program, path_var).ok_or_else(|| TraceDecayError::Config {
-        message: format!(
-            "`{program}` binary required for {lifecycle} but was not found on PATH. \
-             TraceDecay drives the host's own plugin commands and never edits host-owned \
-             plugin state directly; install {program} (or add it to PATH) and retry."
-        ),
+    resolve_on_path(program, path_var).ok_or_else(|| TraceDecayError::HostCliUnavailable {
+        program: program.to_string(),
+        lifecycle: lifecycle.to_string(),
     })
 }
 
@@ -428,13 +425,11 @@ mod tests {
         )
         .expect_err("an absent host binary must refuse, never fall back");
 
-        let TraceDecayError::Config { message } = error else {
-            panic!("host CLI absence must surface as a config error");
+        let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
+            panic!("host CLI absence must surface as a typed requirement");
         };
-        assert!(
-            message.contains("`claude` binary required for claude plugin lifecycle"),
-            "the refusal must name the binary and the lifecycle: {message}"
-        );
+        assert_eq!(program, "claude");
+        assert_eq!(lifecycle, "claude plugin lifecycle");
     }
 
     #[cfg(unix)]

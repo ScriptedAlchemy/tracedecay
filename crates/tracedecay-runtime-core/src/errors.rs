@@ -42,6 +42,11 @@ pub enum TraceDecayError {
     Config { message: String },
 
     #[error(
+        "host CLI `{program}` is unavailable for {lifecycle}; install it or add it to PATH and retry"
+    )]
+    HostCliUnavailable { program: String, lifecycle: String },
+
+    #[error(
         "{component} profile schema {found_version:?} is incompatible with required schema \
          {required_version}; reset the profile"
     )]

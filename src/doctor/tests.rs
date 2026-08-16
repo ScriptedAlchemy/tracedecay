@@ -5,6 +5,39 @@ use super::*;
 use crate::display::format_bytes;
 
 #[test]
+fn supported_kimi_and_kiro_absence_reaches_doctor_without_host_directories() {
+    let home = tempfile::tempdir().expect("isolated home");
+    let reported = agents::all_integrations()
+        .into_iter()
+        .filter(|agent| should_run_host_healthcheck(agent.as_ref(), home.path()))
+        .map(|agent| agent.id())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        reported,
+        std::collections::BTreeSet::from(["kimi", "kiro"]),
+        "supported Kimi and Kiro absences must remain visible while unrelated absent hosts stay quiet"
+    );
+
+    let context = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: home.path().to_path_buf(),
+    };
+    let mut counters = DoctorCounters::new();
+    for agent in agents::all_integrations()
+        .into_iter()
+        .filter(|agent| should_run_host_healthcheck(agent.as_ref(), home.path()))
+    {
+        agent.healthcheck(&mut counters, &context);
+    }
+    assert_eq!(
+        counters.issues, 0,
+        "an absent optional host is a truthful Doctor warning, not a broken installation"
+    );
+    assert_eq!(counters.warnings, 2);
+}
+
+#[test]
 fn domain_symbol_rules_warning_is_silent_without_the_file() {
     let project = tempfile::tempdir().expect("temp project root");
     assert_eq!(domain_symbol_rules_warning(project.path()), None);

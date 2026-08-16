@@ -1176,6 +1176,77 @@ mod tests {
     }
 
     #[test]
+    fn clean_cursor_install_update_and_doctor_preserve_user_config() {
+        let home = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let user_config = home.path().join(".cursor/mcp.json");
+        std::fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+        let user_config_bytes = br#"{"mcpServers":{"operator":{"command":"other"}}}"#;
+        std::fs::write(&user_config, user_config_bytes).unwrap();
+
+        let integration = CursorIntegration;
+        let context = InstallContext {
+            home: home.path().to_path_buf(),
+            tracedecay_bin: "/opt/tracedecay-previous".to_string(),
+            tool_permissions: super::super::expected_tool_perms(),
+            project_root: None,
+            dashboard: true,
+        };
+        assert_eq!(
+            integration.update_plugin(&context).unwrap(),
+            UpdatePluginOutcome::NotInstalled,
+            "update must refuse to create a Cursor installation that was never installed"
+        );
+        assert!(!cursor_plugin_install_dir(home.path()).exists());
+
+        install_cursor_plugin(home.path(), &context.tracedecay_bin).unwrap();
+        let plugin_dir = cursor_plugin_install_dir(home.path());
+        assert!(plugin_dir.join("agents/code-explorer.md").is_file());
+        let mcp_path = plugin_dir.join("mcp.json");
+        let installed_mcp: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            installed_mcp["mcpServers"]["tracedecay"]["command"],
+            "/opt/tracedecay-previous"
+        );
+
+        let updated_context = InstallContext {
+            tracedecay_bin: "/opt/tracedecay-next".to_string(),
+            ..context
+        };
+        assert!(matches!(
+            integration.update_plugin(&updated_context).unwrap(),
+            UpdatePluginOutcome::Refreshed(paths) if paths == vec![plugin_dir.clone()]
+        ));
+        let updated_mcp: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            updated_mcp["mcpServers"]["tracedecay"]["command"], "/opt/tracedecay-next",
+            "the in-composer MCP registration must refresh for the new binary"
+        );
+        assert!(plugin_dir.join("agents/code-explorer.md").is_file());
+        assert_eq!(std::fs::read(&user_config).unwrap(), user_config_bytes);
+
+        let before_idempotent_update = std::fs::read(&mcp_path).unwrap();
+        assert!(matches!(
+            integration.update_plugin(&updated_context).unwrap(),
+            UpdatePluginOutcome::Refreshed(paths) if paths == vec![plugin_dir.clone()]
+        ));
+        assert_eq!(std::fs::read(&mcp_path).unwrap(), before_idempotent_update);
+
+        let mut doctor = DoctorCounters::new();
+        integration.healthcheck(
+            &mut doctor,
+            &HealthcheckContext {
+                home: home.path().to_path_buf(),
+                project_path: project.path().to_path_buf(),
+            },
+        );
+        assert_eq!(doctor.issues, 0);
+        assert_eq!(doctor.warnings, 0);
+    }
+
+    #[test]
     fn native_extension_registration_is_receipt_doctor_ready() {
         let tmp = TempDir::new().unwrap();
         assert_eq!(

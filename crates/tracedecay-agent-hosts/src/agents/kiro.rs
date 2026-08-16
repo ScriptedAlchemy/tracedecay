@@ -276,6 +276,14 @@ impl AgentIntegration for KiroIntegration {
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKiro integration\x1b[0m");
+        let host_home = kiro_home(&ctx.home);
+        if !host_home.is_dir() {
+            dc.warn(&format!(
+                "Kiro is not detected at {} — run `tracedecay install --agent kiro` if you use Kiro",
+                kiro_home.display()
+            ));
+            return;
+        }
         let global_server = doctor_check_mcp_config(dc, &ctx.home);
         doctor_check_workspace_mcp_override(
             dc,
@@ -286,6 +294,10 @@ impl AgentIntegration for KiroIntegration {
         doctor_check_steering(dc, &ctx.home);
         doctor_check_managed_agent(dc, &ctx.home);
         doctor_check_default_agent(dc, &ctx.home);
+    }
+
+    fn reports_absence_to_doctor(&self) -> bool {
+        true
     }
 
     fn host_component_registration(
