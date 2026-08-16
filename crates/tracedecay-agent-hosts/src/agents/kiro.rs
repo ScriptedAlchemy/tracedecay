@@ -216,7 +216,9 @@ fn kiro_doctor_installation_state(home: &Path) -> Result<KiroDoctorInstallationS
         ),
     })?;
     if contents.trim().is_empty() {
-        return Ok(KiroDoctorInstallationState::TraceDecayAbsent);
+        return Err(TraceDecayError::Config {
+            message: format!("Kiro MCP config {} is empty", mcp_path.display()),
+        });
     }
     let config: serde_json::Value =
         serde_json::from_str(&contents).map_err(|error| TraceDecayError::Config {

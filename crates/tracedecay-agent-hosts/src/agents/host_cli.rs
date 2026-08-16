@@ -156,7 +156,14 @@ fn candidate_file_names(program: &str) -> Vec<String> {
 fn is_executable_file(path: &Path) -> Result<bool> {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0),
+        Ok(metadata) if !metadata.is_file() => Ok(false),
+        Ok(metadata) if metadata.permissions().mode() & 0o111 != 0 => Ok(true),
+        Ok(_) => Err(TraceDecayError::Config {
+            message: format!(
+                "host CLI candidate `{}` exists but is not executable",
+                path.display()
+            ),
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(TraceDecayError::Io(error)),
     }
@@ -356,13 +363,13 @@ fn resolve_launch_command(program: &Path) -> Result<(PathBuf, Vec<OsString>)> {
         if interpreter.starts_with('-') || interpreter.contains('=') {
             return Ok((program.to_path_buf(), Vec::new()));
         }
-        let interpreter_path = resolve_on_path(interpreter, std::env::var_os("PATH").as_deref())
+        let interpreter_path = resolve_on_path(interpreter, std::env::var_os("PATH").as_deref())?
             .ok_or_else(|| TraceDecayError::Config {
-                message: format!(
-                    "could not resolve env-shebang interpreter `{interpreter}` for `{}` on PATH",
-                    program.display()
-                ),
-            })?;
+            message: format!(
+                "could not resolve env-shebang interpreter `{interpreter}` for `{}` on PATH",
+                program.display()
+            ),
+        })?;
         let interpreter_path =
             std::fs::canonicalize(&interpreter_path).map_err(|error| TraceDecayError::Config {
                 message: format!(
@@ -462,16 +469,24 @@ mod tests {
     #[test]
     fn a_non_executable_file_does_not_satisfy_the_requirement() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("claude"), b"not executable").unwrap();
+        let candidate = dir.path().join("claude");
+        std::fs::write(&candidate, b"not executable").unwrap();
 
+        let error = require_host_cli_from(
+            "claude",
+            "claude plugin lifecycle",
+            Some(dir.path().as_os_str()),
+        )
+        .expect_err("a non-executable PATH candidate must refuse");
+
+        let TraceDecayError::Config { message } = error else {
+            panic!(
+                "a present non-executable candidate must not become HostCliUnavailable: {error}"
+            );
+        };
         assert!(
-            require_host_cli_from(
-                "claude",
-                "claude plugin lifecycle",
-                Some(dir.path().as_os_str()),
-            )
-            .is_err(),
-            "a non-executable file must not be mistaken for the host CLI"
+            message.contains(&candidate.display().to_string()),
+            "the typed failure must identify the unusable PATH candidate: {message}"
         );
     }
 
