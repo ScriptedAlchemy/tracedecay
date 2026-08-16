@@ -640,6 +640,37 @@ mod tests {
     }
 
     #[test]
+    fn analyzer_initialize_response_denies_omitted_or_false_semantic_methods() {
+        let upstream = UpstreamCapabilities::from_initialize_response(&json!({
+            "capabilities": {
+                "hoverProvider": true,
+                "documentSymbolProvider": { "label": "document symbols" },
+                "definitionProvider": false,
+                "referencesProvider": false,
+                "renameProvider": false
+            }
+        }));
+
+        assert_eq!(
+            upstream.semantic,
+            [
+                SemanticCapability::DocumentSymbol,
+                SemanticCapability::Hover
+            ]
+            .into_iter()
+            .collect()
+        );
+
+        let effective =
+            negotiate_capabilities(&full_client(), &GatewayCapabilities::default(), &upstream);
+        assert!(effective.supports_semantic(SemanticCapability::DocumentSymbol));
+        assert!(effective.supports_semantic(SemanticCapability::Hover));
+        assert!(!effective.supports_semantic(SemanticCapability::Definition));
+        assert!(!effective.supports_semantic(SemanticCapability::References));
+        assert!(!effective.supports_semantic(SemanticCapability::RenameCandidate));
+    }
+
+    #[test]
     fn managed_diagnostics_do_not_require_an_upstream_diagnostic_provider() {
         let effective = negotiate_capabilities(
             &full_client(),

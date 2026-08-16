@@ -2114,12 +2114,32 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": 405,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": document_uri },
+                "position": { "line": 0, "character": 0 },
+            },
+        }),
+    )
+    .await;
+    let undeclared_standard_method = poll_lsp_response(&mut session, 405).await;
+    assert_eq!(undeclared_standard_method["error"]["code"], -32601);
+    assert_eq!(
+        undeclared_standard_method["error"]["data"]["reason"], "capabilityNotNegotiated",
+        "a standard method the client did not negotiate must stay denied: {undeclared_standard_method}"
+    );
+
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 406,
             "method": "tracedecay/arbitrary",
             "params": {},
         }),
     )
     .await;
-    let arbitrary_method = poll_lsp_response(&mut session, 405).await;
+    let arbitrary_method = poll_lsp_response(&mut session, 406).await;
     assert_eq!(arbitrary_method["error"]["code"], -32601);
     assert_eq!(
         arbitrary_method["error"]["data"]["reason"],
@@ -2130,7 +2150,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         &mut session,
         serde_json::json!({
             "jsonrpc": "2.0",
-            "id": 406,
+            "id": 407,
             "method": "tracedecay/context",
             "params": {
                 "kind": "diagnostics",
@@ -2139,7 +2159,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         }),
     )
     .await;
-    let arbitrary_payload = poll_lsp_response(&mut session, 406).await;
+    let arbitrary_payload = poll_lsp_response(&mut session, 407).await;
     assert_eq!(arbitrary_payload["error"]["code"], -32602);
 
     let mut related_lsp_handles = Vec::new();
