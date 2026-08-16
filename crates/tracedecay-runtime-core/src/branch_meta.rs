@@ -12,7 +12,7 @@ use tracedecay_domain::BranchGraphPublicationEpochV1;
 use crate::storage::{BRANCH_META_FILENAME, PrivateStoreIo};
 
 /// Metadata for a single tracked branch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchEntry {
     /// Relative path to the database serving this branch. Branches tracked on
     /// the single project graph store reference the canonical main database
@@ -62,6 +62,42 @@ pub struct BranchGraphSourceV1 {
     pub worktree_root: String,
     pub reference: String,
     pub source_oid: String,
+}
+
+/// Exact graph provenance before the metadata publisher assigns its monotonic
+/// publication epoch. Callers must derive this from one Git snapshot rather
+/// than composing fields from separate scheduler observations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchGraphSourceDraftV1 {
+    pub project_id: String,
+    pub repository_id: String,
+    pub worktree_id: String,
+    pub worktree_root: String,
+    pub reference: String,
+    pub source_oid: String,
+}
+
+impl BranchGraphSourceV1 {
+    #[must_use]
+    pub fn matches_draft(&self, draft: &BranchGraphSourceDraftV1) -> bool {
+        self.project_id == draft.project_id
+            && self.repository_id == draft.repository_id
+            && self.worktree_id == draft.worktree_id
+            && self.worktree_root == draft.worktree_root
+            && self.reference == draft.reference
+            && self.source_oid == draft.source_oid
+    }
+}
+
+/// Result of the locked graph-source compare-and-swap publisher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchGraphSourcePublishOutcomeV1 {
+    Published(BranchGraphSourceV1),
+    AlreadyPublished(BranchGraphSourceV1),
+    CompareAndSwapMiss {
+        observed: Option<BranchGraphSourceV1>,
+    },
+    BranchNotTracked,
 }
 
 /// Top-level branch metadata for a project.
@@ -369,24 +405,76 @@ pub fn update_synced_timestamp(tracedecay_dir: &Path, branch: &str) {
     update_synced_timestamp_with(tracedecay_dir, branch, || {});
 }
 
-/// Atomically publishes the exact worktree/ref/OID identity that produced a
-/// tracked branch graph.
+/// Atomically allocates and publishes the exact worktree/ref/OID identity
+/// that produced a tracked branch graph.
+///
+/// The expected source is a compare-and-swap precondition: `None` means the
+/// tracked entry must still be unpublished. Epoch allocation happens only
+/// after that precondition succeeds while holding the shared branch lock, so
+/// concurrent branch publications cannot reuse an epoch or overwrite newer
+/// provenance.
 pub fn publish_graph_source(
     tracedecay_dir: &Path,
     branch: &str,
-    source: BranchGraphSourceV1,
-) -> std::io::Result<bool> {
+    expected: Option<&BranchGraphSourceV1>,
+    draft: BranchGraphSourceDraftV1,
+) -> std::io::Result<BranchGraphSourcePublishOutcomeV1> {
     let _branch_lock = crate::branch::acquire_branch_lock_blocking(tracedecay_dir)
         .map_err(std::io::Error::other)?;
     let Some(mut meta) = load_branch_meta(tracedecay_dir) else {
-        return Ok(false);
+        return Ok(BranchGraphSourcePublishOutcomeV1::BranchNotTracked);
     };
-    if !meta.is_tracked(branch) {
-        return Ok(false);
+    let Some(entry) = meta.branches.get(branch) else {
+        return Ok(BranchGraphSourcePublishOutcomeV1::BranchNotTracked);
+    };
+    let observed = entry.graph_source.clone();
+    if observed.as_ref() != expected {
+        return Ok(BranchGraphSourcePublishOutcomeV1::CompareAndSwapMiss { observed });
     }
+    if let Some(source) = observed.filter(|source| source.matches_draft(&draft)) {
+        return Ok(BranchGraphSourcePublishOutcomeV1::AlreadyPublished(source));
+    }
+    let last_epoch = meta
+        .branches
+        .values()
+        .filter_map(|entry| entry.graph_source.as_ref())
+        .map(|source| source.publication_epoch.get())
+        .max()
+        .unwrap_or(0);
+    let epoch = last_epoch.checked_add(1).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "branch graph publication epoch is exhausted",
+        )
+    })?;
+    let publication_epoch = BranchGraphPublicationEpochV1::new(epoch).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("branch graph publication epoch is invalid: {error}"),
+        )
+    })?;
+    let source = BranchGraphSourceV1 {
+        publication_epoch,
+        project_id: draft.project_id,
+        repository_id: draft.repository_id,
+        worktree_id: draft.worktree_id,
+        worktree_root: draft.worktree_root,
+        reference: draft.reference,
+        source_oid: draft.source_oid,
+    };
     meta.publish_graph_source(branch, source);
     save_branch_meta(tracedecay_dir, &meta)?;
-    Ok(true)
+    Ok(BranchGraphSourcePublishOutcomeV1::Published(
+        meta.branches
+            .get(branch)
+            .and_then(|entry| entry.graph_source.clone())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "branch graph source publication disappeared before commit",
+                )
+            })?,
+    ))
 }
 
 fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock: impl FnOnce()) {
@@ -645,7 +733,22 @@ mod tests {
             reference: "refs/heads/main".to_owned(),
             source_oid: "a".repeat(40),
         };
-        assert!(publish_graph_source(dir.path(), "main", source.clone()).unwrap());
+        let draft = BranchGraphSourceDraftV1 {
+            project_id: source.project_id.clone(),
+            repository_id: source.repository_id.clone(),
+            worktree_id: source.worktree_id.clone(),
+            worktree_root: source.worktree_root.clone(),
+            reference: source.reference.clone(),
+            source_oid: source.source_oid.clone(),
+        };
+        assert_eq!(
+            publish_graph_source(dir.path(), "main", None, draft.clone()).unwrap(),
+            BranchGraphSourcePublishOutcomeV1::Published(source.clone())
+        );
+        assert_eq!(
+            publish_graph_source(dir.path(), "main", Some(&source), draft).unwrap(),
+            BranchGraphSourcePublishOutcomeV1::AlreadyPublished(source.clone())
+        );
         assert_eq!(
             load_branch_meta(dir.path())
                 .unwrap()
@@ -675,8 +778,8 @@ mod tests {
             publish_graph_source(
                 &first_dir,
                 "feature/one",
-                BranchGraphSourceV1 {
-                    publication_epoch: BranchGraphPublicationEpochV1::new(1).unwrap(),
+                None,
+                BranchGraphSourceDraftV1 {
                     project_id: "project.fixture".to_owned(),
                     repository_id: "repository.fixture".to_owned(),
                     worktree_id: "worktree.one".to_owned(),
@@ -691,8 +794,8 @@ mod tests {
             publish_graph_source(
                 &second_dir,
                 "feature/two",
-                BranchGraphSourceV1 {
-                    publication_epoch: BranchGraphPublicationEpochV1::new(1).unwrap(),
+                None,
+                BranchGraphSourceDraftV1 {
                     project_id: "project.fixture".to_owned(),
                     repository_id: "repository.fixture".to_owned(),
                     worktree_id: "worktree.two".to_owned(),
@@ -703,8 +806,14 @@ mod tests {
             )
         });
 
-        assert!(first.join().unwrap().unwrap());
-        assert!(second.join().unwrap().unwrap());
+        assert!(matches!(
+            first.join().unwrap().unwrap(),
+            BranchGraphSourcePublishOutcomeV1::Published(_)
+        ));
+        assert!(matches!(
+            second.join().unwrap().unwrap(),
+            BranchGraphSourcePublishOutcomeV1::Published(_)
+        ));
 
         let meta = load_branch_meta(dir.path()).unwrap();
         let first_epoch = meta.branches["feature/one"]
