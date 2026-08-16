@@ -5,8 +5,8 @@ use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, Verifie
 
 use super::capacity::drain_and_close_physical;
 use super::{
-    EvictingRuntime, RegistryEntry, StoreRuntimeHandle, StoreRuntimeKey, StoreRuntimeRegistry,
-    StoreRuntimeRegistryFailure,
+    EvictingRuntime, RegistryEntry, StoreRuntimeKey, StoreRuntimeOwnerAttachment,
+    StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
 };
 use crate::db::DatabaseAuthority;
 
@@ -41,7 +41,7 @@ impl ClosedStoreRuntime {
 struct CloseReservation {
     key: StoreRuntimeKey,
     attempt: u64,
-    handle: StoreRuntimeHandle,
+    owner: Arc<StoreRuntimeOwnerAttachment>,
 }
 
 impl StoreRuntimeRegistry {
@@ -52,9 +52,11 @@ impl StoreRuntimeRegistry {
         let selected = {
             let state = self.lock_state();
             let mut selected = state.entries.values().filter_map(|entry| match entry {
-                RegistryEntry::Ready(ready) if ready.handle.locator().path() == path => {
-                    Some(ready.handle.clone())
-                }
+                RegistryEntry::Ready(ready) if ready.owner.locator().path() == path => ready
+                    .owner
+                    .database_authority("close registered runtime by path")
+                    .ok()
+                    .map(|authority| (ready.owner.binding().clone(), authority)),
                 _ => None,
             });
             let first = selected.next();
@@ -69,12 +71,9 @@ impl StoreRuntimeRegistry {
             }
             first
         };
-        let Some(handle) = selected else {
+        let Some((binding, authority)) = selected else {
             return Ok(None);
         };
-        let binding = handle.binding().clone();
-        let authority = handle.database_authority("close registered runtime by path")?;
-        drop(handle);
         self.close_exact(&binding, &authority).await.map(Some)
     }
 
@@ -121,7 +120,7 @@ impl StoreRuntimeRegistry {
         // join handle detaches the task, so physical close still reaches the
         // matching lifecycle transition and `finish_exact_close`.
         tokio::spawn(async move {
-            let physical = reservation.handle.clone();
+            let physical = reservation.owner.clone();
             let mut outcome =
                 tokio::task::spawn_blocking(move || drain_and_close_physical(&physical))
                     .await
@@ -134,7 +133,7 @@ impl StoreRuntimeRegistry {
             if outcome.is_ok() {
                 outcome = match stale_opened_file_identity {
                     Some(expected_identity)
-                        if reservation.handle.opened_file_identity() == Some(expected_identity) =>
+                        if reservation.owner.opened_file_identity() == Some(expected_identity) =>
                     {
                         Ok(())
                     }
@@ -143,14 +142,14 @@ impl StoreRuntimeRegistry {
                         message: "retained opened identity changed during stale close".to_owned(),
                     }),
                     None => reservation
-                        .handle
+                        .owner
                         .validate_opened_file_identity("complete exact registered runtime close")
                         .map(|_| ()),
                 };
             }
             if outcome.is_ok() {
                 outcome = reservation
-                    .handle
+                    .owner
                     .runtime()
                     .transition(RuntimeMaintenanceStateV1::Closed)
                     .map_err(
@@ -160,7 +159,7 @@ impl StoreRuntimeRegistry {
                     );
             } else {
                 let _ = reservation
-                    .handle
+                    .owner
                     .runtime()
                     .transition(RuntimeMaintenanceStateV1::Faulted);
             }
@@ -205,15 +204,15 @@ impl StoreRuntimeRegistry {
                 });
             }
         };
-        if ready.handle.binding() != expected {
-            let actual = ready.handle.binding().clone();
+        if ready.owner.binding() != expected {
+            let actual = ready.owner.binding().clone();
             state.entries.insert(key, RegistryEntry::Ready(ready));
             return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
                 expected: Box::new(expected.clone()),
                 actual: Box::new(actual),
             });
         }
-        let retained_authority = ready.handle.inner.database_authority.as_ref();
+        let retained_authority = ready.owner.database_authority.as_ref();
         let authority_matches = retained_authority.is_some_and(|retained| {
             retained.token() == authority.token()
                 && retained.role() == authority.role()
@@ -237,7 +236,7 @@ impl StoreRuntimeRegistry {
                     message: error.to_string(),
                 });
             }
-            if ready.handle.opened_file_identity() != Some(expected_identity) {
+            if ready.owner.opened_file_identity() != Some(expected_identity) {
                 state.entries.insert(key, RegistryEntry::Ready(ready));
                 return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "reserve stale registered runtime close",
@@ -246,19 +245,21 @@ impl StoreRuntimeRegistry {
                 });
             }
         } else if let Err(failure) = ready
-            .handle
+            .owner
             .validate_database_write_authority(authority, "reserve exact registered runtime close")
         {
             state.entries.insert(key, RegistryEntry::Ready(ready));
             return Err(failure);
         }
 
-        let external_handles = Arc::strong_count(&ready.handle.inner).saturating_sub(1);
-        let external_runtime_references =
-            Arc::strong_count(ready.handle.runtime()).saturating_sub(1);
-        let client_leases = ready.handle.runtime().health_snapshot().client_leases;
+        // Public leases cannot reveal a raw runtime or a reference count. The
+        // canonical client/operation counters are the retirement authority,
+        // including database facades that retain a client lease.
+        let external_handles = 0;
+        let external_runtime_references = 0;
+        let client_leases = ready.owner.runtime().health_snapshot().client_leases;
         if external_handles != 0 || external_runtime_references != 0 || client_leases != 0 {
-            let binding = ready.handle.binding().clone();
+            let binding = ready.owner.binding().clone();
             state.entries.insert(key, RegistryEntry::Ready(ready));
             return Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
                 binding: Box::new(binding),
@@ -282,18 +283,18 @@ impl StoreRuntimeRegistry {
                 message: error.to_string(),
             });
         }
-        let handle = ready.handle;
+        let owner = ready.owner;
         state.entries.insert(
             key.clone(),
             RegistryEntry::Evicting(EvictingRuntime {
                 attempt,
-                handle: handle.clone(),
+                owner: owner.clone(),
             }),
         );
         Ok(CloseReservation {
             key,
             attempt,
-            handle,
+            owner,
         })
     }
 
@@ -303,11 +304,10 @@ impl StoreRuntimeRegistry {
         outcome: Result<(), StoreRuntimeRegistryFailure>,
     ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
         if outcome.is_err()
-            && reservation.handle.runtime().maintenance_state()
-                != RuntimeMaintenanceStateV1::Faulted
+            && reservation.owner.runtime().maintenance_state() != RuntimeMaintenanceStateV1::Faulted
         {
             let _ = reservation
-                .handle
+                .owner
                 .runtime()
                 .transition(RuntimeMaintenanceStateV1::Faulted);
         }
@@ -316,7 +316,7 @@ impl StoreRuntimeRegistry {
         let evicting = match entry {
             Some(RegistryEntry::Evicting(evicting))
                 if evicting.attempt == reservation.attempt
-                    && evicting.handle.binding() == reservation.handle.binding() =>
+                    && evicting.owner.binding() == reservation.owner.binding() =>
             {
                 evicting
             }
@@ -337,7 +337,7 @@ impl StoreRuntimeRegistry {
                 reservation.key,
                 RegistryEntry::Evicting(EvictingRuntime {
                     attempt: evicting.attempt,
-                    handle: evicting.handle,
+                    owner: evicting.owner,
                 }),
             );
             return Err(failure);
@@ -346,15 +346,15 @@ impl StoreRuntimeRegistry {
             && state
                 .profile_authorities
                 .get(reservation.key.shard_id())
-                .is_some_and(|binding| binding == reservation.handle.binding())
+                .is_some_and(|binding| binding == reservation.owner.binding())
         {
             state.profile_authorities.remove(reservation.key.shard_id());
         }
         let proof = ClosedStoreRuntime {
-            binding: reservation.handle.binding().clone(),
-            verified_locator: reservation.handle.locator().verified().clone(),
-            path: reservation.handle.locator().path().to_path_buf(),
-            opened_file_identity: reservation.handle.inner.opened_file_identity,
+            binding: reservation.owner.binding().clone(),
+            verified_locator: reservation.owner.locator().verified().clone(),
+            path: reservation.owner.locator().path().to_path_buf(),
+            opened_file_identity: reservation.owner.opened_file_identity().unwrap_or_default(),
         };
         drop(state);
         drop(evicting);
@@ -457,8 +457,8 @@ mod tests {
         path: PathBuf,
     ) -> (
         StoreRuntimeRegistry,
-        StoreRuntimeHandle,
-        StoreRuntimeHandle,
+        StoreRuntimeClientLease,
+        StoreRuntimeClientLease,
         DatabaseAuthority,
     ) {
         let path = seed_final_graph_db(path).await;
@@ -880,7 +880,7 @@ mod tests {
         assert!(matches!(
             entry,
             Some(RegistryEntry::Evicting(evicting))
-                if evicting.handle.runtime().maintenance_state()
+                if evicting.owner.runtime().maintenance_state()
                     == RuntimeMaintenanceStateV1::Faulted
         ));
         drop(state);

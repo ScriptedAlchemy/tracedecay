@@ -196,7 +196,7 @@ pub(super) fn registry(
 pub(super) async fn open_published(
     registry: &StoreRuntimeRegistry,
     request: StoreRuntimeOpenRequest,
-) -> StoreRuntimeHandle {
+) -> StoreRuntimeClientLease {
     match registry.open(request).await {
         StoreRuntimeOpenResult::Published(handle) => handle,
         other @ StoreRuntimeOpenResult::Failed(_) => panic!("open failed: {other:?}"),

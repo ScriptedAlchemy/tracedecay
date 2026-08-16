@@ -87,6 +87,35 @@ async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
 }
 
 #[tokio::test]
+async fn each_open_waiter_receives_an_independent_client_token_while_clones_share_one() {
+    let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    publisher.block.store(true, Ordering::SeqCst);
+    let request = project_request("project.client-tokens", &pin);
+    let first = registry.begin_or_join_open(&request);
+    wait_for_calls(&publisher.calls, 2).await;
+    let second = registry.begin_or_join_open(&request);
+    publisher.release.notify_one();
+
+    let first = match first.wait().await {
+        StoreRuntimeOpenResult::Published(lease) => lease,
+        StoreRuntimeOpenResult::Failed(failure) => panic!("first open failed: {failure:?}"),
+    };
+    let second = match second.wait().await {
+        StoreRuntimeOpenResult::Published(lease) => lease,
+        StoreRuntimeOpenResult::Failed(failure) => panic!("second open failed: {failure:?}"),
+    };
+    let first_clone = first.clone();
+
+    assert_eq!(first.health_snapshot().client_leases, 2);
+    drop(first);
+    assert_eq!(second.health_snapshot().client_leases, 2);
+    drop(first_clone);
+    assert_eq!(second.health_snapshot().client_leases, 1);
+    drop(second);
+}
+
+#[tokio::test]
 async fn identity_bound_open_rejects_foreign_attachment_before_registry_publication() {
     let (registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;

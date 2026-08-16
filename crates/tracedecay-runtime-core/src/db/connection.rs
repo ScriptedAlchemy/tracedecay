@@ -12,7 +12,7 @@ use tracedecay_store::{
 // concrete handle rather than an erased port.
 use crate::db::engine::{Connection, ReadSnapshot, Transaction, TransactionBehavior};
 use crate::errors::{Result, TraceDecayError};
-use crate::store_runtime::registry::StoreRuntimeHandle;
+use crate::store_runtime::registry::StoreRuntimeClientLease;
 
 use super::{DatabaseAuthority, DatabaseAuthorityRole};
 

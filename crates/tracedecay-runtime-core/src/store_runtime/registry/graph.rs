@@ -19,6 +19,7 @@ pub struct CanonicalGraphStoreLeaseV1 {
     binding: StoreRuntimeBindingV1,
     verified_locator: VerifiedStoreLocatorV1,
     canonical_path: PathBuf,
+    lease_token: u64,
 }
 
 /// One exact code scope routed through its owning project graph runtime.
@@ -96,6 +97,7 @@ impl fmt::Debug for CanonicalGraphStoreLeaseV1 {
             .field("binding", &self.binding)
             .field("verified_locator", &self.verified_locator)
             .field("canonical_path", &self.canonical_path)
+            .field("lease_token", &self.lease_token)
             .finish_non_exhaustive()
     }
 }
@@ -106,6 +108,7 @@ impl Drop for CanonicalGraphStoreLeaseV1 {
             &self.binding,
             &self.verified_locator,
             &self.canonical_path,
+            self.lease_token,
         );
     }
 }
@@ -179,6 +182,12 @@ impl StoreRuntimeRegistry {
             });
         }
         let runtime_binding = state.entries.get(&key).map(entry_binding).cloned();
+        let lease_token = state.next_graph_lease_token.checked_add(1).ok_or(
+            StoreRuntimeRegistryFailure::GraphLeaseTokenExhausted {
+                key: Box::new(key.clone()),
+            },
+        )?;
+        state.next_graph_lease_token = lease_token;
         let binding = if let Some(retained) = state.graph_publications.get_mut(&key) {
             if let Some(runtime) = runtime_binding.as_ref()
                 && runtime != &retained.binding
@@ -197,11 +206,7 @@ impl StoreRuntimeRegistry {
                     resolved_path: resolved.path().to_path_buf(),
                 });
             }
-            retained.leases = retained.leases.checked_add(1).ok_or_else(|| {
-                StoreRuntimeRegistryFailure::GraphLeaseCountExhausted {
-                    binding: Box::new(retained.binding.clone()),
-                }
-            })?;
+            retained.lease_tokens.insert(lease_token);
             retained.binding.clone()
         } else {
             let binding = match runtime_binding {
@@ -218,7 +223,7 @@ impl StoreRuntimeRegistry {
                     binding: binding.clone(),
                     verified_locator: resolved.verified().clone(),
                     canonical_path: resolved.path().to_path_buf(),
-                    leases: 1,
+                    lease_tokens: [lease_token].into_iter().collect(),
                 },
             );
             binding
@@ -229,6 +234,7 @@ impl StoreRuntimeRegistry {
             binding,
             verified_locator: resolved.verified().clone(),
             canonical_path: resolved.path().to_path_buf(),
+            lease_token,
         }))
     }
 
@@ -237,6 +243,7 @@ impl StoreRuntimeRegistry {
         binding: &StoreRuntimeBindingV1,
         verified_locator: &VerifiedStoreLocatorV1,
         canonical_path: &Path,
+        lease_token: u64,
     ) -> bool {
         let key = StoreRuntimeKey::from_binding(binding);
         let mut state = self.lock_state();
@@ -249,15 +256,14 @@ impl StoreRuntimeRegistry {
         {
             return false;
         }
-        if retained.leases == 1 {
+        if !retained.lease_tokens.remove(&lease_token) {
+            return false;
+        }
+        if retained.lease_tokens.is_empty() {
             state.graph_publications.remove(&key);
             return true;
         }
-        if retained.leases > 1 {
-            retained.leases -= 1;
-            return true;
-        }
-        false
+        true
     }
 
     #[cfg(test)]
@@ -269,8 +275,8 @@ impl StoreRuntimeRegistry {
 fn entry_binding(entry: &RegistryEntry) -> &StoreRuntimeBindingV1 {
     match entry {
         RegistryEntry::Opening(opening) => &opening.binding,
-        RegistryEntry::Ready(ready) => ready.handle.binding(),
-        RegistryEntry::Evicting(evicting) => evicting.handle.binding(),
+        RegistryEntry::Ready(ready) => ready.owner.binding(),
+        RegistryEntry::Evicting(evicting) => evicting.owner.binding(),
     }
 }
 

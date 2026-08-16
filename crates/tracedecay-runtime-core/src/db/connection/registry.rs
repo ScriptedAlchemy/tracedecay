@@ -9,7 +9,7 @@ use crate::errors::TraceDecayError;
 use super::memory_graph_reconciliation::{
     MemoryGraphReconciliationCoordinatorV1, ProjectMemoryReconciliationTelemetryV1,
 };
-use crate::store_runtime::registry::StoreRuntimeHandle;
+use crate::store_runtime::registry::{DatabaseRuntimeAttachment, StoreRuntimeClientLease};
 
 pub(super) struct DatabaseInner {
     /// Reader-only channel exposed through the retained database facade.
@@ -20,7 +20,7 @@ pub(super) struct DatabaseInner {
     /// Retains the registry-owned physical runtime. The registry remains the
     /// sole lifecycle owner; this facade never extracts or reopens its
     /// attachment.
-    pub(super) _runtime: StoreRuntimeHandle,
+    pub(super) _runtime: DatabaseRuntimeAttachment,
     pub(super) writable: bool,
     /// Descriptor-derived identity reported by the physical attachment.
     pub(super) opened_file_identity: u64,
@@ -47,11 +47,12 @@ impl DatabaseInner {
     /// Publishes an already-open canonical registry runtime without reopening
     /// the `SQLite` path.
     pub(super) fn publish(
-        runtime: StoreRuntimeHandle,
+        runtime: StoreRuntimeClientLease,
         writable: bool,
         authority: Option<DatabaseAuthority>,
         slot: Option<DatabaseSlot>,
     ) -> crate::errors::Result<Self> {
+        let runtime = runtime.into_database_attachment();
         let opened_file_identity = runtime.opened_file_identity().ok_or_else(|| {
             database_registry_error(
                 "publish canonical database runtime",
