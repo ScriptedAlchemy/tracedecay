@@ -331,21 +331,29 @@ pub(super) async fn production_project_server(
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open owners require an authoritative project identity".to_owned(),
         })?;
-    let resolution = store_administration
-        .project_servers()
-        .lock()
-        .await
-        .bind_or_insert_route_bounded(
+    let resolution = {
+        let mut servers = store_administration.project_servers().lock().await;
+        servers.bind_or_insert_route_bounded(
             route,
             key.clone(),
             core_candidate,
             MAX_CACHED_PROJECT_SERVERS,
             |server| Arc::strong_count(server) > 1,
-        );
-    let Some((mut resolved, inserted)) = resolution else {
+        )
+    };
+    let Some((mut resolved, inserted, retired)) = resolution else {
         route_registered.store(false, Ordering::Release);
         return Err(project_server_capacity_error());
     };
+    for (retired_key, retired_server) in retired {
+        schedule_project_server_retirement(
+            store_administration,
+            retired_key.owner,
+            vec![retired_server],
+            None,
+        )
+        .await;
+    }
     if !inserted {
         route_registered.store(false, Ordering::Release);
     } else {
