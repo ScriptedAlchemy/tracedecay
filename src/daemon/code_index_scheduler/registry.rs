@@ -42,6 +42,20 @@ pub(super) use scope_identity::{latest_matches_scope, latest_matches_scope_ident
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 
+#[cfg(test)]
+struct ColdMountFinalCommitGateV1 {
+    project_root: PathBuf,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+fn cold_mount_final_commit_gate() -> &'static Mutex<Option<ColdMountFinalCommitGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<Option<ColdMountFinalCommitGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(None))
+}
+
 mod resident_memory;
 pub(super) mod watch_ingress;
 
@@ -302,6 +316,48 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+    }
+
+    #[cfg(test)]
+    pub(super) async fn pause_next_cold_mount_before_final_commit(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let mut gate = cold_mount_final_commit_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            gate.is_none(),
+            "only one cold mount final-commit gate may be armed at a time"
+        );
+        *gate = Some(ColdMountFinalCommitGateV1 {
+            project_root,
+            entered,
+            release,
+        });
+        (entered_observed, released)
+    }
+
+    #[cfg(test)]
+    async fn wait_for_cold_mount_final_commit_gate(project_root: &Path) {
+        let gate = {
+            let mut armed = cold_mount_final_commit_gate()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let matches_root = armed
+                .as_ref()
+                .is_some_and(|gate| gate.project_root == project_root);
+            if matches_root { armed.take() } else { None }
+        };
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.await;
+        }
     }
 
     /// Construct a registry with an explicit background-reconcile permit count so
@@ -980,10 +1036,18 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_repository_id = repository_id.clone();
         let worker_worktree_id = worktree_id.clone();
         let worker_graph_activation = graph_activation.clone();
+        #[cfg(test)]
+        Self::wait_for_cold_mount_final_commit_gate(&project_root).await;
         // Wait for the final map owner before creating its worker. Cancellation
         // while waiting leaves no task behind; once this lock is acquired the
         // spawn and insertion below contain no await point, so the registry is
         // the sole owner before the worker can outlive this mount call.
+        let retiring = self.retiring.lock().await;
+        if retiring.contains_key(&project_root) {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler owner is still retiring".to_owned(),
+            ));
+        }
         let mut mounted = self.mounted.lock().await;
         let at_capacity = mounted.len() >= self.max_worktrees;
         let entry = match mounted.entry(project_root) {
