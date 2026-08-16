@@ -900,14 +900,19 @@ async fn activate_manual_branch_with_administration(
     }
     let artifacts = ManualBranchArtifactsV1::for_branch(data_root, branch);
     let worktree = artifacts.worktree.clone();
-    if worktree.is_dir()
-        && schedulers.is_worktree_mounted(&worktree).await
-        && manual_branch_artifacts_match(
+    if worktree.try_exists().map_err(|error| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot inspect manual worktree '{}': {error}",
+            worktree.display()
+        ))
+    })? && schedulers.is_worktree_mounted(&worktree).await
+        && manual_branch_artifacts_match_off_runtime(
             repo_root,
             &artifacts,
             &head_sha,
-            administration.command_control,
+            administration.command_control.clone(),
         )
+        .await?
     {
         return Ok(ManualBranchActivation {
             branch: branch.to_string(),
@@ -919,12 +924,18 @@ async fn activate_manual_branch_with_administration(
 
     let tracking_ref = artifacts.tracking_ref.clone();
     let label = artifacts.label.clone();
-    if worktree.exists() {
-        let replacement_head = manual_branch_owned_head(
+    if worktree.try_exists().map_err(|error| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot inspect manual worktree '{}': {error}",
+            worktree.display()
+        ))
+    })? {
+        let replacement_head = manual_branch_owned_head_off_runtime(
             repo_root,
             &artifacts,
-            administration.command_control,
+            administration.command_control.clone(),
         )
+        .await?
         .ok_or_else(|| {
             ManualBranchActivationError::activation_failed(format!(
                 "existing manual worktree '{}' does not prove ownership for branch '{branch}'",
@@ -1218,7 +1229,7 @@ pub(crate) async fn cleanup_manual_branch_retirement(
             "manual branch retirement cleanup task did not complete: {error}"
         ))
     })?;
-    if !cleaned {
+    if !cleaned? {
         return Err(ManualBranchActivationError::activation_failed(format!(
             "manual artifacts for branch '{branch}' changed before exact retirement"
         )));
@@ -1293,7 +1304,7 @@ async fn cleanup_owned_worktree_off_runtime(
         ManualBranchActivationError::activation_failed(format!(
             "manual branch cleanup task did not complete: {error}"
         ))
-    })
+    })?
 }
 
 async fn manual_branch_artifact_ownership_off_runtime(
@@ -1324,7 +1335,45 @@ async fn manual_branch_artifact_ownership_off_runtime(
         ManualBranchActivationError::activation_failed(format!(
             "manual branch ownership check task did not complete: {error}"
         ))
+    })?
+}
+
+async fn manual_branch_artifacts_match_off_runtime(
+    repo_root: &Path,
+    artifacts: &ManualBranchArtifactsV1,
+    expected_head: &str,
+    command_control: PrCommandControl,
+) -> std::result::Result<bool, ManualBranchActivationError> {
+    let repo_root = repo_root.to_path_buf();
+    let artifacts = artifacts.clone();
+    let expected_head = expected_head.to_owned();
+    tokio::task::spawn_blocking(move || {
+        manual_branch_artifacts_match(&repo_root, &artifacts, &expected_head, &command_control)
     })
+    .await
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch exactness inspection task did not complete: {error}"
+        ))
+    })?
+}
+
+async fn manual_branch_owned_head_off_runtime(
+    repo_root: &Path,
+    artifacts: &ManualBranchArtifactsV1,
+    command_control: PrCommandControl,
+) -> std::result::Result<Option<String>, ManualBranchActivationError> {
+    let repo_root = repo_root.to_path_buf();
+    let artifacts = artifacts.clone();
+    tokio::task::spawn_blocking(move || {
+        manual_branch_owned_head(&repo_root, &artifacts, &command_control)
+    })
+    .await
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch ownership inspection task did not complete: {error}"
+        ))
+    })?
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1334,16 +1383,145 @@ enum ManualBranchArtifactOwnershipV1 {
     Foreign,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ExactRefReadV1 {
+    Absent,
+    Present(String),
+}
+
+fn checked_path_exists(path: &Path) -> std::result::Result<bool, ManualBranchActivationError> {
+    path.try_exists().map_err(|error| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot inspect manual artifact '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn validated_git_oid(
+    stdout: &[u8],
+    reference: &str,
+) -> std::result::Result<String, ManualBranchActivationError> {
+    let oid = std::str::from_utf8(stdout).map_err(|error| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "Git returned non-UTF-8 OID for '{reference}': {error}"
+        ))
+    })?;
+    let oid = oid.trim();
+    if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ManualBranchActivationError::git_unavailable(format!(
+            "Git returned an invalid OID for '{reference}'"
+        )));
+    }
+    Ok(oid.to_owned())
+}
+
+fn read_exact_ref(
+    repo_root: &Path,
+    reference: &str,
+    command_control: &PrCommandControl,
+) -> std::result::Result<ExactRefReadV1, ManualBranchActivationError> {
+    let output = run_git_with_control(
+        repo_root,
+        &["show-ref", "--verify", "--hash", reference],
+        command_control,
+    )
+    .map_err(|error| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot read exact Git ref '{reference}': {error}"
+        ))
+    })?;
+    match output.status.code() {
+        Some(0) => Ok(ExactRefReadV1::Present(validated_git_oid(
+            &output.stdout,
+            reference,
+        )?)),
+        Some(1) => Ok(ExactRefReadV1::Absent),
+        _ => Err(ManualBranchActivationError::git_unavailable(format!(
+            "cannot read exact Git ref '{reference}': Git exited with {}",
+            output.status
+        ))),
+    }
+}
+
+fn read_worktree_head(
+    worktree: &Path,
+    command_control: &PrCommandControl,
+) -> std::result::Result<ExactRefReadV1, ManualBranchActivationError> {
+    let output = run_git_with_control(
+        worktree,
+        &["rev-parse", "--verify", "--quiet", "HEAD"],
+        command_control,
+    )
+    .map_err(|error| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot read manual worktree HEAD '{}': {error}",
+            worktree.display()
+        ))
+    })?;
+    match output.status.code() {
+        Some(0) => Ok(ExactRefReadV1::Present(validated_git_oid(
+            &output.stdout,
+            "HEAD",
+        )?)),
+        Some(1) => Ok(ExactRefReadV1::Absent),
+        _ => Err(ManualBranchActivationError::git_unavailable(format!(
+            "cannot read manual worktree HEAD '{}': Git exited with {}",
+            worktree.display(),
+            output.status
+        ))),
+    }
+}
+
+fn read_worktree_branch(
+    worktree: &Path,
+    command_control: &PrCommandControl,
+) -> std::result::Result<Option<String>, ManualBranchActivationError> {
+    let output = run_git_with_control(worktree, &["symbolic-ref", "-q", "HEAD"], command_control)
+        .map_err(|error| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot read manual worktree branch '{}': {error}",
+            worktree.display()
+        ))
+    })?;
+    match output.status.code() {
+        Some(0) => {
+            let reference = std::str::from_utf8(&output.stdout).map_err(|error| {
+                ManualBranchActivationError::git_unavailable(format!(
+                    "Git returned non-UTF-8 symbolic ref for '{}': {error}",
+                    worktree.display()
+                ))
+            })?;
+            let reference = reference.trim();
+            if reference.is_empty() {
+                return Err(ManualBranchActivationError::git_unavailable(format!(
+                    "Git returned an empty symbolic ref for '{}'",
+                    worktree.display()
+                )));
+            }
+            Ok(Some(reference.to_owned()))
+        }
+        Some(1) => Ok(None),
+        _ => Err(ManualBranchActivationError::git_unavailable(format!(
+            "cannot read manual worktree branch '{}': Git exited with {}",
+            worktree.display(),
+            output.status
+        ))),
+    }
+}
+
 fn exact_ref_ownership(
     repo_root: &Path,
     reference: &str,
     expected_head: &str,
     command_control: &PrCommandControl,
-) -> ManualBranchArtifactOwnershipV1 {
-    match ref_sha(repo_root, reference, command_control) {
-        None => ManualBranchArtifactOwnershipV1::Absent,
-        Some(head) if head == expected_head => ManualBranchArtifactOwnershipV1::Exact,
-        Some(_) => ManualBranchArtifactOwnershipV1::Foreign,
+) -> std::result::Result<ManualBranchArtifactOwnershipV1, ManualBranchActivationError> {
+    match read_exact_ref(repo_root, reference, command_control)? {
+        ExactRefReadV1::Absent => Ok(ManualBranchArtifactOwnershipV1::Absent),
+        ExactRefReadV1::Present(head) if head == expected_head => {
+            Ok(ManualBranchArtifactOwnershipV1::Exact)
+        }
+        ExactRefReadV1::Present(_) => Ok(ManualBranchArtifactOwnershipV1::Foreign),
     }
 }
 
@@ -1354,20 +1532,22 @@ fn manual_branch_artifact_ownership(
     label: &str,
     expected_head: &str,
     command_control: &PrCommandControl,
-) -> ManualBranchArtifactOwnershipV1 {
+) -> std::result::Result<ManualBranchArtifactOwnershipV1, ManualBranchActivationError> {
     let branch_ref = format!("refs/heads/{label}");
-    let tracking = exact_ref_ownership(repo_root, tracking_ref, expected_head, command_control);
-    let branch = exact_ref_ownership(repo_root, &branch_ref, expected_head, command_control);
-    let worktree = if worktree.exists() {
-        worktree_matches_branch_head(
+    let tracking = exact_ref_ownership(repo_root, tracking_ref, expected_head, command_control)?;
+    let branch = exact_ref_ownership(repo_root, &branch_ref, expected_head, command_control)?;
+    let worktree = if checked_path_exists(worktree)? {
+        if worktree_matches_branch_head(
             repo_root,
             worktree,
             &branch_ref,
             expected_head,
             command_control,
-        )
-        .then_some(ManualBranchArtifactOwnershipV1::Exact)
-        .unwrap_or(ManualBranchArtifactOwnershipV1::Foreign)
+        )? {
+            ManualBranchArtifactOwnershipV1::Exact
+        } else {
+            ManualBranchArtifactOwnershipV1::Foreign
+        }
     } else {
         ManualBranchArtifactOwnershipV1::Absent
     };
@@ -1375,14 +1555,14 @@ fn manual_branch_artifact_ownership(
         .into_iter()
         .any(|ownership| ownership == ManualBranchArtifactOwnershipV1::Foreign)
     {
-        ManualBranchArtifactOwnershipV1::Foreign
+        Ok(ManualBranchArtifactOwnershipV1::Foreign)
     } else if [tracking, branch, worktree]
         .into_iter()
         .any(|ownership| ownership == ManualBranchArtifactOwnershipV1::Exact)
     {
-        ManualBranchArtifactOwnershipV1::Exact
+        Ok(ManualBranchArtifactOwnershipV1::Exact)
     } else {
-        ManualBranchArtifactOwnershipV1::Absent
+        Ok(ManualBranchArtifactOwnershipV1::Absent)
     }
 }
 
@@ -1393,7 +1573,7 @@ pub(crate) fn cleanup_owned_worktree(
     label: &str,
     expected_head: &str,
     command_control: &PrCommandControl,
-) -> bool {
+) -> std::result::Result<bool, ManualBranchActivationError> {
     let branch_ref = format!("refs/heads/{label}");
     match manual_branch_artifact_ownership(
         repo_root,
@@ -1402,58 +1582,50 @@ pub(crate) fn cleanup_owned_worktree(
         label,
         expected_head,
         command_control,
-    ) {
-        ManualBranchArtifactOwnershipV1::Absent => return true,
-        ManualBranchArtifactOwnershipV1::Foreign => return false,
+    )? {
+        ManualBranchArtifactOwnershipV1::Absent => return Ok(true),
+        ManualBranchArtifactOwnershipV1::Foreign => return Ok(false),
         ManualBranchArtifactOwnershipV1::Exact => {}
     }
-    if worktree.exists() {
+    if checked_path_exists(worktree)? {
         if !worktree_matches_branch_head(
             repo_root,
             worktree,
             &branch_ref,
             expected_head,
             command_control,
-        ) {
-            return false;
+        )? {
+            return Ok(false);
         }
-        remove_worktree(repo_root, worktree, command_control);
-        if worktree.exists() {
-            return false;
-        }
+        remove_owned_manual_worktree(repo_root, worktree, command_control)?;
     }
-    match exact_ref_ownership(repo_root, &branch_ref, expected_head, command_control) {
+    match exact_ref_ownership(repo_root, &branch_ref, expected_head, command_control)? {
         ManualBranchArtifactOwnershipV1::Exact => {
-            let _ =
-                successful_git_with_control(repo_root, &["branch", "-D", label], command_control);
+            delete_exact_ref(repo_root, &branch_ref, expected_head, command_control)?;
         }
-        ManualBranchArtifactOwnershipV1::Foreign => return false,
+        ManualBranchArtifactOwnershipV1::Foreign => return Ok(false),
         ManualBranchArtifactOwnershipV1::Absent => {}
     }
-    if exact_ref_ownership(repo_root, &branch_ref, expected_head, command_control)
+    if exact_ref_ownership(repo_root, &branch_ref, expected_head, command_control)?
         != ManualBranchArtifactOwnershipV1::Absent
     {
-        return false;
+        return Ok(false);
     }
-    match exact_ref_ownership(repo_root, tracking_ref, expected_head, command_control) {
+    match exact_ref_ownership(repo_root, tracking_ref, expected_head, command_control)? {
         ManualBranchArtifactOwnershipV1::Exact => {
-            let _ = successful_git_with_control(
-                repo_root,
-                &["update-ref", "-d", tracking_ref],
-                command_control,
-            );
+            delete_exact_ref(repo_root, tracking_ref, expected_head, command_control)?;
         }
-        ManualBranchArtifactOwnershipV1::Foreign => return false,
+        ManualBranchArtifactOwnershipV1::Foreign => return Ok(false),
         ManualBranchArtifactOwnershipV1::Absent => {}
     }
-    manual_branch_artifact_ownership(
+    Ok(manual_branch_artifact_ownership(
         repo_root,
         worktree,
         tracking_ref,
         label,
         expected_head,
         command_control,
-    ) == ManualBranchArtifactOwnershipV1::Absent
+    )? == ManualBranchArtifactOwnershipV1::Absent)
 }
 
 fn manual_branch_artifacts_match(
@@ -1461,37 +1633,46 @@ fn manual_branch_artifacts_match(
     artifacts: &ManualBranchArtifactsV1,
     expected_head: &str,
     command_control: &PrCommandControl,
-) -> bool {
+) -> std::result::Result<bool, ManualBranchActivationError> {
     let branch_ref = format!("refs/heads/{}", artifacts.label);
-    ref_points_to(
+    Ok(exact_ref_ownership(
         repo_root,
         &artifacts.tracking_ref,
         expected_head,
         command_control,
-    ) && ref_points_to(repo_root, &branch_ref, expected_head, command_control)
+    )? == ManualBranchArtifactOwnershipV1::Exact
+        && exact_ref_ownership(repo_root, &branch_ref, expected_head, command_control)?
+            == ManualBranchArtifactOwnershipV1::Exact
         && worktree_matches_branch_head(
             repo_root,
             &artifacts.worktree,
             &branch_ref,
             expected_head,
             command_control,
-        )
+        )?)
 }
 
 fn manual_branch_owned_head(
     repo_root: &Path,
     artifacts: &ManualBranchArtifactsV1,
     command_control: &PrCommandControl,
-) -> Option<String> {
+) -> std::result::Result<Option<String>, ManualBranchActivationError> {
     let branch_ref = format!("refs/heads/{}", artifacts.label);
-    let head = ref_sha(repo_root, &artifacts.tracking_ref, command_control)?;
-    manual_branch_artifacts_match(repo_root, artifacts, &head, command_control)
-        .then_some(head)
-        .or_else(|| {
-            (!artifacts.worktree.exists()
-                && ref_points_to(repo_root, &branch_ref, &head, command_control))
-            .then_some(head)
-        })
+    let ExactRefReadV1::Present(head) =
+        read_exact_ref(repo_root, &artifacts.tracking_ref, command_control)?
+    else {
+        return Ok(None);
+    };
+    if manual_branch_artifacts_match(repo_root, artifacts, &head, command_control)? {
+        return Ok(Some(head));
+    }
+    if !checked_path_exists(&artifacts.worktree)?
+        && exact_ref_ownership(repo_root, &branch_ref, &head, command_control)?
+            == ManualBranchArtifactOwnershipV1::Exact
+    {
+        return Ok(Some(head));
+    }
+    Ok(None)
 }
 
 fn worktree_matches_branch_head(
@@ -1500,11 +1681,84 @@ fn worktree_matches_branch_head(
     branch_ref: &str,
     expected_head: &str,
     command_control: &PrCommandControl,
-) -> bool {
-    ref_points_to(worktree, "HEAD", expected_head, command_control)
-        && successful_git_with_control(worktree, &["symbolic-ref", "-q", "HEAD"], command_control)
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .is_some_and(|reference| reference.trim() == branch_ref)
+) -> std::result::Result<bool, ManualBranchActivationError> {
+    if !checked_path_exists(worktree)? {
+        return Ok(false);
+    }
+    Ok(matches!(
+        read_worktree_head(worktree, command_control)?,
+        ExactRefReadV1::Present(head) if head == expected_head
+    ) && read_worktree_branch(worktree, command_control)?.as_deref() == Some(branch_ref))
+}
+
+fn delete_exact_ref(
+    repo_root: &Path,
+    reference: &str,
+    expected_head: &str,
+    command_control: &PrCommandControl,
+) -> std::result::Result<(), ManualBranchActivationError> {
+    let output = run_git_with_control(
+        repo_root,
+        &["update-ref", "-d", reference, expected_head],
+        command_control,
+    )
+    .map_err(|error| {
+        ManualBranchActivationError::git_unavailable(format!(
+            "cannot delete exact Git ref '{reference}': {error}"
+        ))
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(ManualBranchActivationError::activation_failed(format!(
+        "cannot delete exact Git ref '{reference}': Git exited with {}",
+        output.status
+    )))
+}
+
+fn remove_owned_manual_worktree(
+    repo_root: &Path,
+    worktree: &Path,
+    command_control: &PrCommandControl,
+) -> std::result::Result<(), ManualBranchActivationError> {
+    if !checked_path_exists(worktree)? {
+        return Ok(());
+    }
+    let worktree_arg = worktree.to_string_lossy();
+    for arguments in [
+        vec!["worktree", "remove", "--force", &worktree_arg],
+        vec!["worktree", "prune"],
+    ] {
+        let output =
+            run_git_with_control(repo_root, &arguments, command_control).map_err(|error| {
+                ManualBranchActivationError::git_unavailable(format!(
+                    "cannot remove manual worktree '{}': {error}",
+                    worktree.display()
+                ))
+            })?;
+        if !output.status.success() {
+            return Err(ManualBranchActivationError::activation_failed(format!(
+                "cannot remove manual worktree '{}': Git exited with {}",
+                worktree.display(),
+                output.status
+            )));
+        }
+    }
+    if checked_path_exists(worktree)? {
+        std::fs::remove_dir_all(worktree).map_err(|error| {
+            ManualBranchActivationError::git_unavailable(format!(
+                "cannot remove manual worktree directory '{}': {error}",
+                worktree.display()
+            ))
+        })?;
+    }
+    if checked_path_exists(worktree)? {
+        return Err(ManualBranchActivationError::activation_failed(format!(
+            "manual worktree '{}' remained after exact removal",
+            worktree.display()
+        )));
+    }
+    Ok(())
 }
 
 async fn reconcile_project_with_administration(
