@@ -477,8 +477,10 @@ fn an_empty_kiro_mcp_config_is_a_doctor_failure() {
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
     std::fs::write(&mcp_path, b"").unwrap();
 
-    let error = kiro_doctor_installation_state(home.path())
-        .expect_err("an existing empty Kiro MCP config is malformed persisted state");
+    let error = match kiro_doctor_installation_state(home.path()) {
+        Err(error) => error,
+        Ok(_) => panic!("an existing empty Kiro MCP config is malformed persisted state"),
+    };
     let TraceDecayError::Config { message } = error else {
         panic!("an empty Kiro MCP config must not become TraceDecayAbsent: {error}");
     };
