@@ -814,22 +814,28 @@ fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
         default_pr_command_control(),
     )
     .expect("prepare exact worktree");
-    assert!(cleanup_owned_worktree(
-        repo.path(),
-        &artifacts.worktree,
-        &artifacts.tracking_ref,
-        &artifacts.label,
-        &head,
-        default_pr_command_control(),
-    ));
-    assert!(cleanup_owned_worktree(
-        repo.path(),
-        &artifacts.worktree,
-        &artifacts.tracking_ref,
-        &artifacts.label,
-        &head,
-        default_pr_command_control(),
-    ));
+    assert!(
+        cleanup_owned_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("exact cleanup")
+    );
+    assert!(
+        cleanup_owned_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("absent artifacts are an idempotent success")
+    );
 
     prepare_manual_branch_worktree(
         repo.path(),
@@ -860,7 +866,8 @@ fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
             &artifacts.label,
             &head,
             default_pr_command_control(),
-        ),
+        )
+        .expect("foreign provenance must be a typed false result"),
         "foreign ref replacement must survive an exact-source cleanup"
     );
     assert!(
@@ -875,5 +882,71 @@ fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
     assert!(
         artifacts.worktree.exists(),
         "a foreign provenance mismatch must not delete the linked worktree"
+    );
+}
+
+#[test]
+fn manual_artifact_cleanup_keeps_exact_refs_when_git_authority_is_unavailable() {
+    let repo = tempfile::tempdir().unwrap();
+    let branch = "feature/retry-after-git-failure";
+    init_manual_branch_repo(repo.path(), branch);
+    let data = tempfile::tempdir().unwrap();
+    let artifacts = ManualBranchArtifactsV1::for_branch(data.path(), branch);
+    let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
+        .expect("feature branch head");
+    let branch_ref = format!("refs/heads/{}", artifacts.label);
+
+    prepare_manual_branch_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        default_pr_command_control(),
+    )
+    .expect("prepare exact worktree");
+    remove_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        default_pr_command_control(),
+    );
+    assert!(
+        !artifacts.worktree.try_exists().expect("inspect worktree"),
+        "the sealed ref retry begins after the linked worktree is absent"
+    );
+
+    let unavailable = PrCommandControl {
+        command_timeout: Duration::ZERO,
+        ..PrCommandControl::default()
+    };
+    let error = cleanup_owned_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        &unavailable,
+    )
+    .expect_err("unavailable Git must not be collapsed into an absent ref");
+    assert!(matches!(
+        error,
+        ManualBranchActivationError::GitAuthorityUnavailable { .. }
+    ));
+    assert!(
+        git_ref_exists(repo.path(), &artifacts.tracking_ref)
+            && git_ref_exists(repo.path(), &branch_ref),
+        "a failed exact read must retain the sealed reference proof for retry"
+    );
+
+    assert!(
+        cleanup_owned_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        )
+        .expect("restored Git authority must complete exact cleanup")
     );
 }
