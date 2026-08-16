@@ -646,13 +646,11 @@ fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
         crate::agents::host_cli::require_host_cli("claude-definitely-absent", CLAUDE_CLI_LIFECYCLE)
             .expect_err("an absent host binary is a hard requirement failure");
 
-    let TraceDecayError::Config { message } = error else {
-        panic!("host CLI absence must surface as a config error");
+    let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
+        panic!("host CLI absence must surface as a typed requirement");
     };
-    assert!(
-        message.contains("binary required for claude plugin lifecycle"),
-        "the refusal must name the binary and what it was needed for: {message}"
-    );
+    assert_eq!(program, "claude-definitely-absent");
+    assert_eq!(lifecycle, CLAUDE_CLI_LIFECYCLE);
     assert_eq!(
         std::fs::read(known_marketplaces_path(home.path())).ok(),
         before,

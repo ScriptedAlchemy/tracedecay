@@ -852,6 +852,10 @@ pub enum HostBundleError {
     NativeUpdateRequired,
     #[error("host-native plugin removal is required before this lifecycle can complete")]
     NativeRemovalRequired,
+    #[error(
+        "{host:?} host CLI is unavailable; install the host CLI or add it to PATH before retrying"
+    )]
+    HostCliUnavailable { host: HostKindV1 },
     #[error("bundle manifest schema version is unsupported")]
     UnsupportedManifestVersion,
     #[error("bundle manifest is structurally invalid")]

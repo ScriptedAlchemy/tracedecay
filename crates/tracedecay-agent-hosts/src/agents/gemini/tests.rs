@@ -401,13 +401,11 @@ fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
         .prepare_non_interactive_install(&install_context(home.path(), "/bin/tracedecay"))
         .expect_err("an absent host binary is a hard requirement failure");
 
-    let TraceDecayError::Config { message } = error else {
-        panic!("host CLI absence must surface as a config error");
+    let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
+        panic!("host CLI absence must surface as a typed requirement");
     };
-    assert!(
-        message.contains("`gemini` binary required for gemini extension lifecycle"),
-        "the refusal must name the binary and what it was needed for: {message}"
-    );
+    assert_eq!(program, "gemini");
+    assert_eq!(lifecycle, "gemini extension lifecycle");
     assert_eq!(
         std::fs::read(&settings).unwrap(),
         original,

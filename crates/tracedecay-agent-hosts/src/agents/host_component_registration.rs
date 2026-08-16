@@ -187,8 +187,15 @@ impl CatalogHostComponentRegistrationAuthority {
     }
 
     fn registration_error(
+        host: crate::agents::host_bundle_v2::HostKindV1,
         error: crate::errors::TraceDecayError,
     ) -> crate::agents::host_bundle_v2::HostBundleError {
+        if matches!(
+            &error,
+            crate::errors::TraceDecayError::HostCliUnavailable { .. }
+        ) {
+            return crate::agents::host_bundle_v2::HostBundleError::HostCliUnavailable { host };
+        }
         // The transaction error vocabulary is fixed, so surface the
         // integration's own message here before it is collapsed into the
         // generic storage failure — otherwise the actionable cause (for
@@ -1542,7 +1549,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
                                 &components,
                                 &self.context,
                             )
-                            .map_err(Self::registration_error),
+                            .map_err(|error| Self::registration_error(component_set.host, error)),
                         crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
                         | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
                         | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
@@ -1551,7 +1558,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
                                 &components,
                                 &self.context,
                             )
-                            .map_err(Self::registration_error),
+                            .map_err(|error| Self::registration_error(component_set.host, error)),
                     }
                 }
             },
@@ -1757,7 +1764,36 @@ fn write_registration_backup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::host_bundle_v2::HostBundleError;
+    use crate::agents::host_bundle_v2::{HostBundleError, HostKindV1};
+
+    #[test]
+    fn typed_host_cli_absence_stays_distinct_from_config_failure() {
+        let unavailable = CatalogHostComponentRegistrationAuthority::registration_error(
+            HostKindV1::Kiro,
+            crate::errors::TraceDecayError::HostCliUnavailable {
+                program: "kiro-cli".to_string(),
+                lifecycle: "kiro MCP registry lifecycle".to_string(),
+            },
+        );
+        assert_eq!(
+            unavailable,
+            HostBundleError::HostCliUnavailable {
+                host: HostKindV1::Kiro,
+            },
+            "a proven absent Kiro CLI must not be relabelled as a filesystem failure"
+        );
+
+        let config_failure = CatalogHostComponentRegistrationAuthority::registration_error(
+            HostKindV1::Kiro,
+            crate::errors::TraceDecayError::Config {
+                message: "malformed Kiro MCP config".to_string(),
+            },
+        );
+        assert!(
+            matches!(config_failure, HostBundleError::StorageFailure(_)),
+            "a genuine host config failure must retain the existing lifecycle failure mapping"
+        );
+    }
 
     /// Gemini's deployed artifacts are an extension *source*: the host carries
     /// nothing until `gemini extensions install` adopts them. Classifying the

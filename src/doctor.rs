@@ -143,7 +143,7 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
             project_path: project_path.clone(),
         };
         for agent in agents::all_integrations() {
-            if agent.has_tracedecay(home) {
+            if should_run_host_healthcheck(agent.as_ref(), home) {
                 agent.healthcheck_with_daemon_status(&mut dc, &hctx, daemon_status.as_ref().ok());
             }
         }
@@ -155,6 +155,10 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
     print_summary(&dc);
 
     doctor_result(&dc, &storage_health)
+}
+
+fn should_run_host_healthcheck(agent: &dyn agents::AgentIntegration, home: &Path) -> bool {
+    agent.has_tracedecay(home) || agent.reports_absence_to_doctor()
 }
 
 fn render_canonical_doctor_report(
