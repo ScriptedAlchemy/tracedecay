@@ -115,11 +115,6 @@ impl GraphDbOwner {
         self.clients.load(Ordering::Acquire) == 0
     }
 
-    #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-    pub(crate) fn is_closed(&self) -> bool {
-        self.database.inner.closed.load(Ordering::Acquire)
-    }
-
     fn from_database(database: Arc<GraphDb>) -> Self {
         Self {
             database,
