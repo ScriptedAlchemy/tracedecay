@@ -124,6 +124,59 @@ fn accepting_memory_write_control() -> FactWriteControl {
     FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
 }
 
+async fn retention_fixture(
+    capacity: usize,
+) -> (
+    tempfile::TempDir,
+    DaemonSessionRuntimeRegistryV1,
+    crate::db::DaemonDatabaseScope,
+) {
+    let temporary = tempfile::tempdir().expect("temporary runtime-retention root");
+    let profile_root = temporary.path().join("profile");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 1, "session-runtime-retention")
+            .expect("daemon database scope");
+    let registry =
+        DaemonSessionRuntimeRegistryV1::open_with_retention_capacity_for_test(identity, capacity)
+            .await
+            .expect("bounded session runtime registry");
+    (temporary, registry, database_scope)
+}
+
+async fn mount_retention_project(
+    registry: &DaemonSessionRuntimeRegistryV1,
+    root: &std::path::Path,
+    label: &str,
+) -> (
+    ProjectId,
+    Arc<crate::db::Database>,
+    Arc<crate::global_db::RegisteredGlobalDb>,
+) {
+    let project_id =
+        ProjectId::new(format!("runtime-retention-{label}")).expect("typed project identity");
+    let project_root = root.join(label);
+    std::fs::create_dir_all(&project_root).expect("project root");
+    crate::storage::write_enrollment_marker(
+        &project_root,
+        &crate::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .expect("project enrollment");
+    let memory = registry
+        .project_memory(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("project memory runtime");
+    let sessions = registry
+        .project_sessions(project_id.clone(), [project_root])
+        .await
+        .expect("project session runtime");
+    (project_id, memory, sessions)
+}
+
 async fn add_profile_schema_fact(
     database: &crate::db::Database,
     label: &str,
@@ -1188,5 +1241,108 @@ async fn read_only_worktree_mount_never_recreates_a_deleted_database() {
     assert!(
         !database_path.exists(),
         "read-only mount recreated the deleted worktree DB"
+    );
+}
+
+#[tokio::test]
+async fn project_runtime_capacity_retires_idle_pairs_and_reopens_the_exact_project() {
+    let (temporary, registry, _database_scope) = retention_fixture(2).await;
+    let (first_id, first_memory, first_sessions) =
+        mount_retention_project(&registry, temporary.path(), "first").await;
+    drop((first_memory, first_sessions));
+    let (_second_id, second_memory, second_sessions) =
+        mount_retention_project(&registry, temporary.path(), "second").await;
+    drop((second_memory, second_sessions));
+
+    let (_third_id, third_memory, third_sessions) =
+        mount_retention_project(&registry, temporary.path(), "third").await;
+    drop((third_memory, third_sessions));
+
+    let settled = registry
+        .session_runtime_retention_telemetry()
+        .await
+        .expect("retention telemetry");
+    assert_eq!(settled.project_memory_runtimes, 2);
+    assert_eq!(settled.project_session_runtimes, 2);
+    assert_eq!(settled.retired_project_memory_runtimes, 1);
+    assert_eq!(settled.retired_project_session_runtimes, 1);
+
+    let (reopened_id, reopened_memory, reopened_sessions) =
+        mount_retention_project(&registry, temporary.path(), "first").await;
+    assert_eq!(reopened_id, first_id);
+    assert!(reopened_memory.is_writable());
+    assert_eq!(
+        reopened_sessions.binding().shard_id.scope.project_id(),
+        Some(&first_id)
+    );
+}
+
+#[tokio::test]
+async fn project_runtime_capacity_never_evicts_a_live_project_pair() {
+    let (temporary, registry, _database_scope) = retention_fixture(1).await;
+    let (first_id, first_memory, first_sessions) =
+        mount_retention_project(&registry, temporary.path(), "live-first").await;
+
+    let blocked = registry
+        .project_memory(
+            ProjectId::new("runtime-retention-blocked").expect("typed project identity"),
+            [temporary.path().join("blocked")],
+        )
+        .await
+        .expect_err("a live project pair must retain its exact runtime authority");
+    assert!(
+        blocked
+            .to_string()
+            .contains("project runtime retention capacity is exhausted"),
+        "unexpected bounded-retirement refusal: {blocked}"
+    );
+    assert!(first_memory.is_writable());
+    assert_eq!(
+        first_sessions.binding().shard_id.scope.project_id(),
+        Some(&first_id)
+    );
+    let telemetry = registry
+        .session_runtime_retention_telemetry()
+        .await
+        .expect("retention telemetry");
+    assert_eq!(telemetry.project_memory_runtimes, 1);
+    assert_eq!(telemetry.project_session_runtimes, 1);
+    assert_eq!(telemetry.retirement_refusals, 1);
+}
+
+#[tokio::test]
+async fn runtime_shutdown_joins_memory_reconciliation_and_reopens_cleanly() {
+    let (temporary, registry, _database_scope) = retention_fixture(1).await;
+    let (project_id, memory, sessions) =
+        mount_retention_project(&registry, temporary.path(), "shutdown").await;
+    drop((memory, sessions));
+
+    registry
+        .shutdown_retained_runtimes()
+        .await
+        .expect("cancellation-safe retained-runtime shutdown");
+    let shutdown = registry
+        .session_runtime_retention_telemetry()
+        .await
+        .expect("shutdown telemetry");
+    assert_eq!(shutdown.project_memory_runtimes, 0);
+    assert_eq!(shutdown.project_session_runtimes, 0);
+    assert_eq!(shutdown.retained_memory_graph_reconciliation_tasks, 0);
+
+    drop(registry);
+    let identity =
+        crate::daemon::profile_identity::load_or_create(&temporary.path().join("profile"))
+            .expect("reopen durable profile identity");
+    let registry =
+        DaemonSessionRuntimeRegistryV1::open_with_retention_capacity_for_test(identity, 1)
+            .await
+            .expect("fresh runtime registry after cancellation-safe shutdown");
+    let (reopened_id, reopened_memory, reopened_sessions) =
+        mount_retention_project(&registry, temporary.path(), "shutdown").await;
+    assert_eq!(reopened_id, project_id);
+    assert!(reopened_memory.is_writable());
+    assert_eq!(
+        reopened_sessions.binding().shard_id.scope.project_id(),
+        Some(&project_id)
     );
 }

@@ -1,10 +1,12 @@
 //! Daemon-owned registry assembly for profile and project session shards.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracedecay_agent_hosts::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use tracedecay_domain::BrainNodeId;
@@ -47,6 +49,27 @@ pub(crate) use profile_memory::open_user_memory_db;
 
 static LONG_LIVED_SESSION_MAINTENANCE: AtomicBool = AtomicBool::new(false);
 
+/// Every session relation store resolves through this one registry, whose
+/// capacity reserves one slot for the profile session store.
+pub(crate) const RETAINED_SESSION_GRAPH_RUNTIME_CAPACITY: usize = 8;
+/// One relation-graph slot is reserved for the profile session store; project
+/// runtimes must stay below the remaining registered graph capacity.
+pub(crate) const DEFAULT_RETAINED_PROJECT_RUNTIME_CAPACITY: usize =
+    RETAINED_SESSION_GRAPH_RUNTIME_CAPACITY - 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SessionRuntimeRetentionTelemetryV1 {
+    pub(crate) project_runtime_capacity: u64,
+    pub(crate) profile_memory_runtimes: u64,
+    pub(crate) profile_session_runtimes: u64,
+    pub(crate) project_memory_runtimes: u64,
+    pub(crate) project_session_runtimes: u64,
+    pub(crate) retained_memory_graph_reconciliation_tasks: u64,
+    pub(crate) retired_project_memory_runtimes: u64,
+    pub(crate) retired_project_session_runtimes: u64,
+    pub(crate) retirement_refusals: u64,
+}
+
 fn remote_restore_quarantine_fence_path(database: &Path) -> std::path::PathBuf {
     database.with_extension("remote-restore-quarantine.json")
 }
@@ -77,6 +100,58 @@ impl DaemonSessionRuntimeRegistryV1 {
         let inventory = self.registry.inventory(AdmissionConfigV1::default(), None);
         crate::daemon::store_runtime::telemetry::project_runtime_telemetry(&inventory)
     }
+
+    pub(crate) async fn session_runtime_retention_telemetry(
+        &self,
+    ) -> Result<SessionRuntimeRetentionTelemetryV1> {
+        let project_memory_runtimes = self.project_memory.lock().await.len();
+        let project_session_runtimes = self.project_sessions.lock().await.len();
+        let profile_memory_runtimes = u64::from(self.profile_memory.lock().await.is_some());
+        let profile_session_runtimes = u64::from(self.profile_sessions.lock().await.is_some());
+        let retained_memory_graph_reconciliation_tasks =
+            self.memory_graph_reconciliation_tasks.retained_count()?;
+        let project_runtime_capacity =
+            u64::try_from(self.project_runtime_capacity.get()).map_err(|_| {
+                session_registry_error(
+                    "observe retained project runtime capacity",
+                    "project runtime capacity exceeds telemetry range".to_owned(),
+                )
+            })?;
+        let project_memory_runtimes = u64::try_from(project_memory_runtimes).map_err(|_| {
+            session_registry_error(
+                "observe retained project memory runtimes",
+                "project memory runtime cardinality exceeds telemetry range".to_owned(),
+            )
+        })?;
+        let project_session_runtimes = u64::try_from(project_session_runtimes).map_err(|_| {
+            session_registry_error(
+                "observe retained project session runtimes",
+                "project session runtime cardinality exceeds telemetry range".to_owned(),
+            )
+        })?;
+        let retained_memory_graph_reconciliation_tasks =
+            u64::try_from(retained_memory_graph_reconciliation_tasks).map_err(|_| {
+                session_registry_error(
+                    "observe retained memory graph reconciliation tasks",
+                    "memory graph task cardinality exceeds telemetry range".to_owned(),
+                )
+            })?;
+        Ok(SessionRuntimeRetentionTelemetryV1 {
+            project_runtime_capacity,
+            profile_memory_runtimes,
+            profile_session_runtimes,
+            project_memory_runtimes,
+            project_session_runtimes,
+            retained_memory_graph_reconciliation_tasks,
+            retired_project_memory_runtimes: self
+                .retired_project_memory_runtimes
+                .load(Ordering::Acquire),
+            retired_project_session_runtimes: self
+                .retired_project_session_runtimes
+                .load(Ordering::Acquire),
+            retirement_refusals: self.retirement_refusals.load(Ordering::Acquire),
+        })
+    }
 }
 
 /// One canonical registry and profile pin shared by every daemon session shard.
@@ -106,6 +181,10 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     >,
     project_memory: Arc<Mutex<BTreeMap<ProjectId, Arc<Database>>>>,
     project_sessions: Arc<Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>>,
+    project_runtime_capacity: NonZeroUsize,
+    retired_project_memory_runtimes: AtomicU64,
+    retired_project_session_runtimes: AtomicU64,
+    retirement_refusals: AtomicU64,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     retained_hook_tasks: RetainedHookTasks,
     memory_graph_reconciliation_tasks: Arc<RetainedMemoryGraphReconciliationTasksV1>,

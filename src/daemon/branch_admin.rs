@@ -3,7 +3,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Weak,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use serde_json::json;
@@ -27,6 +27,7 @@ pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
+const DEFAULT_RETAINED_PROFILE_RUNTIME_CAPACITY: usize = 8;
 mod project_retirement;
 mod remote_deletion_lifecycle;
 pub(in crate::daemon) mod remote_recovery_lifecycle;
@@ -287,7 +288,52 @@ pub(super) struct SessionRuntimeRegistryEntryV1 {
             Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
         >,
     >,
+    pub(super) retiring: Arc<AtomicBool>,
+    pub(super) opening: Arc<AtomicUsize>,
 }
+
+impl SessionRuntimeRegistryEntryV1 {
+    pub(super) fn new(
+        identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    ) -> Self {
+        Self {
+            identity,
+            registry: Arc::new(tokio::sync::OnceCell::new()),
+            retiring: Arc::new(AtomicBool::new(false)),
+            opening: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct SessionRuntimeRegistryCapacityV1 {
+    max_profiles: usize,
+}
+
+impl Default for SessionRuntimeRegistryCapacityV1 {
+    fn default() -> Self {
+        Self {
+            max_profiles: DEFAULT_RETAINED_PROFILE_RUNTIME_CAPACITY,
+        }
+    }
+}
+
+impl SessionRuntimeRegistryCapacityV1 {
+    #[cfg(test)]
+    pub(super) fn for_test(max_profiles: usize) -> Result<Self> {
+        if max_profiles == 0 {
+            return Err(TraceDecayError::Config {
+                message: "session runtime registry capacity must be greater than zero".to_owned(),
+            });
+        }
+        Ok(Self { max_profiles })
+    }
+
+    pub(super) const fn max_profiles(self) -> usize {
+        self.max_profiles
+    }
+}
+
 type SessionRuntimeRegistries = HashMap<PathBuf, SessionRuntimeRegistryEntryV1>;
 pub(super) type SharedSessionRuntimeRegistries = Arc<tokio::sync::Mutex<SessionRuntimeRegistries>>;
 
@@ -300,6 +346,8 @@ struct ProfileHostAdmissionBootstrapContext {
             Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
         >,
     >,
+    retiring: Arc<AtomicBool>,
+    opening: Arc<AtomicUsize>,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<
             HashMap<PathBuf, tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
@@ -311,19 +359,33 @@ struct ProfileHostAdmissionBootstrapContext {
 
 impl ProfileHostAdmissionBootstrapContext {
     async fn ensure(&self) -> Result<()> {
+        if self.retiring.load(Ordering::Acquire) {
+            return Err(TraceDecayError::Config {
+                message: "session runtime registry is retiring under bounded capacity".to_owned(),
+            });
+        }
         let profile_identity = self.profile_identity.clone();
+        self.opening.fetch_add(1, Ordering::AcqRel);
+        let retiring = Arc::clone(&self.retiring);
         let session_runtime_registry = self
             .session_runtime_registry
             .get_or_try_init(|| async move {
+                if retiring.load(Ordering::Acquire) {
+                    return Err(TraceDecayError::Config {
+                        message: "session runtime registry is retiring under bounded capacity"
+                            .to_owned(),
+                    });
+                }
                 crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
                     profile_identity,
                 )
                 .await
                 .map(Arc::new)
             })
-            .await
-            .map(Arc::clone)
-            .map_err(|error| {
+            .await;
+        self.opening.fetch_sub(1, Ordering::AcqRel);
+        let session_runtime_registry =
+            session_runtime_registry.map(Arc::clone).map_err(|error| {
                 TraceDecayError::project_route(
                     "registered_authority_unavailable",
                     true,
@@ -415,6 +477,7 @@ pub(super) struct StoreAdministration {
     authenticated_profile_database_scopes:
         Arc<tokio::sync::Mutex<HashMap<PathBuf, crate::db::DaemonDatabaseScope>>>,
     session_runtime_registries: SharedSessionRuntimeRegistries,
+    session_runtime_registry_capacity: SessionRuntimeRegistryCapacityV1,
     session_runtime_registry_admission_closed: Arc<AtomicBool>,
     gate: Arc<StoreWriterGates>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
@@ -460,6 +523,7 @@ impl Default for StoreAdministration {
                 tokio::sync::Mutex::new(HashMap::new()),
             ),
             session_runtime_registries: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            session_runtime_registry_capacity: SessionRuntimeRegistryCapacityV1::default(),
             session_runtime_registry_admission_closed: Arc::new(AtomicBool::new(false)),
             gate: Arc::new(StoreWriterGates::default()),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
@@ -525,6 +589,8 @@ impl StoreAdministration {
                 SessionRuntimeRegistryEntryV1 {
                     identity: profile_identity,
                     registry,
+                    retiring: Arc::new(AtomicBool::new(false)),
+                    opening: Arc::new(AtomicUsize::new(0)),
                 },
             );
         Ok(administration)
@@ -535,6 +601,15 @@ impl StoreAdministration {
         profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
     ) -> Self {
         self.profile_identity = Some(profile_identity);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_session_runtime_registry_capacity_for_test(
+        mut self,
+        capacity: SessionRuntimeRegistryCapacityV1,
+    ) -> Self {
+        self.session_runtime_registry_capacity = capacity;
         self
     }
 
@@ -857,7 +932,7 @@ impl StoreAdministration {
                 message: "profile host-admission bootstrap identity mismatch".to_owned(),
             });
         }
-        let session_runtime_registry = {
+        let (session_runtime_registry, retiring, opening) = {
             let mut registries = self.session_runtime_registries.lock().await;
             if self
                 .session_runtime_registry_admission_closed
@@ -868,20 +943,21 @@ impl StoreAdministration {
                         .to_owned(),
                 });
             }
-            Arc::clone(
-                &registries
-                    .entry(profile_root.clone())
-                    .or_insert_with(|| SessionRuntimeRegistryEntryV1 {
-                        identity: profile_identity.clone(),
-                        registry: Arc::new(tokio::sync::OnceCell::new()),
-                    })
-                    .registry,
+            let entry = registries
+                .entry(profile_root.clone())
+                .or_insert_with(|| SessionRuntimeRegistryEntryV1::new(profile_identity.clone()));
+            (
+                Arc::clone(&entry.registry),
+                Arc::clone(&entry.retiring),
+                Arc::clone(&entry.opening),
             )
         };
         let context = ProfileHostAdmissionBootstrapContext {
             profile_root: profile_root.clone(),
             profile_identity,
             session_runtime_registry,
+            retiring,
+            opening,
             host_admission_brokers: Arc::clone(&self.host_admission_brokers),
             host_admission_broker_gate: Arc::clone(&self.host_admission_broker_gate),
             profile_host_admission_replay: Arc::downgrade(&self.profile_host_admission_replay),

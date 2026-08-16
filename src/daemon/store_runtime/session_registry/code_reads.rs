@@ -31,6 +31,36 @@ impl DaemonSessionRuntimeRegistryV1 {
         // `\\?\` verbatim form, macOS resolves `/var` to `/private/var`.
         // Comparing spellings refused a mount whose two locators name one
         // file.
+        let writable = matches!(&access, DatabaseAccessMode::ReadWrite);
+        {
+            let mounted = self.project_memory.lock().await;
+            if let Some(database) = mounted.get(&project_id) {
+                if !same_canonical_path(database.canonical_database_path(), &database_path) {
+                    return Err(session_registry_error(
+                        "reuse project graph runtime",
+                        format!(
+                            "project graph locator {} differs from retained canonical locator {}",
+                            database_path.display(),
+                            database.canonical_database_path().display()
+                        ),
+                    ));
+                }
+                return match access {
+                    DatabaseAccessMode::ReadWrite => Ok(database.as_ref().clone()),
+                    DatabaseAccessMode::ReadOnly => {
+                        Database::publish_runtime(
+                            database.retained_runtime().clone(),
+                            DatabaseAccessMode::ReadOnly,
+                        )
+                        .await
+                    }
+                };
+            }
+        }
+        if writable {
+            self.ensure_project_memory_runtime_capacity(&project_id)
+                .await?;
+        }
         let mut mounted = self.project_memory.lock().await;
         if let Some(database) = mounted.get(&project_id) {
             if !same_canonical_path(database.canonical_database_path(), &database_path) {
@@ -110,7 +140,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ),
             ));
         }
-        let writable = matches!(&access, DatabaseAccessMode::ReadWrite);
         let database = Database::publish_runtime(runtime, access).await?;
         if writable {
             let database = Arc::new(database);
@@ -177,9 +206,19 @@ impl DaemonSessionRuntimeRegistryV1 {
         let Some(database) = mounted.get(project_id) else {
             return Ok(());
         };
+        if Arc::strong_count(database) != 1 {
+            self.retirement_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            return Err(session_registry_error(
+                "retire project session runtime",
+                "project session runtime is still leased".to_owned(),
+            ));
+        }
         let (graph_binding, graph_verified_locator) = database
             .session_relation_graph_identity()
             .map(|(binding, locator)| (binding.clone(), locator.clone()))?;
+        let runtime_binding = database.binding().clone();
+        let runtime_authority = database.authority().clone();
         self.remote_replay_transaction
             .unregister_target(project_id, database.binding())
             .map_err(|error| {
@@ -224,14 +263,365 @@ impl DaemonSessionRuntimeRegistryV1 {
                         )
                     })?;
             }
+            self.retirement_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             return Err(close_error);
         }
+        if let Err(close_error) = self
+            .registry
+            .close_exact(&runtime_binding, &runtime_authority)
+            .await
+        {
+            let restored = self
+                .mount_registered_project_sessions(project_id.clone())
+                .await
+                .map_err(|restore_error| {
+                    session_registry_error(
+                        "restore project session authority after runtime close refusal",
+                        format!("{close_error:?}; remount failed: {restore_error}"),
+                    )
+                })?;
+            if let Some(session_sync) = self
+                .session_sync_service
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+            {
+                session_sync
+                    .rebind_project(self.identity.profile_id(), project_id, &restored)
+                    .await
+                    .map_err(|rebind_error| {
+                        session_registry_error(
+                            "restore project session sync after runtime close refusal",
+                            format!("{close_error:?}; rebind failed: {rebind_error}"),
+                        )
+                    })?;
+            }
+            self.retirement_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            return Err(session_registry_error(
+                "close project session runtime",
+                format!("{close_error:?}"),
+            ));
+        }
+        self.retired_project_session_runtimes
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
     }
 
     pub(crate) async fn retire_project_memory_graph(&self, project_id: &ProjectId) -> Result<()> {
-        self.project_memory.lock().await.remove(project_id);
+        let (runtime_binding, runtime_authority, shard_id, database_path) = {
+            let mounted = self.project_memory.lock().await;
+            let Some(database) = mounted.get(project_id) else {
+                return Ok(());
+            };
+            if Arc::strong_count(database) != 1 {
+                self.retirement_refusals
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                return Err(session_registry_error(
+                    "retire project memory runtime",
+                    "project memory runtime is still leased".to_owned(),
+                ));
+            }
+            (
+                database.retained_runtime().binding().clone(),
+                database.write_authority()?,
+                database.retained_runtime().binding().shard_id.clone(),
+                database.canonical_database_path().to_path_buf(),
+            )
+        };
+        self.retire_memory_graph_reconciliation_task(&shard_id)
+            .await?;
+        let database = self.project_memory.lock().await.remove(project_id);
+        drop(database);
+        if let Err(close_error) = self
+            .registry
+            .close_exact(&runtime_binding, &runtime_authority)
+            .await
+        {
+            self.project_graph_database(
+                project_id.clone(),
+                database_path,
+                Some(runtime_authority),
+                DatabaseAccessMode::ReadWrite,
+            )
+            .await
+            .map_err(|restore_error| {
+                session_registry_error(
+                    "restore project memory authority after runtime close refusal",
+                    format!("{close_error:?}; remount failed: {restore_error}"),
+                )
+            })?;
+            self.retirement_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            return Err(session_registry_error(
+                "close project memory runtime",
+                format!("{close_error:?}"),
+            ));
+        }
+        self.retired_project_memory_runtimes
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
+    }
+
+    async fn retire_profile_session_relation_graph(&self) -> Result<()> {
+        let mut mounted = self.profile_sessions.lock().await;
+        let Some(database) = mounted.as_ref() else {
+            return Ok(());
+        };
+        if Arc::strong_count(database) != 1 {
+            self.retirement_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            return Err(session_registry_error(
+                "retire profile session runtime",
+                "profile session runtime is still leased".to_owned(),
+            ));
+        }
+        let (graph_binding, graph_verified_locator) = database
+            .session_relation_graph_identity()
+            .map(|(binding, locator)| (binding.clone(), locator.clone()))?;
+        let runtime_binding = database.binding().clone();
+        let runtime_authority = database.authority().clone();
+        let database = mounted.take().ok_or_else(|| {
+            session_registry_error(
+                "retire profile session runtime",
+                "mounted ProfileSessions authority disappeared during retirement".to_owned(),
+            )
+        })?;
+        drop(database);
+        drop(mounted);
+        if let Err(close_error) = super::code_graph::graph_attachment::close_retained(
+            &self.graph_registry,
+            graph_binding,
+            graph_verified_locator,
+        )
+        .await
+        {
+            self.profile_sessions().await.map_err(|restore_error| {
+                session_registry_error(
+                    "restore profile session authority after relation graph close refusal",
+                    format!("{close_error}; remount failed: {restore_error}"),
+                )
+            })?;
+            self.retirement_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            return Err(close_error);
+        }
+        if let Err(close_error) = self
+            .registry
+            .close_exact(&runtime_binding, &runtime_authority)
+            .await
+        {
+            self.profile_sessions().await.map_err(|restore_error| {
+                session_registry_error(
+                    "restore profile session authority after runtime close refusal",
+                    format!("{close_error:?}; remount failed: {restore_error}"),
+                )
+            })?;
+            self.retirement_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            return Err(session_registry_error(
+                "close profile session runtime",
+                format!("{close_error:?}"),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn retire_profile_memory_graph(&self) -> Result<()> {
+        let (runtime_binding, runtime_authority, shard_id) = {
+            let mounted = self.profile_memory.lock().await;
+            let Some(database) = mounted.as_ref() else {
+                return Ok(());
+            };
+            if Arc::strong_count(database) != 1 {
+                self.retirement_refusals
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                return Err(session_registry_error(
+                    "retire profile memory runtime",
+                    "profile memory runtime is still leased".to_owned(),
+                ));
+            }
+            (
+                database.retained_runtime().binding().clone(),
+                database.write_authority()?,
+                database.retained_runtime().binding().shard_id.clone(),
+            )
+        };
+        self.retire_memory_graph_reconciliation_task(&shard_id)
+            .await?;
+        let database = self.profile_memory.lock().await.take();
+        drop(database);
+        if let Err(close_error) = self
+            .registry
+            .close_exact(&runtime_binding, &runtime_authority)
+            .await
+        {
+            self.profile_memory().await.map_err(|restore_error| {
+                session_registry_error(
+                    "restore profile memory authority after runtime close refusal",
+                    format!("{close_error:?}; remount failed: {restore_error}"),
+                )
+            })?;
+            self.retirement_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            return Err(session_registry_error(
+                "close profile memory runtime",
+                format!("{close_error:?}"),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn shutdown_retained_runtimes(&self) -> Result<()> {
+        self.cancel_memory_graph_reconciliation_tasks();
+        let mut failures = Vec::new();
+        let project_ids = self
+            .project_sessions
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for project_id in project_ids {
+            if let Err(error) = self
+                .retire_project_session_relation_graph(&project_id)
+                .await
+            {
+                failures.push(error.to_string());
+            }
+        }
+        let project_ids = self
+            .project_memory
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for project_id in project_ids {
+            if let Err(error) = self.retire_project_memory_graph(&project_id).await {
+                failures.push(error.to_string());
+            }
+        }
+        if let Err(error) = self.retire_profile_session_relation_graph().await {
+            failures.push(error.to_string());
+        }
+        if let Err(error) = self.retire_profile_memory_graph().await {
+            failures.push(error.to_string());
+        }
+        if let Err(error) = self.shutdown_memory_graph_reconciliation_tasks().await {
+            failures.push(error);
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(session_registry_error(
+                "shutdown retained session runtimes",
+                failures.join("; "),
+            ))
+        }
+    }
+
+    pub(crate) async fn retire_retained_runtimes_for_capacity(&self) -> Result<()> {
+        let project_ids = self
+            .project_sessions
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for project_id in project_ids {
+            self.retire_project_session_relation_graph(&project_id)
+                .await?;
+        }
+        let project_ids = self
+            .project_memory
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for project_id in project_ids {
+            self.retire_project_memory_graph(&project_id).await?;
+        }
+        self.retire_profile_session_relation_graph().await?;
+        self.retire_profile_memory_graph().await?;
+        if self.memory_graph_reconciliation_tasks.retained_count()? != 0 {
+            self.retirement_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            return Err(session_registry_error(
+                "retire profile session runtime registry",
+                "profile has pending memory graph reconciliation tasks".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn ensure_project_session_runtime_capacity(
+        &self,
+        requested: &ProjectId,
+    ) -> Result<()> {
+        loop {
+            let candidate = {
+                let mounted = self.project_sessions.lock().await;
+                if mounted.contains_key(requested)
+                    || mounted.len() < self.project_runtime_capacity.get()
+                {
+                    return Ok(());
+                }
+                mounted.iter().find_map(|(project_id, database)| {
+                    (Arc::strong_count(database) == 1).then(|| project_id.clone())
+                })
+            };
+            let Some(candidate) = candidate else {
+                self.retirement_refusals
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                return Err(session_registry_error(
+                    "admit project session runtime",
+                    "project runtime retention capacity is exhausted by active session runtimes"
+                        .to_owned(),
+                ));
+            };
+            if let Err(error) = self.retire_project_session_relation_graph(&candidate).await {
+                return Err(session_registry_error(
+                    "retire idle project session runtime",
+                    error.to_string(),
+                ));
+            }
+        }
+    }
+
+    pub(super) async fn ensure_project_memory_runtime_capacity(
+        &self,
+        requested: &ProjectId,
+    ) -> Result<()> {
+        loop {
+            let candidate = {
+                let mounted = self.project_memory.lock().await;
+                if mounted.contains_key(requested)
+                    || mounted.len() < self.project_runtime_capacity.get()
+                {
+                    return Ok(());
+                }
+                mounted.iter().find_map(|(project_id, database)| {
+                    (Arc::strong_count(database) == 1).then(|| project_id.clone())
+                })
+            };
+            let Some(candidate) = candidate else {
+                self.retirement_refusals
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                return Err(session_registry_error(
+                    "admit project memory runtime",
+                    "project runtime retention capacity is exhausted by active memory runtimes"
+                        .to_owned(),
+                ));
+            };
+            if let Err(error) = self.retire_project_memory_graph(&candidate).await {
+                return Err(session_registry_error(
+                    "retire idle project memory runtime",
+                    error.to_string(),
+                ));
+            }
+        }
     }
 
     /// Mounts the project-wide mutable graph. The checkout path is exact route

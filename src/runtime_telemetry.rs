@@ -135,6 +135,23 @@ pub struct DatabaseSnapshot {
     pub reader_pool: Option<ReaderPoolOccupancy>,
     /// Bounded daemon store-runtime registry telemetry for all mounted shards.
     pub runtime_registry: RuntimeRegistrySnapshot,
+    /// Exact project runtime and reconciliation ownership retained by the
+    /// current profile's canonical daemon session registry.
+    #[serde(default)]
+    pub session_runtime_retention: SessionRuntimeRetentionSnapshot,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionRuntimeRetentionSnapshot {
+    pub project_runtime_capacity: u64,
+    pub profile_memory_runtimes: u64,
+    pub profile_session_runtimes: u64,
+    pub project_memory_runtimes: u64,
+    pub project_session_runtimes: u64,
+    pub retained_memory_graph_reconciliation_tasks: u64,
+    pub retired_project_memory_runtimes: u64,
+    pub retired_project_session_runtimes: u64,
+    pub retirement_refusals: u64,
 }
 
 /// Per-lane reader-pool occupancy at one instant.
@@ -321,6 +338,7 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
         d.runtime_registry.aggregate.writer_transaction_micros,
         d.runtime_registry.aggregate.committed_batches,
     );
+    let retained_runtimes = &d.session_runtime_retention;
     format!(
         "tracedecay {ver} runtime snapshot ({os})\n\
          ────────────────────────────────────────\n\
@@ -349,6 +367,7 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
            runtime interrupts {runtime_interrupts}\n\
            runtime writer time {runtime_writer_time}\n\
            runtime wal       {runtime_wal}\n\
+           session retention profiles memory/session {profile_memory}/{profile_sessions}; projects memory/session {project_memory}/{project_sessions} of {project_capacity}; reconciliation {reconciliation}; retired memory/session {retired_memory}/{retired_sessions}; refusals {retirement_refusals}\n\
         ",
         ver = snap.tracedecay_version,
         os = snap.host_os,
@@ -405,6 +424,15 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
             .aggregate
             .wal_bytes
             .map_or_else(|| "unknown".to_owned(), bytes_human),
+        profile_memory = retained_runtimes.profile_memory_runtimes,
+        profile_sessions = retained_runtimes.profile_session_runtimes,
+        project_memory = retained_runtimes.project_memory_runtimes,
+        project_sessions = retained_runtimes.project_session_runtimes,
+        project_capacity = retained_runtimes.project_runtime_capacity,
+        reconciliation = retained_runtimes.retained_memory_graph_reconciliation_tasks,
+        retired_memory = retained_runtimes.retired_project_memory_runtimes,
+        retired_sessions = retained_runtimes.retired_project_session_runtimes,
+        retirement_refusals = retained_runtimes.retirement_refusals,
     )
 }
 
@@ -541,6 +569,10 @@ async fn collect_database_with_generation_census(
         .map(ReaderPoolOccupancy::from_pool);
     let runtime_registry =
         RuntimeRegistrySnapshot::from_projection(cg.store_runtime_registry().runtime_telemetry());
+    let retention = cg
+        .store_runtime_registry()
+        .session_runtime_retention_telemetry()
+        .await?;
     Ok(DatabaseSnapshot {
         project_root,
         db_path,
@@ -558,6 +590,18 @@ async fn collect_database_with_generation_census(
         generation_census,
         reader_pool,
         runtime_registry,
+        session_runtime_retention: SessionRuntimeRetentionSnapshot {
+            project_runtime_capacity: retention.project_runtime_capacity,
+            profile_memory_runtimes: retention.profile_memory_runtimes,
+            profile_session_runtimes: retention.profile_session_runtimes,
+            project_memory_runtimes: retention.project_memory_runtimes,
+            project_session_runtimes: retention.project_session_runtimes,
+            retained_memory_graph_reconciliation_tasks: retention
+                .retained_memory_graph_reconciliation_tasks,
+            retired_project_memory_runtimes: retention.retired_project_memory_runtimes,
+            retired_project_session_runtimes: retention.retired_project_session_runtimes,
+            retirement_refusals: retention.retirement_refusals,
+        },
     })
 }
 
@@ -798,6 +842,39 @@ mod tests {
             occupancy.general.available + occupancy.general.leased + occupancy.general.limbo,
             occupancy.general.workers
         );
+    }
+
+    #[tokio::test]
+    async fn production_database_snapshot_reports_session_runtime_retention() {
+        let temporary = tempfile::tempdir().expect("runtime telemetry fixture");
+        let project_root = temporary.path().join("project");
+        let profile_root = temporary.path().join("profile");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        gix::init(&project_root).expect("project repository");
+        let graph = crate::tracedecay::TraceDecay::init_with_options(
+            &project_root,
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(profile_root.clone()),
+                global_db_path: Some(profile_root.join("global.db")),
+            },
+        )
+        .await
+        .expect("production graph initialization");
+
+        let snapshot = collect_database(&graph, false)
+            .await
+            .expect("production runtime telemetry snapshot");
+        assert_eq!(
+            snapshot.session_runtime_retention.project_runtime_capacity,
+            u64::try_from(
+                crate::daemon::store_runtime::session_registry::DEFAULT_RETAINED_PROJECT_RUNTIME_CAPACITY,
+            )
+            .expect("retention capacity fits telemetry wire range")
+        );
+        let serialized = serde_json::to_value(snapshot)
+            .expect("session runtime retention uses the canonical telemetry wire snapshot");
+        assert!(serialized["session_runtime_retention"].is_object());
+        graph.close();
     }
 
     /// Regression guard for the Windows `STATUS_STACK_OVERFLOW` report against

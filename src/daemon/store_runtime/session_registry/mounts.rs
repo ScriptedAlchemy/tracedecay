@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -59,6 +60,48 @@ impl DaemonSessionRuntimeRegistryV1 {
         identity: LocalProfileIdentityAuthorityV1,
         long_lived_session_maintenance: bool,
     ) -> Result<Self> {
+        let project_runtime_capacity = NonZeroUsize::new(
+            super::DEFAULT_RETAINED_PROJECT_RUNTIME_CAPACITY,
+        )
+        .ok_or_else(|| {
+            session_registry_error(
+                "configure retained project runtime capacity",
+                "default retained project runtime capacity is zero".to_owned(),
+            )
+        })?;
+        Self::open_with_session_maintenance_and_retention_capacity(
+            identity,
+            long_lived_session_maintenance,
+            project_runtime_capacity,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn open_with_retention_capacity_for_test(
+        identity: LocalProfileIdentityAuthorityV1,
+        project_runtime_capacity: usize,
+    ) -> Result<Self> {
+        let project_runtime_capacity =
+            NonZeroUsize::new(project_runtime_capacity).ok_or_else(|| {
+                session_registry_error(
+                    "configure retained project runtime capacity",
+                    "test retained project runtime capacity must be greater than zero".to_owned(),
+                )
+            })?;
+        Self::open_with_session_maintenance_and_retention_capacity(
+            identity,
+            false,
+            project_runtime_capacity,
+        )
+        .await
+    }
+
+    async fn open_with_session_maintenance_and_retention_capacity(
+        identity: LocalProfileIdentityAuthorityV1,
+        long_lived_session_maintenance: bool,
+        project_runtime_capacity: NonZeroUsize,
+    ) -> Result<Self> {
         let remote_credential_authority = Arc::new(
             crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
                 identity.brain_id().clone(),
@@ -97,7 +140,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         let graph_manifest_provider =
             Arc::new(super::code_graph_manifest::DaemonCodeGraphManifestProviderV1::default());
         let graph_registry = GraphDbRegistry::new_with_manifest_provider(
-            GraphDbRegistryConfig { max_open: 8 },
+            GraphDbRegistryConfig {
+                max_open: super::RETAINED_SESSION_GRAPH_RUNTIME_CAPACITY,
+            },
             graph_manifest_provider.clone(),
         )
         .map_err(|error| {
@@ -144,6 +189,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             remote_recovery_authorities: Mutex::new(BTreeMap::new()),
             project_memory: Arc::new(Mutex::new(BTreeMap::new())),
             project_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            project_runtime_capacity,
+            retired_project_memory_runtimes: std::sync::atomic::AtomicU64::new(0),
+            retired_project_session_runtimes: std::sync::atomic::AtomicU64::new(0),
+            retirement_refusals: std::sync::atomic::AtomicU64::new(0),
             registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
             retained_hook_tasks: RetainedHookTasks::new(),
             memory_graph_reconciliation_tasks: Arc::new(
@@ -573,6 +622,14 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         project_id: ProjectId,
     ) -> Result<Arc<RegisteredGlobalDb>> {
+        {
+            let mounted = self.project_sessions.lock().await;
+            if let Some(database) = mounted.get(&project_id) {
+                return Ok(Arc::clone(database));
+            }
+        }
+        self.ensure_project_session_runtime_capacity(&project_id)
+            .await?;
         let mut mounted = self.project_sessions.lock().await;
         if let Some(database) = mounted.get(&project_id) {
             return Ok(Arc::clone(database));
@@ -650,6 +707,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             .map_err(|error| {
                 session_registry_error("register project memory authority", format!("{error:?}"))
             })?;
+        {
+            let mounted = self.project_memory.lock().await;
+            if let Some(database) = mounted.get(&project_id) {
+                return Ok(Arc::clone(database));
+            }
+        }
+        self.ensure_project_memory_runtime_capacity(&project_id)
+            .await?;
         let mut mounted = self.project_memory.lock().await;
         if let Some(database) = mounted.get(&project_id) {
             return Ok(Arc::clone(database));

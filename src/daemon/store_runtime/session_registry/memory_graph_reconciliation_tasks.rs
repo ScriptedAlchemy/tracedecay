@@ -72,6 +72,18 @@ impl RetainedMemoryGraphReconciliationTasksV1 {
         }
     }
 
+    pub(super) fn retained_count(&self) -> Result<usize> {
+        self.state
+            .lock()
+            .map(|state| state.tasks.len())
+            .map_err(|_| {
+                session_registry_error(
+                    "observe memory graph reconciliation tasks",
+                    "memory graph task registry lock is poisoned".to_owned(),
+                )
+            })
+    }
+
     pub(super) async fn shutdown(&self) -> std::result::Result<(), String> {
         self.cancel();
         let tasks = self
