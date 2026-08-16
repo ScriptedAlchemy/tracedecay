@@ -16,8 +16,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::semantic_activation_journey_test::{
-    evaluate_native_profile, installed_selection_material, seed_distribution_fixture, selection,
-    semantic_candidate, set_semantic_profile, wait_for_semantic_generation,
+    assert_semantic_probe_contribution, evaluate_native_profile, installed_selection_material,
+    seed_distribution_fixture, selection, semantic_candidate, set_semantic_profile,
+    wait_for_semantic_generation,
 };
 use super::*;
 
@@ -305,20 +306,13 @@ fn assert_semantic_pending(payload: &Value) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_activation() {
-    // This real journey uses the byte-pinned package produced by distribution
-    // acceptance; it must not synthesize a model. Absent that prerequisite,
-    // leave the fixture-dependent journey out of an ordinary lib-test run.
-    let Some(fixture_root) = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
+    let fixture_root = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
         .map(PathBuf::from)
         .filter(|path| path.is_dir())
-    else {
-        eprintln!(
-            "skipping the live semantic availability journey; prepare the \
-             distribution-acceptance package and set \
-             TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE"
+        .expect(
+            "live semantic availability journey requires \
+             TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE from distribution acceptance",
         );
-        return;
-    };
     let _profile = crate::config::PinnedUserDataDir::new();
     let lifecycle_root =
         crate::semantic_code::default_lifecycle_root().expect("isolated lifecycle root");
@@ -486,6 +480,11 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
     .await
     .expect("activated semantic retrieval did not begin answering");
     assert_eq!(activated["semantic"]["status"], json!("complete"));
+    assert_semantic_probe_contribution(
+        &activated,
+        PROBE_SYMBOL,
+        "semantic availability activation",
+    );
     assert_eq!(activated_state["state"], json!("ready"));
     assert_eq!(
         activated_state["receipt"]["activated_generation"],
@@ -498,6 +497,11 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         core_after["semantic"]["status"],
         json!("complete"),
         "semantic retrieval must answer once activation completes: {core_after}"
+    );
+    assert_semantic_probe_contribution(
+        &core_after,
+        PROBE_SYMBOL,
+        "semantic availability fallback search after activation",
     );
     assert_eq!(
         core_after["coverage"]["recall"],
