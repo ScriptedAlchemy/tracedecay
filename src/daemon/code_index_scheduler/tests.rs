@@ -2757,7 +2757,7 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
 
     assert_eq!(
         registry
-            .retire_owned_serving_generation(fixture.path(), &original_installation)
+            .retire_owned_serving_generation(fixture.path(), original_installation)
             .await,
         ServingGenerationRollbackOutcomeV1::NoMatch,
         "a foreign replacement must invalidate the original installation token"
@@ -2779,7 +2779,7 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
     };
     assert_eq!(
         registry
-            .retire_owned_serving_generation(fixture.path(), &newer_installation)
+            .retire_owned_serving_generation(fixture.path(), newer_installation)
             .await,
         ServingGenerationRollbackOutcomeV1::Cleared
     );
@@ -2813,7 +2813,7 @@ async fn committed_serving_generation_installation_preserves_the_exact_generatio
     };
     assert_eq!(
         registry
-            .commit_serving_generation_installation(fixture.path(), &installation)
+            .commit_serving_generation_installation(fixture.path(), installation)
             .await,
         ServingGenerationRollbackOutcomeV1::Cleared
     );
@@ -2822,12 +2822,45 @@ async fn committed_serving_generation_installation_preserves_the_exact_generatio
         Some(generation_id),
         "committing metadata ownership must retain the exact serving generation"
     );
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn abandoned_serving_generation_installation_releases_the_exact_replay_claim() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, _scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let generation = registry
+        .serving_code_scope(fixture.path())
+        .await
+        .and_then(|scope| scope.serving_generation)
+        .expect("initial retained generation");
+    let generation_id = generation.manifest().generation_id.clone();
+    let ServingGenerationInstallationOutcomeV1::Installed(abandoned) = registry
+        .install_exact_serving_generation(fixture.path(), &generation)
+        .await
+    else {
+        panic!("the initial serving generation must admit one exact owner")
+    };
+
+    drop(abandoned);
+
+    let ServingGenerationInstallationOutcomeV1::Installed(replay) = registry
+        .install_exact_serving_generation(fixture.path(), &generation)
+        .await
+    else {
+        panic!("dropping an unfinished installation must release the replay claim")
+    };
     assert_eq!(
         registry
-            .retire_owned_serving_generation(fixture.path(), &installation)
+            .commit_serving_generation_installation(fixture.path(), replay)
             .await,
-        ServingGenerationRollbackOutcomeV1::NoMatch,
-        "a committed installation token cannot later erase the serving generation"
+        ServingGenerationRollbackOutcomeV1::Cleared
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(generation_id),
+        "releasing an abandoned claim must never clear the serving generation"
     );
 
     registry.shutdown().await;

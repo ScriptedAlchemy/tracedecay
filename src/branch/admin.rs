@@ -36,6 +36,15 @@ pub struct BranchAdminReport {
     pub default_branch: Option<String>,
 }
 
+/// Exact single-store provenance selected for cleanup alongside a metadata
+/// removal. Older or legacy branch entries without sealed graph provenance are
+/// deliberately absent: destructive Git/worktree cleanup must never guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SingleStoreBranchRetirementV1 {
+    pub(crate) branch: String,
+    pub(crate) source: crate::branch_meta::BranchGraphSourceV1,
+}
+
 /// A branch metadata mutation selected while holding the shared branch lock.
 /// The daemon reserves [`Self::database_paths`] through the store runtime
 /// registry's destructive maintenance path before committing.
@@ -46,6 +55,7 @@ pub struct PreparedBranchAdminMutation {
     metadata_after: Option<String>,
     database_paths: Vec<PathBuf>,
     gc_branches: Vec<String>,
+    single_store_retirements: Vec<SingleStoreBranchRetirementV1>,
     report: BranchAdminReport,
     _branch_lock: std::fs::File,
 }
@@ -57,6 +67,10 @@ impl PreparedBranchAdminMutation {
 
     pub fn report(&self) -> &BranchAdminReport {
         &self.report
+    }
+
+    pub(crate) fn single_store_retirements(&self) -> &[SingleStoreBranchRetirementV1] {
+        &self.single_store_retirements
     }
 
     #[cfg(test)]
@@ -159,6 +173,7 @@ pub fn prepare_branch_admin_mutation(
     let mut removed_branches = Vec::new();
     let mut removed_orphan_dbs = Vec::new();
     let mut gc_branches = Vec::new();
+    let mut single_store_retirements = Vec::new();
     let mut outcome = BranchAdminOutcome::NoChanges;
 
     match action {
@@ -172,6 +187,7 @@ pub fn prepare_branch_admin_mutation(
                     metadata_after: metadata_before.clone(),
                     database_paths,
                     gc_branches,
+                    single_store_retirements,
                     report: BranchAdminReport {
                         outcome,
                         removed_branches,
@@ -191,8 +207,13 @@ pub fn prepare_branch_admin_mutation(
                 // metadata-only; only a legacy private copy is deletable.
                 if !entry.served_by_project_store() {
                     database_paths.push(tracedecay_dir.join(entry.db_file));
+                } else if let Some(source) = entry.graph_source {
+                    single_store_retirements.push(SingleStoreBranchRetirementV1 {
+                        branch: branch.clone(),
+                        source,
+                    });
                 }
-                removed_branches.push(branch);
+                removed_branches.push(branch.clone());
                 outcome = BranchAdminOutcome::Removed;
             } else {
                 outcome = BranchAdminOutcome::NotTracked;
@@ -208,6 +229,7 @@ pub fn prepare_branch_admin_mutation(
                     metadata_after: metadata_before.clone(),
                     database_paths,
                     gc_branches,
+                    single_store_retirements,
                     report: BranchAdminReport {
                         outcome,
                         removed_branches,
@@ -220,9 +242,14 @@ pub fn prepare_branch_admin_mutation(
             let mut removed = branch_meta.remove_all_branches();
             removed.sort_by(|left, right| left.0.cmp(&right.0));
             for (branch, entry) in removed {
-                removed_branches.push(branch);
+                removed_branches.push(branch.clone());
                 if !entry.served_by_project_store() {
                     database_paths.push(tracedecay_dir.join(entry.db_file));
+                } else if let Some(source) = entry.graph_source {
+                    single_store_retirements.push(SingleStoreBranchRetirementV1 {
+                        branch: branch.clone(),
+                        source,
+                    });
                 }
             }
             if !removed_branches.is_empty() {
@@ -248,16 +275,21 @@ pub fn prepare_branch_admin_mutation(
                         // private store is a physical deletion candidate.
                         let private_store = (!entry.served_by_project_store())
                             .then(|| tracedecay_dir.join(&entry.db_file));
-                        (name.clone(), private_store)
+                        (name.clone(), private_store, entry.graph_source.clone())
                     })
                     .collect::<Vec<_>>();
                 candidates.sort_by(|left, right| left.0.cmp(&right.0));
-                for (name, private_store) in candidates {
+                for (name, private_store, source) in candidates {
                     branch_meta.remove_branch(&name);
                     gc_branches.push(name.clone());
-                    removed_branches.push(name);
+                    removed_branches.push(name.clone());
                     if let Some(path) = private_store {
                         database_paths.push(path);
+                    } else if let Some(source) = source {
+                        single_store_retirements.push(SingleStoreBranchRetirementV1 {
+                            branch: name,
+                            source,
+                        });
                     }
                 }
             }
@@ -301,6 +333,7 @@ pub fn prepare_branch_admin_mutation(
         metadata_after,
         database_paths,
         gc_branches,
+        single_store_retirements,
         report: BranchAdminReport {
             outcome,
             removed_branches,

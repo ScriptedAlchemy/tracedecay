@@ -229,18 +229,39 @@ pub(in crate::daemon) enum ServingGenerationRollbackOutcomeV1 {
     NoMatch,
 }
 
-/// Opaque ownership of one exact serving-slot installation. The token is
-/// minted by the serving-slot CAS and is invalidated by every later slot
-/// replacement, even when a replacement reuses the same generation id.
+/// Slot-local claim kept independently from its RAII lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::daemon) struct ServingGenerationInstallationV1 {
+struct ServingGenerationInstallationClaimV1 {
     token: u64,
     serving_epoch: u64,
     generation_id: CodeGenerationId,
 }
 
+/// Non-clone ownership of one exact serving-slot installation. Dropping an
+/// unfinished lease releases only its matching claim; it never clears or
+/// mutates the serving generation, so cancellation cannot strand a later
+/// exact replay behind an abandoned same-epoch claim.
+#[derive(Debug)]
+#[must_use = "an installation lease must be committed, retired, or dropped"]
+pub(in crate::daemon) struct ServingGenerationInstallationV1 {
+    claim: ServingGenerationInstallationClaimV1,
+    active_installation: Arc<Mutex<Option<ServingGenerationInstallationClaimV1>>>,
+}
+
+impl Drop for ServingGenerationInstallationV1 {
+    fn drop(&mut self) {
+        let mut active = self
+            .active_installation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.as_ref() == Some(&self.claim) {
+            *active = None;
+        }
+    }
+}
+
 /// Result of claiming one exact serving generation for a branch publication.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(in crate::daemon) enum ServingGenerationInstallationOutcomeV1 {
     Installed(ServingGenerationInstallationV1),
     NoMatch,
@@ -294,7 +315,7 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     serving_generation_epoch: Arc<AtomicU64>,
     /// One in-flight branch publication may own a serving-slot installation.
     /// It is paired with `serving_generation_epoch` under the slot CAS.
-    serving_generation_installation: Arc<Mutex<Option<ServingGenerationInstallationV1>>>,
+    serving_generation_installation: Arc<Mutex<Option<ServingGenerationInstallationClaimV1>>>,
     graph_activation: CodeGraphActivationAuthorityV1,
     ignored_dependency_admissions: Arc<
         Mutex<
@@ -1269,7 +1290,7 @@ impl CodeIndexSchedulerRegistryV1 {
             Ok(token) => token,
             Err(_) => return ServingGenerationInstallationOutcomeV1::NoMatch,
         };
-        let installation = ServingGenerationInstallationV1 {
+        let claim = ServingGenerationInstallationClaimV1 {
             token,
             serving_epoch,
             generation_id: current.generation().manifest().generation_id.clone(),
@@ -1283,8 +1304,11 @@ impl CodeIndexSchedulerRegistryV1 {
         {
             return ServingGenerationInstallationOutcomeV1::NoMatch;
         }
-        *active_installation = Some(installation.clone());
-        ServingGenerationInstallationOutcomeV1::Installed(installation)
+        *active_installation = Some(claim.clone());
+        ServingGenerationInstallationOutcomeV1::Installed(ServingGenerationInstallationV1 {
+            claim,
+            active_installation: installation_slot,
+        })
     }
 
     /// Completes an exact serving-slot installation after its matching branch
@@ -1294,9 +1318,9 @@ impl CodeIndexSchedulerRegistryV1 {
     pub(in crate::daemon) async fn commit_serving_generation_installation(
         &self,
         project_root: &Path,
-        installation: &ServingGenerationInstallationV1,
+        installation: ServingGenerationInstallationV1,
     ) -> ServingGenerationRollbackOutcomeV1 {
-        self.resolve_serving_generation_installation(project_root, installation, false)
+        self.resolve_serving_generation_installation(project_root, &installation.claim, false)
             .await
     }
 
@@ -1305,16 +1329,16 @@ impl CodeIndexSchedulerRegistryV1 {
     pub(in crate::daemon) async fn retire_owned_serving_generation(
         &self,
         project_root: &Path,
-        installation: &ServingGenerationInstallationV1,
+        installation: ServingGenerationInstallationV1,
     ) -> ServingGenerationRollbackOutcomeV1 {
-        self.resolve_serving_generation_installation(project_root, installation, true)
+        self.resolve_serving_generation_installation(project_root, &installation.claim, true)
             .await
     }
 
     async fn resolve_serving_generation_installation(
         &self,
         project_root: &Path,
-        installation: &ServingGenerationInstallationV1,
+        installation: &ServingGenerationInstallationClaimV1,
         retire: bool,
     ) -> ServingGenerationRollbackOutcomeV1 {
         let Ok(project_root) = project_root.canonicalize() else {

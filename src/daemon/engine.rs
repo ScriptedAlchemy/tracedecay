@@ -207,7 +207,11 @@ impl DaemonEngine {
         action: crate::branch::BranchAdminAction,
     ) -> Result<crate::branch::BranchAdminReport> {
         self.store_administration
-            .execute_branch_admin_for_handshake(handshake, action)
+            .execute_branch_admin_for_handshake(
+                &self.invocation.code_index_schedulers,
+                handshake,
+                action,
+            )
             .await
     }
 

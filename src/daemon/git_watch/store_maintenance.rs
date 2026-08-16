@@ -72,6 +72,7 @@ impl ScopeRootProofInputsV1 {
 /// eligible for a retry.
 pub(super) async fn run_gc(
     administration: &StoreAdministration,
+    schedulers: &super::super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     branch_gc_days: u64,
     orphan_db_gc_days: u64,
     cg: &TraceDecay,
@@ -83,6 +84,7 @@ pub(super) async fn run_gc(
     // safety checks; GC never runs beside a content writer on the same store.
     let report = administration
         .execute_branch_admin_in_layout(
+            schedulers,
             root,
             data_root,
             BranchAdminAction::Gc,
