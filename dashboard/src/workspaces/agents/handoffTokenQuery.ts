@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { skipToken, useQuery } from '@tanstack/react-query';
 import type { AnalyticsSubagentTreePayloadV1, ListTaskHandoffsResultV1 } from '../../contracts/generated.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { callWork, type WorkResult } from '../work/workApi.ts';
@@ -38,23 +38,21 @@ export function newestTreeSession(
  *
  * Goes through the same `callWork` wire as the Work routes because the handoff
  * family is mounted on the same application router and answers with the same
- * envelope. The query is disabled with no session: react-query must not be
+ * envelope. With no session the query is skipped: react-query must not be
  * asked for an answer to a question this page has not got.
  */
 export function useAgentHandoffTokens(sessionId: string | null) {
   const scope = useScope((state) => state.scope);
   return useQuery<WorkResult<ListTaskHandoffsResultV1>>({
     queryKey: ['agents', 'handoff-tokens', scopeKey(scope), sessionId],
-    enabled: sessionId !== null,
-    queryFn: () => {
-      if (sessionId === null) {
-        throw new Error('handoff token frontier queried with no session named');
-      }
-      return callWork(
-        HANDOFF_LIST_TASK_ROUTE,
-        { session_id: sessionId },
-        scopedUrl(scope, HANDOFF_LIST_TASK_ROUTE.path),
-      );
-    },
+    queryFn:
+      sessionId === null
+        ? skipToken
+        : () =>
+            callWork(
+              HANDOFF_LIST_TASK_ROUTE,
+              { session_id: sessionId },
+              scopedUrl(scope, HANDOFF_LIST_TASK_ROUTE.path),
+            ),
   });
 }

@@ -328,15 +328,6 @@ fn fact_add_body(content: &str) -> Value {
     json!({ "content": content, "category": "general" })
 }
 
-/// Asserts a marker passes production memory hygiene, so a hygiene refusal can
-/// never masquerade as the partial-effect terminal this suite induces.
-fn assert_marker_is_storable(marker: &str) {
-    assert!(
-        detect_secret_like(marker).is_none(),
-        "marker {marker:?} would be refused as secret-like before the commit boundary"
-    );
-}
-
 /// Asserts the SDK surfaced a typed terminal rather than a success or a
 /// transport failure, and returns its canonical envelope.
 fn sdk_problem(error: ClientError, context: &str) -> (String, Value) {
@@ -357,8 +348,13 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
     /// Query that must retrieve every marker above after the restart.
     const MARKER_QUERY: &str = "boundaries-partial";
 
+    // A hygiene refusal must never masquerade as the partial-effect terminal
+    // this suite induces.
     for marker in [HTTP_MARKER, MCP_MARKER, SDK_MARKER, POST_RESTART_MARKER] {
-        assert_marker_is_storable(marker);
+        assert!(
+            detect_secret_like(marker).is_none(),
+            "marker {marker:?} would be refused as secret-like before the commit boundary"
+        );
     }
 
     let home = tempfile::TempDir::new().expect("isolated home");
