@@ -114,15 +114,11 @@ fn run_codex_plugin_step(
 ) -> Result<()> {
     let config_path = codex_config_path(home);
     let owned_key = plugin_selector(marketplace_name);
-    let regions_before = preserved_regions(&config_path, &owned_key)?;
+    let (_, regions_before) = read_config_observation(&config_path, &owned_key)?;
     let outcome = crate::agents::host_cli::run_host_cli(codex_cli, args, home)?;
     let (observed_bytes, regions_after) = read_config_observation(&config_path, &owned_key)?;
     if regions_before != regions_after {
-        let invocation = if args.is_empty() {
-            codex_cli.display().to_string()
-        } else {
-            format!("{} {}", codex_cli.display(), args.join(" "))
-        };
+        let invocation = format!("{} {}", codex_cli.display(), args.join(" "));
         return Err(TraceDecayError::Config {
             message: format!(
                 "`{invocation}` changed Codex-owned state in {} that TraceDecay does not author \
@@ -153,11 +149,6 @@ struct CodexPluginPreservedRegionsV1 {
     mcp_servers: Option<toml::Value>,
     /// Codex-owned hook trust records (`[hooks.state."…"]`).
     hooks: Option<toml::Value>,
-}
-
-fn preserved_regions(path: &Path, owned_key: &str) -> Result<CodexPluginPreservedRegionsV1> {
-    let (_, regions) = read_config_observation(path, owned_key)?;
-    Ok(regions)
 }
 
 fn read_config_observation(
