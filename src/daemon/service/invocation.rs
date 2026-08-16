@@ -170,6 +170,7 @@ use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookSco
 
 // Structural split: production logic now lives in the child modules below;
 // this file remains the stable external path (`service::invocation::*`).
+mod administrative_effect;
 mod clock;
 mod configuration;
 mod dispatch;

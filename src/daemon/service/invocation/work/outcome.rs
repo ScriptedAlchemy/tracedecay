@@ -4,8 +4,8 @@ use serde::Serialize;
 use tracedecay_application::{
     ApplicationContractError, ApplicationOutcome, ApplicationProblem, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantSnapshot,
-    Deadline, EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority,
-    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, EvidencePacket, IdempotencyKey,
+    Deadline, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
+    EvidenceDomain, EvidenceIdentity, EvidencePacket,
     OperationBudgetUsage, OperationReceipt, PageState, PolicyDecisionRef, ReconciliationState,
     RequestAdmission, RequestContext, RequestId, RetryDirective, SafeDiagnostic, TemporalState,
     WorkProjectionApplicationError, WorkflowEffectTerminalV1,
@@ -18,6 +18,7 @@ use crate::daemon_contract::{
     WorkApplicationOutcomeV1,
 };
 
+use super::super::administrative_effect::administrative_command_effect;
 use super::super::current_micros;
 use super::{RegisteredWorkRuntime, application_problem};
 
@@ -339,6 +340,8 @@ where
     )
 }
 
+/// A completed Work command effect: the shared administrative receipt shape
+/// with every digest domain namespaced under the `work` family token.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn work_command_effect<T>(
     registered: &RegisteredWorkRuntime,
@@ -354,91 +357,18 @@ pub(super) fn work_command_effect<T>(
 where
     T: Serialize,
 {
-    let policy_digest = canonical_sha256(&(
-        "tracedecay.daemon.work-policy.v1",
-        &registered.policy_digest,
-        &registered.grant.digest,
-        operation_key,
-        &use_case,
-    ))?;
-    let policy = PolicyDecisionRef::new(
-        format!("policy.daemon.work.{operation_key}.v1"),
-        1,
-        policy_digest,
-        ComponentVersion::new("tracedecay.daemon.work-policy.v1").map_err(|_| {
-            ApplicationContractError::Inconsistent {
-                field: "Work policy evaluator",
-            }
-        })?,
-    )?;
-    let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
-    let suffix = input_digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "Work input digest",
-        })?
-        .to_owned();
-    let idempotency_key = IdempotencyKey::new(format!("work.{operation_key}.{suffix}"))?;
-    let expected_state = canonical_sha256(&(
-        "tracedecay.work.expected-state.v1",
-        operation_key,
-        &input_digest,
-    ))
-    .map_err(|_| ApplicationContractError::Inconsistent {
-        field: "Work expected state",
-    })?;
-    let committed_state =
-        canonical_sha256(&("tracedecay.work.committed-state.v1", operation_key, &result)).map_err(
-            |_| ApplicationContractError::Inconsistent {
-                field: "Work committed state",
-            },
-        )?;
-    let execution = OperationReceipt::completed(
-        observed_at,
-        current_micros(),
-        deadline,
-        OperationBudgetUsage::default(),
-    )?;
-    let receipt = EffectReceipt {
-        operation: use_case,
+    administrative_command_effect(
+        "work",
+        registered,
+        context,
         request_id,
-        actor: registered.actor.clone(),
-        scope: context.scope().clone(),
-        effect_class: EffectClass::Administrative,
-        idempotency_key: idempotency_key.clone(),
+        operation_key,
+        use_case,
         input_digest,
-        expected_state: expected_state.clone(),
-        policy_digest: authority.policy.digest.clone(),
-        configuration_digest: registered.configuration_digest.clone(),
-        catalog_digest: canonical_sha256(&("tracedecay.work.catalog.v1", operation_key)).map_err(
-            |_| ApplicationContractError::Inconsistent {
-                field: "Work catalog digest",
-            },
-        )?,
-        privacy_digest: canonical_sha256(&(
-            "tracedecay.work.privacy.v1",
-            context.scope(),
-            context.grant().disclosure,
-        ))
-        .map_err(|_| ApplicationContractError::Inconsistent {
-            field: "Work privacy digest",
-        })?,
-        outcome: EffectTermination::Completed,
-        committed_state: Some(committed_state),
-        external_proof: None,
-    };
-    Ok(ApplicationOutcome::Effect(EffectResult::new(
-        EffectId::new(format!("effect.work.{operation_key}.{suffix}"))?,
-        EffectClass::Administrative,
-        idempotency_key,
-        authority,
-        expected_state,
-        execution,
-        ReconciliationState::Reconciled,
-        receipt,
-        Some(result),
-    )?))
+        result,
+        observed_at,
+        deadline,
+    )
 }
 
 pub(in crate::daemon::service::invocation) fn work_request_context(

@@ -12,7 +12,12 @@ use tracedecay_application::{
     investigation_owner_version_digest,
 };
 
+use super::administrative_effect::{administrative_authority, administrative_command_effect};
 use super::*;
+
+/// The token namespacing every handoff digest domain, policy id, idempotency
+/// key, and effect id.
+const HANDOFF_EFFECT_FAMILY: &str = "handoff";
 
 #[derive(Clone)]
 struct DaemonHandoffOpenTargets {
@@ -372,7 +377,8 @@ fn complete_handoff_effect(
     deadline: Deadline,
 ) -> DaemonInvocationResponse {
     let outcome = match result {
-        HandoffApplicationResult::IssueTask(result) => handoff_effect(
+        HandoffApplicationResult::IssueTask(result) => administrative_command_effect(
+            HANDOFF_EFFECT_FAMILY,
             registered,
             context,
             canonical_request_id,
@@ -384,10 +390,11 @@ fn complete_handoff_effect(
             deadline,
         )
         .map(HandoffApplicationOutcomeV1::IssueTaskHandoff),
-        // The read takes the evidence path, not `handoff_effect`. Minting an
-        // effect id, an idempotency key and a durable effect receipt for an
-        // operation that committed nothing would put a permanent record of a
-        // mutation that never happened into the reconciliation ledger.
+        // The read takes the evidence path, not the command-effect path.
+        // Minting an effect id, an idempotency key and a durable effect
+        // receipt for an operation that committed nothing would put a
+        // permanent record of a mutation that never happened into the
+        // reconciliation ledger.
         HandoffApplicationResult::ListTask(result) => handoff_evidence(
             registered,
             context,
@@ -398,7 +405,8 @@ fn complete_handoff_effect(
             deadline,
         )
         .map(HandoffApplicationOutcomeV1::ListTaskHandoffs),
-        HandoffApplicationResult::Investigation(result) => handoff_effect(
+        HandoffApplicationResult::Investigation(result) => administrative_command_effect(
+            HANDOFF_EFFECT_FAMILY,
             registered,
             context,
             canonical_request_id,
@@ -410,7 +418,8 @@ fn complete_handoff_effect(
             deadline,
         )
         .map(HandoffApplicationOutcomeV1::OpenInvestigationHandoff),
-        HandoffApplicationResult::Task(result) => handoff_effect(
+        HandoffApplicationResult::Task(result) => administrative_command_effect(
+            HANDOFF_EFFECT_FAMILY,
             registered,
             context,
             canonical_request_id,
@@ -437,12 +446,12 @@ fn complete_handoff_effect(
 
 /// The read path: an evidence packet for an enumeration that commits nothing.
 ///
-/// Deliberately NOT `handoff_effect`. That function mints an `EffectId`, an
-/// idempotency key and a `DurableEffect` receipt, all of which assert a
-/// committed state change. This operation reads the grant store and leaves it
-/// byte-identical, so it carries an operation receipt and a coverage claim
-/// instead — and the coverage claim is only `Complete` when the enumeration did
-/// not hit its ceiling.
+/// Deliberately NOT `administrative_command_effect`. That function mints an
+/// `EffectId`, an idempotency key and a `DurableEffect` receipt, all of which
+/// assert a committed state change. This operation reads the grant store and
+/// leaves it byte-identical, so it carries an operation receipt and a coverage
+/// claim instead — and the coverage claim is only `Complete` when the
+/// enumeration did not hit its ceiling.
 fn handoff_evidence(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
@@ -455,7 +464,8 @@ fn handoff_evidence(
     ApplicationOutcome<tracedecay_application::ListTaskHandoffsResultV1>,
     ApplicationContractError,
 > {
-    let (authority, execution) = handoff_authority(
+    let (authority, execution) = administrative_authority(
+        HANDOFF_EFFECT_FAMILY,
         registered,
         context,
         operation_key,
@@ -511,114 +521,3 @@ fn handoff_evidence(
     }))
 }
 
-/// Policy-bound authority receipt and completed operation receipt shared by
-/// the handoff effect and evidence outcomes.
-fn handoff_authority(
-    registered: &RegisteredWorkRuntime,
-    context: &RequestContext,
-    operation_key: &str,
-    use_case: &UseCaseId,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-) -> Result<(AuthorityReceipt, OperationReceipt), ApplicationContractError> {
-    let policy_digest = canonical_sha256(&(
-        "tracedecay.daemon.handoff-policy.v1",
-        &registered.policy_digest,
-        &registered.grant.digest,
-        operation_key,
-        use_case,
-    ))?;
-    let policy = PolicyDecisionRef::new(
-        format!("policy.daemon.handoff.{operation_key}.v1"),
-        1,
-        policy_digest,
-        ComponentVersion::new("tracedecay.daemon.handoff-policy.v1").map_err(|_| {
-            ApplicationContractError::Inconsistent {
-                field: "handoff policy evaluator",
-            }
-        })?,
-    )?;
-    let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
-    let execution = OperationReceipt::completed(
-        observed_at,
-        current_micros(),
-        deadline,
-        OperationBudgetUsage::default(),
-    )?;
-    Ok((authority, execution))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn handoff_effect<T>(
-    registered: &RegisteredWorkRuntime,
-    context: &RequestContext,
-    request_id: RequestId,
-    operation_key: &str,
-    use_case: UseCaseId,
-    input_digest: ManifestDigest,
-    result: T,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-) -> Result<ApplicationOutcome<T>, ApplicationContractError>
-where
-    T: Serialize,
-{
-    let (authority, execution) = handoff_authority(
-        registered,
-        context,
-        operation_key,
-        &use_case,
-        observed_at,
-        deadline,
-    )?;
-    let suffix = input_digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "handoff input digest",
-        })?
-        .to_owned();
-    let idempotency_key = IdempotencyKey::new(format!("handoff.{operation_key}.{suffix}"))?;
-    let expected_state = canonical_sha256(&(
-        "tracedecay.handoff.expected-state.v1",
-        operation_key,
-        &input_digest,
-    ))?;
-    let committed_state = canonical_sha256(&(
-        "tracedecay.handoff.committed-state.v1",
-        operation_key,
-        &result,
-    ))?;
-    let receipt = EffectReceipt {
-        operation: use_case,
-        request_id,
-        actor: registered.actor.clone(),
-        scope: context.scope().clone(),
-        effect_class: EffectClass::Administrative,
-        idempotency_key: idempotency_key.clone(),
-        input_digest,
-        expected_state: expected_state.clone(),
-        policy_digest: authority.policy.digest.clone(),
-        configuration_digest: registered.configuration_digest.clone(),
-        catalog_digest: canonical_sha256(&("tracedecay.handoff.catalog.v1", operation_key))?,
-        privacy_digest: canonical_sha256(&(
-            "tracedecay.handoff.privacy.v1",
-            context.scope(),
-            context.grant().disclosure,
-        ))?,
-        outcome: EffectTermination::Completed,
-        committed_state: Some(committed_state),
-        external_proof: None,
-    };
-    Ok(ApplicationOutcome::Effect(EffectResult::new(
-        EffectId::new(format!("effect.handoff.{operation_key}.{suffix}"))?,
-        EffectClass::Administrative,
-        idempotency_key,
-        authority,
-        expected_state,
-        execution,
-        ReconciliationState::Reconciled,
-        receipt,
-        Some(result),
-    )?))
-}
