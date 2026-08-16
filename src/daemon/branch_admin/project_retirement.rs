@@ -349,6 +349,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+    use crate::daemon::project_server_lifecycle;
     use crate::daemon::store_writer_gate::{StoreWriterClass, WriterScope};
 
     fn owner(project_id: &str) -> StoreOwnerKey {
@@ -667,21 +668,16 @@ mod tests {
         for (retired_key, retired_server) in retired {
             admission.spawn_and_track(
                 retired_key.owner,
-                super::super::project_server_lifecycle::retire_project_servers(
-                    vec![retired_server],
-                    None,
-                ),
+                project_server_lifecycle::retire_project_servers(vec![retired_server], None),
             );
         }
         drop(admission);
         drop(replacement);
 
-        let mut shutdown = Box::pin(
-            super::super::project_server_lifecycle::shutdown_project_servers(
-                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
-                &administration,
-            ),
-        );
+        let mut shutdown = Box::pin(project_server_lifecycle::shutdown_project_servers(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            &administration,
+        ));
         std::future::poll_fn(|context| {
             assert!(
                 shutdown.as_mut().poll(context).is_pending(),
