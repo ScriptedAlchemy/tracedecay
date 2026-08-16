@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_domain::{
-    ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkV1,
-    CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore, LogicalEvidenceId,
-    ManifestDigest, ProjectionBatchRequestV1, ProjectionOperationV1, ProjectionReplayReasonV1,
-    QueryFallbackSubpayload, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SemanticSearchIndexKeyV1,
+    CalibrationProfileId, ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId,
+    CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore,
+    LogicalEvidenceId, ManifestDigest, ProjectionBatchRequestV1, ProjectionOperationV1,
+    ProjectionReplayReasonV1, QueryFallbackSubpayload, RetrievalAnchorId, RetrievalCursorKeyId,
+    RetrieverBatch, RetrieverKind, RetrieverOutcome, ScoreDomainId, SemanticSearchIndexKeyV1,
     SemanticSearchIndexProfileV1, SourceOccurrenceId, VectorGenerationIdV1, WorktreeId,
     canonical_sha256,
 };
@@ -73,10 +73,11 @@ use tracedecay_semantic::{
     PreparedSemanticEvaluationProjectionV1, PreparedSemanticRuntimeCommitV1,
     PreparedSemanticRuntimeObservationV1, PreparedSemanticRuntimeRestoreV1,
     SemanticEvaluationCancellationV1, SemanticEvaluationQueryFactoryV1,
-    SemanticExecutionInterruptionV1, SemanticGenerationPointerV1, SemanticModelLifecycleOwnerV1,
-    SemanticProjectionResumeOutcomeV1, SemanticRuntimeScheduleFailureV1,
-    SemanticRuntimeScheduleStatusV1, measure_semantic_evaluation_projection_cancellation,
-    prepare_semantic_evaluation_projection,
+    SemanticGenerationPointerV1, SemanticModelLifecycleEvaluationPublicationLeaseV1,
+    SemanticModelLifecycleOwnerV1, SemanticModelLifecyclePublicationIdentityV1,
+    SemanticModelLifecycleStateV1, SemanticProjectionResumeOutcomeV1,
+    SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
+    measure_semantic_evaluation_projection_cancellation, prepare_semantic_evaluation_projection,
 };
 use vector_projection_support::{
     BatchCommitStateV1, commit_evaluation_prepared_generation, projection_input_bytes,
@@ -98,6 +99,8 @@ use super::{
     DaemonGlobalSemanticProjectionSchedulerV1, SemanticProjectionBatchV1,
     SemanticProjectionLeaseV1, SemanticProjectionScheduleErrorV1,
 };
+#[cfg(test)]
+use tracedecay_semantic::SemanticExecutionInterruptionV1;
 
 const EVALUATION_MAX_CONCURRENT_SESSIONS: u32 = 1;
 
@@ -205,6 +208,63 @@ pub struct SemanticCompatibleCurrentGenerationSnapshotV1 {
 pub struct SemanticEvaluationCurrentGenerationSnapshotV1 {
     pub vector_state_revision: i64,
     pub vector_generation_id: VectorGenerationIdV1,
+}
+
+/// Exact pre-acceptance target certified against the live semantic runtime.
+///
+/// This is intentionally independent of accepted-profile configuration: it
+/// proves that a proposed semantic compatibility pin can be evaluated against
+/// the current vector generation and the runtime's actual configured ceiling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticVerifiedEvaluationTargetSnapshotV1 {
+    semantic_compatibility: crate::config::retrieval::SemanticCompatibilityPinsV1,
+    vector_state_revision: i64,
+    vector_generation_id: VectorGenerationIdV1,
+    configured_resource_ceiling: crate::config::retrieval::SemanticResourceRequirementV1,
+    lifecycle_verification: SemanticEvaluationLifecycleVerificationV1,
+}
+
+impl SemanticVerifiedEvaluationTargetSnapshotV1 {
+    pub fn semantic_compatibility(&self) -> &crate::config::retrieval::SemanticCompatibilityPinsV1 {
+        &self.semantic_compatibility
+    }
+
+    pub const fn vector_state_revision(&self) -> i64 {
+        self.vector_state_revision
+    }
+
+    pub fn vector_generation_id(&self) -> &VectorGenerationIdV1 {
+        &self.vector_generation_id
+    }
+
+    pub const fn configured_resource_ceiling(
+        &self,
+    ) -> crate::config::retrieval::SemanticResourceRequirementV1 {
+        self.configured_resource_ceiling
+    }
+
+    pub fn lifecycle_verification(&self) -> &SemanticEvaluationLifecycleVerificationV1 {
+        &self.lifecycle_verification
+    }
+}
+
+/// Opaque lifecycle/runtime observation bound to one pre-acceptance target.
+/// Only [`ProductionSemanticRuntimeV1`] can mint or revalidate it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticEvaluationLifecycleVerificationV1 {
+    compatibility: crate::config::retrieval::SemanticCompatibilityPinsV1,
+    source_generation: CodeGenerationId,
+    source_manifest_digest: ManifestDigest,
+    capability_manifest_digest: ManifestDigest,
+    vector_state_revision: i64,
+    lifecycle_identity: SemanticModelLifecyclePublicationIdentityV1,
+}
+
+/// Final lifecycle read lease held across daemon publication. Its drop releases
+/// model selection, acquisition, and remediation writers through the canonical
+/// lifecycle owner.
+pub struct SemanticEvaluationPublicationLeaseV1 {
+    _lifecycle: SemanticModelLifecycleEvaluationPublicationLeaseV1,
 }
 
 pub struct SemanticVectorPublicationLeaseV1 {
@@ -1044,6 +1104,160 @@ impl ProductionSemanticRuntimeV1 {
         })
     }
 
+    /// Certify a proposed semantic evaluation target without reading accepted
+    /// profile or configuration state.
+    ///
+    /// The candidate must bind the canonical exact-flat index, the exact
+    /// current vector/source generation, installed artifact members, runtime
+    /// implementation, and configured resource ceiling before a native
+    /// evaluator is allowed to run.
+    pub async fn inspect_verified_evaluation_target_snapshot(
+        &self,
+        candidate: &crate::config::retrieval::SemanticCompatibilityPinsV1,
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+        capability_manifest_digest: &ManifestDigest,
+        cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
+    ) -> Result<SemanticVerifiedEvaluationTargetSnapshotV1, SemanticRuntimeBackendErrorV1> {
+        check_evaluation_cancellation(cancellation.as_ref())?;
+        let certified = certify_evaluation_target_compatibility(
+            candidate,
+            source_generation,
+            source_manifest_digest,
+            capability_manifest_digest,
+        )?;
+        validate_evaluation_target_search_index(&certified.search_index_key)?;
+        let verified = self
+            .inspect_compatible_current_generation_snapshot(
+                &certified,
+                source_generation,
+                source_manifest_digest,
+            )
+            .await?;
+        check_evaluation_cancellation(cancellation.as_ref())?;
+        if verified.vector_generation_id != certified.vector_generation_id {
+            return Err(SemanticRuntimeBackendErrorV1::Rejected);
+        }
+        let lifecycle_verification = self.evaluation_lifecycle_verification(
+            certified,
+            source_generation.clone(),
+            source_manifest_digest.clone(),
+            capability_manifest_digest.clone(),
+            verified.vector_state_revision,
+        )?;
+        Ok(SemanticVerifiedEvaluationTargetSnapshotV1 {
+            semantic_compatibility: lifecycle_verification.compatibility.clone(),
+            vector_state_revision: verified.vector_state_revision,
+            vector_generation_id: verified.vector_generation_id,
+            configured_resource_ceiling: configured_semantic_resource_ceiling(self.resources),
+            lifecycle_verification,
+        })
+    }
+
+    /// Recheck the opaque pre-acceptance lifecycle observation immediately
+    /// before publication. A changed vector/code/lifecycle target is a CAS
+    /// conflict, while a malformed or foreign lease remains rejected.
+    pub async fn revalidate_verified_evaluation_target(
+        &self,
+        verification: &SemanticEvaluationLifecycleVerificationV1,
+        cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
+    ) -> Result<(), SemanticRuntimeBackendErrorV1> {
+        check_evaluation_cancellation(cancellation.as_ref())?;
+        let certified = certify_evaluation_target_compatibility(
+            &verification.compatibility,
+            &verification.source_generation,
+            &verification.source_manifest_digest,
+            &verification.capability_manifest_digest,
+        )
+        .map_err(revalidation_error)?;
+        if verification.compatibility != certified {
+            return Err(SemanticRuntimeBackendErrorV1::Conflict);
+        }
+        let verified = self
+            .inspect_compatible_current_generation_snapshot(
+                &verification.compatibility,
+                &verification.source_generation,
+                &verification.source_manifest_digest,
+            )
+            .await
+            .map_err(revalidation_error)?;
+        check_evaluation_cancellation(cancellation.as_ref())?;
+        if verified.vector_state_revision != verification.vector_state_revision
+            || verified.vector_generation_id != verification.compatibility.vector_generation_id
+        {
+            return Err(SemanticRuntimeBackendErrorV1::Conflict);
+        }
+        let current = self
+            .evaluation_lifecycle_verification(
+                verification.compatibility.clone(),
+                verification.source_generation.clone(),
+                verification.source_manifest_digest.clone(),
+                verification.capability_manifest_digest.clone(),
+                verification.vector_state_revision,
+            )
+            .map_err(revalidation_error)?;
+        revalidate_lifecycle_verification(verification, &current)
+    }
+
+    /// Acquire the canonical lifecycle read lease after all target checks
+    /// succeed. Daemon publication holds this as its final lease through
+    /// commit, so lifecycle writers cannot change the evaluated model between
+    /// validation and durable profile publication.
+    pub async fn acquire_verified_evaluation_target_publication_lease(
+        &self,
+        verification: &SemanticEvaluationLifecycleVerificationV1,
+        cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
+    ) -> Result<SemanticEvaluationPublicationLeaseV1, SemanticRuntimeBackendErrorV1> {
+        self.revalidate_verified_evaluation_target(verification, Arc::clone(&cancellation))
+            .await?;
+        let lifecycle = self
+            .lifecycle
+            .acquire_verified_evaluation_publication_lease(
+                &verification.lifecycle_identity,
+                cancellation,
+            )
+            .await
+            .map_err(lifecycle_publication_error)?;
+        Ok(SemanticEvaluationPublicationLeaseV1 {
+            _lifecycle: lifecycle,
+        })
+    }
+
+    fn evaluation_lifecycle_verification(
+        &self,
+        compatibility: crate::config::retrieval::SemanticCompatibilityPinsV1,
+        source_generation: CodeGenerationId,
+        source_manifest_digest: ManifestDigest,
+        capability_manifest_digest: ManifestDigest,
+        vector_state_revision: i64,
+    ) -> Result<SemanticEvaluationLifecycleVerificationV1, SemanticRuntimeBackendErrorV1> {
+        let lifecycle_identity = self
+            .lifecycle
+            .verified_evaluation_publication_identity()
+            .map_err(lifecycle_publication_error)?;
+        let lifecycle_state = lifecycle_identity.state();
+        if !matches!(
+            lifecycle_state,
+            SemanticModelLifecycleStateV1::Installed { .. }
+                | SemanticModelLifecycleStateV1::Loading { .. }
+                | SemanticModelLifecycleStateV1::Indexing { .. }
+                | SemanticModelLifecycleStateV1::Ready { .. }
+        ) || !lifecycle_artifact_matches(
+            lifecycle_state,
+            &compatibility.artifact_manifest_digest,
+        ) {
+            return Err(SemanticRuntimeBackendErrorV1::Rejected);
+        }
+        Ok(SemanticEvaluationLifecycleVerificationV1 {
+            compatibility,
+            source_generation,
+            source_manifest_digest,
+            capability_manifest_digest,
+            vector_state_revision,
+            lifecycle_identity,
+        })
+    }
+
     /// Inspect only immutable vector/source identity before native evaluation.
     /// Resource evidence does not exist yet and is therefore not fabricated
     /// from the evaluator's configured ceilings.
@@ -1805,7 +2019,7 @@ struct SemanticEvaluationExecutionControlV1 {
 
 impl SemanticExecutionControl for SemanticEvaluationExecutionControlV1 {
     fn is_cancelled(&self) -> bool {
-        self.cancellation.interruption() == Some(SemanticExecutionInterruptionV1::Cancelled)
+        self.cancellation.interruption().is_some()
     }
 
     fn elapsed_micros(&self) -> u64 {
@@ -1819,7 +2033,7 @@ impl RerankExecutionControlV1 for SemanticEvaluationExecutionControlV1 {
     }
 
     fn is_cancelled(&self) -> bool {
-        self.cancellation.interruption() == Some(SemanticExecutionInterruptionV1::Cancelled)
+        self.cancellation.interruption().is_some()
     }
 }
 
@@ -1965,6 +2179,168 @@ fn configured_resource_ceiling_covers(
         && configured.max_batch_size >= required.batch_size
         && configured.max_sequence_length >= required.sequence_length
         && configured.load_deadline_ms >= required.load_deadline_ms
+}
+
+fn configured_semantic_resource_ceiling(
+    configured: SemanticResourceCeilings,
+) -> crate::config::retrieval::SemanticResourceRequirementV1 {
+    crate::config::retrieval::SemanticResourceRequirementV1 {
+        model_bytes: configured.max_model_bytes,
+        tokenizer_bytes: configured.max_tokenizer_bytes,
+        resident_bytes: configured.max_resident_bytes,
+        threads: configured.max_threads,
+        max_concurrent_sessions: configured.max_concurrent_sessions,
+        batch_size: configured.max_batch_size,
+        sequence_length: configured.max_sequence_length,
+        load_deadline_ms: configured.load_deadline_ms,
+    }
+}
+
+fn canonical_exact_flat_search_index_key()
+-> Result<SemanticSearchIndexKeyV1, SemanticRuntimeBackendErrorV1> {
+    SemanticSearchIndexProfileV1::exact_flat_v1()
+        .and_then(|profile| profile.index_key())
+        .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)
+}
+
+fn validate_evaluation_target_search_index(
+    search_index_key: &SemanticSearchIndexKeyV1,
+) -> Result<(), SemanticRuntimeBackendErrorV1> {
+    if *search_index_key == canonical_exact_flat_search_index_key()? {
+        Ok(())
+    } else {
+        Err(SemanticRuntimeBackendErrorV1::Rejected)
+    }
+}
+
+const EVALUATION_SEMANTIC_CALIBRATION_PROFILE_ID_V1: &str = "calibration.semantic.runtime.v1";
+const EVALUATION_SEMANTIC_CALIBRATION_COHORT_DOMAIN_V1: &str =
+    "tracedecay.semantic.evaluation-calibration-cohort.v1";
+const EVALUATION_SEMANTIC_MAXIMUM_DISTANCE_MICROS_V1: i64 = i64::MAX;
+const EVALUATION_SEMANTIC_MINIMUM_MARGIN_MICROS_V1: u64 = 0;
+
+fn certify_evaluation_target_compatibility(
+    candidate: &crate::config::retrieval::SemanticCompatibilityPinsV1,
+    source_generation: &CodeGenerationId,
+    source_manifest_digest: &ManifestDigest,
+    capability_manifest_digest: &ManifestDigest,
+) -> Result<crate::config::retrieval::SemanticCompatibilityPinsV1, SemanticRuntimeBackendErrorV1> {
+    let fusion_revision =
+        ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+    let calibration = canonical_evaluation_calibration(
+        candidate,
+        source_generation,
+        source_manifest_digest,
+        capability_manifest_digest,
+    )?;
+    if candidate.fusion_revision != fusion_revision || candidate.calibration != calibration {
+        return Err(SemanticRuntimeBackendErrorV1::Rejected);
+    }
+    let mut certified = candidate.clone();
+    certified.fusion_revision = fusion_revision;
+    certified.calibration = calibration;
+    Ok(certified)
+}
+
+fn canonical_evaluation_calibration(
+    candidate: &crate::config::retrieval::SemanticCompatibilityPinsV1,
+    source_generation: &CodeGenerationId,
+    source_manifest_digest: &ManifestDigest,
+    capability_manifest_digest: &ManifestDigest,
+) -> Result<SemanticCalibrationProfileV1, SemanticRuntimeBackendErrorV1> {
+    source_generation
+        .validate()
+        .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+    source_manifest_digest
+        .validate()
+        .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+    capability_manifest_digest
+        .validate()
+        .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+    let cohort_digest = canonical_sha256(&(
+        EVALUATION_SEMANTIC_CALIBRATION_COHORT_DOMAIN_V1,
+        source_generation,
+        source_manifest_digest,
+        capability_manifest_digest,
+        &candidate.projection,
+        &candidate.vector_generation_id,
+        &candidate.artifact_manifest_digest,
+    ))
+    .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+    Ok(SemanticCalibrationProfileV1 {
+        calibration_profile_id: CalibrationProfileId::new(
+            EVALUATION_SEMANTIC_CALIBRATION_PROFILE_ID_V1,
+        )
+        .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?,
+        cohort_digest,
+        projection_key: candidate.projection.projection_key().clone(),
+        vector_generation: candidate.vector_generation_id.clone(),
+        capability_manifest_digest: capability_manifest_digest.clone(),
+        maximum_distance_micros: EVALUATION_SEMANTIC_MAXIMUM_DISTANCE_MICROS_V1,
+        minimum_margin_micros: EVALUATION_SEMANTIC_MINIMUM_MARGIN_MICROS_V1,
+    })
+}
+
+fn lifecycle_artifact_matches(
+    lifecycle_state: &SemanticModelLifecycleStateV1,
+    expected_artifact: &ManifestDigest,
+) -> bool {
+    let observed = lifecycle_state.artifact_digest();
+    observed == expected_artifact.as_str()
+        || expected_artifact.as_str().strip_prefix("sha256:") == Some(observed)
+}
+
+fn check_evaluation_cancellation(
+    cancellation: &dyn SemanticEvaluationCancellationV1,
+) -> Result<(), SemanticRuntimeBackendErrorV1> {
+    match cancellation.interruption() {
+        None => Ok(()),
+        Some(_) => Err(SemanticRuntimeBackendErrorV1::Unavailable),
+    }
+}
+
+fn revalidation_error(error: SemanticRuntimeBackendErrorV1) -> SemanticRuntimeBackendErrorV1 {
+    match error {
+        SemanticRuntimeBackendErrorV1::Unavailable => SemanticRuntimeBackendErrorV1::Unavailable,
+        SemanticRuntimeBackendErrorV1::Rejected | SemanticRuntimeBackendErrorV1::Conflict => {
+            SemanticRuntimeBackendErrorV1::Conflict
+        }
+    }
+}
+
+fn lifecycle_publication_error(
+    error: tracedecay_semantic::ModelLifecycleErrorV1,
+) -> SemanticRuntimeBackendErrorV1 {
+    match error {
+        tracedecay_semantic::ModelLifecycleErrorV1::Rejected => {
+            SemanticRuntimeBackendErrorV1::Conflict
+        }
+        tracedecay_semantic::ModelLifecycleErrorV1::Cancelled
+        | tracedecay_semantic::ModelLifecycleErrorV1::CancellationCleanupQuarantined(_)
+        | tracedecay_semantic::ModelLifecycleErrorV1::CancellationCleanupFailed(_)
+        | tracedecay_semantic::ModelLifecycleErrorV1::Catalog(_)
+        | tracedecay_semantic::ModelLifecycleErrorV1::StoreUnavailable
+        | tracedecay_semantic::ModelLifecycleErrorV1::DownloadFailed
+        | tracedecay_semantic::ModelLifecycleErrorV1::DownloadFailedWithReason(_)
+        | tracedecay_semantic::ModelLifecycleErrorV1::VerificationFailed
+        | tracedecay_semantic::ModelLifecycleErrorV1::InstallFailed
+        | tracedecay_semantic::ModelLifecycleErrorV1::WorkerJoinFailed
+        | tracedecay_semantic::ModelLifecycleErrorV1::ArtifactImport(_) => {
+            SemanticRuntimeBackendErrorV1::Unavailable
+        }
+    }
+}
+
+fn revalidate_lifecycle_verification(
+    expected: &SemanticEvaluationLifecycleVerificationV1,
+    observed: &SemanticEvaluationLifecycleVerificationV1,
+) -> Result<(), SemanticRuntimeBackendErrorV1> {
+    if expected == observed {
+        Ok(())
+    } else {
+        Err(SemanticRuntimeBackendErrorV1::Conflict)
+    }
 }
 
 fn accepted_semantic_resources(
@@ -3000,19 +3376,16 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
-    #[cfg(feature = "semantic-fastembed")]
-    use tracedecay_domain::CalibrationProfileId;
-
     use tracedecay_domain::UtcMicros;
 
     use tokio::sync::oneshot;
     use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
     use tracedecay_domain::{
         AdmittedEmbeddingProjectionKeyV1, AuthorizationRevision, BoundedSanitizedText,
-        ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-        CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ContentDigest,
-        EphemeralSanitizedQueryViewV1, FallbackSubpayloadDigest, FileOccurrenceId, FusionProfileId,
-        LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId, PrincipalId,
+        CalibrationProfileId, ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId,
+        CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1,
+        ContentDigest, EphemeralSanitizedQueryViewV1, FallbackSubpayloadDigest, FileOccurrenceId,
+        FusionProfileId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId, PrincipalId,
         ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, PublicRetrieverStatus,
         QueryDigest, QueryMac, QueryNormalizationRevision, RepositoryId, RetrievalRequest,
         RetrievalScope, RetrievalSnapshot, RetrieverKind, SanitizerRevision, SensitivityDecision,
@@ -3062,6 +3435,19 @@ mod tests {
         };
 
         assert!(configured_resource_ceiling_covers(&configured, accepted));
+        assert_eq!(
+            configured_semantic_resource_ceiling(configured),
+            crate::config::retrieval::SemanticResourceRequirementV1 {
+                model_bytes: configured.max_model_bytes,
+                tokenizer_bytes: configured.max_tokenizer_bytes,
+                resident_bytes: configured.max_resident_bytes,
+                threads: configured.max_threads,
+                max_concurrent_sessions: configured.max_concurrent_sessions,
+                batch_size: configured.max_batch_size,
+                sequence_length: configured.max_sequence_length,
+                load_deadline_ms: configured.load_deadline_ms,
+            }
+        );
         let applied = accepted_semantic_resources(accepted);
         assert_eq!(applied.max_model_bytes, accepted.model_bytes);
         assert_eq!(applied.max_tokenizer_bytes, accepted.tokenizer_bytes);
@@ -3071,6 +3457,159 @@ mod tests {
             accepted.max_concurrent_sessions
         );
         assert_ne!(applied.max_resident_bytes, configured.max_resident_bytes);
+    }
+
+    #[test]
+    fn preacceptance_target_requires_the_canonical_exact_flat_index() {
+        let canonical = search_index_key().clone();
+        assert_eq!(validate_evaluation_target_search_index(&canonical), Ok(()));
+
+        let mut wrong = canonical;
+        wrong.schema_revision = "semantic-search-index.v0".to_owned();
+        assert_eq!(
+            validate_evaluation_target_search_index(&wrong),
+            Err(SemanticRuntimeBackendErrorV1::Rejected)
+        );
+    }
+
+    fn test_digest(value: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", value.to_string().repeat(64)))
+            .expect("test digest")
+    }
+
+    fn evaluation_target_pins(
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+        capability_manifest_digest: &ManifestDigest,
+    ) -> crate::config::retrieval::SemanticCompatibilityPinsV1 {
+        let projection = tracedecay_semantic::session_pool::test_support::authority()
+            .projection()
+            .clone();
+        let vector_generation_id = vector_generation('v');
+        let mut candidate = crate::config::retrieval::SemanticCompatibilityPinsV1 {
+            implementation_revision: ComponentRevision::new("semantic.fastembed.production.v1")
+                .expect("implementation revision"),
+            fusion_revision: ComponentRevision::new(
+                tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
+            )
+            .expect("canonical fusion revision"),
+            artifact_manifest_digest: projection.embedding_key().model_artifact_digest.clone(),
+            runtime_compatibility_digest: test_digest('b'),
+            projection,
+            search_index_key: search_index_key().clone(),
+            vector_generation_id: vector_generation_id.clone(),
+            calibration: SemanticCalibrationProfileV1 {
+                calibration_profile_id: CalibrationProfileId::new(
+                    EVALUATION_SEMANTIC_CALIBRATION_PROFILE_ID_V1,
+                )
+                .expect("calibration profile"),
+                cohort_digest: test_digest('c'),
+                projection_key: projection_key(),
+                vector_generation: vector_generation_id,
+                capability_manifest_digest: capability_manifest_digest.clone(),
+                maximum_distance_micros: EVALUATION_SEMANTIC_MAXIMUM_DISTANCE_MICROS_V1,
+                minimum_margin_micros: EVALUATION_SEMANTIC_MINIMUM_MARGIN_MICROS_V1,
+            },
+            resources: crate::config::retrieval::SemanticResourceRequirementV1 {
+                model_bytes: 1,
+                tokenizer_bytes: 1,
+                resident_bytes: 1,
+                threads: 1,
+                max_concurrent_sessions: 1,
+                batch_size: 1,
+                sequence_length: 1,
+                load_deadline_ms: 1,
+            },
+        };
+        candidate.calibration = canonical_evaluation_calibration(
+            &candidate,
+            source_generation,
+            source_manifest_digest,
+            capability_manifest_digest,
+        )
+        .expect("canonical calibration");
+        candidate
+    }
+
+    #[test]
+    fn preacceptance_rejects_foreign_fusion_revision() {
+        let source_generation = source_generation('f');
+        let source_manifest_digest = test_digest('d');
+        let capability_manifest_digest = test_digest('e');
+        let mut candidate = evaluation_target_pins(
+            &source_generation,
+            &source_manifest_digest,
+            &capability_manifest_digest,
+        );
+        candidate.fusion_revision =
+            ComponentRevision::new("ranking.foreign.v1").expect("foreign fusion revision");
+
+        assert_eq!(
+            certify_evaluation_target_compatibility(
+                &candidate,
+                &source_generation,
+                &source_manifest_digest,
+                &capability_manifest_digest,
+            ),
+            Err(SemanticRuntimeBackendErrorV1::Rejected)
+        );
+    }
+
+    #[test]
+    fn preacceptance_rejects_foreign_calibration_cohort_and_thresholds() {
+        let source_generation = source_generation('c');
+        let source_manifest_digest = test_digest('d');
+        let capability_manifest_digest = test_digest('e');
+        let candidate = evaluation_target_pins(
+            &source_generation,
+            &source_manifest_digest,
+            &capability_manifest_digest,
+        );
+
+        let mut wrong_cohort = candidate.clone();
+        wrong_cohort.calibration.cohort_digest = test_digest('f');
+        assert_eq!(
+            certify_evaluation_target_compatibility(
+                &wrong_cohort,
+                &source_generation,
+                &source_manifest_digest,
+                &capability_manifest_digest,
+            ),
+            Err(SemanticRuntimeBackendErrorV1::Rejected)
+        );
+
+        let mut wrong_thresholds = candidate;
+        wrong_thresholds.calibration.minimum_margin_micros = 1;
+        assert_eq!(
+            certify_evaluation_target_compatibility(
+                &wrong_thresholds,
+                &source_generation,
+                &source_manifest_digest,
+                &capability_manifest_digest,
+            ),
+            Err(SemanticRuntimeBackendErrorV1::Rejected)
+        );
+    }
+
+    #[test]
+    fn deadline_interrupts_semantic_and_rerank_evaluation_cooperatively() {
+        struct DeadlineCancellation;
+
+        impl tracedecay_semantic::SemanticExecutionAuthority for DeadlineCancellation {
+            fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
+                Some(SemanticExecutionInterruptionV1::DeadlineExceeded)
+            }
+        }
+
+        impl tracedecay_semantic::SemanticEvaluationCancellationV1 for DeadlineCancellation {}
+
+        let control = SemanticEvaluationExecutionControlV1 {
+            started: std::time::Instant::now(),
+            cancellation: Arc::new(DeadlineCancellation),
+        };
+
+        assert!(SemanticExecutionControl::is_cancelled(&control));
+        assert!(RerankExecutionControlV1::is_cancelled(&control));
     }
 
     fn projection_key() -> ProjectionKeyV1 {

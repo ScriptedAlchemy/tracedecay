@@ -97,6 +97,19 @@ impl CancellationToken {
         self.token_id.as_deref()
     }
 
+    /// Creates a cancellation scope for work performed on behalf of this token.
+    ///
+    /// The child retains the admitted request identity, observes cancellation
+    /// from this token, and can be cancelled independently without revoking
+    /// the parent request.
+    #[must_use]
+    pub fn child_token(&self) -> Self {
+        Self {
+            token_id: self.token_id.clone(),
+            inner: self.inner.child_token(),
+        }
+    }
+
     pub fn cancel(&self) {
         self.inner.cancel();
     }
@@ -176,5 +189,49 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), token.cancelled())
             .await
             .expect("future waiter should complete");
+    }
+
+    #[tokio::test]
+    async fn child_cancellation_preserves_identity_and_observes_parent_cancellation() {
+        let parent =
+            CancellationToken::for_admitted_application_request("cancellation.request.semantic")
+                .expect("valid admitted cancellation identity");
+        let child = parent.child_token();
+
+        assert_eq!(
+            child.application_token_id(),
+            parent.application_token_id(),
+            "child work remains attributed to the admitted request"
+        );
+        assert!(
+            !parent.is_same_token(&child),
+            "a child must be independently cancellable"
+        );
+
+        parent.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), child.cancelled())
+            .await
+            .expect("parent cancellation should wake the child");
+    }
+
+    #[tokio::test]
+    async fn child_cancellation_does_not_cancel_the_parent() {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+
+        child.cancel();
+
+        assert!(child.is_cancelled());
+        assert!(
+            !parent.is_cancelled(),
+            "cancelling child work must not revoke the parent request"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), parent.cancelled())
+                .await
+                .is_err(),
+            "the parent cancellation waiter must stay pending"
+        );
     }
 }

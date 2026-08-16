@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::CodeGenerationId;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use crate::config::retrieval::RetrievalRuntimeCompatibilityV1;
 use crate::search_eval::semantic_native::{
@@ -26,7 +26,8 @@ use crate::search_eval::{
 use tracedecay_usecases::semantic_runtime::{
     SemanticActivationCoordinationErrorV1, SemanticEvaluationAuthorityPublicationV1,
     SemanticEvaluationProfileCandidateV1, SemanticEvaluationPublicationSnapshotPortV1,
-    SemanticEvaluationPublicationSnapshotV1, SemanticRuntimeFuture,
+    SemanticEvaluationPublicationSnapshotV1, SemanticEvaluationSnapshotPortV1,
+    SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
 };
 
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
@@ -88,6 +89,9 @@ impl DaemonSemanticEvaluationControlV1 {
         &self,
         fallback: SemanticActivationCoordinationErrorV1,
     ) -> DaemonSemanticEvaluationExecutionErrorV1 {
+        if self.cancellation.is_cancelled() {
+            self.cancel();
+        }
         match self.phase.load(Ordering::Acquire) {
             EVALUATION_CANCELLED => DaemonSemanticEvaluationExecutionErrorV1::Cancelled,
             EVALUATION_TIMED_OUT => DaemonSemanticEvaluationExecutionErrorV1::TimedOut,
@@ -96,6 +100,9 @@ impl DaemonSemanticEvaluationControlV1 {
     }
 
     fn checkpoint(&self) -> Result<(), SemanticActivationCoordinationErrorV1> {
+        if self.cancellation.is_cancelled() {
+            self.cancel();
+        }
         if tokio::time::Instant::now() >= self.deadline {
             self.expire();
         }
@@ -128,6 +135,7 @@ impl DaemonSemanticEvaluationControlV1 {
         tokio::select! {
             biased;
             () = self.cancellation.cancelled() => {
+                self.cancel();
                 Err(SemanticActivationCoordinationErrorV1::Unavailable)
             }
             () = tokio::time::sleep_until(self.deadline) => {
@@ -158,6 +166,37 @@ impl tracedecay_semantic::SemanticExecutionAuthority for DaemonSemanticEvaluatio
 }
 
 impl tracedecay_semantic::SemanticEvaluationCancellationV1 for DaemonSemanticEvaluationControlV1 {}
+
+/// Wait for one semantic task without detaching it when request cancellation
+/// or deadline wins. `interruptible` drops only its borrowed awaiter, while
+/// this owner keeps and joins the task after it propagates the linked
+/// cancellation token into semantic execution.
+async fn await_semantic_task<Output>(
+    control: &DaemonSemanticEvaluationControlV1,
+    task: &mut JoinHandle<Result<Output, SemanticActivationCoordinationErrorV1>>,
+) -> Result<Output, SemanticActivationCoordinationErrorV1> {
+    let result = match control.interruptible(&mut *task).await {
+        Ok(result) => result.map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?,
+        Err(error) => {
+            let _ = task.await;
+            return Err(error);
+        }
+    };
+    control.checkpoint()?;
+    result
+}
+
+fn coordination_error_from_runtime(
+    error: SemanticRuntimeBackendErrorV1,
+) -> SemanticActivationCoordinationErrorV1 {
+    match error {
+        SemanticRuntimeBackendErrorV1::Unavailable => {
+            SemanticActivationCoordinationErrorV1::Unavailable
+        }
+        SemanticRuntimeBackendErrorV1::Rejected => SemanticActivationCoordinationErrorV1::Rejected,
+        SemanticRuntimeBackendErrorV1::Conflict => SemanticActivationCoordinationErrorV1::Conflict,
+    }
+}
 
 struct SemanticEvaluationWorkerV1 {
     control: Arc<DaemonSemanticEvaluationControlV1>,
@@ -204,6 +243,7 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
     pub(crate) async fn execute<Output, Work, WorkFuture>(
         self: &Arc<Self>,
         deadline: tokio::time::Instant,
+        admitted_cancellation: CancellationToken,
         work: Work,
     ) -> Result<Output, DaemonSemanticEvaluationExecutionErrorV1>
     where
@@ -212,7 +252,7 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
         WorkFuture:
             Future<Output = Result<Output, SemanticActivationCoordinationErrorV1>> + Send + 'static,
     {
-        let cancellation = CancellationToken::new();
+        let cancellation = admitted_cancellation.child_token();
         let control = Arc::new(DaemonSemanticEvaluationControlV1::new(
             cancellation.clone(),
             deadline,
@@ -252,10 +292,16 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
                         result.map_err(|error| worker_control.execution_error(error))
                     }
                     () = worker_control.cancellation.cancelled() => {
-                        let _ = evaluation.await;
-                        Err(worker_control.execution_error(
-                            SemanticActivationCoordinationErrorV1::Unavailable,
-                        ))
+                        if worker_control.cancel() {
+                            let _ = evaluation.await;
+                            Err(worker_control.execution_error(
+                                SemanticActivationCoordinationErrorV1::Unavailable,
+                            ))
+                        } else {
+                            evaluation
+                                .await
+                                .map_err(|error| worker_control.execution_error(error))
+                        }
                     }
                     () = tokio::time::sleep_until(deadline) => {
                         if worker_control.expire() {
@@ -418,6 +464,19 @@ impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
             projection_cases: Arc::new(Mutex::new(BTreeMap::new())),
             incremental_projections: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+}
+
+/// The only daemon authority carrying the publication capability. The
+/// qualification execution path receives the inner snapshot authority instead,
+/// so it cannot reach compare-and-swap publication or configuration bootstrap.
+pub(super) struct DaemonSemanticEvaluationPublicationAuthorityV1 {
+    snapshot: DaemonSemanticEvaluationSnapshotAuthorityV1,
+}
+
+impl DaemonSemanticEvaluationPublicationAuthorityV1 {
+    pub(super) fn new(snapshot: DaemonSemanticEvaluationSnapshotAuthorityV1) -> Self {
+        Self { snapshot }
     }
 }
 
@@ -802,7 +861,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
     }
 }
 
-impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthorityV1 {
+impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthorityV1 {
     fn current(
         &self,
     ) -> SemanticRuntimeFuture<
@@ -824,30 +883,44 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                 semantic_ceiling,
                 vector_state_revision,
                 vector_generation_id,
+                semantic,
+                semantic_lifecycle_verification,
             ) = match self.candidate.compatibility.semantic.as_ref() {
-                Some(required) => {
+                Some(candidate) => {
                     let runtime =
                         tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
                             &self.project_root,
                         )
                         .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
-                    let semantic = self
-                        .control
-                        .interruptible(runtime.inspect_evaluation_current_generation_snapshot(
-                            required,
-                            &code.source_generation,
-                            &code.source_manifest_digest,
-                        ))
-                        .await?
-                        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+                    let candidate = candidate.clone();
+                    let source_generation = code.source_generation.clone();
+                    let source_manifest_digest = code.source_manifest_digest.clone();
+                    let capability_manifest_digest = code.capability_manifest_digest.clone();
+                    let cancellation = Arc::clone(&self.control)
+                        as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>;
+                    let mut verification = tokio::spawn(async move {
+                        runtime
+                            .inspect_verified_evaluation_target_snapshot(
+                                &candidate,
+                                &source_generation,
+                                &source_manifest_digest,
+                                &capability_manifest_digest,
+                                cancellation,
+                            )
+                            .await
+                            .map_err(coordination_error_from_runtime)
+                    });
+                    let receipt = await_semantic_task(&self.control, &mut verification).await?;
                     (
                         Some(code.source_generation.clone()),
-                        None,
-                        Some(semantic.vector_state_revision),
-                        Some(semantic.vector_generation_id),
+                        Some(receipt.configured_resource_ceiling()),
+                        Some(receipt.vector_state_revision()),
+                        Some(receipt.vector_generation_id().clone()),
+                        Some(receipt.semantic_compatibility().clone()),
+                        Some(receipt.lifecycle_verification().clone()),
                     )
                 }
-                None => (None, None, None, None),
+                None => (None, None, None, None, None, None),
             };
             let evaluated = crate::search_eval::load_default_evaluated_profile_material(
                 &self.candidate.evaluated_profile_id,
@@ -860,13 +933,15 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                 code_generation: code.source_generation,
                 code_source_manifest_digest: code.source_manifest_digest,
                 code_snapshot_digest: code.snapshot_digest,
+                code_capability_manifest_digest: code.capability_manifest_digest,
                 semantic_source_generation,
                 vector_state_revision,
                 vector_generation_id,
+                semantic_lifecycle_verification,
                 runtime: RetrievalRuntimeCompatibilityV1 {
                     retrieval_ceiling:
                         super::code_index_scheduler::queries::maximum_retrieval_budget(),
-                    semantic: self.candidate.compatibility.semantic.clone(),
+                    semantic,
                     semantic_ceiling,
                     rerank: self.candidate.compatibility.rerank.clone(),
                     rerank_ceiling: evaluated.rerank,
@@ -894,7 +969,7 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                 .interruptible(RESOURCE_MEASUREMENT_LOCK_V1.acquire())
                 .await?
                 .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
-            let result = tokio::task::spawn_blocking(move || {
+            let mut task = tokio::task::spawn_blocking(move || {
                 let _measurement = measurement;
                 authority.control.checkpoint()?;
                 evaluate_default_activation_candidate(&evaluated_profile_id, &authority).map_err(
@@ -902,44 +977,80 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                         SemanticActivationCoordinationErrorV1::RejectedDetail(error.to_string())
                     },
                 )
-            })
-            .await
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
-            self.control.checkpoint()?;
-            result
+            });
+            await_semantic_task(&self.control, &mut task).await
         })
     }
+}
 
+impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationPublicationAuthorityV1 {
+    fn current(
+        &self,
+    ) -> SemanticRuntimeFuture<
+        '_,
+        Result<SemanticEvaluationPublicationSnapshotV1, SemanticActivationCoordinationErrorV1>,
+    > {
+        self.snapshot.current()
+    }
+
+    fn evaluate_default_candidate<'a>(
+        &'a self,
+        evaluated_profile_id: &'a str,
+    ) -> SemanticRuntimeFuture<
+        'a,
+        Result<
+            crate::search_eval::DirectActivationEvaluationV1,
+            SemanticActivationCoordinationErrorV1,
+        >,
+    > {
+        self.snapshot
+            .evaluate_default_candidate(evaluated_profile_id)
+    }
+}
+
+impl SemanticEvaluationPublicationSnapshotPortV1
+    for DaemonSemanticEvaluationPublicationAuthorityV1
+{
     fn publish_if_current<'a>(
         &'a self,
         expected: &'a SemanticEvaluationPublicationSnapshotV1,
         publication: SemanticEvaluationAuthorityPublicationV1,
     ) -> SemanticRuntimeFuture<'a, Result<(), SemanticActivationCoordinationErrorV1>> {
         Box::pin(async move {
-            self.control.checkpoint()?;
+            self.snapshot.control.checkpoint()?;
             let expected_code = super::code_index_scheduler::SemanticEvaluationCodeSnapshotV1 {
                 source_generation: expected.code_generation.clone(),
                 source_manifest_digest: expected.code_source_manifest_digest.clone(),
                 snapshot_digest: expected.code_snapshot_digest.clone(),
+                capability_manifest_digest: expected.code_capability_manifest_digest.clone(),
             };
             let _code_lease = self
+                .snapshot
                 .control
                 .interruptible(
-                    self.scheduler
-                        .acquire_semantic_evaluation_publication_lease(&self.scope, &expected_code),
+                    self.snapshot
+                        .scheduler
+                        .acquire_semantic_evaluation_publication_lease(
+                            &self.snapshot.scope,
+                            &expected_code,
+                        ),
                 )
                 .await?
                 .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
+            let semantic_lifecycle_verification = expected.semantic_lifecycle_verification.clone();
+            let vector_state_revision = expected.vector_state_revision;
+            let vector_generation_id = expected.vector_generation_id.clone();
             let runtime = match (
-                self.candidate.compatibility.semantic.as_ref(),
-                expected.vector_state_revision,
-                expected.vector_generation_id.as_ref(),
+                semantic_lifecycle_verification,
+                vector_state_revision,
+                vector_generation_id,
             ) {
-                (Some(_), Some(revision), Some(generation)) => Some((
+                (Some(verification), Some(revision), Some(generation)) => Some((
                     tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
-                        &self.project_root,
+                        &self.snapshot.project_root,
                     )
                     .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?,
+                    verification,
                     revision,
                     generation,
                 )),
@@ -947,8 +1058,9 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                 _ => return Err(SemanticActivationCoordinationErrorV1::Rejected),
             };
             let _vector_lease = match runtime.as_ref() {
-                Some((runtime, revision, generation)) => Some(
-                    self.control
+                Some((runtime, _, revision, generation)) => Some(
+                    self.snapshot
+                        .control
                         .interruptible(
                             runtime.acquire_vector_publication_lease(*revision, generation),
                         )
@@ -957,27 +1069,27 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                 ),
                 None => None,
             };
-            if let (Some((runtime, revision, generation)), Some(required)) =
-                (runtime.as_ref(), publication.semantic_compatibility())
-            {
-                let observed = self
-                    .control
-                    .interruptible(runtime.inspect_compatible_current_generation_snapshot(
-                        required,
-                        &expected.code_generation,
-                        &expected.code_source_manifest_digest,
-                    ))
-                    .await?
-                    .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
-                if observed.vector_state_revision != *revision
-                    || &observed.vector_generation_id != *generation
-                {
-                    return Err(SemanticActivationCoordinationErrorV1::Conflict);
-                }
-            }
-            self.control.try_begin_commit()?;
+            let _lifecycle_lease = if let Some((runtime, verification, _, _)) = runtime.as_ref() {
+                let runtime = runtime.clone();
+                let verification = verification.clone();
+                let cancellation = Arc::clone(&self.snapshot.control)
+                    as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>;
+                let mut acquisition = tokio::spawn(async move {
+                    runtime
+                        .acquire_verified_evaluation_target_publication_lease(
+                            &verification,
+                            cancellation,
+                        )
+                        .await
+                        .map_err(coordination_error_from_runtime)
+                });
+                Some(await_semantic_task(&self.snapshot.control, &mut acquisition).await?)
+            } else {
+                None
+            };
+            self.snapshot.control.try_begin_commit()?;
             let result = publication.commit(expected).await;
-            self.control.checkpoint()?;
+            self.snapshot.control.checkpoint()?;
             result
         })
     }
@@ -1069,6 +1181,7 @@ mod lifecycle_tests {
                 owner
                     .execute(
                         tokio::time::Instant::now() + Duration::from_secs(5),
+                        CancellationToken::new(),
                         move |control| async move {
                             let _ = started_tx.send(());
                             while control.checkpoint().is_ok() {
@@ -1104,6 +1217,7 @@ mod lifecycle_tests {
                 owner
                     .execute(
                         tokio::time::Instant::now() + Duration::from_secs(5),
+                        CancellationToken::new(),
                         move |control| async move {
                             let _ = started_tx.send(());
                             while control.checkpoint().is_ok() {
@@ -1136,6 +1250,7 @@ mod lifecycle_tests {
         let result = owner
             .execute(
                 tokio::time::Instant::now() + Duration::from_millis(5),
+                CancellationToken::new(),
                 |control| async move {
                     while control.checkpoint().is_ok() {
                         tokio::task::yield_now().await;
@@ -1162,6 +1277,7 @@ mod lifecycle_tests {
                 owner
                     .execute(
                         tokio::time::Instant::now() + Duration::from_secs(5),
+                        CancellationToken::new(),
                         move |control| async move {
                             control.try_begin_commit()?;
                             let _ = commit_tx.send(());
@@ -1189,6 +1305,139 @@ mod lifecycle_tests {
         assert!(receipt.is_clean());
         assert_eq!(receipt.joined_workers, 1);
         assert_eq!(execution.await.expect("execution task"), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn request_cancellation_joins_native_evaluation_worker_before_returning() {
+        let owner = Arc::new(DaemonSemanticEvaluationWorkerOwnerV1::default());
+        let request_cancellation = CancellationToken::new();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, mut finished_rx) = tokio::sync::oneshot::channel();
+        let mut execution = {
+            let owner = Arc::clone(&owner);
+            let request_cancellation = request_cancellation.clone();
+            tokio::spawn(async move {
+                owner
+                    .execute(
+                        tokio::time::Instant::now() + Duration::from_secs(5),
+                        request_cancellation,
+                        move |control| async move {
+                            let child_control = Arc::clone(&control);
+                            let mut child = tokio::task::spawn_blocking(move || {
+                                let _ = started_tx.send(());
+                                while child_control.checkpoint().is_ok() {
+                                    std::thread::yield_now();
+                                }
+                                let _ = finished_tx.send(());
+                                Err::<(), _>(SemanticActivationCoordinationErrorV1::Unavailable)
+                            });
+                            await_semantic_task(&control, &mut child).await
+                        },
+                    )
+                    .await
+            })
+        };
+        started_rx.await.expect("native evaluation started");
+
+        request_cancellation.cancel();
+
+        tokio::select! {
+            biased;
+            _ = &mut finished_rx => {}
+            result = &mut execution => panic!(
+                "cancelled response returned before native blocking child completed: {result:?}"
+            ),
+        }
+        assert_eq!(
+            execution.await.expect("execution task"),
+            Err(DaemonSemanticEvaluationExecutionErrorV1::Cancelled)
+        );
+        let receipt = owner
+            .cancel_and_join_until(tokio::time::Instant::now() + Duration::from_secs(1))
+            .await;
+        assert!(receipt.is_clean());
+        assert_eq!(receipt.joined_workers, 0);
+        assert_eq!(receipt.remaining_workers, 0);
+    }
+
+    #[tokio::test]
+    async fn deadline_joins_blocking_model_preflight_before_timing_out() {
+        let control = Arc::new(DaemonSemanticEvaluationControlV1::new(
+            CancellationToken::new(),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        ));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, mut finished_rx) = tokio::sync::oneshot::channel();
+        let mut preflight = {
+            let control = Arc::clone(&control);
+            tokio::spawn(async move {
+                let child_control = Arc::clone(&control);
+                let mut child = tokio::task::spawn_blocking(move || {
+                    let _ = started_tx.send(());
+                    while child_control.checkpoint().is_ok() {
+                        std::thread::yield_now();
+                    }
+                    let _ = finished_tx.send(());
+                    Err::<(), _>(SemanticActivationCoordinationErrorV1::Unavailable)
+                });
+                await_semantic_task(&control, &mut child).await
+            })
+        };
+        started_rx.await.expect("model preflight started");
+
+        assert!(control.expire(), "preflight deadline must win exactly once");
+        tokio::select! {
+            biased;
+            _ = &mut finished_rx => {}
+            result = &mut preflight => panic!(
+                "timeout returned before blocking model preflight joined: {result:?}"
+            ),
+        }
+        assert_eq!(
+            preflight.await.expect("preflight task"),
+            Err(SemanticActivationCoordinationErrorV1::Unavailable)
+        );
+        assert_eq!(
+            control.execution_error(SemanticActivationCoordinationErrorV1::Unavailable),
+            DaemonSemanticEvaluationExecutionErrorV1::TimedOut
+        );
+    }
+
+    #[tokio::test]
+    async fn request_cancellation_after_commit_preserves_publish_result() {
+        let owner = Arc::new(DaemonSemanticEvaluationWorkerOwnerV1::default());
+        let request_cancellation = CancellationToken::new();
+        let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let execution = {
+            let owner = Arc::clone(&owner);
+            let request_cancellation = request_cancellation.clone();
+            tokio::spawn(async move {
+                owner
+                    .execute(
+                        tokio::time::Instant::now() + Duration::from_secs(5),
+                        request_cancellation,
+                        move |control| async move {
+                            control.try_begin_commit()?;
+                            let _ = commit_tx.send(());
+                            let _ = release_rx.await;
+                            Ok::<_, SemanticActivationCoordinationErrorV1>(())
+                        },
+                    )
+                    .await
+            })
+        };
+        commit_rx.await.expect("publish commit started");
+
+        request_cancellation.cancel();
+        release_tx.send(()).expect("release publish commit");
+
+        assert_eq!(execution.await.expect("execution task"), Ok(()));
+        let receipt = owner
+            .cancel_and_join_until(tokio::time::Instant::now() + Duration::from_secs(1))
+            .await;
+        assert!(receipt.is_clean());
+        assert_eq!(receipt.remaining_workers, 0);
     }
 }
 

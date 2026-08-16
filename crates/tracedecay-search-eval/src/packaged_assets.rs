@@ -6,6 +6,7 @@ use tempfile::TempDir;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
+use crate::candidate_output::compute_corpus_digest_from_embedded_bytes;
 use crate::{
     CandidateWorkloadV1, SearchEvalError, load_candidate_workload, validate_workload_for_tuning,
 };
@@ -13,6 +14,11 @@ use crate::{
 #[cfg(test)]
 thread_local! {
     static MATERIALIZATION_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn materialization_count() -> u64 {
+    MATERIALIZATION_COUNT.with(std::cell::Cell::get)
 }
 
 const WORKLOAD_PATH: &str =
@@ -184,6 +190,15 @@ pub(crate) fn load_workload() -> Result<CandidateWorkloadV1, SearchEvalError> {
     })?;
     validate_workload_for_tuning(&workload)?;
     Ok(workload)
+}
+
+/// Derive the corpus binding from the bytes embedded in this package. This is
+/// deliberately separate from `materialize`: qualification loading must not
+/// create a temporary evaluator root merely to establish corpus identity.
+pub(crate) fn current_corpus_digest(
+    workload: &CandidateWorkloadV1,
+) -> Result<String, SearchEvalError> {
+    compute_corpus_digest_from_embedded_bytes(workload, FILES).map_err(SearchEvalError::from)
 }
 
 fn materialize_git_authority(root: &Path) -> Result<(), SearchEvalError> {

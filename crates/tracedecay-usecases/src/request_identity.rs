@@ -24,6 +24,7 @@ pub enum GlobalRequestSurface {
     ManagedTestRun,
     FeedbackObservation,
     SemanticEvaluation,
+    SemanticQualification,
     ProjectOpenFeedbackCycle,
     ProjectOpenGithubDiscovery,
     DaemonDoctor,
@@ -49,6 +50,7 @@ impl GlobalRequestSurface {
             Self::ManagedTestRun => "request.managed-test-run",
             Self::FeedbackObservation => "request.feedback-observe",
             Self::SemanticEvaluation => "request.semantic-evaluation",
+            Self::SemanticQualification => "request.semantic-qualification",
             Self::ProjectOpenFeedbackCycle => "request.project-open.cycle",
             Self::ProjectOpenGithubDiscovery => "request.project-open.github-discovery",
             Self::DaemonDoctor => "request.daemon.doctor",
@@ -419,6 +421,10 @@ mod tests {
                 "request.semantic-evaluation.100000000",
             ),
             (
+                GlobalRequestSurface::SemanticQualification,
+                "request.semantic-qualification.100000000",
+            ),
+            (
                 GlobalRequestSurface::ProjectOpenFeedbackCycle,
                 "request.project-open.cycle.100000000",
             ),
@@ -484,6 +490,21 @@ mod tests {
         assert_ne!(cli, http);
         assert!(cli.starts_with("request.cli."));
         assert!(http.starts_with("request.http."));
+    }
+
+    #[test]
+    fn semantic_qualification_has_a_domain_separated_request_identity() {
+        let authority = ProcessUniqueIdentityAuthority::from_instance_nonce([4; 16]);
+        let evaluation = authority
+            .mint_string(GlobalRequestSurface::SemanticEvaluation.prefix())
+            .unwrap();
+        let qualification = authority
+            .mint_string(GlobalRequestSurface::SemanticQualification.prefix())
+            .unwrap();
+
+        assert_ne!(evaluation, qualification);
+        assert!(evaluation.starts_with("request.semantic-evaluation."));
+        assert!(qualification.starts_with("request.semantic-qualification."));
     }
 
     #[test]

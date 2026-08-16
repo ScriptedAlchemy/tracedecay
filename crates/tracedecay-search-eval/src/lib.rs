@@ -13,10 +13,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod candidate_output;
+mod native_qualification;
 mod packaged_assets;
 mod report;
 pub mod semantic_native;
 
+#[cfg(test)]
+mod native_qualification_tests;
 #[cfg(test)]
 mod report_tests;
 
@@ -39,6 +42,18 @@ pub use candidate_output::{
     generate_candidate_outputs_with_native, load_candidate_workload,
     load_direct_evaluated_profile_material, no_admitted_corpus_scope,
     retrieve_partition_query_bytes, validate_workload_for_tuning, write_generate_outputs,
+};
+#[cfg(test)]
+pub use native_qualification::packaged_native_qualification_materialization_count;
+pub use native_qualification::{
+    NativeQualificationEvaluatorKeyV1, NativeQualificationExecutionResourceKeyV1,
+    NativeQualificationExpectationsV1, NativeQualificationKeyV1, NativeQualificationModelKeyV1,
+    NativeQualificationPlatformV1, NativeQualificationRuntimeKeyV1,
+    NativeQualificationVectorGenerationRetentionV1, PackagedNativeActivationCandidateV1,
+    PackagedNativeQualificationErrorV1, PackagedNativeQualificationV1,
+    PortableNativeQualificationEvidenceV1, encode_packaged_native_qualification,
+    load_packaged_native_qualification_from_bytes, packaged_native_qualification_bytes,
+    qualified_default_activation_candidate, write_packaged_native_qualification,
 };
 
 /// Returns the nearest-rank percentile from an ascending sample.
@@ -124,6 +139,12 @@ pub struct DirectActivationEvaluationV1 {
 }
 
 impl DirectActivationEvaluationV1 {
+    /// Read the genuine evaluator report without granting construction or
+    /// serialization authority for an activation candidate.
+    pub fn report(&self) -> &DirectEvaluationReportV1 {
+        &self.report
+    }
+
     pub fn into_parts(self) -> (DirectEvaluationReportV1, DirectEvaluatedProfileMaterialV1) {
         (self.report, self.evaluated_material)
     }
@@ -347,6 +368,18 @@ pub fn evaluate_generated_outputs(
     workload: &CandidateWorkloadV1,
     generated: &GenerateCandidateOutputsResultV1,
 ) -> Result<DirectEvaluationReportV1, SearchEvalError> {
+    let corpus_digest = compute_corpus_digest(repo_root, workload)?;
+    evaluate_generated_outputs_against_corpus(workload, generated, &corpus_digest)
+}
+
+/// Rebuild a report from retained outputs against an already-authoritative
+/// corpus digest. Package qualification uses this to validate embedded bytes
+/// without materializing the packaged fixture into a temporary directory.
+pub(crate) fn evaluate_generated_outputs_against_corpus(
+    workload: &CandidateWorkloadV1,
+    generated: &GenerateCandidateOutputsResultV1,
+    corpus_digest: &str,
+) -> Result<DirectEvaluationReportV1, SearchEvalError> {
     validate_workload_for_tuning(workload)?;
     let digest = compute_workload_digest(workload)?;
     if generated.workload_digest != digest {
@@ -354,8 +387,7 @@ pub fn evaluate_generated_outputs(
             "generated outputs do not bind the checked-in workload".to_owned(),
         ));
     }
-    let corpus_digest = compute_corpus_digest(repo_root, workload)?;
-    validate_output_matrix(workload, generated, &corpus_digest)?;
+    validate_output_matrix(workload, generated, corpus_digest)?;
     let queries: BTreeMap<_, _> = workload
         .queries
         .iter()
@@ -364,7 +396,7 @@ pub fn evaluate_generated_outputs(
     let mut profiles = generated
         .outputs
         .iter()
-        .map(|output| evaluate_profile(workload, &queries, &corpus_digest, output))
+        .map(|output| evaluate_profile(workload, &queries, corpus_digest, output))
         .collect::<Result<Vec<_>, _>>()?;
     profiles.sort_by(|left, right| {
         (&left.profile_id, &left.partition).cmp(&(&right.profile_id, &right.partition))
@@ -373,7 +405,7 @@ pub fn evaluate_generated_outputs(
         command: "compare".to_owned(),
         status: aggregate_profile_status(&profiles),
         workload_digest: digest,
-        corpus_digest,
+        corpus_digest: corpus_digest.to_owned(),
         fixture_source_repository_commit: workload.source_repository_commit.clone(),
         fixture_source_repository_tree: workload.source_repository_tree.clone(),
         execution_contract: workload.execution_contract.clone(),

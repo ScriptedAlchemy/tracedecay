@@ -35,10 +35,11 @@ pub use config_store::ProductionSemanticRetrievalConfigurationStoreV1;
 pub use configuration_operation::{
     ProductionSemanticConfigurationOperationV1, SemanticAppliedActivationV1,
     SemanticAppliedRollbackV1, SemanticEvaluatedProfilePublicationV1,
-    SemanticEvaluationAuthorityPublicationV1, SemanticEvaluationDiversityCandidateV1,
-    SemanticEvaluationFusionCandidateV1, SemanticEvaluationProfileCandidateV1,
-    SemanticEvaluationPublicationSnapshotPortV1, SemanticEvaluationPublicationSnapshotV1,
-    SemanticEvaluationRerankCandidateV1, SemanticProtectedActivationOperationV1,
+    SemanticEvaluatedProfileQualificationV1, SemanticEvaluationAuthorityPublicationV1,
+    SemanticEvaluationDiversityCandidateV1, SemanticEvaluationFusionCandidateV1,
+    SemanticEvaluationProfileCandidateV1, SemanticEvaluationPublicationSnapshotPortV1,
+    SemanticEvaluationPublicationSnapshotV1, SemanticEvaluationRerankCandidateV1,
+    SemanticEvaluationSnapshotPortV1, SemanticProtectedActivationOperationV1,
     SemanticProtectedRollbackOperationV1,
 };
 pub use coordinator::{
@@ -79,11 +80,12 @@ pub use production::{
     PreparedProductionSemanticCacheCommitV1, PreparedSemanticEvaluationGenerationV1,
     ProductionSemanticRuntimeV1, SavedCodeGenerationScheduleHookV1,
     SavedGenerationScheduleHookParametersV1, SemanticCompatibleCurrentGenerationSnapshotV1,
-    SemanticEvaluationCurrentGenerationSnapshotV1, SemanticVectorPublicationLeaseV1,
-    production_saved_generation_schedule_hook, project_semantic_application_status,
-    project_semantic_production_runtime, project_semantic_source_generation,
-    register_project_semantic_runtime, unbind_project_semantic_cache_if_current,
-    unregister_project_semantic_runtime,
+    SemanticEvaluationCurrentGenerationSnapshotV1, SemanticEvaluationLifecycleVerificationV1,
+    SemanticEvaluationPublicationLeaseV1, SemanticVectorPublicationLeaseV1,
+    SemanticVerifiedEvaluationTargetSnapshotV1, production_saved_generation_schedule_hook,
+    project_semantic_application_status, project_semantic_production_runtime,
+    project_semantic_source_generation, register_project_semantic_runtime,
+    unbind_project_semantic_cache_if_current, unregister_project_semantic_runtime,
 };
 pub use publish_failure_memo::{
     DEFAULT_PUBLISH_FAILURE_BACKOFF_BASE, DEFAULT_PUBLISH_FAILURE_BACKOFF_CEILING,

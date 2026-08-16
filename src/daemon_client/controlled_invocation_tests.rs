@@ -6,8 +6,9 @@ use super::{DaemonInvocationClient, InvocationCancellationPolicy};
 use crate::client_identity::DaemonClientIdentity;
 use crate::daemon::{DaemonConnection, DaemonHandshake};
 use crate::daemon_contract::{
-    DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
-    DaemonInvocationResponse, parse_daemon_invocation_cancellation_request,
+    CanonicalQualificationBlob, DaemonInvocationOutcome, DaemonInvocationPayload,
+    DaemonInvocationProblem, DaemonInvocationRequest, DaemonInvocationResponse,
+    parse_daemon_invocation_cancellation_request,
 };
 use tracedecay_application::{CancellationContext, CancellationSignal, Deadline};
 use tracedecay_domain::UtcMicros;
@@ -24,6 +25,37 @@ fn deadline_after(duration: Duration) -> Deadline {
     let now = now_micros();
     let delta = i64::try_from(duration.as_micros()).unwrap_or(i64::MAX);
     Deadline::new(UtcMicros(now.0.saturating_add(delta))).expect("deadline")
+}
+
+fn semantic_qualification_candidate()
+-> tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1 {
+    let material = crate::search_eval::load_default_evaluated_profile_material("query-fallback")
+        .expect("checked-in query fallback profile");
+    tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1 {
+        evaluated_profile_id: "query-fallback".to_owned(),
+        profile: tracedecay_usecases::semantic_runtime::SemanticEvaluationFusionCandidateV1 {
+            profile_id: material.profile.profile_id.clone(),
+            calibrations: material.profile.calibrations.clone(),
+            score_domain_calibrations: material.profile.score_domain_calibrations.clone(),
+            weights_micros: material.profile.weights_micros.clone(),
+            diversity_policy_id: material.profile.diversity_policy_id.clone(),
+            rerank_policy_id: material.profile.rerank_policy_id.clone(),
+            retrieval_budget: material.profile.retrieval_budget,
+        },
+        diversity: tracedecay_usecases::semantic_runtime::SemanticEvaluationDiversityCandidateV1 {
+            policy_id: material.diversity.policy_id.clone(),
+            per_source_namespace: material.diversity.per_source_namespace,
+            per_source_instance: material.diversity.per_source_instance,
+            per_repository: material.diversity.per_repository,
+            per_file: material.diversity.per_file,
+            per_session_or_thread: material.diversity.per_session_or_thread,
+            per_copy_cluster: material.diversity.per_copy_cluster,
+            per_evidence_role: material.diversity.per_evidence_role,
+        },
+        rerank: None,
+        compatibility:
+            tracedecay_usecases::config::retrieval::RetrievalCompatibilityPinsV1::default(),
+    }
 }
 
 fn invocation_request(request_id: &str, deadline: Deadline) -> DaemonInvocationRequest {
@@ -501,4 +533,206 @@ async fn indeterminate_effect_discards_connection_before_next_invocation() {
     ));
     cancel.await.expect("cancellation task");
     server.await.expect("server task");
+}
+
+#[tokio::test]
+async fn semantic_qualification_uses_the_submitted_deadline_and_maps_canonical_bytes() {
+    const DEADLINE_MICROS: i64 = 5_000_000;
+    const CANCELLATION_ID: &str = "cancel.semantic-qualification.success";
+    let (listener, endpoint) = crate::daemon::transport::BrokerListener::bind(
+        &crate::daemon::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("bind invocation listener");
+    let server = tokio::spawn(async move {
+        let invocation_stream = listener.accept().await.expect("accept invocation");
+        let (invocation_reader, mut invocation_writer) = invocation_stream.into_split();
+        let mut invocation_lines = BufReader::new(invocation_reader).lines();
+        invocation_lines
+            .next_line()
+            .await
+            .expect("read invocation handshake")
+            .expect("invocation handshake");
+        let request_line = invocation_lines
+            .next_line()
+            .await
+            .expect("read invocation request")
+            .expect("invocation request");
+        let request: DaemonInvocationRequest =
+            serde_json::from_str(&request_line).expect("typed invocation request");
+        let request_id = request.request_id.clone();
+        match request.payload {
+            DaemonInvocationPayload::SemanticQualify {
+                candidate,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                assert_eq!(candidate.evaluated_profile_id, "query-fallback");
+                assert_eq!(
+                    deadline.expires_at.0 - observed_at.0,
+                    DEADLINE_MICROS,
+                    "the client must carry the exact caller deadline"
+                );
+                assert_eq!(cancellation.token_id.as_str(), CANCELLATION_ID);
+            }
+            payload => panic!("expected semantic qualification payload, got {payload:?}"),
+        }
+        let response = DaemonInvocationResponse::with_outcome(
+            request_id,
+            DaemonInvocationOutcome::SemanticEvaluatedProfileQualified {
+                qualification: CanonicalQualificationBlob::new(vec![0x51, 0x55, 0x41, 0x4c])
+                    .expect("bounded canonical qualification"),
+            },
+        );
+        invocation_writer
+            .write_all(
+                serde_json::to_string(&response)
+                    .expect("response JSON")
+                    .as_bytes(),
+            )
+            .await
+            .expect("write qualification response");
+        invocation_writer
+            .write_all(b"\n")
+            .await
+            .expect("write response newline");
+        invocation_writer
+            .flush()
+            .await
+            .expect("flush qualification response");
+    });
+    let profile = tempfile::tempdir().expect("profile");
+    let profile_root = profile.path().to_path_buf();
+    let client = DaemonInvocationClient::for_connection_for_test(
+        DaemonConnection::unauthenticated_for_test(endpoint),
+        DaemonHandshake {
+            project_path: Some(profile_root.clone()),
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            allow_initialize_root_routing: false,
+            client_identity: DaemonClientIdentity {
+                global_db_path: profile_root.join("global.db"),
+                profile_root,
+            },
+            client_version: env!("CARGO_PKG_VERSION").to_owned(),
+            client_instance_id: "client.semantic-qualification-success".to_owned(),
+            tool_list_changed_capable: false,
+            catalog_version: String::new(),
+        },
+    );
+    let cancellation = CancellationSignal::active(CANCELLATION_ID).expect("cancellation");
+
+    let result = client
+        .qualify_semantic_profile_until(
+            semantic_qualification_candidate(),
+            DEADLINE_MICROS,
+            cancellation,
+        )
+        .await
+        .expect("canonical qualification bytes");
+
+    assert_eq!(result.qualification_bytes, vec![0x51, 0x55, 0x41, 0x4c]);
+    server.await.expect("server task");
+}
+
+#[tokio::test]
+async fn semantic_qualification_cancellation_controls_the_same_payload_request() {
+    const CANCELLATION_ID: &str = "cancel.semantic-qualification.control";
+    let (listener, endpoint) = crate::daemon::transport::BrokerListener::bind(
+        &crate::daemon::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("bind invocation listener");
+    let (request_admitted, admitted) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let invocation_stream = listener.accept().await.expect("accept invocation");
+        let (invocation_reader, _invocation_writer) = invocation_stream.into_split();
+        let mut invocation_lines = BufReader::new(invocation_reader).lines();
+        invocation_lines
+            .next_line()
+            .await
+            .expect("read invocation handshake")
+            .expect("invocation handshake");
+        let request_line = invocation_lines
+            .next_line()
+            .await
+            .expect("read invocation request")
+            .expect("invocation request");
+        let request: DaemonInvocationRequest =
+            serde_json::from_str(&request_line).expect("typed invocation request");
+        let request_id = request.request_id.clone();
+        match request.payload {
+            DaemonInvocationPayload::SemanticQualify { cancellation, .. } => {
+                assert_eq!(cancellation.token_id.as_str(), CANCELLATION_ID);
+            }
+            payload => panic!("expected semantic qualification payload, got {payload:?}"),
+        }
+        let _ = request_admitted.send(());
+
+        let control_stream = listener.accept().await.expect("accept cancellation");
+        let (control_reader, _control_writer) = control_stream.into_split();
+        let mut control_lines = BufReader::new(control_reader).lines();
+        control_lines
+            .next_line()
+            .await
+            .expect("read cancellation handshake")
+            .expect("cancellation handshake");
+        let cancellation_line = control_lines
+            .next_line()
+            .await
+            .expect("read cancellation request")
+            .expect("cancellation request");
+        let control = parse_daemon_invocation_cancellation_request(&cancellation_line)
+            .expect("typed invocation cancellation");
+        assert_eq!(control.target_request_id(), request_id);
+        std::future::pending::<()>().await;
+    });
+    let profile = tempfile::tempdir().expect("profile");
+    let profile_root = profile.path().to_path_buf();
+    let client = DaemonInvocationClient::for_connection_for_test(
+        DaemonConnection::unauthenticated_for_test(endpoint),
+        DaemonHandshake {
+            project_path: Some(profile_root.clone()),
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            allow_initialize_root_routing: false,
+            client_identity: DaemonClientIdentity {
+                global_db_path: profile_root.join("global.db"),
+                profile_root,
+            },
+            client_version: env!("CARGO_PKG_VERSION").to_owned(),
+            client_instance_id: "client.semantic-qualification-cancel".to_owned(),
+            tool_list_changed_capable: false,
+            catalog_version: String::new(),
+        },
+    );
+    let cancellation = CancellationSignal::active(CANCELLATION_ID).expect("cancellation");
+    let call_cancellation = cancellation.clone();
+    let call_client = client.clone();
+    let call = tokio::spawn(async move {
+        call_client
+            .qualify_semantic_profile_until(
+                semantic_qualification_candidate(),
+                5_000_000,
+                call_cancellation,
+            )
+            .await
+    });
+    admitted.await.expect("request admission");
+    assert!(cancellation.cancel(now_micros()));
+
+    let error = tokio::time::timeout(Duration::from_secs(1), call)
+        .await
+        .expect("read-only cancellation returns promptly")
+        .expect("qualification call task")
+        .expect_err("cancelled qualification must not return bytes");
+    let (reason, retryable, _) = error
+        .project_route_context()
+        .expect("typed semantic qualification cancellation");
+    assert_eq!(reason, "semantic_qualification_cancelled");
+    assert!(!retryable);
+    server.abort();
 }

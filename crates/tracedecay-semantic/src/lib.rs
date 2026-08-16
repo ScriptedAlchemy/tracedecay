@@ -61,8 +61,10 @@ pub use model_catalog::{CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use model_lifecycle::ModelMemberSourceV1;
 pub use model_lifecycle::{
-    ModelLifecycleErrorV1, SemanticLifecycleVerifiedReadyEventV1, SemanticModelLifecycleOwnerV1,
-    SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1, apply_config_and_queue_startup,
+    ModelLifecycleErrorV1, SemanticLifecycleVerifiedReadyEventV1,
+    SemanticModelLifecycleEvaluationPublicationLeaseV1, SemanticModelLifecycleOwnerV1,
+    SemanticModelLifecyclePublicationIdentityV1, SemanticModelLifecycleStateV1,
+    SemanticModelLifecycleStatusV1, apply_config_and_queue_startup,
     open_local_semantic_evaluation_lifecycle, shared_lifecycle_owner,
 };
 

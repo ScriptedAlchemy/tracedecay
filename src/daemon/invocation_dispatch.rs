@@ -4,7 +4,7 @@
 //! resolves the roots they name, and runs the invocation on the Unix and
 //! portable executors.
 //!
-//! Semantic evaluation controls are admitted before project routing and bound
+//! Semantic execution controls are admitted before project routing and bound
 //! around project-open waits so route failures cannot hide cancellation or
 //! deadline expiry.
 
@@ -29,6 +29,7 @@ fn semantic_invocation_interruption_response(
 
 async fn await_project_open_with_semantic_control<Output>(
     control: Option<&SemanticInvocationControlV1>,
+    request_cancellation: Option<&CancellationToken>,
     project_open: impl Future<Output = Output>,
 ) -> std::result::Result<Output, tracedecay_application::ApplicationProblem> {
     let Some(control) = control else {
@@ -36,6 +37,9 @@ async fn await_project_open_with_semantic_control<Output>(
     };
     if let Some(problem) = control.interruption(tracedecay_application::clock::now_micros()) {
         return Err(problem);
+    }
+    if request_cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(tracedecay_application::ApplicationProblem::cancelled_before_admission());
     }
     let remaining = control.remaining(tracedecay_application::clock::now_micros())?;
     let deadline = tokio::time::Instant::now()
@@ -54,6 +58,14 @@ async fn await_project_open_with_semantic_control<Output>(
     tokio::pin!(project_open);
     tokio::select! {
         biased;
+        () = async {
+            match request_cancellation {
+                Some(request_cancellation) => request_cancellation.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        } => {
+            Err(tracedecay_application::ApplicationProblem::cancelled_before_admission())
+        }
         () = tokio::time::sleep_until(deadline) => {
             Err(tracedecay_application::ApplicationProblem::TimedOut {
                 stage: tracedecay_application::CancellationStage::BeforeAdmission,
@@ -62,7 +74,9 @@ async fn await_project_open_with_semantic_control<Output>(
             })
         }
         output = &mut project_open => {
-            if let Some(problem) =
+            if request_cancellation.is_some_and(CancellationToken::is_cancelled) {
+                Err(tracedecay_application::ApplicationProblem::cancelled_before_admission())
+            } else if let Some(problem) =
                 control.interruption(tracedecay_application::clock::now_micros())
             {
                 Err(problem)
@@ -76,17 +90,19 @@ async fn await_project_open_with_semantic_control<Output>(
 #[cfg(unix)]
 async fn await_unix_project_open<Output>(
     control: Option<&SemanticInvocationControlV1>,
+    request_cancellation: Option<&CancellationToken>,
     project_open: impl Future<Output = Output>,
 ) -> std::result::Result<Output, tracedecay_application::ApplicationProblem> {
-    await_project_open_with_semantic_control(control, project_open).await
+    await_project_open_with_semantic_control(control, request_cancellation, project_open).await
 }
 
 #[cfg(any(not(unix), test))]
 async fn await_portable_project_open<Output>(
     control: Option<&SemanticInvocationControlV1>,
+    request_cancellation: Option<&CancellationToken>,
     project_open: impl Future<Output = Output>,
 ) -> std::result::Result<Output, tracedecay_application::ApplicationProblem> {
-    await_project_open_with_semantic_control(control, project_open).await
+    await_project_open_with_semantic_control(control, request_cancellation, project_open).await
 }
 
 async fn await_lsp_project_open_upgrade(
@@ -208,6 +224,22 @@ pub(super) async fn execute_portable_daemon_invocation(
     {
         return response;
     }
+    let semantic_cancellation_lease = if semantic_control.is_some() {
+        match crate::daemon::request_cancellation::register(&request_id) {
+            Some(lease) => Some(lease),
+            None => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::InvalidRequest,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let semantic_cancellation = semantic_cancellation_lease
+        .as_ref()
+        .map(crate::daemon::request_cancellation::Lease::token);
     let lsp_cancellation_lease =
         if request.operation() == service::invocation::DaemonInvocationOperation::LspOpen {
             match crate::daemon::request_cancellation::register(&request_id) {
@@ -225,6 +257,7 @@ pub(super) async fn execute_portable_daemon_invocation(
     let lsp_cancellation = lsp_cancellation_lease
         .as_ref()
         .map(crate::daemon::request_cancellation::Lease::token);
+    let request_cancellation = semantic_cancellation.clone().or(lsp_cancellation.clone());
     let lsp_project_open_gates = Arc::clone(&project_open_gates);
     #[cfg(test)]
     let lsp_project_open_attempts = project_open_attempts.clone();
@@ -234,6 +267,7 @@ pub(super) async fn execute_portable_daemon_invocation(
     if request.requires_project() {
         let project_server = await_portable_project_open(
             semantic_control.as_ref(),
+            semantic_cancellation.as_ref(),
             Box::pin(portable_project_server_for_request(
                 lifecycle.clone(),
                 store_administration.clone(),
@@ -348,7 +382,7 @@ pub(super) async fn execute_portable_daemon_invocation(
             &store_administration,
             project_path.as_deref(),
             request,
-            lsp_cancellation,
+            request_cancellation,
         )
         .await
 }
@@ -495,6 +529,22 @@ pub(super) async fn execute_daemon_invocation(
     {
         return response;
     }
+    let semantic_cancellation_lease = if semantic_control.is_some() {
+        match crate::daemon::request_cancellation::register(&request_id) {
+            Some(lease) => Some(lease),
+            None => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let semantic_cancellation = semantic_cancellation_lease
+        .as_ref()
+        .map(crate::daemon::request_cancellation::Lease::token);
     let lsp_cancellation_lease =
         if request.operation() == service::invocation::DaemonInvocationOperation::LspOpen {
             match crate::daemon::request_cancellation::register(&request_id) {
@@ -512,12 +562,14 @@ pub(super) async fn execute_daemon_invocation(
     let lsp_cancellation = lsp_cancellation_lease
         .as_ref()
         .map(crate::daemon::request_cancellation::Lease::token);
+    let request_cancellation = semantic_cancellation.clone().or(lsp_cancellation.clone());
     let git_operation = invocation_is_git_operation(request.operation());
     let workflow_application = request.is_workflow_application();
     let mut project_path = None;
     if request.requires_project() {
         let project_server = await_unix_project_open(
             semantic_control.as_ref(),
+            semantic_cancellation.as_ref(),
             engine.project_server_for_request(handshake, ProjectServerRequirement::Core),
         )
         .await;
@@ -611,7 +663,7 @@ pub(super) async fn execute_daemon_invocation(
         &engine.store_administration,
         project_path.as_deref(),
         request,
-        lsp_cancellation,
+        request_cancellation,
     ))
     .await
 }
@@ -688,7 +740,7 @@ mod semantic_control_tests {
     #[tokio::test]
     async fn unix_dispatch_admits_controls_before_and_during_project_open() {
         let cancelled = cancelled_control();
-        let cancelled_problem = await_unix_project_open(Some(&cancelled), async {
+        let cancelled_problem = await_unix_project_open(Some(&cancelled), None, async {
             panic!("pre-cancelled project open must not be polled");
         })
         .await
@@ -696,7 +748,7 @@ mod semantic_control_tests {
         assert_eq!(cancelled_problem.kind(), ApplicationProblemKind::Cancelled);
 
         let expired = active_control(0);
-        let expired_problem = await_unix_project_open(Some(&expired), async {
+        let expired_problem = await_unix_project_open(Some(&expired), None, async {
             panic!("pre-expired project open must not be polled");
         })
         .await
@@ -705,16 +757,40 @@ mod semantic_control_tests {
 
         let expiring = active_control(2_000);
         let during_open_problem =
-            await_unix_project_open(Some(&expiring), std::future::pending::<()>())
+            await_unix_project_open(Some(&expiring), None, std::future::pending::<()>())
                 .await
                 .expect_err("project open must observe deadline");
         assert_eq!(during_open_problem.kind(), ApplicationProblemKind::TimedOut);
+
+        let request_cancellation = CancellationToken::new();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let cancelled_open = {
+            let request_cancellation = request_cancellation.clone();
+            tokio::spawn(async move {
+                let control = active_control(1_000_000);
+                await_unix_project_open(Some(&control), Some(&request_cancellation), async move {
+                    let _ = started_tx.send(());
+                    std::future::pending::<()>().await
+                })
+                .await
+            })
+        };
+        started_rx.await.expect("project open started");
+        request_cancellation.cancel();
+        assert_eq!(
+            cancelled_open
+                .await
+                .expect("project-open task")
+                .expect_err("request cancellation must interrupt project open")
+                .kind(),
+            ApplicationProblemKind::Cancelled
+        );
     }
 
     #[tokio::test]
     async fn portable_dispatch_admits_controls_before_and_during_project_open() {
         let cancelled = cancelled_control();
-        let cancelled_problem = await_portable_project_open(Some(&cancelled), async {
+        let cancelled_problem = await_portable_project_open(Some(&cancelled), None, async {
             panic!("pre-cancelled project open must not be polled");
         })
         .await
@@ -722,7 +798,7 @@ mod semantic_control_tests {
         assert_eq!(cancelled_problem.kind(), ApplicationProblemKind::Cancelled);
 
         let expired = active_control(0);
-        let expired_problem = await_portable_project_open(Some(&expired), async {
+        let expired_problem = await_portable_project_open(Some(&expired), None, async {
             panic!("pre-expired project open must not be polled");
         })
         .await
@@ -731,10 +807,38 @@ mod semantic_control_tests {
 
         let expiring = active_control(2_000);
         let during_open_problem =
-            await_portable_project_open(Some(&expiring), std::future::pending::<()>())
+            await_portable_project_open(Some(&expiring), None, std::future::pending::<()>())
                 .await
                 .expect_err("project open must observe deadline");
         assert_eq!(during_open_problem.kind(), ApplicationProblemKind::TimedOut);
+
+        let request_cancellation = CancellationToken::new();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let cancelled_open = {
+            let request_cancellation = request_cancellation.clone();
+            tokio::spawn(async move {
+                let control = active_control(1_000_000);
+                await_portable_project_open(
+                    Some(&control),
+                    Some(&request_cancellation),
+                    async move {
+                        let _ = started_tx.send(());
+                        std::future::pending::<()>().await
+                    },
+                )
+                .await
+            })
+        };
+        started_rx.await.expect("project open started");
+        request_cancellation.cancel();
+        assert_eq!(
+            cancelled_open
+                .await
+                .expect("project-open task")
+                .expect_err("request cancellation must interrupt project open")
+                .kind(),
+            ApplicationProblemKind::Cancelled
+        );
     }
 }
 

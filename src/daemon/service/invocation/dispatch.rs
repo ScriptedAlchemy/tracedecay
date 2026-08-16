@@ -780,6 +780,24 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
+                    request_cancellation.clone(),
+                )
+                .await
+            }
+            DaemonInvocationPayload::SemanticQualify {
+                candidate,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                self.execute_semantic_qualification(
+                    project_root,
+                    request_id,
+                    *candidate,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                    request_cancellation.clone(),
                 )
                 .await
             }
