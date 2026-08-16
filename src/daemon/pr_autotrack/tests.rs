@@ -794,3 +794,86 @@ async fn manual_branch_missing_ref_is_typed_failure() {
     ));
     schedulers.shutdown().await;
 }
+
+#[test]
+fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
+    let repo = tempfile::tempdir().unwrap();
+    let branch = "feature/exact-cleanup";
+    init_manual_branch_repo(repo.path(), branch);
+    let data = tempfile::tempdir().unwrap();
+    let artifacts = ManualBranchArtifactsV1::for_branch(data.path(), branch);
+    let head = resolve_branch_head(repo.path(), branch, default_pr_command_control())
+        .expect("feature branch head");
+
+    prepare_manual_branch_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        default_pr_command_control(),
+    )
+    .expect("prepare exact worktree");
+    assert!(cleanup_owned_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        default_pr_command_control(),
+    ));
+    assert!(cleanup_owned_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        default_pr_command_control(),
+    ));
+
+    prepare_manual_branch_worktree(
+        repo.path(),
+        &artifacts.worktree,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        default_pr_command_control(),
+    )
+    .expect("prepare replacement exact worktree");
+    let foreign = resolve_branch_head(repo.path(), "main", default_pr_command_control())
+        .expect("main branch head");
+    assert_ne!(foreign, head, "fixture branches must have distinct heads");
+    assert!(
+        successful_git_with_control(
+            repo.path(),
+            &["update-ref", &artifacts.tracking_ref, &foreign],
+            default_pr_command_control(),
+        )
+        .is_some()
+    );
+
+    assert!(
+        !cleanup_owned_worktree(
+            repo.path(),
+            &artifacts.worktree,
+            &artifacts.tracking_ref,
+            &artifacts.label,
+            &head,
+            default_pr_command_control(),
+        ),
+        "foreign ref replacement must survive an exact-source cleanup"
+    );
+    assert!(
+        ref_points_to(
+            repo.path(),
+            &artifacts.tracking_ref,
+            &foreign,
+            default_pr_command_control(),
+        ),
+        "the foreign tracking ref must remain untouched"
+    );
+    assert!(
+        artifacts.worktree.exists(),
+        "a foreign provenance mismatch must not delete the linked worktree"
+    );
+}
