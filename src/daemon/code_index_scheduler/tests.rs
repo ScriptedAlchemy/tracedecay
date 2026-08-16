@@ -3542,8 +3542,8 @@ async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coales
         .expect("mounted worktree");
 
     drop(held);
-    drop(admission);
     registry.shutdown().await;
+    drop(admission);
 
     assert_ne!(
         stamped, 0,

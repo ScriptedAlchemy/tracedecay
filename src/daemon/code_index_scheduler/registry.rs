@@ -84,10 +84,18 @@ fn cold_mount_admission_barriers() -> &'static Mutex<BTreeMap<PathBuf, Arc<tokio
 }
 
 #[cfg(test)]
-fn query_admission_barriers() -> &'static Mutex<BTreeMap<WorktreeId, Arc<tokio::sync::Barrier>>> {
-    static BARRIERS: std::sync::OnceLock<Mutex<BTreeMap<WorktreeId, Arc<tokio::sync::Barrier>>>> =
-        std::sync::OnceLock::new();
-    BARRIERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+struct QueryAdmissionTestControlV1 {
+    lookup_gate: tokio::sync::Mutex<()>,
+    rendezvous: tokio::sync::Barrier,
+}
+
+#[cfg(test)]
+fn query_admission_controls()
+-> &'static Mutex<BTreeMap<WorktreeId, Arc<QueryAdmissionTestControlV1>>> {
+    static CONTROLS: std::sync::OnceLock<
+        Mutex<BTreeMap<WorktreeId, Arc<QueryAdmissionTestControlV1>>>,
+    > = std::sync::OnceLock::new();
+    CONTROLS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 /// One mounted worktree's code scope identity and serving generation, read
@@ -302,11 +310,14 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
         callers: usize,
     ) {
-        let barrier = Arc::new(tokio::sync::Barrier::new(callers));
-        let replaced = query_admission_barriers()
+        let control = Arc::new(QueryAdmissionTestControlV1 {
+            lookup_gate: tokio::sync::Mutex::new(()),
+            rendezvous: tokio::sync::Barrier::new(callers),
+        });
+        let replaced = query_admission_controls()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(scope.worktree_id.clone(), barrier);
+            .insert(scope.worktree_id.clone(), control);
         assert!(
             replaced.is_none(),
             "query-admission barrier already installed"
@@ -326,15 +337,14 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     #[cfg(test)]
-    async fn pause_query_admission_for_test(scope: &tracedecay_application::ResolvedScope) {
-        let barrier = query_admission_barriers()
+    fn query_admission_control_for_test(
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<Arc<QueryAdmissionTestControlV1>> {
+        query_admission_controls()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&scope.worktree_id)
-            .cloned();
-        if let Some(barrier) = barrier {
-            barrier.wait().await;
-        }
+            .cloned()
     }
 
     /// The pending-wake slot for one exact scope's worktree, in unix micros;
@@ -2340,6 +2350,14 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> bool {
+        #[cfg(test)]
+        let test_control = Self::query_admission_control_for_test(scope);
+        #[cfg(test)]
+        let lookup_guard = if let Some(test_control) = test_control.as_ref() {
+            Some(test_control.lookup_gate.lock().await)
+        } else {
+            None
+        };
         let (scheduler, serving_generation, wake, pending_wake_micros, pending_wake_trigger) = {
             let Ok(mounted) = self.mounted.try_lock() else {
                 return false;
@@ -2367,13 +2385,17 @@ impl CodeIndexSchedulerRegistryV1 {
             };
             matched
         };
+        #[cfg(test)]
+        drop(lookup_guard);
         // Debounce on the existing pending-wake slot: a wake already posted and
         // not yet claimed by the worker covers this admission too.
         if pending_wake_micros.load(Ordering::Acquire) != 0 {
             return false;
         }
         #[cfg(test)]
-        Self::pause_query_admission_for_test(scope).await;
+        if let Some(test_control) = test_control {
+            test_control.rendezvous.wait().await;
+        }
         tokio::task::spawn_blocking(move || {
             let mut scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
