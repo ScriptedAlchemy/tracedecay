@@ -756,7 +756,7 @@ fn graph_matches_project(
             .is_some_and(|root| root == canonical_root)
 }
 
-fn typed_project_route_error(
+pub(super) fn typed_project_route_error(
     id: serde_json::Value,
     reason_code: &str,
     retryable: bool,
