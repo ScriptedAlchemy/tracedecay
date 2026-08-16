@@ -11,7 +11,7 @@ use std::time::Duration;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexProductionErrorV1};
 use tracedecay_domain::canonical_sha256;
 
-use super::CodeIndexSchedulerRegistryV1;
+use super::{CodeIndexSchedulerRegistryV1, PendingWakeV1};
 use crate::daemon::code_index_scheduler::graph_activation::CodeGraphActivationAuthorityV1;
 use crate::daemon::code_index_scheduler::{
     CodeGraphReplayBindingV1, CodeIndexCadenceTriggerV1, CodeIndexIgnoredDependencyIndexOutcomeV1,
@@ -194,8 +194,7 @@ struct AdmissionFlightOwnerV1 {
     hints: Arc<Mutex<PendingHintsV1>>,
     wake: Arc<tokio::sync::Notify>,
     epoch: Arc<AtomicU64>,
-    pending_wake_micros: Arc<AtomicU64>,
-    pending_wake_trigger: Arc<AtomicU64>,
+    pending_wake: Arc<PendingWakeV1>,
     finished: bool,
 }
 
@@ -230,8 +229,7 @@ impl AdmissionFlightOwnerV1 {
             .overflow();
         DaemonCodeIndexControlV1::advance(&self.epoch);
         CodeIndexSchedulerRegistryV1::note_wake(
-            &self.pending_wake_micros,
-            &self.pending_wake_trigger,
+            &self.pending_wake,
             &self.wake,
             CodeIndexCadenceTriggerV1::QueryAdmission,
         );
@@ -309,8 +307,7 @@ impl CodeIndexSchedulerRegistryV1 {
             hints,
             wake,
             epoch,
-            pending_wake_micros,
-            pending_wake_trigger,
+            pending_wake,
         ) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root).ok_or_else(|| {
@@ -332,8 +329,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.epoch),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         let (flight, owns_flight) = {
@@ -367,8 +363,7 @@ impl CodeIndexSchedulerRegistryV1 {
             hints,
             wake,
             epoch,
-            pending_wake_micros,
-            pending_wake_trigger,
+            pending_wake,
             finished: false,
         };
         let result = self
@@ -394,8 +389,7 @@ impl CodeIndexSchedulerRegistryV1 {
             publication_gate,
             shutting_down,
             wake,
-            pending_wake_micros,
-            pending_wake_trigger,
+            pending_wake,
             reconcile_in_progress,
             background_reconcile_admission,
         ) = {
@@ -415,8 +409,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.semantic_evaluation_publication_gate),
                 Arc::clone(&worktree.shutting_down),
                 Arc::clone(&worktree.wake),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
+                Arc::clone(&worktree.pending_wake),
                 Arc::clone(&worktree.reconcile_in_progress),
                 Arc::clone(&self.background_reconcile_admission),
             )
@@ -472,8 +465,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .request_background_reconcile();
             Self::note_wake(
-                &pending_wake_micros,
-                &pending_wake_trigger,
+                &pending_wake,
                 &wake,
                 CodeIndexCadenceTriggerV1::QueryAdmission,
             );

@@ -58,8 +58,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .overflow();
         DaemonCodeIndexControlV1::advance(&worktree.epoch);
         Self::note_wake(
-            &worktree.pending_wake_micros,
-            &worktree.pending_wake_trigger,
+            &worktree.pending_wake,
             &worktree.wake,
             CodeIndexCadenceTriggerV1::GitWatcher,
         );
