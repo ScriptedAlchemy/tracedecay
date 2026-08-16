@@ -76,6 +76,7 @@ pub use runtime_service::{
 };
 pub use semantic_evaluation::{
     PreparedSemanticEvaluationProjectionV1, SemanticEvaluationCancellationV1,
+    SemanticEvaluationProjectionBatchCachePolicyV1, SemanticEvaluationProjectionBatchCacheV1,
     SemanticEvaluationProjectionCancellationV1, SemanticEvaluationQueryEmbedderV1,
     SemanticEvaluationQueryFactoryV1, measure_semantic_evaluation_projection_cancellation,
     prepare_semantic_evaluation_projection,
@@ -560,6 +561,8 @@ impl DaemonSemanticRuntimeHandleV1 {
                     &request.projection_request,
                     &request.canonical_chunks,
                     request.max_embeds_per_batch,
+                    authority.projection().embedding_key().inference_batch_size as usize,
+                    authority.projection().embedding_key().inference_batch_bytes as usize,
                 )
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
                 drop(request.canonical_chunks);
@@ -975,49 +978,39 @@ where
     }
     let max_texts = session.authority().max_batch_texts() as usize;
     let max_bytes = session.authority().max_batch_bytes() as usize;
-    let mut encoded = Vec::with_capacity(chunks.len());
-    let mut units = 0u64;
-    let mut cursor = 0;
-    while cursor < chunks.len() {
-        let mut end = cursor;
-        let mut batch_bytes = 0usize;
-        while end < chunks.len() && end - cursor < max_texts {
-            let text_bytes = chunks[end].sanitized_text.as_str().len();
-            if text_bytes > max_bytes {
-                return Err("semantic projection text exceeds the batch byte ceiling".to_owned());
-            }
-            if end > cursor && batch_bytes.saturating_add(text_bytes) > max_bytes {
-                break;
-            }
-            batch_bytes = batch_bytes.saturating_add(text_bytes);
-            end += 1;
-        }
-        if end == cursor {
-            return Err("semantic projection batch limits admit no input".to_owned());
-        }
-        let batch = BoundedSanitizedTextBatchV1::try_new(
-            chunks[cursor..end]
-                .iter()
-                .map(|chunk| chunk.sanitized_text.as_str().to_owned())
-                .collect(),
-            max_texts,
-            max_bytes,
-        )
-        .map_err(|error| error.to_string())?;
-        let vectors = session
-            .embed_batch(&batch, progress)
-            .map_err(|error| error.to_string())?;
-        if vectors.len() != end - cursor {
-            return Err("semantic projector returned an unexpected vector batch size".to_owned());
-        }
-        for vector in vectors {
-            vector.validate().map_err(|error| error.to_string())?;
-            encoded.push(vector.values);
-        }
-        units = units.saturating_add((end - cursor) as u64);
-        cursor = end;
+    let inference_batch_size = key.inference_batch_size as usize;
+    let inference_batch_bytes = key.inference_batch_bytes as usize;
+    if max_texts != inference_batch_size
+        || max_bytes != inference_batch_bytes
+        || chunks.len() > inference_batch_size
+    {
+        return Err(
+            "semantic projection authority does not match its inference batch identity".to_owned(),
+        );
     }
-    Ok((encoded, units))
+    let batch = BoundedSanitizedTextBatchV1::try_new(
+        chunks
+            .iter()
+            .map(|chunk| chunk.sanitized_text.as_str().to_owned())
+            .collect(),
+        max_texts,
+        max_bytes,
+    )
+    .map_err(|error| error.to_string())?;
+    let vectors = session
+        .embed_batch(&batch, progress)
+        .map_err(|error| error.to_string())?;
+    if vectors.len() != chunks.len() {
+        return Err("semantic projector returned an unexpected vector batch size".to_owned());
+    }
+    let encoded = vectors
+        .into_iter()
+        .map(|vector| {
+            vector.validate().map_err(|error| error.to_string())?;
+            Ok(vector.values)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((encoded, chunks.len() as u64))
 }
 
 impl<R> CanonicalChunkVectorEncoderV1 for RuntimeChunkVectorEncoderV1<R>

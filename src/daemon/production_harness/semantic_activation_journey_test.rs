@@ -275,18 +275,33 @@ pub(super) fn semantic_candidate(
     // These bound the evaluation execution only. The accepted profile is
     // rebound to the evaluator's exact current/10x observations before it is
     // persisted or becomes activation-eligible.
-    let evaluation_limits = crate::config::SemanticResourceCeilings::default();
+    let configured_limits = crate::config::SemanticResourceCeilings::default();
+    let catalog = crate::semantic_code::production_fastembed_catalog();
+    let cataloged_model = catalog
+        .get(crate::semantic_code::DEFAULT_FASTEMBED_MODEL_ID)
+        .expect("production catalog contains default model");
+    let model_bytes = cataloged_model
+        .members
+        .get("model")
+        .expect("production model member")
+        .length;
+    let tokenizer_bytes = cataloged_model
+        .members
+        .get("tokenizer")
+        .expect("production tokenizer member")
+        .length;
     let vector_generation_id = vector.generation_id().clone();
     let calibration = SemanticCalibrationProfileV1 {
-        calibration_profile_id: CalibrationProfileId::new(
-            "calibration.semantic.native-product-journey.v1",
-        )
-        .expect("calibration profile id"),
+        calibration_profile_id: CalibrationProfileId::new("calibration.semantic.runtime.v1")
+            .expect("calibration profile id"),
         cohort_digest: canonical_sha256(&(
-            "tracedecay.semantic.native-product-journey.cohort.v1",
+            "tracedecay.semantic.evaluation-calibration-cohort.v1",
             code.manifest().generation_id.clone(),
-            vector_generation_id.clone(),
+            vector.source_manifest_digest().clone(),
             code.capability().manifest_digest.clone(),
+            vector.embedding_key().clone(),
+            vector_generation_id.clone(),
+            embedding.model_artifact_digest.clone(),
         ))
         .expect("calibration cohort digest"),
         projection_key: vector.projection_key().clone(),
@@ -322,7 +337,7 @@ pub(super) fn semantic_candidate(
                 implementation_revision: ComponentRevision::new("semantic.fastembed.production.v1")
                     .expect("semantic implementation revision"),
                 fusion_revision: ComponentRevision::new(
-                    "fusion.semantic.native-product-journey.v1",
+                    tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
                 )
                 .expect("fusion revision"),
                 artifact_manifest_digest: embedding.model_artifact_digest.clone(),
@@ -332,14 +347,14 @@ pub(super) fn semantic_candidate(
                 vector_generation_id,
                 calibration,
                 resources: SemanticResourceRequirementV1 {
-                    model_bytes: evaluation_limits.max_model_bytes,
-                    tokenizer_bytes: evaluation_limits.max_tokenizer_bytes,
-                    resident_bytes: evaluation_limits.max_resident_bytes,
-                    threads: evaluation_limits.max_threads,
-                    max_concurrent_sessions: evaluation_limits.max_concurrent_sessions,
-                    batch_size: evaluation_limits.max_batch_size,
-                    sequence_length: evaluation_limits.max_sequence_length,
-                    load_deadline_ms: evaluation_limits.load_deadline_ms,
+                    model_bytes,
+                    tokenizer_bytes,
+                    resident_bytes: configured_limits.max_resident_bytes,
+                    threads: configured_limits.max_threads,
+                    max_concurrent_sessions: configured_limits.max_concurrent_sessions,
+                    batch_size: configured_limits.max_batch_size,
+                    sequence_length: configured_limits.max_sequence_length,
+                    load_deadline_ms: configured_limits.load_deadline_ms,
                 },
             }),
             rerank: None,

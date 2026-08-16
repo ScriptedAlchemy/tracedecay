@@ -351,6 +351,8 @@ mod tests {
                 "pooling": "mean",
                 "truncation_side": "right",
                 "truncation_length": 1,
+                "inference_batch_size": 1,
+                "inference_batch_bytes": 4,
                 "runtime_backend": "qualification-cli-test",
                 "runtime_build_revision": "qualification-cli-test.v1",
                 "device_class": "cpu",

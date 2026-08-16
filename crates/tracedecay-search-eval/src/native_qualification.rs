@@ -28,9 +28,9 @@ use crate::{
 
 const PACKAGED_NATIVE_QUALIFICATION_SCHEMA_VERSION: u32 = 1;
 
-// There is intentionally no `include_bytes!` until a genuine native run has
-// generated and reviewed a report. An empty slice is an unavailable artifact,
-// never a synthetic qualification, and is rejected before JSON decoding.
+// Qualification bytes remain unavailable until a genuine native run has
+// produced a reviewed report. An empty slice is an unavailable artifact, never
+// a synthetic qualification, and is rejected before JSON decoding.
 const PACKAGED_NATIVE_QUALIFICATION_BYTES: &[u8] = &[];
 const PACKAGED_NATIVE_QUALIFICATION_SHA256: Option<&str> = None;
 
@@ -92,6 +92,8 @@ pub struct NativeQualificationModelKeyV1 {
     pub pooling: EmbeddingPoolingV1,
     pub truncation_side: EmbeddingTruncationSideV1,
     pub truncation_length: u32,
+    pub inference_batch_size: u32,
+    pub inference_batch_bytes: u32,
     pub runtime_backend: String,
     pub runtime_build_revision: String,
     pub device_class: EmbeddingDeviceClassV1,
@@ -115,6 +117,8 @@ impl NativeQualificationModelKeyV1 {
             pooling: projection.pooling,
             truncation_side: projection.truncation_side,
             truncation_length: projection.truncation_length,
+            inference_batch_size: projection.inference_batch_size,
+            inference_batch_bytes: projection.inference_batch_bytes,
             runtime_backend: projection.runtime_backend.clone(),
             runtime_build_revision: projection.runtime_build_revision.clone(),
             device_class: projection.device_class,
@@ -140,6 +144,8 @@ impl NativeQualificationModelKeyV1 {
                 .as_ref()
                 .is_none_or(|digest| digest.validate().is_ok())
             && self.truncation_length != 0
+            && self.inference_batch_size != 0
+            && self.inference_batch_bytes != 0
             && self.dimensions != 0
             && !self.runtime_backend.trim().is_empty()
             && !self.runtime_build_revision.trim().is_empty()
@@ -492,17 +498,9 @@ pub fn load_packaged_native_qualification_from_bytes(
     activation_candidate_from_qualification(qualification, expectations)
 }
 
-/// The literal bytes intended for `include_bytes!` after a genuine native run
-/// produces a reviewed report. Empty means the package makes no claim.
+/// Embedded qualification bytes. Empty means the package makes no claim.
 pub fn packaged_native_qualification_bytes() -> &'static [u8] {
     PACKAGED_NATIVE_QUALIFICATION_BYTES
-}
-
-/// Test-only access to the canonical package materialization counter. Loading
-/// qualification must leave it unchanged.
-#[cfg(test)]
-pub fn packaged_native_qualification_materialization_count() -> u64 {
-    crate::packaged_assets::materialization_count()
 }
 
 /// Load embedded bytes through one process-wide SHA-pinned structural parse,
@@ -801,6 +799,16 @@ fn validate_report_runtime_bindings(
     report: &DirectEvaluationReportV1,
     runtime: &NativeQualificationRuntimeKeyV1,
 ) -> Result<(), PackagedNativeQualificationErrorV1> {
+    if runtime.model.inference_batch_size != runtime.execution_resources.batch_size
+        || runtime.model.inference_batch_bytes
+            != runtime
+                .execution_resources
+                .batch_size
+                .saturating_mul(runtime.execution_resources.sequence_length)
+                .saturating_mul(4)
+    {
+        return Err(PackagedNativeQualificationErrorV1::RuntimeMismatch);
+    }
     for output in &report.raw_outputs {
         let resources = output
             .native_resources

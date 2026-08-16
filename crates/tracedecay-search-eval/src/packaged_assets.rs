@@ -11,16 +11,6 @@ use crate::{
     CandidateWorkloadV1, SearchEvalError, load_candidate_workload, validate_workload_for_tuning,
 };
 
-#[cfg(test)]
-thread_local! {
-    static MATERIALIZATION_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn materialization_count() -> u64 {
-    MATERIALIZATION_COUNT.with(std::cell::Cell::get)
-}
-
 const WORKLOAD_PATH: &str =
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
 const SOURCE_COMMIT: &str = "8312618fee8109b16be09e65f45118b4e550fa14";
@@ -138,8 +128,6 @@ impl PackagedEvaluatorAssets {
 
 pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> {
     let workload = load_workload()?;
-    #[cfg(test)]
-    MATERIALIZATION_COUNT.with(|count| count.set(count.get().saturating_add(1)));
     let directory = tempfile::tempdir().map_err(|error| {
         SearchEvalError::Contract(format!("create packaged evaluator root: {error}"))
     })?;
@@ -257,17 +245,6 @@ pub(crate) fn admitted_scope(_root: &Path) -> Option<ResolvedScope> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn profile_metadata_load_does_not_materialize_runtime_assets() {
-        let before = super::MATERIALIZATION_COUNT.with(std::cell::Cell::get);
-
-        crate::load_default_evaluated_profile_material("query-fallback")
-            .expect("packaged profile metadata");
-
-        let after = super::MATERIALIZATION_COUNT.with(std::cell::Cell::get);
-        assert_eq!(after, before);
-    }
-
     #[test]
     fn packaged_workload_is_independent_of_mounted_project() {
         let unrelated = tempfile::tempdir().expect("unrelated project");

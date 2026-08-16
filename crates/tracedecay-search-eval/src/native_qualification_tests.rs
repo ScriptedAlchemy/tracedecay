@@ -1,19 +1,21 @@
 //! Byte-backed native-qualification acceptance contracts.
 //!
-//! The successful fixture comes only from the future embedded production
-//! qualification. These tests deliberately never fabricate native evidence:
-//! every negative case mutates that genuine encoded qualification at the
-//! boundary it is intended to exercise.
+//! Successful qualification requires a reviewed embedded production report.
+//! Until then the empty packaged bytes produce typed unavailability. These tests
+//! deliberately never fabricate native evidence: every negative case mutates a
+//! genuine encoded qualification at the boundary it is intended to exercise.
 
 use crate::{
     DirectEvaluationStatusV1, NativeQualificationExpectationsV1,
     NativeQualificationVectorGenerationRetentionV1, PackagedNativeQualificationErrorV1,
     PackagedNativeQualificationV1, load_packaged_native_qualification_from_bytes,
-    packaged_native_qualification_bytes, packaged_native_qualification_materialization_count,
-    qualified_default_activation_candidate,
+    packaged_native_qualification_bytes, qualified_default_activation_candidate,
 };
 
 const EVALUATED_PROFILE_ID: &str = "hybrid-conservative";
+const NO_MATERIALIZATION_CHILD_ENV: &str = "TRACEDECAY_NATIVE_QUALIFICATION_NO_MATERIALIZATION";
+const NO_MATERIALIZATION_TEST: &str =
+    "native_qualification_tests::embedded_qualification_load_does_not_materialize_runtime_assets";
 
 fn packaged_bytes() -> Vec<u8> {
     packaged_native_qualification_bytes().to_vec()
@@ -56,25 +58,46 @@ fn assert_refusal(bytes: &[u8], expected: PackagedNativeQualificationErrorV1) {
 }
 
 #[test]
-fn byte_backed_native_qualification_returns_the_embedded_report_and_material_without_runtime_assets()
- {
-    let before = packaged_native_qualification_materialization_count();
+fn byte_backed_native_qualification_returns_the_embedded_report_and_material() {
     let expectations = expectations();
     let expected = qualified_default_activation_candidate(&expectations)
         .expect("embedded native qualification must qualify the selected profile");
     let actual = load_packaged_native_qualification_from_bytes(&packaged_bytes(), &expectations)
         .expect("the embedded qualification bytes must load without native generation");
-    let after = packaged_native_qualification_materialization_count();
 
     assert_eq!(actual.clone().into_parts(), expected.into_parts());
-    assert_eq!(
-        after, before,
-        "qualification loading must not materialize runtime assets"
-    );
     assert_eq!(
         actual.into_parts().1.profile.profile_id.as_str(),
         EVALUATED_PROFILE_ID,
         "qualification must return material for the requested profile"
+    );
+}
+
+#[test]
+fn embedded_qualification_load_does_not_materialize_runtime_assets() {
+    if std::env::var_os(NO_MATERIALIZATION_CHILD_ENV).is_some() {
+        let candidate = qualified_default_activation_candidate(&expectations())
+            .expect("embedded qualification must load through metadata only");
+        assert_eq!(
+            candidate.into_parts().1.profile.profile_id.as_str(),
+            EVALUATED_PROFILE_ID
+        );
+        return;
+    }
+
+    let isolation = tempfile::tempdir().expect("isolated environment");
+    let non_directory = isolation.path().join("not-a-directory");
+    std::fs::write(&non_directory, b"not a directory").expect("non-directory temp root");
+    let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", NO_MATERIALIZATION_TEST])
+        .env(NO_MATERIALIZATION_CHILD_ENV, "1")
+        .env("TMPDIR", &non_directory)
+        .status()
+        .expect("run isolated qualification loader");
+
+    assert!(
+        status.success(),
+        "loading embedded qualification must not invoke the real tempfile-backed asset materializer"
     );
 }
 

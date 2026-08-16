@@ -72,7 +72,8 @@ use tracedecay_semantic::{
     DaemonSemanticRuntimeHandleV1, FastEmbedSemanticGenerationRequestV1, LoadedSemanticArtifactV1,
     PreparedSemanticEvaluationProjectionV1, PreparedSemanticRuntimeCommitV1,
     PreparedSemanticRuntimeObservationV1, PreparedSemanticRuntimeRestoreV1,
-    SemanticEvaluationCancellationV1, SemanticEvaluationQueryFactoryV1,
+    SemanticEvaluationCancellationV1, SemanticEvaluationProjectionBatchCachePolicyV1,
+    SemanticEvaluationProjectionBatchCacheV1, SemanticEvaluationQueryFactoryV1,
     SemanticGenerationPointerV1, SemanticModelLifecycleEvaluationPublicationLeaseV1,
     SemanticModelLifecycleOwnerV1, SemanticModelLifecyclePublicationIdentityV1,
     SemanticModelLifecycleStateV1, SemanticProjectionResumeOutcomeV1,
@@ -468,6 +469,22 @@ impl ProductionSemanticRuntimeV1 {
         generation: &CodeIndexPublishedGenerationV1,
         cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<PreparedSemanticEvaluationGenerationV1, SemanticRuntimeScheduleFailureV1> {
+        self.prepare_evaluation_generation_with_cache(
+            generation,
+            Arc::new(SemanticEvaluationProjectionBatchCacheV1::new()),
+            cancellation,
+        )
+    }
+
+    /// Prepare one evaluator generation with a cache retained by the daemon's
+    /// enclosing evaluation request. The cache is never attached to the
+    /// runtime, lifecycle, or durable vector state.
+    pub fn prepare_evaluation_generation_with_cache(
+        &self,
+        generation: &CodeIndexPublishedGenerationV1,
+        projection_batch_cache: Arc<SemanticEvaluationProjectionBatchCacheV1>,
+        cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
+    ) -> Result<PreparedSemanticEvaluationGenerationV1, SemanticRuntimeScheduleFailureV1> {
         let artifact_bytes = installed_artifact_member_bytes(&self.lifecycle)?;
         let execution = SemanticResourceCeilings {
             max_concurrent_sessions: EVALUATION_MAX_CONCURRENT_SESSIONS,
@@ -493,6 +510,8 @@ impl ProductionSemanticRuntimeV1 {
             generation.chunks().chunks(),
             execution.max_concurrent_sessions as usize,
             self.resources.max_resident_bytes,
+            projection_batch_cache.as_ref(),
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
             Arc::clone(&cancellation),
         )?;
         PreparedSemanticEvaluationGenerationV1::new(
@@ -503,6 +522,7 @@ impl ProductionSemanticRuntimeV1 {
             execution,
             elapsed_micros(started),
             projection_input_bytes,
+            projection_batch_cache,
             cancellation,
         )
     }
@@ -556,6 +576,8 @@ impl ProductionSemanticRuntimeV1 {
             &chunks,
             EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
             self.resources.max_resident_bytes,
+            current.projection_batch_cache.as_ref(),
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
             Arc::clone(&current.cancellation),
         )?;
         if prepared.prepared.request.changes.from_generation.as_ref()
@@ -750,6 +772,7 @@ impl ProductionSemanticRuntimeV1 {
         let (one_symbol, one_symbol_elapsed, one_symbol_input) = self.prepare_projection_case(
             sources.one_symbol,
             Some(&clean_pointer),
+            &clean.projection_batch_cache,
             &clean.cancellation,
         )?;
         let one_symbol_retained = graph
@@ -782,6 +805,7 @@ impl ProductionSemanticRuntimeV1 {
         let (no_op, no_op_elapsed, no_op_input) = self.prepare_projection_case(
             sources.no_op,
             Some(&one_symbol_pointer),
+            &clean.projection_batch_cache,
             &clean.cancellation,
         )?;
         let no_op_retained = graph
@@ -814,6 +838,7 @@ impl ProductionSemanticRuntimeV1 {
         let (deletion, deletion_elapsed, deletion_input) = self.prepare_projection_case(
             sources.deletion,
             Some(&no_op_pointer),
+            &clean.projection_batch_cache,
             &clean.cancellation,
         )?;
         let deletion_retained = graph
@@ -910,6 +935,7 @@ impl ProductionSemanticRuntimeV1 {
             &cancellation_chunks,
             EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
             self.resources.max_resident_bytes,
+            clean.projection_batch_cache.as_ref(),
             Arc::clone(&clean.cancellation),
         );
         if !cancellation_store
@@ -962,8 +988,13 @@ impl ProductionSemanticRuntimeV1 {
             },
         );
 
-        let (incompatible, incompatible_elapsed, incompatible_input) =
-            self.prepare_projection_case(sources.one_symbol, None, &clean.cancellation)?;
+        let (incompatible, incompatible_elapsed, incompatible_input) = self
+            .prepare_projection_case(
+                sources.one_symbol,
+                None,
+                &clean.projection_batch_cache,
+                &clean.cancellation,
+            )?;
         if incompatible.request.changes.from_generation.is_some()
             || incompatible.request.previous_projection_key.is_some()
             || incompatible.request.replay_reason
@@ -1024,6 +1055,7 @@ impl ProductionSemanticRuntimeV1 {
         &self,
         generation: &CodeIndexPublishedGenerationV1,
         current: Option<&SemanticGenerationPointerV1>,
+        projection_batch_cache: &Arc<SemanticEvaluationProjectionBatchCacheV1>,
         cancellation: &Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<(PreparedVectorGenerationV1, u64, u64), SemanticRuntimeScheduleFailureV1> {
         let artifact = LoadedSemanticArtifactV1::from_lifecycle(
@@ -1057,6 +1089,8 @@ impl ProductionSemanticRuntimeV1 {
             &chunks,
             EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
             self.resources.max_resident_bytes,
+            projection_batch_cache.as_ref(),
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
             Arc::clone(cancellation),
         )?;
         Ok((prepared.prepared, elapsed_micros(started), input_bytes))
@@ -1809,6 +1843,7 @@ pub struct PreparedSemanticEvaluationGenerationV1 {
     vector_generation: VectorGenerationIdV1,
     prepared_projection: PreparedVectorGenerationV1,
     projection_input_bytes: u64,
+    projection_batch_cache: Arc<SemanticEvaluationProjectionBatchCacheV1>,
     capability_manifest_digest: ManifestDigest,
     query_factory: SemanticEvaluationQueryFactoryV1,
     vectors: PublishedSemanticVectorReadPortV1,
@@ -1826,6 +1861,7 @@ impl PreparedSemanticEvaluationGenerationV1 {
         execution: SemanticResourceCeilings,
         clean_projection_build_micros: u64,
         projection_input_bytes: u64,
+        projection_batch_cache: Arc<SemanticEvaluationProjectionBatchCacheV1>,
         cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
         let vector_generation = evaluation_vector_generation_id(&code, &prepared.prepared)?;
@@ -1915,6 +1951,7 @@ impl PreparedSemanticEvaluationGenerationV1 {
             vector_generation,
             prepared_projection: prepared.prepared,
             projection_input_bytes,
+            projection_batch_cache,
             capability_manifest_digest: code.capability().manifest_digest.clone(),
             code,
             cancellation,

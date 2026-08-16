@@ -29,19 +29,9 @@ use tracedecay_code_index::parallelism::indexing_worker_target;
 /// memory rather than CPU binds. Values below 1 are ignored.
 const EMBED_SESSIONS_ENV: &str = "TRACEDECAY_EMBED_SESSIONS";
 
-/// Operator override for how many chunks are packed into one ONNX
-/// invocation. This changes the padded tensor shape, so it is an explicit
-/// override rather than a host-derived value.
-const EMBED_BATCH_CHUNKS_ENV: &str = "TRACEDECAY_EMBED_BATCH_CHUNKS";
-
 /// Never open more concurrent sessions than this regardless of host width:
 /// each session is a full resident copy of the model graph.
 const MAX_EMBEDDING_SESSIONS: usize = 16;
-
-/// Chunks packed into one ONNX invocation when the artifact permits it. The
-/// prior value (8) left tokenizer and per-invocation setup cost dominating
-/// wall clock.
-const DEFAULT_EMBED_BATCH_CHUNKS: usize = 32;
 
 /// Intra-op threads a shipped default configuration requests.
 ///
@@ -59,20 +49,6 @@ fn env_width(name: &str) -> Option<usize> {
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|width| *width >= 1)
-}
-
-/// Chunks to pack into one ONNX invocation, clamped to what the admitted
-/// artifact permits.
-///
-/// The artifact ceiling always wins: a wider request can never widen a tensor
-/// beyond the shape the manifest admitted.
-#[must_use]
-pub fn embedding_batch_chunks(artifact_max_batch_texts: u32) -> usize {
-    let ceiling = (artifact_max_batch_texts as usize).max(1);
-    env_width(EMBED_BATCH_CHUNKS_ENV)
-        .unwrap_or(DEFAULT_EMBED_BATCH_CHUNKS)
-        .min(ceiling)
-        .max(1)
 }
 
 /// Concurrent embedding sessions for a host with `total_cores` logical CPUs,
@@ -180,17 +156,10 @@ mod tests {
     }
 
     #[test]
-    fn every_host_keeps_at_least_one_session_and_one_batch_chunk() {
+    fn every_host_keeps_at_least_one_session() {
         for cores in 1..=256usize {
             assert!(embedding_session_width_for(cores, 4, 64) >= 1);
             assert!(default_max_concurrent_sessions_for(cores) >= 1);
         }
-        assert_eq!(embedding_batch_chunks(0), 1);
-        assert_eq!(embedding_batch_chunks(1), 1);
-    }
-
-    #[test]
-    fn batch_chunks_never_exceed_the_artifact_ceiling() {
-        assert_eq!(embedding_batch_chunks(4), 4);
     }
 }

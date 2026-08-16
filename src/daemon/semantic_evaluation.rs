@@ -420,6 +420,7 @@ pub(super) struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
     scheduler: CodeIndexSchedulerRegistryV1,
     candidate: SemanticEvaluationProfileCandidateV1,
     control: Arc<DaemonSemanticEvaluationControlV1>,
+    projection_batch_cache: Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1>,
     prepared_native: Arc<
         Mutex<
             BTreeMap<
@@ -460,6 +461,9 @@ impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
             scheduler,
             candidate,
             control,
+            projection_batch_cache: Arc::new(
+                tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1::new(),
+            ),
             prepared_native: Arc::new(Mutex::new(BTreeMap::new())),
             projection_cases: Arc::new(Mutex::new(BTreeMap::new())),
             incremental_projections: Arc::new(Mutex::new(BTreeMap::new())),
@@ -538,8 +542,9 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                     )
                 })?;
             let generation = runtime
-                .prepare_evaluation_generation(
+                .prepare_evaluation_generation_with_cache(
                     context.code,
+                    Arc::clone(&self.projection_batch_cache),
                     Arc::clone(&self.control)
                         as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>,
                 )
@@ -606,8 +611,9 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                         )
                     })?;
                 let generation = runtime
-                    .prepare_evaluation_generation(
+                    .prepare_evaluation_generation_with_cache(
                         context.code,
+                        Arc::clone(&self.projection_batch_cache),
                         Arc::clone(&self.control)
                             as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>,
                     )
@@ -684,7 +690,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                             context.incremental_code,
                         )
                         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-                    self.incremental_projections
+                    let measured = self
+                        .incremental_projections
                         .lock()
                         .map_err(|_| {
                             CandidateOutputError::Contract(
@@ -693,7 +700,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                         })?
                         .entry(incremental_key)
                         .or_insert(measured)
-                        .clone()
+                        .clone();
+                    measured
                 }
             };
             // The isolated projection-case measurement stands up a fresh
@@ -747,7 +755,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                             &context.semantic_projection_sources,
                         )
                         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-                    self.projection_cases
+                    let measured = self
+                        .projection_cases
                         .lock()
                         .map_err(|_| {
                             CandidateOutputError::Contract(
@@ -756,7 +765,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                         })?
                         .entry(projection_cases_key)
                         .or_insert(measured)
-                        .clone()
+                        .clone();
+                    measured
                 }
             };
             resources

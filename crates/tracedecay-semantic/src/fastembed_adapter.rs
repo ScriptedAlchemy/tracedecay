@@ -62,6 +62,12 @@ use crate::SemanticResourceCeilings;
 mod pins;
 pub use pins::ProjectionArtifactPinV1;
 
+fn inference_batch_byte_ceiling(max_batch_size: u32, max_sequence_length: u32) -> u32 {
+    max_batch_size
+        .saturating_mul(max_sequence_length)
+        .saturating_mul(4)
+}
+
 /// Typed failure of one embedding operation or runtime admission (Plan 31:
 /// load failure, OOM, corruption, revocation, or incompatible pins disables
 /// the affected semantic stage; nothing silently substitutes another model).
@@ -233,7 +239,6 @@ impl VerifiedEmbeddingArtifactV1 {
                 .is_some_and(|install| install.declares_member(role))
     }
 
-    #[cfg(feature = "semantic-fastembed")]
     fn max_threads(&self) -> u32 {
         self.max_threads
     }
@@ -353,6 +358,18 @@ impl AdmittedProjectionArtifactV1 {
             ProjectionArtifactPinV1::TruncationLength,
         )?;
         require_pin(
+            key.inference_batch_size == payload.resource_ceiling.max_batch_size,
+            ProjectionArtifactPinV1::InferenceBatchSize,
+        )?;
+        require_pin(
+            key.inference_batch_bytes
+                == inference_batch_byte_ceiling(
+                    payload.resource_ceiling.max_batch_size,
+                    payload.resource_ceiling.max_sequence_length,
+                ),
+            ProjectionArtifactPinV1::InferenceBatchBytes,
+        )?;
+        require_pin(
             key.runtime_backend == payload.runtime.runtime,
             ProjectionArtifactPinV1::RuntimeBackend,
         )?;
@@ -393,11 +410,10 @@ impl AdmittedProjectionArtifactV1 {
                 artifact: Some(artifact.clone()),
                 lifecycle_install: None,
                 max_batch_texts: payload.resource_ceiling.max_batch_size,
-                max_batch_bytes: payload
-                    .resource_ceiling
-                    .max_batch_size
-                    .saturating_mul(payload.resource_ceiling.max_sequence_length)
-                    .saturating_mul(4),
+                max_batch_bytes: inference_batch_byte_ceiling(
+                    payload.resource_ceiling.max_batch_size,
+                    payload.resource_ceiling.max_sequence_length,
+                ),
                 max_threads: payload.resource_ceiling.max_threads,
                 resident_byte_ceiling: payload.resource_ceiling.max_resident_bytes,
                 load_deadline_ms: payload.resource_ceiling.load_deadline_ms,
@@ -457,10 +473,10 @@ impl AdmittedProjectionArtifactV1 {
                 artifact: None,
                 lifecycle_install: Some(lifecycle_install),
                 max_batch_texts: resources.max_batch_size,
-                max_batch_bytes: resources
-                    .max_sequence_length
-                    .saturating_mul(resources.max_batch_size)
-                    .saturating_mul(4),
+                max_batch_bytes: inference_batch_byte_ceiling(
+                    resources.max_batch_size,
+                    resources.max_sequence_length,
+                ),
                 max_threads: resources.max_threads,
                 resident_byte_ceiling: resources.max_resident_bytes,
                 load_deadline_ms: resources.load_deadline_ms,
@@ -512,6 +528,11 @@ impl AdmittedProjectionArtifactV1 {
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: model.max_length.min(resources.max_sequence_length),
+            inference_batch_size: resources.max_batch_size,
+            inference_batch_bytes: inference_batch_byte_ceiling(
+                resources.max_batch_size,
+                resources.max_sequence_length,
+            ),
             runtime_backend: FASTEMBED_RUNTIME_FAMILY_V1.to_owned(),
             runtime_build_revision: FASTEMBED_RUNTIME_BUILD_REVISION_V1.to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
@@ -536,6 +557,14 @@ impl AdmittedProjectionArtifactV1 {
 
     pub fn projection(&self) -> &AdmittedEmbeddingProjectionKeyV1 {
         &self.runtime_artifact.projection
+    }
+
+    /// Intra-op width is admitted with the artifact and is part of the exact
+    /// FastEmbed execution identity, even though it is not a projection-key
+    /// field. Keep it crate-private so callers cannot label a cache entry
+    /// with an independently supplied width.
+    pub(crate) fn execution_max_threads(&self) -> u32 {
+        self.runtime_artifact.max_threads()
     }
 
     #[cfg(any(test, feature = "semantic-fastembed"))]
@@ -1457,6 +1486,8 @@ mod tests {
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: 512,
+            inference_batch_size: 8,
+            inference_batch_bytes: 16 * 1024,
             runtime_backend: "fastembed-ort".to_owned(),
             runtime_build_revision: "ort-test-rev-1".to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,

@@ -43,8 +43,6 @@ pub use candidate_output::{
     load_direct_evaluated_profile_material, no_admitted_corpus_scope,
     retrieve_partition_query_bytes, validate_workload_for_tuning, write_generate_outputs,
 };
-#[cfg(test)]
-pub use native_qualification::packaged_native_qualification_materialization_count;
 pub use native_qualification::{
     NativeQualificationEvaluatorKeyV1, NativeQualificationExecutionResourceKeyV1,
     NativeQualificationExpectationsV1, NativeQualificationKeyV1, NativeQualificationModelKeyV1,
