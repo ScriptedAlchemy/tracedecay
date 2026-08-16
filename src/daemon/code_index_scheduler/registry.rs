@@ -962,6 +962,16 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_repository_id = repository_id.clone();
         let worker_worktree_id = worktree_id.clone();
         let worker_graph_activation = graph_activation.clone();
+        // Wait for the final map owner before creating its worker. Cancellation
+        // while waiting leaves no task behind; once this lock is acquired the
+        // spawn and insertion below contain no await point, so the registry is
+        // the sole owner before the worker can outlive this mount call.
+        let mut mounted = self.mounted.lock().await;
+        if mounted.len() >= self.max_worktrees {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler capacity is exhausted".to_owned(),
+            ));
+        }
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;
@@ -1193,12 +1203,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _ = result;
             }
         });
-        let mut mounted = self.mounted.lock().await;
-        if mounted.len() >= self.max_worktrees {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler capacity is exhausted".to_owned(),
-            ));
-        }
         mounted.insert(
             project_root,
             MountedCodeIndexWorktreeV1 {
