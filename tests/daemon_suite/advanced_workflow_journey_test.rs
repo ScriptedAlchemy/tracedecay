@@ -949,10 +949,12 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let _ = wait_for_application_mount(&client);
     wait_for_work_mount(&client);
     task_session::wait_for_semantic_current(&home, &project);
-    let _task_session = task_session::assert_available_over_sdk_and_mcp(
+    let dashboard = task_session::DashboardProcess::start(&home, &project);
+    let _task_session = task_session::assert_available_over_sdk_mcp_and_dashboard(
         &home,
         &project,
         &client,
+        &dashboard,
         &product_selection,
         &synthesis_task,
         restored_entry.verified_version(),

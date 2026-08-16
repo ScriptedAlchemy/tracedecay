@@ -1,8 +1,8 @@
 //! Typed SDK proof for provider-qualified Work-to-TaskSession availability.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -57,6 +57,148 @@ const JOURNEY_MODEL_LOAD_DEADLINE_MS: u64 = 180_000;
 pub(super) struct InstalledSemanticFixture {
     artifact_digest: String,
     artifact_path: PathBuf,
+}
+
+/// A daemon-hosted dashboard mounted against the journey's real project.
+///
+/// The launcher only publishes the browser-facing address; the server remains
+/// owned by the daemon. Holding and draining its pipes keeps later dashboard
+/// logs from breaking the mounted route with SIGPIPE while the retrieval
+/// assertions are still running.
+pub(super) struct DashboardProcess {
+    process: Child,
+    base_url: String,
+    diagnostics: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+impl DashboardProcess {
+    pub(super) fn start(home: &Path, project: &Path) -> Self {
+        let mut process = common::tracedecay_command_with_home(home)
+            .args(["dashboard", "--host", "127.0.0.1", "--port", "0"])
+            .current_dir(project)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start dashboard mount");
+        let diagnostics = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        if let Some(stderr) = process.stderr.take() {
+            let sink = std::sync::Arc::clone(&diagnostics);
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader};
+
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                while matches!(reader.read_line(&mut line), Ok(read) if read > 0) {
+                    if let Ok(mut sink) = sink.lock() {
+                        sink.push_str(&line);
+                    }
+                    line.clear();
+                }
+            });
+        }
+        let stdout = process.stdout.take().expect("dashboard stdout");
+        let base_url = read_listening_url(stdout, &mut process);
+        let dashboard = Self {
+            process,
+            base_url,
+            diagnostics,
+        };
+        dashboard.wait_until_serving();
+        dashboard
+    }
+
+    fn wait_until_serving(&self) {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build()
+            .into();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if agent.get(&format!("{}/", self.base_url)).call().is_ok() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the daemon-hosted dashboard at {} never accepted connections\nlauncher stderr:\n{}",
+                self.base_url,
+                self.diagnostics
+                    .lock()
+                    .map(|captured| captured.clone())
+                    .unwrap_or_default()
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    fn retrieve_evidence(&self, request: &WorkEvidenceRetrieveRequestV1) -> (u16, Value) {
+        // The public dashboard request contract carries only evidence input.
+        // Its cancellation signal is daemon-owned per HTTP request and cannot
+        // be supplied here without inventing a test-only control surface.
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(120)))
+            .build()
+            .into();
+        let url = format!("{}/api/work/retrieve-evidence", self.base_url);
+        let mut response = agent
+            .post(&url)
+            .content_type("application/json")
+            .send(
+                serde_json::to_string(request)
+                    .expect("encode canonical dashboard evidence request"),
+            )
+            .unwrap_or_else(|error| panic!("POST {url} failed: {error}"));
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .unwrap_or_else(|error| panic!("POST {url} body failed: {error}"));
+        let body = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("POST {url} answered non-JSON `{text}`: {error}"));
+        (status, body)
+    }
+}
+
+impl Drop for DashboardProcess {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
+
+fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) -> String {
+    use std::io::{BufRead, BufReader};
+
+    let mut reader = BufReader::new(stdout);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut seen = String::new();
+    while Instant::now() < deadline {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                seen.push_str(&line);
+                if let Some(rest) = line.split_once("listening on ")
+                    && let Some(url) = rest.1.split_whitespace().next()
+                {
+                    std::thread::spawn(move || {
+                        let mut line = String::new();
+                        while matches!(reader.read_line(&mut line), Ok(read) if read > 0) {
+                            line.clear();
+                        }
+                    });
+                    return url.trim_end_matches('/').to_owned();
+                }
+            }
+            Err(error) => panic!("dashboard stdout failed: {error}; seen:\n{seen}"),
+        }
+    }
+    let mut stderr = String::new();
+    if let Some(mut piped) = process.stderr.take() {
+        let _ = piped.read_to_string(&mut stderr);
+    }
+    panic!("dashboard never announced a listen URL\nstdout:\n{seen}\nstderr:\n{stderr}");
 }
 
 pub(super) fn seed_semantic_source(project: &Path) {
@@ -584,10 +726,11 @@ fn semantic_runtime_status(home: &Path, project: &Path) -> Option<SemanticRuntim
     serde_json::from_value(value["semantic_runtime"].clone()).ok()
 }
 
-pub(super) fn assert_available_over_sdk_and_mcp(
+pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
     home: &Path,
     project: &Path,
     client: &Client,
+    dashboard: &DashboardProcess,
     selection: &WorkProductSelectionScopeV1,
     task_id: &TaskId,
     verified_version: &VerifiedWorkGraphVersionV1,
@@ -603,10 +746,11 @@ pub(super) fn assert_available_over_sdk_and_mcp(
         let expansion = Some(WorkEvidenceExpansionSelectorV1::TaskSession {
             attempt: identity.clone(),
         });
-        let first = retrieve_over_sdk_and_mcp(
+        let first = retrieve_over_sdk_mcp_and_dashboard(
             home,
             project,
             client,
+            dashboard,
             WorkEvidenceRetrieveRequestV1 {
                 selection: selection.clone(),
                 task_id: task_id.clone(),
@@ -661,10 +805,11 @@ pub(super) fn assert_available_over_sdk_and_mcp(
             PROVIDER_SESSION_ID
         );
 
-        let second = retrieve_over_sdk_and_mcp(
+        let second = retrieve_over_sdk_mcp_and_dashboard(
             home,
             project,
             client,
+            dashboard,
             WorkEvidenceRetrieveRequestV1 {
                 selection: selection.clone(),
                 task_id: task_id.clone(),
@@ -672,7 +817,9 @@ pub(super) fn assert_available_over_sdk_and_mcp(
                 temporal,
                 page_size: 1,
                 expansion,
-                continuation: Some(WorkEvidenceContinuationV1::TaskSession { continuation }),
+                continuation: Some(WorkEvidenceContinuationV1::TaskSession {
+                    continuation: continuation.clone(),
+                }),
                 observed_at: now(),
             },
         );
@@ -702,6 +849,43 @@ pub(super) fn assert_available_over_sdk_and_mcp(
             second_evidence.hydrated[0].anchor_id, first_evidence.hydrated[0].anchor_id,
             "{temporal:?} continuation repeated a hydrated TaskSession anchor"
         );
+        assert_eq!(
+            second_evidence.hydrated[0].rank,
+            first_evidence.hydrated[0].rank + 1,
+            "{temporal:?} continuation must advance by exactly one ranked TaskSession anchor"
+        );
+
+        let mut revoked_continuation = continuation;
+        revoked_continuation.participant_epoch =
+            ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
+                .expect("well-formed foreign participant epoch");
+        let (status, revoked) = dashboard.retrieve_evidence(&WorkEvidenceRetrieveRequestV1 {
+            selection: selection.clone(),
+            task_id: task_id.clone(),
+            verified_version: verified_version.clone(),
+            temporal,
+            page_size: 1,
+            expansion: Some(WorkEvidenceExpansionSelectorV1::TaskSession {
+                attempt: identity.clone(),
+            }),
+            continuation: Some(WorkEvidenceContinuationV1::TaskSession {
+                continuation: revoked_continuation,
+            }),
+            observed_at: now(),
+        });
+        assert_eq!(status, 409, "{temporal:?} rank-final revocation: {revoked}");
+        assert_eq!(
+            revoked["kind"], "problem",
+            "{temporal:?} rank-final revocation must use the canonical problem envelope: {revoked}"
+        );
+        assert_eq!(
+            revoked["value"]["problem"]["kind"], "stale",
+            "{temporal:?} foreign participant epoch must be revoked after ranking: {revoked}"
+        );
+        assert_eq!(
+            revoked["value"]["problem"]["retryable"], true,
+            "{temporal:?} rank-final revocation must tell the dashboard to restart its read: {revoked}"
+        );
         if temporal == TemporalModeV1::Current {
             current = Some(first_evidence);
         }
@@ -722,10 +906,11 @@ fn assert_available(
     );
 }
 
-fn retrieve_over_sdk_and_mcp(
+fn retrieve_over_sdk_mcp_and_dashboard(
     home: &Path,
     project: &Path,
     client: &Client,
+    dashboard: &DashboardProcess,
     request: WorkEvidenceRetrieveRequestV1,
 ) -> WorkEvidenceRetrievalV1 {
     let sdk = client
@@ -749,6 +934,27 @@ fn retrieve_over_sdk_and_mcp(
     assert_eq!(
         mcp, sdk,
         "typed SDK and real tracedecay serve must expose the same Work payload"
+    );
+    let (status, dashboard_envelope) = dashboard.retrieve_evidence(&request);
+    assert_eq!(
+        status, 200,
+        "dashboard Work retrieval must be mounted and successful: {dashboard_envelope}"
+    );
+    assert_eq!(
+        dashboard_envelope["kind"], "success",
+        "dashboard Work retrieval must return the canonical success envelope: {dashboard_envelope}"
+    );
+    assert_eq!(
+        dashboard_envelope["value"]["outcome"]["outcome"], "evidence",
+        "dashboard Work retrieval must return evidence: {dashboard_envelope}"
+    );
+    let dashboard = serde_json::from_value::<WorkEvidenceRetrievalV1>(
+        dashboard_envelope["value"]["outcome"]["value"]["payload"].clone(),
+    )
+    .expect("canonical dashboard Work evidence payload");
+    assert_eq!(
+        dashboard, sdk,
+        "dashboard, SDK, and MCP must preserve the same TaskSession page"
     );
     sdk
 }
