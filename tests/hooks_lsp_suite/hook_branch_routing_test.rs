@@ -114,7 +114,8 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
     let source = entry
         .graph_source
         .as_ref()
-        .expect("hook branch sync must seal a branch-graph generation");
+        .expect("hook branch sync must seal a branch-graph generation")
+        .clone();
     assert_eq!(source.reference, "refs/heads/feature/hook");
     assert_eq!(source.source_oid, head_oid);
     let canonical_project = project.canonicalize().unwrap();
@@ -143,9 +144,59 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .cloned()
         .expect("replayed branch must keep its sealed provenance");
     assert_eq!(
-        replay_source,
-        source.clone(),
+        replay_source, source,
         "the exact branch/worktree/store route must not publish a replacement generation"
+    );
+
+    // A retained generation at the same ref but an older commit is stale. The
+    // branch publisher must not accept the branch name alone as idempotence:
+    // it has to capture the new Git snapshot, await that exact generation, and
+    // replace the stale provenance.
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn hook_marker() {}\npub fn refreshed_hook_marker() {}\n",
+    )
+    .unwrap();
+    git(&project, &["add", "src/lib.rs"]);
+    git(
+        &project,
+        &[
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay-test@example.com",
+            "commit",
+            "-m",
+            "refresh branch source",
+        ],
+    );
+    let refreshed_head_oid = git_head_oid(&project);
+    let refreshed = harness
+        .track_worktree_branch(&project, &project, "feature/hook")
+        .await
+        .unwrap();
+    assert_eq!(
+        refreshed,
+        tracedecay::branch::BranchAddOutcome::Added,
+        "a new branch head must not be mistaken for an idempotent replay"
+    );
+    let refreshed_source = tracedecay::branch_meta::load_branch_meta(&shard_root)
+        .expect("refreshed branch metadata must be published")
+        .branches
+        .get("feature/hook")
+        .and_then(|entry| entry.graph_source.as_ref())
+        .cloned()
+        .expect("refreshed branch must replace the stale provenance");
+    assert_eq!(refreshed_source.reference, "refs/heads/feature/hook");
+    assert_eq!(refreshed_source.source_oid, refreshed_head_oid);
+    assert_eq!(
+        refreshed_source.worktree_root,
+        canonical_project.to_string_lossy().into_owned(),
+        "the refreshed publication must retain the same exact worktree route"
+    );
+    assert!(
+        refreshed_source.publication_epoch.get() > first_epoch,
+        "a refreshed commit must receive a newer publication epoch"
     );
 
     // A write on a second branch rolls the store to a newer generation under
@@ -166,9 +217,10 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .expect("second branch sync must seal its own generation");
     assert_eq!(second.reference, "refs/heads/feature/second");
     assert!(
-        second.publication_epoch.get() > first_epoch,
+        second.publication_epoch.get() > refreshed_source.publication_epoch.get(),
         "a later branch write must land in a newer publication epoch \
-         (first {first_epoch}, second {})",
+         (refreshed {}, second {})",
+        refreshed_source.publication_epoch.get(),
         second.publication_epoch.get()
     );
     let first = meta
@@ -176,7 +228,10 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .get("feature/hook")
         .and_then(|entry| entry.graph_source.as_ref())
         .expect("first branch must keep its sealed provenance");
-    assert_eq!(first.publication_epoch.get(), first_epoch);
+    assert_eq!(
+        first.publication_epoch.get(),
+        refreshed_source.publication_epoch.get()
+    );
     assert!(
         !shard_root.join("branches").exists(),
         "no write may create a per-branch database"
