@@ -306,6 +306,46 @@ pub struct UpstreamCapabilities {
     pub semantic: BTreeSet<SemanticCapability>,
 }
 
+impl UpstreamCapabilities {
+    /// Retains only the semantic methods the upstream server advertised in its
+    /// standard `initialize` result. Missing, `false`, or malformed entries
+    /// are unavailable rather than inferred from the client request.
+    pub(crate) fn from_initialize_response(response: &Value) -> Self {
+        let capabilities = response.get("capabilities").and_then(Value::as_object);
+        let semantic = [
+            ("declarationProvider", SemanticCapability::Declaration),
+            ("definitionProvider", SemanticCapability::Definition),
+            ("typeDefinitionProvider", SemanticCapability::TypeDefinition),
+            ("implementationProvider", SemanticCapability::Implementation),
+            ("referencesProvider", SemanticCapability::References),
+            ("hoverProvider", SemanticCapability::Hover),
+            ("documentSymbolProvider", SemanticCapability::DocumentSymbol),
+            (
+                "workspaceSymbolProvider",
+                SemanticCapability::WorkspaceSymbol,
+            ),
+            ("callHierarchyProvider", SemanticCapability::CallHierarchy),
+            ("signatureHelpProvider", SemanticCapability::SignatureHelp),
+            ("typeHierarchyProvider", SemanticCapability::TypeHierarchy),
+            ("renameProvider", SemanticCapability::RenameCandidate),
+        ]
+        .into_iter()
+        .filter_map(|(field, capability)| {
+            capabilities
+                .and_then(|capabilities| capabilities.get(field))
+                .is_some_and(server_capability_enabled)
+                .then_some(capability)
+        })
+        .collect();
+        Self {
+            supports_diagnostics: capabilities
+                .and_then(|capabilities| capabilities.get("diagnosticProvider"))
+                .is_some_and(server_capability_enabled),
+            semantic,
+        }
+    }
+}
+
 /// The result of capability negotiation. Unsupported features stay false
 /// regardless of client or upstream claims.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -592,6 +632,10 @@ fn bool_at(object: Option<&serde_json::Map<String, Value>>, key: &str) -> bool {
 }
 
 fn capability_declared(value: &Value) -> bool {
+    value.as_bool().unwrap_or_else(|| value.is_object())
+}
+
+fn server_capability_enabled(value: &Value) -> bool {
     value.as_bool().unwrap_or_else(|| value.is_object())
 }
 

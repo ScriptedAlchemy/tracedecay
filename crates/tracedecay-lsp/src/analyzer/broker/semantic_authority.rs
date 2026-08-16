@@ -12,7 +12,7 @@ use super::super::error::{
 };
 use crate::{
     AdmittedRoot, AnalyzerEvent, AnalyzerState, AnalyzerSupervisor, LspRequestId, LspRuntimeFuture,
-    LspSemanticOperationOutcome, LspSemanticRequestAuthority,
+    LspSemanticOperationOutcome, LspSemanticRequestAuthority, UpstreamCapabilities,
 };
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -91,6 +91,39 @@ impl StdioLspSemanticAuthority {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Starts the retained client once and returns the typed capabilities from
+    /// its successful standard initialize response.
+    pub async fn upstream_capabilities(
+        &self,
+    ) -> std::result::Result<UpstreamCapabilities, TraceDecayError> {
+        let mut slot = self.inner.client.lock().await;
+        if let Some(client) = slot.as_ref() {
+            return Ok(client.upstream_capabilities());
+        }
+
+        let root = AdmittedRoot::new(self.inner.root_uri.clone());
+        begin_analyzer_start(&self.inner, &root);
+        match StdioLspClient::start_with_timeouts(
+            &self.inner.command,
+            &self.inner.args,
+            &self.inner.project_root,
+            self.inner.timeouts,
+        )
+        .await
+        {
+            Ok(client) => {
+                let capabilities = client.upstream_capabilities();
+                mark_analyzer_ready(&self.inner, &root);
+                *slot = Some(client);
+                Ok(capabilities)
+            }
+            Err(error) => {
+                record_analyzer_event(&self.inner, &root, AnalyzerEvent::StartupFailed);
+                Err(error)
+            }
+        }
     }
 
     fn terminal_outcome(&self) -> Option<LspSemanticOperationOutcome> {
