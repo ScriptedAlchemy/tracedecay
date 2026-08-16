@@ -9,7 +9,8 @@ use crate::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 use super::projection::ProjectionContext;
 use super::{
     CONFLICT_MIN_ADJUDICATED_CASES_V1, EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1,
-    EXECUTION_TOPOLOGY_PROJECTOR_REVISION_V1, ExecutionMetricUnavailableV1,
+    EXECUTION_TOPOLOGY_PROJECTOR_REVISION_V1, ExecutionConcurrencyPhaseV1,
+    ExecutionDuplicateKindV1, ExecutionMetricUnavailableV1, ExecutionQuantityUnitV1,
     ExecutionTopologyDimensionV1, ExecutionTopologyMeasurementV1, ExecutionTopologyMetricsV1,
     MAX_CENSORING_RATIO_V1, MAX_METRIC_DIMENSIONS_V1, MIN_COVERAGE_RATIO_V1,
     RATE_MIN_ELIGIBLE_CASES_V1,
@@ -384,6 +385,42 @@ mod descriptor_tests {
             full_cell_identities.len() > expected_metric_names.len(),
             "the normal projection must retain its dimensional descriptor identities"
         );
+        let dimensional_measurement_count = model
+            .measurements
+            .iter()
+            .filter(|measurement| !measurement.dimensions.is_empty())
+            .count();
+        assert!(
+            dimensional_measurement_count > 0,
+            "the normal projection must retain at least one dimensional cell"
+        );
+        assert!(
+            model.measurements.iter().any(|measurement| {
+                measurement.value.metric == "work_duplicate_effort_total"
+                    && measurement.value.unit == "microseconds"
+                    && measurement.value.denominator == "adjudicated_duplicate_relations"
+                    && measurement.dimensions
+                        == vec![
+                            ExecutionTopologyDimensionV1::DuplicateKind(
+                                ExecutionDuplicateKindV1::ExactDuplicate,
+                            ),
+                            ExecutionTopologyDimensionV1::Unit(ExecutionQuantityUnitV1::WallMicros),
+                        ]
+            }),
+            "the normal projection must retain the duplicate kind and unit cell"
+        );
+        assert!(
+            model.measurements.iter().any(|measurement| {
+                measurement.value.metric == "work_execution_concurrency_width"
+                    && measurement.value.unit == "microseconds"
+                    && measurement.value.denominator == "duration_weighted_topology_samples"
+                    && measurement.dimensions
+                        == vec![ExecutionTopologyDimensionV1::ConcurrencyPhase(
+                            ExecutionConcurrencyPhaseV1::Requested,
+                        )]
+            }),
+            "the normal projection must retain the refused concurrency phase cell"
+        );
         assert!(
             model.measurements.iter().all(|measurement| {
                 measurement.value.metric != "work_duplicate_effort_total"
@@ -396,21 +433,63 @@ mod descriptor_tests {
             measurement.value.value.is_none()
                 && measurement.unavailable == Some(ExecutionMetricUnavailableV1::NoEligibleEvidence)
         }));
-        for metric in [
-            "work_merge_success_ratio",
-            "work_blocked_cause_seconds",
-            "work_rerun_rate",
-            "work_delivery_duplicate_ratio",
+        let known_empty_coverage = MetricCoverageV1 {
+            eligible: Some(0),
+            observed: 0,
+            completed: 0,
+            censored: 0,
+            unknown: 0,
+            excluded: 0,
+            state: CoverageStateV1::Known,
+        };
+        for (metric, unit, denominator) in [
+            (
+                "work_merge_success_ratio",
+                "ratio",
+                "observed_native_integrations",
+            ),
+            (
+                "work_blocked_cause_seconds",
+                "seconds",
+                "closed_blocked_intervals",
+            ),
+            ("work_rerun_rate", "ratio", "eligible_original_attempts"),
+            (
+                "work_delivery_duplicate_ratio",
+                "ratio",
+                "attempted_deliveries",
+            ),
         ] {
-            assert!(
-                model.measurements.iter().any(|measurement| {
-                    measurement.value.metric == metric
-                        && measurement.dimensions.is_empty()
-                        && measurement.value.value.is_none()
-                        && measurement.unavailable
-                            == Some(ExecutionMetricUnavailableV1::NoEligibleEvidence)
-                }),
-                "known empty projection must retain a dimensionless typed absence for {metric}"
+            let matching = model
+                .measurements
+                .iter()
+                .filter(|measurement| {
+                    measurement.value.metric == metric && measurement.dimensions.is_empty()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "known empty projection must retain one dimensionless typed absence for {metric}"
+            );
+            let measurement = matching[0];
+            assert!(measurement.dimensions.is_empty());
+            assert_eq!(
+                measurement.value.descriptor_revision,
+                EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1
+            );
+            assert_eq!(measurement.value.unit, unit);
+            assert_eq!(measurement.value.denominator, denominator);
+            assert_eq!(measurement.value.denominator_value, Some(0));
+            assert_eq!(measurement.value.coverage, known_empty_coverage);
+            assert!(measurement.value.value.is_none());
+            assert_eq!(
+                measurement.unavailable,
+                Some(ExecutionMetricUnavailableV1::NoEligibleEvidence)
+            );
+            assert_eq!(
+                measurement.value.unavailable_reason.as_deref(),
+                Some(ExecutionMetricUnavailableV1::NoEligibleEvidence.as_str())
             );
         }
     }
