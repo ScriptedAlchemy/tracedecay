@@ -25,6 +25,7 @@ pub(crate) enum MemoryGraphReconciliationTaskScheduleV1 {
 pub enum MemoryGraphReconciliationRetirementBlockerV1 {
     Pending,
     Running,
+    InFlightWeakUpgrade,
     RetainedJoinWork,
     Retiring,
     Closed,
@@ -182,6 +183,7 @@ struct MemoryGraphReconciliationTaskStateV1 {
     retirement_reserved: bool,
     pending: bool,
     running: bool,
+    in_flight_weak_upgrades: usize,
     current_identity: Option<Arc<()>>,
     current: Option<JoinHandle<()>>,
     retired: Vec<JoinHandle<()>>,
@@ -407,6 +409,25 @@ async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
             continue;
         }
 
+        // The operation upgrades its weak database reference after we release
+        // the coordinator lock. Keep that upgrade window visible to retirement:
+        // a fence may never observe an idle worker and then race a newly-live
+        // database facade into a strict graph/store reservation.
+        {
+            let mut state = shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.in_flight_weak_upgrades = state
+                .in_flight_weak_upgrades
+                .checked_add(1)
+                .unwrap_or_else(|| {
+                    // This count is bounded by one worker. Saturate only on an
+                    // impossible overflow so retirement stays conservatively
+                    // blocked rather than fabricating idleness.
+                    usize::MAX
+                });
+        }
         let settled = operation(weak_database.clone()).await;
         let Some(shared) = weak_shared.upgrade() else {
             return;
@@ -419,6 +440,7 @@ async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.in_flight_weak_upgrades = state.in_flight_weak_upgrades.saturating_sub(1);
             state.running = false;
             if !state.accepting {
                 state.pending = false;
@@ -499,6 +521,9 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
         }
         if state.running {
             return Err(MemoryGraphReconciliationRetirementBlockerV1::Running);
+        }
+        if state.in_flight_weak_upgrades != 0 {
+            return Err(MemoryGraphReconciliationRetirementBlockerV1::InFlightWeakUpgrade);
         }
         if state.joining || !state.retired.is_empty() || state.joining_task_count != 0 {
             return Err(MemoryGraphReconciliationRetirementBlockerV1::RetainedJoinWork);
