@@ -1364,6 +1364,7 @@ fn global_table_retention_config(
 /// at most once per [`RETENTION_MIN_INTERVAL_SECS`]. Best-effort: retention is
 /// housekeeping, so failures are logged and never abort a scheduler tick.
 async fn maybe_run_global_retention(
+    administration: &super::branch_admin::StoreAdministration,
     database: &crate::global_db::RegisteredGlobalDb,
     config: &crate::config::RetentionConfig,
 ) {
@@ -1372,41 +1373,56 @@ async fn maybe_run_global_retention(
     };
     let now_secs = crate::tracedecay::current_timestamp();
     let global_config = global_table_retention_config(config);
-    let succeeded =
-        match crate::retention::prune_global_retention(database, &global_config, now_secs).await {
-            Ok(reports) => {
-                for report in reports {
-                    if report.applied && report.rows > 0 {
-                        log_daemon_event(
-                            "retention_prune",
-                            &[
-                                ("scope", "global".to_string()),
-                                ("table", report.table.to_string()),
-                                ("rows", report.rows.to_string()),
-                                (
-                                    "window_days",
-                                    report
-                                        .window_days
-                                        .map_or_else(|| "unlimited".to_string(), |d| d.to_string()),
-                                ),
-                            ],
-                        );
-                    }
+    let Some(retention) = administration
+        .try_with_writer(|| async {
+            crate::retention::prune_global_retention(database, &global_config, now_secs).await
+        })
+        .await
+    else {
+        log_daemon_event(
+            "retention_prune",
+            &[
+                ("scope", "global".to_string()),
+                ("outcome", "deferred".to_string()),
+                ("reason", "writer_admission_unavailable".to_string()),
+            ],
+        );
+        return;
+    };
+    let succeeded = match retention {
+        Ok(reports) => {
+            for report in reports {
+                if report.applied && report.rows > 0 {
+                    log_daemon_event(
+                        "retention_prune",
+                        &[
+                            ("scope", "global".to_string()),
+                            ("table", report.table.to_string()),
+                            ("rows", report.rows.to_string()),
+                            (
+                                "window_days",
+                                report
+                                    .window_days
+                                    .map_or_else(|| "unlimited".to_string(), |d| d.to_string()),
+                            ),
+                        ],
+                    );
                 }
-                true
             }
-            Err(_) => {
-                log_daemon_event(
-                    "retention_prune",
-                    &[
-                        ("scope", "global".to_string()),
-                        ("outcome", "error".to_string()),
-                        ("failure", "retention_pass_failed".to_string()),
-                    ],
-                );
-                false
-            }
-        };
+            true
+        }
+        Err(_) => {
+            log_daemon_event(
+                "retention_prune",
+                &[
+                    ("scope", "global".to_string()),
+                    ("outcome", "error".to_string()),
+                    ("failure", "retention_pass_failed".to_string()),
+                ],
+            );
+            false
+        }
+    };
     reservation.finish(std::time::Instant::now(), succeeded);
 }
 

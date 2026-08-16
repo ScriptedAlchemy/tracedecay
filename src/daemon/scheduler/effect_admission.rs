@@ -287,8 +287,12 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
         .registered_profile_database()
         .await
     {
-        maybe_run_global_retention(profile_database.as_ref(), &cg.get_config().sync.retention)
-            .await;
+        maybe_run_global_retention(
+            &engine.store_administration,
+            profile_database.as_ref(),
+            &cg.get_config().sync.retention,
+        )
+        .await;
     }
     let backend = CodexAppServerBackend::from_automation_config(config);
     let authoritative_project_id = cg
