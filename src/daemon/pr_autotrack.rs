@@ -934,14 +934,16 @@ async fn activate_manual_branch_with_administration(
         retire_worktree_mount(Some(schedulers), &worktree)
             .await
             .map_err(ManualBranchActivationError::activation_failed)?;
-        if !cleanup_owned_worktree(
+        if !cleanup_owned_worktree_off_runtime(
             repo_root,
             &worktree,
             &tracking_ref,
             &label,
             &replacement_head,
-            administration.command_control,
-        ) {
+            administration.command_control.clone(),
+        )
+        .await?
+        {
             return Err(ManualBranchActivationError::activation_failed(format!(
                 "existing manual worktree '{}' changed before replacement",
                 worktree.display()
@@ -1082,14 +1084,16 @@ async fn cleanup_failed_manual_track(
 ) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
     match retire_worktree_mount(administration.schedulers, worktree).await {
         Ok(()) => {
-            if !cleanup_owned_worktree(
+            if !cleanup_owned_worktree_off_runtime(
                 repo_root,
                 worktree,
                 tracking_ref,
                 label,
                 head_sha,
-                administration.command_control,
-            ) {
+                administration.command_control.clone(),
+            )
+            .await?
+            {
                 return Err(ManualBranchActivationError::activation_failed(format!(
                     "{original}; incomplete branch worktree ownership changed before cleanup"
                 )));
@@ -1128,14 +1132,16 @@ pub(crate) async fn cleanup_manual_branch_activation(
     retire_worktree_mount(Some(schedulers), &artifacts.worktree)
         .await
         .map_err(ManualBranchActivationError::activation_failed)?;
-    if !cleanup_owned_worktree(
+    if !cleanup_owned_worktree_off_runtime(
         repo_root,
         &artifacts.worktree,
         &artifacts.tracking_ref,
         &artifacts.label,
         &activation.head_sha,
-        &default_pr_command_control(),
-    ) {
+        default_pr_command_control().clone(),
+    )
+    .await?
+    {
         return Err(ManualBranchActivationError::activation_failed(format!(
             "failed activation for branch '{}' changed before exact cleanup",
             activation.branch
@@ -1145,18 +1151,20 @@ pub(crate) async fn cleanup_manual_branch_activation(
 }
 
 /// Retires only the manual artifacts proven by a persisted graph-source entry
-/// after branch metadata removal has committed. The source's exact worktree,
+/// before branch metadata removal commits. The source's exact worktree,
 /// synthetic ref, and OID are the ownership proof; a legacy entry without
 /// that proof is intentionally left untouched rather than guessing at Git
-/// artifacts.
+/// artifacts. The lifecycle lease returns only after synchronous Git teardown
+/// finishes, so request cancellation cannot admit a concurrent replacement
+/// while the blocking worker still owns those artifacts.
 pub(crate) async fn cleanup_manual_branch_retirement(
     repo_root: &Path,
     data_root: &Path,
     schedulers: &CodeIndexSchedulerRegistryV1,
     branch: &str,
     source: &crate::branch_meta::BranchGraphSourceV1,
-    lifecycle: &ManualBranchLifecycleLeaseV1,
-) -> std::result::Result<(), ManualBranchActivationError> {
+    lifecycle: ManualBranchLifecycleLeaseV1,
+) -> std::result::Result<ManualBranchLifecycleLeaseV1, ManualBranchActivationError> {
     if !lifecycle.matches_branch(branch) {
         return Err(ManualBranchActivationError::activation_failed(
             "manual branch lifecycle lease does not match metadata retirement",
@@ -1172,22 +1180,50 @@ pub(crate) async fn cleanup_manual_branch_retirement(
         .worktree
         .canonicalize()
         .unwrap_or(artifacts.worktree.clone());
-    retire_worktree_mount(Some(schedulers), &expected_worktree)
-        .await
-        .map_err(ManualBranchActivationError::activation_failed)?;
-    if !cleanup_owned_worktree(
+    let ownership = manual_branch_artifact_ownership_off_runtime(
         repo_root,
         &expected_worktree,
         &artifacts.tracking_ref,
         &artifacts.label,
         &source.source_oid,
-        &default_pr_command_control(),
-    ) {
+        default_pr_command_control().clone(),
+    )
+    .await?;
+    if ownership == ManualBranchArtifactOwnershipV1::Foreign {
+        return Err(ManualBranchActivationError::activation_failed(format!(
+            "manual artifacts for branch '{branch}' are no longer owned by the stored source"
+        )));
+    }
+    retire_worktree_mount(Some(schedulers), &expected_worktree)
+        .await
+        .map_err(ManualBranchActivationError::activation_failed)?;
+    let repo_root = repo_root.to_path_buf();
+    let tracking_ref = artifacts.tracking_ref;
+    let label = artifacts.label;
+    let source_oid = source.source_oid.clone();
+    let (cleaned, lifecycle) = tokio::task::spawn_blocking(move || {
+        let cleaned = cleanup_owned_worktree(
+            &repo_root,
+            &expected_worktree,
+            &tracking_ref,
+            &label,
+            &source_oid,
+            default_pr_command_control(),
+        );
+        (cleaned, lifecycle)
+    })
+    .await
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch retirement cleanup task did not complete: {error}"
+        ))
+    })?;
+    if !cleaned {
         return Err(ManualBranchActivationError::activation_failed(format!(
             "manual artifacts for branch '{branch}' changed before exact retirement"
         )));
     }
-    Ok(())
+    Ok(lifecycle)
 }
 
 pub(crate) fn manual_branch_source_owns_artifacts(
@@ -1229,6 +1265,127 @@ pub(crate) async fn retire_worktree_mount(
     Ok(())
 }
 
+async fn cleanup_owned_worktree_off_runtime(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    expected_head: &str,
+    command_control: PrCommandControl,
+) -> std::result::Result<bool, ManualBranchActivationError> {
+    let repo_root = repo_root.to_path_buf();
+    let worktree = worktree.to_path_buf();
+    let tracking_ref = tracking_ref.to_owned();
+    let label = label.to_owned();
+    let expected_head = expected_head.to_owned();
+    tokio::task::spawn_blocking(move || {
+        cleanup_owned_worktree(
+            &repo_root,
+            &worktree,
+            &tracking_ref,
+            &label,
+            &expected_head,
+            &command_control,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch cleanup task did not complete: {error}"
+        ))
+    })
+}
+
+async fn manual_branch_artifact_ownership_off_runtime(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    expected_head: &str,
+    command_control: PrCommandControl,
+) -> std::result::Result<ManualBranchArtifactOwnershipV1, ManualBranchActivationError> {
+    let repo_root = repo_root.to_path_buf();
+    let worktree = worktree.to_path_buf();
+    let tracking_ref = tracking_ref.to_owned();
+    let label = label.to_owned();
+    let expected_head = expected_head.to_owned();
+    tokio::task::spawn_blocking(move || {
+        manual_branch_artifact_ownership(
+            &repo_root,
+            &worktree,
+            &tracking_ref,
+            &label,
+            &expected_head,
+            &command_control,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ManualBranchActivationError::activation_failed(format!(
+            "manual branch ownership check task did not complete: {error}"
+        ))
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManualBranchArtifactOwnershipV1 {
+    Absent,
+    Exact,
+    Foreign,
+}
+
+fn exact_ref_ownership(
+    repo_root: &Path,
+    reference: &str,
+    expected_head: &str,
+    command_control: &PrCommandControl,
+) -> ManualBranchArtifactOwnershipV1 {
+    match ref_sha(repo_root, reference, command_control) {
+        None => ManualBranchArtifactOwnershipV1::Absent,
+        Some(head) if head == expected_head => ManualBranchArtifactOwnershipV1::Exact,
+        Some(_) => ManualBranchArtifactOwnershipV1::Foreign,
+    }
+}
+
+fn manual_branch_artifact_ownership(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    expected_head: &str,
+    command_control: &PrCommandControl,
+) -> ManualBranchArtifactOwnershipV1 {
+    let branch_ref = format!("refs/heads/{label}");
+    let tracking = exact_ref_ownership(repo_root, tracking_ref, expected_head, command_control);
+    let branch = exact_ref_ownership(repo_root, &branch_ref, expected_head, command_control);
+    let worktree = if worktree.exists() {
+        worktree_matches_branch_head(
+            repo_root,
+            worktree,
+            &branch_ref,
+            expected_head,
+            command_control,
+        )
+        .then_some(ManualBranchArtifactOwnershipV1::Exact)
+        .unwrap_or(ManualBranchArtifactOwnershipV1::Foreign)
+    } else {
+        ManualBranchArtifactOwnershipV1::Absent
+    };
+    if [tracking, branch, worktree]
+        .into_iter()
+        .any(|ownership| ownership == ManualBranchArtifactOwnershipV1::Foreign)
+    {
+        ManualBranchArtifactOwnershipV1::Foreign
+    } else if [tracking, branch, worktree]
+        .into_iter()
+        .any(|ownership| ownership == ManualBranchArtifactOwnershipV1::Exact)
+    {
+        ManualBranchArtifactOwnershipV1::Exact
+    } else {
+        ManualBranchArtifactOwnershipV1::Absent
+    }
+}
+
 pub(crate) fn cleanup_owned_worktree(
     repo_root: &Path,
     worktree: &Path,
@@ -1238,39 +1395,65 @@ pub(crate) fn cleanup_owned_worktree(
     command_control: &PrCommandControl,
 ) -> bool {
     let branch_ref = format!("refs/heads/{label}");
-    if !ref_points_to(repo_root, tracking_ref, expected_head, command_control)
-        || !ref_points_to(repo_root, &branch_ref, expected_head, command_control)
-        || (worktree.exists()
-            && !worktree_matches_branch_head(
-                repo_root,
-                worktree,
-                &branch_ref,
-                expected_head,
-                command_control,
-            ))
-    {
-        return false;
+    match manual_branch_artifact_ownership(
+        repo_root,
+        worktree,
+        tracking_ref,
+        label,
+        expected_head,
+        command_control,
+    ) {
+        ManualBranchArtifactOwnershipV1::Absent => return true,
+        ManualBranchArtifactOwnershipV1::Foreign => return false,
+        ManualBranchArtifactOwnershipV1::Exact => {}
     }
     if worktree.exists() {
+        if !worktree_matches_branch_head(
+            repo_root,
+            worktree,
+            &branch_ref,
+            expected_head,
+            command_control,
+        ) {
+            return false;
+        }
         remove_worktree(repo_root, worktree, command_control);
         if worktree.exists() {
             return false;
         }
     }
-    if ref_points_to(repo_root, &branch_ref, expected_head, command_control) {
-        let _ = successful_git_with_control(repo_root, &["branch", "-D", label], command_control);
+    match exact_ref_ownership(repo_root, &branch_ref, expected_head, command_control) {
+        ManualBranchArtifactOwnershipV1::Exact => {
+            let _ =
+                successful_git_with_control(repo_root, &["branch", "-D", label], command_control);
+        }
+        ManualBranchArtifactOwnershipV1::Foreign => return false,
+        ManualBranchArtifactOwnershipV1::Absent => {}
     }
-    if ref_points_to(repo_root, &branch_ref, expected_head, command_control) {
+    if exact_ref_ownership(repo_root, &branch_ref, expected_head, command_control)
+        != ManualBranchArtifactOwnershipV1::Absent
+    {
         return false;
     }
-    if ref_points_to(repo_root, tracking_ref, expected_head, command_control) {
-        let _ = successful_git_with_control(
-            repo_root,
-            &["update-ref", "-d", tracking_ref],
-            command_control,
-        );
+    match exact_ref_ownership(repo_root, tracking_ref, expected_head, command_control) {
+        ManualBranchArtifactOwnershipV1::Exact => {
+            let _ = successful_git_with_control(
+                repo_root,
+                &["update-ref", "-d", tracking_ref],
+                command_control,
+            );
+        }
+        ManualBranchArtifactOwnershipV1::Foreign => return false,
+        ManualBranchArtifactOwnershipV1::Absent => {}
     }
-    !ref_points_to(repo_root, tracking_ref, expected_head, command_control)
+    manual_branch_artifact_ownership(
+        repo_root,
+        worktree,
+        tracking_ref,
+        label,
+        expected_head,
+        command_control,
+    ) == ManualBranchArtifactOwnershipV1::Absent
 }
 
 fn manual_branch_artifacts_match(

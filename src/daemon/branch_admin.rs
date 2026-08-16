@@ -1398,15 +1398,16 @@ impl StoreAdministration {
         let lifecycle_leases = acquire_manual_branch_retirement_leases(data_root, &retirements)?;
         let database_paths = canonical_branch_database_paths(prepared.database_paths())?;
         if database_paths.is_empty() {
-            let report = prepared.finish_without_database_deletion()?;
-            cleanup_manual_branch_retirements(
+            let lifecycle_leases = cleanup_manual_branch_retirements(
                 project_root,
                 data_root,
                 schedulers,
                 &retirements,
-                &lifecycle_leases,
+                lifecycle_leases,
             )
             .await?;
+            let report = prepared.finish_without_database_deletion()?;
+            drop(lifecycle_leases);
             return Ok(report);
         }
 
@@ -1433,6 +1434,23 @@ impl StoreAdministration {
             .await?
             .begin_destructive_code_maintenance(data_root, canonical_paths.iter().cloned())
             .await?;
+        let lifecycle_leases = match cleanup_manual_branch_retirements(
+            project_root,
+            data_root,
+            schedulers,
+            &retirements,
+            lifecycle_leases,
+        )
+        .await
+        {
+            Ok(lifecycle_leases) => lifecycle_leases,
+            Err(error) => {
+                reservation
+                    .abort_preserved()
+                    .map_err(destructive_reservation_error)?;
+                return Err(error);
+            }
+        };
         let report = match prepared.commit_destructive() {
             Ok(report) => report,
             Err(error) => {
@@ -1445,14 +1463,7 @@ impl StoreAdministration {
         reservation
             .finish_deleted()
             .map_err(destructive_reservation_error)?;
-        cleanup_manual_branch_retirements(
-            project_root,
-            data_root,
-            schedulers,
-            &retirements,
-            &lifecycle_leases,
-        )
-        .await?;
+        drop(lifecycle_leases);
         Ok(report)
     }
 }
@@ -1480,16 +1491,17 @@ async fn cleanup_manual_branch_retirements(
     data_root: &Path,
     schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     retirements: &[crate::branch::SingleStoreBranchRetirementV1],
-    lifecycle_leases: &[super::pr_autotrack::ManualBranchLifecycleLeaseV1],
-) -> Result<()> {
+    lifecycle_leases: Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>,
+) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
     if retirements.len() != lifecycle_leases.len() {
         return Err(TraceDecayError::Config {
             message: "branch retirement lifecycle ownership did not match metadata selection"
                 .to_owned(),
         });
     }
+    let mut retained_leases = Vec::with_capacity(lifecycle_leases.len());
     for (retirement, lifecycle) in retirements.iter().zip(lifecycle_leases) {
-        super::pr_autotrack::cleanup_manual_branch_retirement(
+        let lifecycle = super::pr_autotrack::cleanup_manual_branch_retirement(
             project_root,
             data_root,
             schedulers,
@@ -1500,12 +1512,13 @@ async fn cleanup_manual_branch_retirements(
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!(
-                "branch metadata removed '{}' but exact artifact retirement failed: {error}",
+                "branch metadata retained '{}' because exact artifact retirement failed: {error}",
                 retirement.branch
             ),
         })?;
+        retained_leases.push(lifecycle);
     }
-    Ok(())
+    Ok(retained_leases)
 }
 
 pub(super) struct BranchAdminRequest {
