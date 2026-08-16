@@ -427,6 +427,50 @@ fn a_missing_kiro_binary_refuses_instead_of_editing_host_owned_state() {
 }
 
 #[test]
+fn detected_kiro_without_a_tracedecay_server_is_a_single_optional_warning() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mcp_path,
+        br#"{"mcpServers":{"operator":{"command":"other","args":[]}}}"#,
+    )
+    .unwrap();
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.warnings, 1);
+}
+
+#[test]
+fn malformed_kiro_mcp_config_remains_a_doctor_failure() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(&mcp_path, "{ not valid JSON").unwrap();
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(counters.issues, 1);
+    assert_eq!(counters.warnings, 0);
+}
+
+#[test]
 fn an_ambient_kiro_home_never_redirects_an_admitted_profile() {
     struct AmbientKiroHomeGuard {
         previous: Option<std::ffi::OsString>,

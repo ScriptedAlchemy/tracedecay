@@ -66,7 +66,20 @@ fn public_inventory_problem(error: &TraceDecayError) -> (&'static str, &'static 
                 "The local response-handle inventory contains a corrupt record.",
             )
         }
-        _ => (
+        TraceDecayError::File { .. }
+        | TraceDecayError::Parse { .. }
+        | TraceDecayError::Database { .. }
+        | TraceDecayError::Search { .. }
+        | TraceDecayError::Config { .. }
+        | TraceDecayError::HostCliUnavailable { .. }
+        | TraceDecayError::ProfileResetRequired { .. }
+        | TraceDecayError::ResetRequired { .. }
+        | TraceDecayError::ProjectRoute { .. }
+        | TraceDecayError::SyncLock { .. }
+        | TraceDecayError::Io(_)
+        | TraceDecayError::Sqlite(_)
+        | TraceDecayError::Json(_)
+        | TraceDecayError::Automation(_) => (
             "handle_inventory_unavailable",
             "The local response-handle inventory is unavailable.",
         ),
@@ -88,7 +101,20 @@ pub(crate) fn public_retrieve_error(error: TraceDecayError) -> TraceDecayError {
                 path: "response-handles".to_string(),
             }
         }
-        _ => TraceDecayError::File {
+        TraceDecayError::File { .. }
+        | TraceDecayError::Parse { .. }
+        | TraceDecayError::Database { .. }
+        | TraceDecayError::Search { .. }
+        | TraceDecayError::Config { .. }
+        | TraceDecayError::HostCliUnavailable { .. }
+        | TraceDecayError::ProfileResetRequired { .. }
+        | TraceDecayError::ResetRequired { .. }
+        | TraceDecayError::ProjectRoute { .. }
+        | TraceDecayError::SyncLock { .. }
+        | TraceDecayError::Io(_)
+        | TraceDecayError::Sqlite(_)
+        | TraceDecayError::Json(_)
+        | TraceDecayError::Automation(_) => TraceDecayError::File {
             message: "response-handle cache is unavailable".to_string(),
             path: "response-handles".to_string(),
         },
@@ -366,6 +392,7 @@ fn error_class(error: &TraceDecayError) -> &'static str {
         TraceDecayError::Database { .. } => "database",
         TraceDecayError::Search { .. } => "search",
         TraceDecayError::Config { .. } => "config",
+        TraceDecayError::HostCliUnavailable { .. } => "host_cli_unavailable",
         TraceDecayError::ProfileResetRequired { .. } => "profile_reset_required",
         TraceDecayError::ProjectRoute { .. } => "project_route",
         TraceDecayError::SyncLock { .. } => "sync_lock",
@@ -416,6 +443,16 @@ mod tests {
             TraceDecayError::reset_required("session store", "session store reset required");
 
         assert_eq!(error_class(&error), "reset_required");
+    }
+
+    #[test]
+    fn host_cli_requirement_error_class_is_distinct() {
+        let error = TraceDecayError::HostCliUnavailable {
+            program: "kiro-cli".to_string(),
+            lifecycle: "kiro MCP registry lifecycle".to_string(),
+        };
+
+        assert_eq!(error_class(&error), "host_cli_unavailable");
     }
 
     #[test]
