@@ -141,7 +141,9 @@ pub(super) fn retains_fault(error: &GraphDbError) -> bool {
 pub(super) fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
     match entry {
         RegistryEntry::Opening { .. } => GraphDbRegistryStatus::Opening,
-        RegistryEntry::Closing { .. } => GraphDbRegistryStatus::Closing,
+        RegistryEntry::Closing { .. } | RegistryEntry::Retiring { .. } => {
+            GraphDbRegistryStatus::Closing
+        }
         RegistryEntry::Ready { owner, .. } => match owner.runtime_state() {
             GraphDbRuntimeState::Ready => GraphDbRegistryStatus::Ready,
             GraphDbRuntimeState::Closed => GraphDbRegistryStatus::Closed,

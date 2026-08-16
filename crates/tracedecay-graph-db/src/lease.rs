@@ -16,7 +16,7 @@ use tracedecay_store::runtime::{
 
 use crate::generation::physical_namespace;
 use crate::{
-    GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
+    GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
     GraphGenerationDependency, GraphGenerationId, GraphGenerationManifest, GraphGenerationRelation,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectionPage,
     GraphProjectionReadRequest, GraphProjectionTelemetry, GraphProjectionTelemetryRequest,
@@ -160,7 +160,7 @@ impl VerifiedGenerationState {
 
 #[derive(Clone)]
 pub struct VerifiedGraphSnapshot {
-    database: Arc<GraphDb>,
+    database: crate::GraphDbLeaseV1,
     head: Arc<VerifiedGenerationLease>,
     closure: BTreeMap<GraphProjectionIdentity, Arc<VerifiedGenerationLease>>,
 }
@@ -187,7 +187,7 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Self, GraphDbError> {
         let owner = crate::GraphDbOwner::memory(Arc::clone(&cancellation))?;
-        let database = owner.handle();
+        let database = owner.lease();
         let check = || {
             if cancellation.is_cancelled() {
                 Err(GraphDbError::Cancelled)
@@ -239,7 +239,7 @@ impl VerifiedGraphSnapshot {
     }
 
     pub(crate) fn new(
-        database: Arc<GraphDb>,
+        database: crate::GraphDbLeaseV1,
         head: Arc<VerifiedGenerationLease>,
         closure: BTreeMap<GraphProjectionIdentity, Arc<VerifiedGenerationLease>>,
     ) -> Self {

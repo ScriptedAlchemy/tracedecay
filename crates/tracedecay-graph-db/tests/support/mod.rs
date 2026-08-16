@@ -4,10 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-use tracedecay_graph_db::GraphDb;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
+    GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbRegistration, GraphDbRegistry,
+    GraphDbRegistryConfig,
 };
 use tracedecay_store::{
     BrainId, ProjectId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
@@ -63,7 +62,7 @@ impl RegisteredGraph {
     }
 
     #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-    pub fn open_raw(root: &Path) -> Result<(Self, Arc<GraphDb>), GraphDbError> {
+    pub fn open_lease(root: &Path) -> Result<(Self, GraphDbLeaseV1), GraphDbError> {
         let registered = Self::new(root)?;
         let database = registered
             .registry
@@ -77,9 +76,9 @@ impl RegisteredGraph {
     }
 
     #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-    pub fn reopen_raw(&self) -> Result<Arc<GraphDb>, GraphDbError> {
+    pub fn reopen_lease(&self) -> Result<GraphDbLeaseV1, GraphDbError> {
         self.registry
-            .reopen_raw_for_harness(registration(self.binding.clone(), &self.root))
+            .reopen_for_harness(registration(self.binding.clone(), &self.root))
     }
 }
 

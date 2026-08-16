@@ -11,15 +11,16 @@ use tracedecay_store::runtime::{
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::lease::{GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot};
 use crate::{
-    GraphDb, GraphDbError, GraphGenerationDependency, GraphGenerationId, GraphGenerationManifest,
-    GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
+    GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationDependency, GraphGenerationId,
+    GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
+    GraphProjectionIdentity,
 };
 
 impl GraphDbRegistry {
     pub(super) fn registered_database(
         &self,
         registration: &GraphDbRegistration,
-    ) -> Result<Arc<GraphDb>, GraphDbError> {
+    ) -> Result<GraphDbLeaseV1, GraphDbError> {
         let mut state = self.state_lock()?;
         let entry = state
             .entries
@@ -49,7 +50,7 @@ impl GraphDbRegistry {
             ),
         )?;
         *last_used = std::time::Instant::now();
-        Ok(owner.handle())
+        Ok(owner.lease())
     }
 
     pub fn verified_snapshot(

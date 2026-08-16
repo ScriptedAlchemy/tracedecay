@@ -739,7 +739,7 @@ impl GraphDbRegistry {
     fn load_dependencies(
         &self,
         registration: &GraphDbRegistration,
-        database: &Arc<GraphDb>,
+        database: &GraphDb,
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         manifest: &GraphGenerationManifest,
@@ -799,7 +799,7 @@ impl GraphDbRegistry {
     fn load_verified_head(
         &self,
         registration: &GraphDbRegistration,
-        database: &Arc<GraphDb>,
+        database: &GraphDb,
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         head: GraphVerifiedHeadV1,

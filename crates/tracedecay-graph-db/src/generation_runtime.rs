@@ -823,7 +823,7 @@ mod tests {
         .unwrap()
     }
 
-    fn persistent_database(temp: &TempDir) -> (GraphDbOwner, Arc<crate::GraphDb>) {
+    fn persistent_database(temp: &TempDir) -> (GraphDbOwner, crate::GraphDbLeaseV1) {
         let owner = GraphDbOwner::open(GraphDbOpenOptions {
             location: GraphDbLocation::Persistent(temp.path().join("commit-metadata.grafeo")),
             expected_format: GraphFormatVersion::current(),
@@ -831,7 +831,7 @@ mod tests {
             cancellation: Arc::new(NeverCancelled),
         })
         .unwrap();
-        let database = owner.handle();
+        let database = owner.lease();
         (owner, database)
     }
 
@@ -899,7 +899,7 @@ mod tests {
             cancellation: Arc::new(NeverCancelled),
         })
         .unwrap();
-        let database = owner.handle();
+        let database = owner.lease();
         let manifest = GraphGenerationManifest::new(
             GraphProjectionIdentity::new(
                 GraphNamespace::new("one-pass").unwrap(),
