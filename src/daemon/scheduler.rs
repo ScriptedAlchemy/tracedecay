@@ -1524,15 +1524,6 @@ mod global_retention_tests {
                     INSERT INTO retention_delete_receipts(deleted_message_id)
                     VALUES (OLD.message_id);
                  END;
-                 INSERT INTO lcm_raw_messages(
-                    provider, message_id, session_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref, snippet_text,
-                    index_text, legacy_source, legacy_truncated, metadata_json
-                 ) VALUES (
-                    'claude', 'retention-message', 'retention-session', 'assistant', 1, 0,
-                    'retention fixture', 'retention-fixture-hash', 'inline', NULL,
-                    'retention fixture', 'retention fixture', 0, 0, NULL
-                 );
                  INSERT INTO lcm_summary_nodes(
                     node_id, provider, conversation_id, session_id, depth, summary_text,
                     summary_hash, summary_token_count, source_token_count
