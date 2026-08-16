@@ -1,5 +1,6 @@
 //! Typed SDK proof for provider-qualified Work-to-TaskSession availability.
 
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -18,14 +19,15 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, CalibrationProfileId, ComponentRevision, ManifestDigest,
-    ProjectId, SemanticSearchIndexProfileV1, TaskId, TemporalModeV1, UtcMicros,
+    ProjectId, RetrieverKind, SemanticSearchIndexProfileV1, TaskId, TemporalModeV1, UtcMicros,
     VectorGenerationIdV1, WorkAttemptIdentityV1, canonical_sha256,
 };
 use tracedecay_global_db::configuration::semantic::{SemanticConfig, SemanticProfileSelection};
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_sdk::client::Client;
 use tracedecay_sdk::operations::{
-    ApplicationConfigurationObservedState, ApplicationConfigurationSet, WorkRetrieveEvidence,
+    ApplicationConfigurationGet, ApplicationConfigurationObservedState,
+    ApplicationConfigurationSet, WorkRetrieveEvidence,
 };
 use tracedecay_semantic::{
     DEFAULT_FASTEMBED_MODEL_ID, LoadedSemanticArtifactV1, SemanticModelLifecycleOwnerV1,
@@ -44,11 +46,11 @@ use tracedecay_usecases::semantic_runtime::{
 };
 
 use super::{
-    PROVIDER_SESSION_ID, common,
+    PROVIDER_SESSION_ID, advance_provider_transcript_participant_generation, common,
     daemon_fixture::{
         sdk_client, spawn_project_daemon, wait_for_application_mount, wait_for_work_mount,
     },
-    now,
+    now, seeded_provider_transcript_contents,
 };
 
 const EVALUATED_PROFILE_ID: &str = "hybrid-conservative";
@@ -695,12 +697,57 @@ fn semantic_candidate(
     }
 }
 
-pub(super) fn wait_for_semantic_current(home: &Path, project: &Path) {
+/// Proves the evaluated profile is both selected through the public configuration
+/// authority and ready through the mounted runtime authority before TaskSession
+/// selection. TaskSession anchors deliberately retain only TaskSession provenance.
+pub(super) fn wait_for_evaluated_semantic_profile_current(
+    home: &Path,
+    project: &Path,
+    client: &Client,
+) {
+    let configured = client
+        .execute::<ApplicationConfigurationGet>(
+            &tracedecay_application::configuration::ConfigurationGetRequestV1 {
+                key: SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY)
+                    .expect("semantic runtime setting key"),
+            },
+        )
+        .expect("read activated semantic runtime configuration through typed SDK")
+        .result;
+    let ConfigurationValueV1::Text(value) = &configured.effective_value else {
+        panic!(
+            "activated semantic runtime must retain its typed configuration text: {configured:?}"
+        );
+    };
+    let semantic_config: SemanticConfig = serde_json::from_str(value)
+        .unwrap_or_else(|error| panic!("decode activated semantic runtime configuration: {error}"));
+    let active_profile = semantic_config
+        .active_profile
+        .as_ref()
+        .expect("evaluated semantic profile must remain active through the typed SDK");
+    assert_eq!(
+        active_profile.profile_id, EVALUATED_PROFILE_ID,
+        "the evaluated semantic profile selected through the typed SDK must remain active"
+    );
+
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let status = semantic_runtime_status(home, project)
             .unwrap_or_else(|| panic!("runtime returned an invalid semantic status"));
-        if matches!(status.state, SemanticRuntimeStateV1::Current { .. }) {
+        if let SemanticRuntimeStateV1::Current { receipt } = &status.state {
+            let runtime_configuration = status
+                .configuration
+                .as_ref()
+                .expect("ready semantic runtime must report its activation configuration");
+            assert_eq!(
+                runtime_configuration.effective_behavior_digest,
+                configured.effective_behavior_digest,
+                "the runtime readiness receipt must authorize the exact evaluated configuration selected through the SDK"
+            );
+            assert_eq!(
+                receipt.configuration, *runtime_configuration,
+                "the ready semantic receipt must retain the runtime's exact activation configuration"
+            );
             return;
         }
         assert!(
@@ -789,15 +836,26 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
         assert_eq!(first_evidence.continuation, Some(continuation.clone()));
         assert_eq!(first_evidence.ranked_anchors.len(), 1);
         assert_eq!(first_evidence.hydrated.len(), 1);
+        let first_ranked = &first_evidence.ranked_anchors[0];
+        let first_hydrated = &first_evidence.hydrated[0];
         assert_eq!(
-            first_evidence.hydrated[0].state,
+            first_hydrated.state,
             WorkTaskSessionHydrationStateV1::Available
         );
+        assert_eq!(
+            first_hydrated.anchor_id, first_ranked.anchor_id,
+            "{temporal:?} page one must hydrate the exact ranked anchor"
+        );
+        assert_eq!(
+            first_hydrated.rank, first_ranked.final_ordinal,
+            "{temporal:?} page one hydration rank must equal its ranked ordinal"
+        );
         assert!(
-            first_evidence.hydrated[0]
-                .content
-                .as_ref()
-                .is_some_and(|content| !content.is_empty())
+            first_ranked
+                .contributions
+                .iter()
+                .any(|contribution| contribution.retriever == RetrieverKind::TaskSession),
+            "{temporal:?} page one must retain canonical TaskSession provenance; the evaluated semantic profile is proven ready separately before selection: {first_ranked:?}"
         );
         assert_eq!(first_evidence.source.provider().as_str(), "claude");
         assert_eq!(
@@ -835,62 +893,119 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
         assert_eq!(second_evidence.source, first_evidence.source);
         assert_eq!(second_evidence.ranked_anchors.len(), 1);
         assert_eq!(second_evidence.hydrated.len(), 1);
+        let second_ranked = &second_evidence.ranked_anchors[0];
+        let second_hydrated = &second_evidence.hydrated[0];
         assert_eq!(
-            second_evidence.hydrated[0].state,
+            second_hydrated.state,
             WorkTaskSessionHydrationStateV1::Available
         );
+        assert_eq!(
+            second_hydrated.anchor_id, second_ranked.anchor_id,
+            "{temporal:?} continuation must hydrate the exact ranked anchor"
+        );
+        assert_eq!(
+            second_hydrated.rank, second_ranked.final_ordinal,
+            "{temporal:?} continuation hydration rank must equal its ranked ordinal"
+        );
         assert!(
-            second_evidence.hydrated[0]
-                .content
-                .as_ref()
-                .is_some_and(|content| !content.is_empty())
+            second_ranked
+                .contributions
+                .iter()
+                .any(|contribution| contribution.retriever == RetrieverKind::TaskSession),
+            "{temporal:?} continuation must retain canonical TaskSession provenance; the evaluated semantic profile is proven ready separately before selection: {second_ranked:?}"
         );
         assert_ne!(
-            second_evidence.hydrated[0].anchor_id, first_evidence.hydrated[0].anchor_id,
+            second_hydrated.anchor_id, first_hydrated.anchor_id,
             "{temporal:?} continuation repeated a hydrated TaskSession anchor"
         );
         assert_eq!(
-            second_evidence.hydrated[0].rank,
-            first_evidence.hydrated[0].rank + 1,
+            second_ranked.final_ordinal,
+            first_ranked.final_ordinal + 1,
             "{temporal:?} continuation must advance by exactly one ranked TaskSession anchor"
         );
+        let actual_contents = BTreeSet::from([
+            first_hydrated
+                .content
+                .clone()
+                .expect("page one seeded transcript content"),
+            second_hydrated
+                .content
+                .clone()
+                .expect("continuation seeded transcript content"),
+        ]);
+        let expected_contents = BTreeSet::from(seeded_provider_transcript_contents(identity));
+        assert_eq!(
+            actual_contents, expected_contents,
+            "{temporal:?} ranked TaskSession pages must hydrate the exact seeded transcript messages"
+        );
+        if temporal == TemporalModeV1::Current {
+            current = Some((first_evidence, continuation));
+        }
+    }
 
-        let mut revoked_continuation = continuation;
-        revoked_continuation.participant_epoch =
-            ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
-                .expect("well-formed foreign participant epoch");
-        let (status, revoked) = dashboard.retrieve_evidence(&WorkEvidenceRetrieveRequestV1 {
+    let (current, initial_continuation) =
+        current.expect("Current TaskSession evidence and continuation");
+    assert_eq!(
+        initial_continuation.participant_epoch, current.participant_epoch,
+        "the initial continuation must carry the epoch returned by the activated evaluated query"
+    );
+    advance_provider_transcript_participant_generation(home, project, identity);
+    let refreshed = retrieve_over_sdk_mcp_and_dashboard(
+        home,
+        project,
+        client,
+        dashboard,
+        WorkEvidenceRetrieveRequestV1 {
             selection: selection.clone(),
             task_id: task_id.clone(),
             verified_version: verified_version.clone(),
-            temporal,
+            temporal: TemporalModeV1::Current,
             page_size: 1,
             expansion: Some(WorkEvidenceExpansionSelectorV1::TaskSession {
                 attempt: identity.clone(),
             }),
-            continuation: Some(WorkEvidenceContinuationV1::TaskSession {
-                continuation: revoked_continuation,
-            }),
+            continuation: None,
             observed_at: now(),
-        });
-        assert_eq!(status, 409, "{temporal:?} rank-final revocation: {revoked}");
-        assert_eq!(
-            revoked["kind"], "problem",
-            "{temporal:?} rank-final revocation must use the canonical problem envelope: {revoked}"
-        );
-        assert_eq!(
-            revoked["value"]["problem"]["kind"], "stale",
-            "{temporal:?} foreign participant epoch must be revoked after ranking: {revoked}"
-        );
-        assert_eq!(
-            revoked["value"]["problem"]["retryable"], true,
-            "{temporal:?} rank-final revocation must tell the dashboard to restart its read: {revoked}"
-        );
-        if temporal == TemporalModeV1::Current {
-            current = Some(first_evidence);
-        }
-    }
-    current.expect("Current TaskSession evidence")
+        },
+    );
+    let (_refreshed_receipt, refreshed_evidence, omissions) =
+        evidence_for_attempt(refreshed, identity);
+    assert_available(&omissions, TemporalModeV1::Current);
+    let refreshed_evidence =
+        refreshed_evidence.expect("participant refresh must return TaskSession evidence");
+    assert_ne!(
+        refreshed_evidence.participant_epoch, current.participant_epoch,
+        "the public transcript import must produce a newly frozen participant epoch"
+    );
+
+    let (status, revoked) = dashboard.retrieve_evidence(&WorkEvidenceRetrieveRequestV1 {
+        selection: selection.clone(),
+        task_id: task_id.clone(),
+        verified_version: verified_version.clone(),
+        temporal: TemporalModeV1::Current,
+        page_size: 1,
+        expansion: Some(WorkEvidenceExpansionSelectorV1::TaskSession {
+            attempt: identity.clone(),
+        }),
+        continuation: Some(WorkEvidenceContinuationV1::TaskSession {
+            continuation: initial_continuation,
+        }),
+        observed_at: now(),
+    });
+    assert_eq!(status, 409, "rank-final participant revocation: {revoked}");
+    assert_eq!(
+        revoked["kind"], "problem",
+        "rank-final participant revocation must use the canonical problem envelope: {revoked}"
+    );
+    assert_eq!(
+        revoked["value"]["problem"]["kind"], "stale",
+        "the previous real participant epoch must be stale after public transcript import: {revoked}"
+    );
+    assert_eq!(
+        revoked["value"]["problem"]["retryable"], true,
+        "rank-final participant revocation must tell the dashboard to restart its read: {revoked}"
+    );
+    current
 }
 
 fn assert_available(
