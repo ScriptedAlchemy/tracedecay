@@ -43,7 +43,7 @@ pub struct ProjectMemoryReconciliationTelemetryObserverV1 {
 }
 
 impl ProjectMemoryReconciliationTelemetryObserverV1 {
-    pub(crate) fn new(
+    pub(super) fn new(
         telemetry: Arc<ProjectMemoryReconciliationTelemetryV1>,
         database: Weak<super::registry::DatabaseInner>,
     ) -> Self {
