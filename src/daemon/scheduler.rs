@@ -1410,6 +1410,176 @@ async fn maybe_run_global_retention(
     reservation.finish(std::time::Instant::now(), succeeded);
 }
 
+#[cfg(test)]
+mod global_retention_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
+
+    use super::*;
+    use crate::daemon::branch_admin::StoreAdministration;
+    use crate::db::engine::{Executor, QueryExecutor, Row};
+    use crate::global_db::RegisteredGlobalDb;
+    use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
+
+    static RETENTION_JOURNEY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct ResetGlobalRetentionCadence;
+
+    impl ResetGlobalRetentionCadence {
+        fn new() -> Self {
+            reset_global_retention_cadence();
+            Self
+        }
+    }
+
+    impl Drop for ResetGlobalRetentionCadence {
+        fn drop(&mut self) {
+            reset_global_retention_cadence();
+        }
+    }
+
+    fn reset_global_retention_cadence() {
+        let mut cadence = match GLOBAL_RETENTION_CADENCE.lock() {
+            Ok(cadence) => cadence,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *cadence = GlobalRetentionCadence::default();
+    }
+
+    async fn seed_eligible_projected_message(database: &RegisteredGlobalDb) {
+        let transaction = database
+            .begin_write_transaction()
+            .await
+            .expect("open registered fixture writer");
+        transaction
+            .execute_batch(
+                "CREATE TABLE retention_delete_receipts (deleted_message_id TEXT NOT NULL);
+                 CREATE TRIGGER retention_delete_receipt
+                 AFTER DELETE ON session_messages BEGIN
+                    INSERT INTO retention_delete_receipts(deleted_message_id)
+                    VALUES (OLD.message_id);
+                 END;
+                 INSERT INTO sessions(provider, session_id, project_key, project_path)
+                 VALUES ('claude', 'retention-session', 'retention-project', '/retention-project');
+                 INSERT INTO lcm_raw_messages(
+                    provider, message_id, session_id, role, ordinal, timestamp,
+                    content, content_hash, storage_kind, payload_ref, snippet_text,
+                    index_text, legacy_source, legacy_truncated, metadata_json
+                 ) VALUES (
+                    'claude', 'retention-message', 'retention-session', 'assistant', 1, 0,
+                    'retention fixture', 'retention-fixture-hash', 'inline', NULL,
+                    'retention fixture', 'retention fixture', 0, 0, NULL
+                 );
+                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 SELECT 'retention-summary', 'raw_message', CAST(store_id AS TEXT), 0
+                 FROM lcm_raw_messages
+                 WHERE provider = 'claude' AND message_id = 'retention-message';
+                 INSERT INTO session_messages(
+                    provider, message_id, session_id, role, timestamp, ordinal, text
+                 ) VALUES (
+                    'claude', 'retention-message', 'retention-session', 'assistant', 0, 1,
+                    'retention fixture'
+                 );",
+            )
+            .await
+            .expect("seed a projection-durable retention candidate");
+        transaction
+            .commit()
+            .await
+            .expect("commit retention fixture");
+    }
+
+    async fn deletion_receipt_count(database: &RegisteredGlobalDb) -> i64 {
+        let mut rows = database
+            .read_connection()
+            .query("SELECT COUNT(*) FROM retention_delete_receipts", ())
+            .await
+            .expect("read retention deletion receipts");
+        rows.next()
+            .await
+            .expect("read retention deletion receipt row")
+            .expect("retention deletion receipt count row")
+            .get::<i64>(0)
+            .expect("decode retention deletion receipt count")
+    }
+
+    #[tokio::test]
+    async fn retention_defers_while_daemon_writer_is_held_and_prunes_once_after_release() {
+        let _test_lock = RETENTION_JOURNEY_TEST_LOCK.lock().await;
+        let _cadence_reset = ResetGlobalRetentionCadence::new();
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let harness = RegisteredGlobalDbHarness::open("global-retention-writer-admission").await;
+        let database = Arc::clone(&harness.registered);
+        seed_eligible_projected_message(database.as_ref()).await;
+
+        let mut config = crate::config::RetentionConfig::default();
+        config.session_lcm.enabled = true;
+        config.session_lcm.dedupe_projected_after_days = Some(1);
+        config.session_lcm.drop_after_days = None;
+        config.session_lcm.offload_after_days = None;
+
+        let administration = StoreAdministration::default();
+        let writer_held = Arc::new(Notify::new());
+        let writer_held_by_blocker = Arc::clone(&writer_held);
+        let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+        let blocker_administration = administration.clone();
+        let blocker = tokio::spawn(async move {
+            blocker_administration
+                .with_writer(|| async move {
+                    writer_held_by_blocker.notify_one();
+                    writer_release.await.expect("release daemon writer");
+                })
+                .await;
+        });
+        writer_held.notified().await;
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(
+                maybe_run_global_retention(&administration, database.as_ref(), &config),
+                maybe_run_global_retention(&administration, database.as_ref(), &config),
+            );
+        })
+        .await
+        .expect("retention must defer instead of waiting behind the daemon writer");
+        assert_eq!(
+            database
+                .session_message_count()
+                .await
+                .expect("count deferred retention candidate"),
+            1,
+            "a deferred retention pass must not start a competing database transaction"
+        );
+        assert_eq!(
+            deletion_receipt_count(database.as_ref()).await,
+            0,
+            "the writer-held pass must not delete the eligible projection"
+        );
+
+        release_writer.send(()).expect("release daemon writer");
+        blocker.await.expect("join daemon writer blocker");
+
+        tokio::join!(
+            maybe_run_global_retention(&administration, database.as_ref(), &config),
+            maybe_run_global_retention(&administration, database.as_ref(), &config),
+        );
+        assert_eq!(
+            database
+                .session_message_count()
+                .await
+                .expect("count retention candidate after admission"),
+            0,
+            "one admitted wake must prune the eligible projection"
+        );
+        assert_eq!(
+            deletion_receipt_count(database.as_ref()).await,
+            1,
+            "concurrent post-release wakes must remain one retention pass"
+        );
+    }
+}
+
 struct PinnedAutomationConfiguration {
     configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
     configuration_digest: tracedecay_domain::ManifestDigest,
