@@ -27,7 +27,7 @@ use super::*;
 
 const EVALUATED_PROFILE_ID: &str = "hybrid-conservative";
 
-fn git(project: &Path, arguments: &[&str]) -> String {
+pub(super) fn git(project: &Path, arguments: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .current_dir(project)
         .args(arguments)
@@ -62,7 +62,7 @@ fn commit(project: &Path, message: &str) -> String {
     git(project, &["rev-parse", "HEAD"])
 }
 
-fn tool_payload(response: &JsonRpcResponse) -> Value {
+pub(super) fn tool_payload(response: &JsonRpcResponse) -> Value {
     assert!(response.error.is_none(), "tool failed: {response:?}");
     let result = response.result.as_ref().expect("tool result");
     let text = result["content"][0]["text"].as_str().expect("tool text");

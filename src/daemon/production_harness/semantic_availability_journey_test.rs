@@ -16,39 +16,14 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::semantic_activation_journey_test::{
-    evaluate_native_profile, installed_selection_material, seed_distribution_fixture, selection,
-    semantic_candidate, set_semantic_profile, wait_for_semantic_generation,
+    evaluate_native_profile, git, installed_selection_material, seed_distribution_fixture,
+    selection, semantic_candidate, set_semantic_profile, tool_payload,
+    wait_for_semantic_generation,
 };
 use super::*;
 
 const PROBE_SYMBOL: &str = "semantic_availability_probe";
 const SESSION_ID: &str = "semantic-availability-journey-session";
-
-fn git(project: &Path, arguments: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .current_dir(project)
-        .args(arguments)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {arguments:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout)
-        .expect("git output")
-        .trim()
-        .to_owned()
-}
-
-fn tool_payload(response: &JsonRpcResponse) -> Value {
-    assert!(response.error.is_none(), "tool failed: {response:?}");
-    let result = response.result.as_ref().expect("tool result");
-    let text = result["content"][0]["text"].as_str().expect("tool text");
-    serde_json::from_str(text).unwrap_or_else(|error| {
-        panic!("tool did not return JSON: {error}; result={result}; text={text}")
-    })
-}
 
 /// A retrieval mode "answered" when the transport carried a typed payload the
 /// caller can act on. A JSON-RPC error is the one outcome that means the mode
