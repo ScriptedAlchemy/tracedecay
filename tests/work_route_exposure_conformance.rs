@@ -1021,10 +1021,10 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         .iter()
         .map(|(metric, unit, denominator)| {
             (
-                EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1,
-                *metric,
-                *unit,
-                *denominator,
+                EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1.to_owned(),
+                (*metric).to_owned(),
+                (*unit).to_owned(),
+                (*denominator).to_owned(),
             )
         })
         .collect::<Vec<_>>();
@@ -1037,16 +1037,20 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
                 (
                     measurement["value"]["descriptor_revision"]
                         .as_str()
-                        .expect("measurement descriptor revision"),
+                        .expect("measurement descriptor revision")
+                        .to_owned(),
                     measurement["value"]["metric"]
                         .as_str()
-                        .expect("measurement descriptor name"),
+                        .expect("measurement descriptor name")
+                        .to_owned(),
                     measurement["value"]["unit"]
                         .as_str()
-                        .expect("measurement descriptor unit"),
+                        .expect("measurement descriptor unit")
+                        .to_owned(),
                     measurement["value"]["denominator"]
                         .as_str()
-                        .expect("measurement descriptor denominator"),
+                        .expect("measurement descriptor denominator")
+                        .to_owned(),
                 )
             })
             .collect::<Vec<_>>()
