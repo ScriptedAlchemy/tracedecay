@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tracedecay_graph_db::{
-    GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphEntity,
-    GraphEntityId, GraphMutation, GraphNamespace, GraphProjectionId, GraphProjectionReadRequest,
-    GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
+    GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphDbLeaseV1, GraphDbOwner,
+    GraphEntity, GraphEntityId, GraphMutation, GraphNamespace, GraphProjectionId,
+    GraphProjectionReadRequest, GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId,
+    GraphRelationKind, GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
 };
 
 fn cancellation() -> Arc<dyn GraphCancellation> {
@@ -21,8 +21,8 @@ impl GraphCancellation for Cancelled {
     }
 }
 
-fn memory_db() -> Arc<GraphDb> {
-    GraphDbOwner::memory(cancellation()).unwrap().handle()
+fn memory_db() -> GraphDbLeaseV1 {
+    GraphDbOwner::memory(cancellation()).unwrap().lease()
 }
 
 fn entity(identity: &str) -> GraphEntity {

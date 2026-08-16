@@ -78,7 +78,7 @@ fn visit_identities(
 #[test]
 fn replacing_entity_owner_preserves_foreign_edge_in_live_snapshot_and_reopen() {
     let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open_raw(temp.path()).unwrap();
+    let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
     db.apply_unverified(batch(
         "facts",
         "facts-g1",
@@ -121,7 +121,7 @@ fn replacing_entity_owner_preserves_foreign_edge_in_live_snapshot_and_reopen() {
     drop(snapshot);
     drop(db);
     registered.close().unwrap();
-    let reopened = registered.reopen_raw().unwrap();
+    let reopened = registered.reopen_lease().unwrap();
     assert_eq!(
         visit_identities(reopened.traverse(traversal("source")).unwrap()),
         expected
@@ -131,7 +131,7 @@ fn replacing_entity_owner_preserves_foreign_edge_in_live_snapshot_and_reopen() {
 #[test]
 fn direct_apply_delete_then_upsert_preserves_foreign_edge_through_reopen() {
     let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open_raw(temp.path()).unwrap();
+    let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
     db.apply_unverified(batch(
         "facts",
         "facts-g1",
@@ -174,7 +174,7 @@ fn direct_apply_delete_then_upsert_preserves_foreign_edge_through_reopen() {
     drop(snapshot);
     drop(db);
     registered.close().unwrap();
-    let reopened = registered.reopen_raw().unwrap();
+    let reopened = registered.reopen_lease().unwrap();
     assert_eq!(
         visit_identities(reopened.traverse(traversal("source")).unwrap()),
         expected
@@ -184,7 +184,7 @@ fn direct_apply_delete_then_upsert_preserves_foreign_edge_through_reopen() {
 #[test]
 fn publish_delete_then_upsert_preserves_foreign_edge_through_reopen() {
     let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open_raw(temp.path()).unwrap();
+    let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
     db.apply_unverified(batch(
         "facts",
         "facts-g1",
@@ -238,7 +238,7 @@ fn publish_delete_then_upsert_preserves_foreign_edge_through_reopen() {
     drop(snapshot);
     drop(db);
     registered.close().unwrap();
-    let reopened = registered.reopen_raw().unwrap();
+    let reopened = registered.reopen_lease().unwrap();
     assert_eq!(
         visit_identities(reopened.traverse(traversal("source")).unwrap()),
         expected

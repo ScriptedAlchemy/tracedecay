@@ -48,7 +48,7 @@ fn owner_close_releases_the_physical_database_after_durability_uncertainty() {
         cancellation: Arc::new(NeverCancelled),
     })
     .unwrap();
-    let handle = owner.handle();
+    let handle = owner.lease();
     handle.inner.poisoned.store(true, Ordering::Release);
 
     assert!(matches!(

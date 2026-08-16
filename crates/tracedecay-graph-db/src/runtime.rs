@@ -51,6 +51,7 @@ pub(crate) struct Inner {
 pub struct GraphSnapshot {
     pub(crate) database: Arc<GraphDb>,
     _lease: ArcRwLockReadGuard<RawRwLock, ()>,
+    _client: Option<crate::GraphDbLeaseV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,7 +133,12 @@ impl GraphDb {
         Ok(GraphSnapshot {
             database: Arc::clone(self),
             _lease: lease,
+            _client: None,
         })
+    }
+
+    pub(crate) fn retain_client(&mut self, client: crate::GraphDbLeaseV1) {
+        self._client = Some(client);
     }
 
     /// Applies a mutation batch to the disposable derived graph index.

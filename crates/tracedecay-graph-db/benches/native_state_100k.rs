@@ -139,7 +139,7 @@ fn native_state_100k(criterion: &mut Criterion) {
             || (registry.clone(), request.clone()),
             |(registry, request)| {
                 let database = registry
-                    .reopen_raw_for_harness(request.clone())
+                    .reopen_for_harness(request.clone())
                     .expect("store reopens");
                 drop(database);
                 registry.close(&request).expect("store closes");

@@ -39,6 +39,13 @@ pub(super) fn binding(entry: &RegistryEntry) -> IdentityRef<'_> {
             expected_format,
             ..
         }
+        | RegistryEntry::Retiring {
+            binding,
+            verified_locator,
+            path,
+            expected_format,
+            ..
+        }
         | RegistryEntry::Faulted {
             binding,
             verified_locator,
@@ -96,6 +103,37 @@ pub(super) fn require_closing(
     {
         return Err(GraphDbError::unavailable(
             "graph close reservation identity changed",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn require_retiring(
+    entry: &RegistryEntry,
+    reservation: &Eviction,
+) -> Result<(), GraphDbError> {
+    let RegistryEntry::Retiring {
+        authority_lease,
+        binding,
+        verified_locator,
+        path,
+        expected_format,
+        owner,
+    } = entry
+    else {
+        return Err(GraphDbError::unavailable(
+            "graph retirement reservation was replaced",
+        ));
+    };
+    if binding != &reservation.binding
+        || verified_locator != &reservation.verified_locator
+        || path.as_path() != reservation.path
+        || expected_format != &reservation.expected_format
+        || !Arc::ptr_eq(owner, &reservation.owner)
+        || !Arc::ptr_eq(authority_lease, &reservation.authority_lease)
+    {
+        return Err(GraphDbError::unavailable(
+            "graph retirement reservation identity changed",
         ));
     }
     Ok(())
