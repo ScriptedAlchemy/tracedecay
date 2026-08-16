@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::branch::BranchAdminAction;
 use crate::config::{CompactionThresholdConfig, RetentionConfig};
+use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::tracedecay::TraceDecay;
 
 use super::branch_admin::StoreAdministration;
@@ -72,7 +73,7 @@ impl ScopeRootProofInputsV1 {
 /// eligible for a retry.
 pub(super) async fn run_gc(
     administration: &StoreAdministration,
-    schedulers: &super::super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: &CodeIndexSchedulerRegistryV1,
     branch_gc_days: u64,
     orphan_db_gc_days: u64,
     cg: &TraceDecay,
@@ -141,7 +142,7 @@ fn now_secs_i64() -> Result<i64, &'static str> {
 /// only fixed-size aggregate counts for Doctor.
 pub(super) async fn run_semantic_vector_generation_retention(
     graph: &TraceDecay,
-    schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_usecases::context::CancellationToken,
 ) -> bool {
@@ -253,7 +254,7 @@ fn log_semantic_vector_retention_degraded(failure: &str) {
 /// protection set, which would delete generations vectors still read from.
 pub(super) async fn run_code_generation_retention(
     graph: &TraceDecay,
-    schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_usecases::context::CancellationToken,
 ) -> bool {
@@ -628,7 +629,7 @@ fn git_worktree_root_inventory(
 
 async fn collect_scope_root_proof_inputs(
     graph: &TraceDecay,
-    schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: &CodeIndexSchedulerRegistryV1,
     vector_receipt: &tracedecay_store::SemanticVectorProjectCensusReceipt,
 ) -> Result<ScopeRootProofInputsV1, &'static str> {
     let layout = graph.hook_store_layout();
@@ -801,7 +802,7 @@ async fn collect_scope_root_proof_inputs(
 /// missing, conflicting, or stale vector evidence collects nothing.
 pub(super) async fn run_code_index_scope_reconciliation(
     graph: &TraceDecay,
-    schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
 ) -> bool {
     use crate::retention::code_index_generations::{

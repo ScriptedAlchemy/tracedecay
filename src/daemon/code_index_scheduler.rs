@@ -2865,5 +2865,8 @@ pub(in crate::daemon) use ignored_dependencies::{
 };
 pub(crate) use registry::CodeIndexSchedulerRegistryV1;
 pub(in crate::daemon) use registry::watch_ingress::GitStateChangeRequestV1;
+pub(in crate::daemon) use registry::{
+    ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
+};
 pub(crate) type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
 pub(crate) type CodeIndexSchedulerMemoryStatsV1 = registry::CodeIndexSchedulerMemoryStatsV1;
