@@ -1727,6 +1727,49 @@ async fn existing_path_remount_rejects_foreign_project_identity() {
     registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_same_root_mounts_keep_one_canonical_owner() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(4);
+    let barrier = Arc::new(tokio::sync::Barrier::new(4));
+    let mut tasks = Vec::new();
+    for _ in 0..4 {
+        let registry = registry.clone();
+        let root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            registry
+                .mount_worktree(test_project_id(), &root, store_root, None)
+                .await
+        }));
+    }
+
+    let mut mounted = 0;
+    let mut reused = 0;
+    for task in tasks {
+        match task
+            .await
+            .expect("mount task joins")
+            .expect("mount succeeds")
+        {
+            true => mounted += 1,
+            false => reused += 1,
+        }
+    }
+    assert_eq!(mounted, 1, "one caller must install the canonical owner");
+    assert_eq!(reused, 3, "same-root racers must reuse the canonical owner");
+    assert_eq!(
+        registry.mounted.lock().await.len(),
+        1,
+        "the registry must retain exactly one owner after the mount race"
+    );
+
+    registry.shutdown().await;
+}
+
 #[test]
 fn empty_generation_restart_preserves_project_identity() {
     // A file with a compiled language descriptor (so the snapshot has something

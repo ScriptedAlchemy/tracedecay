@@ -1722,6 +1722,41 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
     }
 
+    async fn replace_existing_semantic_schedule(
+        scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+        serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+        project_id: ProjectId,
+        semantic_schedule: Option<
+            tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
+        >,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        // Reconcile holds this mutex; wait in the blocking pool so remount
+        // never parks a runtime worker or admission for other lanes.
+        tokio::task::spawn_blocking(move || {
+            let mut scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if scheduler.project_id() != &project_id {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "mounted worktree belongs to a different project identity".to_owned(),
+                ));
+            }
+            scheduler.replace_semantic_schedule_hook(semantic_schedule);
+            if let Some(latest) = serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                let _ = scheduler.schedule_semantic_generation(latest.generation());
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_error| {
+            CodeIndexSchedulerErrorV1::SemanticSchedule("hook task failed".to_owned())
+        })?
+    }
+
     async fn mount_worktree_inner(
         &self,
         project_id: ProjectId,
@@ -1803,6 +1838,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let open_project_id = project_id.clone();
         let open_project_root = project_root.clone();
         let open_byte_pool = Arc::clone(&self.byte_pool);
+        let open_semantic_schedule = semantic_schedule.clone();
         let (opened, cold_mount_reservation) = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             Self::pause_cold_mount_open_for_test(&open_project_root);
@@ -1815,7 +1851,7 @@ impl CodeIndexSchedulerRegistryV1 {
             #[cfg(test)]
             Self::finish_cold_mount_open_for_test(&open_project_root);
             let mut opened = opened?;
-            opened.replace_semantic_schedule_hook(semantic_schedule);
+            opened.replace_semantic_schedule_hook(open_semantic_schedule);
             Ok::<_, CodeIndexSchedulerErrorV1>((opened, cold_mount_reservation))
         })
         .await
@@ -1875,11 +1911,31 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler is shutting down".to_owned(),
             ));
         }
-        if mounted.len() >= self.max_worktrees {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler capacity is exhausted".to_owned(),
-            ));
-        }
+        let at_capacity = mounted.len() >= self.max_worktrees;
+        let entry = match mounted.entry(project_root) {
+            std::collections::btree_map::Entry::Occupied(existing) => {
+                let scheduler = Arc::clone(&existing.get().scheduler);
+                let serving_generation = Arc::clone(&existing.get().serving_generation);
+                drop(mounted);
+                drop(retiring);
+                Self::replace_existing_semantic_schedule(
+                    scheduler,
+                    serving_generation,
+                    worker_project_id,
+                    semantic_schedule,
+                )
+                .await?;
+                return Ok(false);
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                if at_capacity {
+                    return Err(CodeIndexSchedulerErrorV1::Identity(
+                        "code-index scheduler capacity is exhausted".to_owned(),
+                    ));
+                }
+                entry
+            }
+        };
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;
@@ -2105,36 +2161,33 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _ = result;
             }
         });
-        mounted.insert(
-            project_root,
-            MountedCodeIndexWorktreeV1 {
-                repository_id,
-                worktree_id,
-                query_authority: None,
-                semantic_query_authority: None,
-                query_activation_revision: None,
-                query_activation_epoch: None,
-                query_activation_transition_digest: None,
-                query_activation_attempt: 0,
-                query_activation_redundancy: None,
-                semantic_vector_graph_provider: None,
-                scheduler,
-                serving_generation,
-                serving_generation_epoch,
-                serving_generation_installation,
-                graph_activation,
-                ignored_dependency_admissions,
-                hints,
-                wake: Arc::clone(&wake),
-                epoch,
-                pending_wake: Arc::clone(&pending_wake),
-                shutting_down,
-                reconcile_in_progress,
-                active_generation_encoded_bytes,
-                semantic_evaluation_publication_gate,
-                task,
-            },
-        );
+        entry.insert(MountedCodeIndexWorktreeV1 {
+            repository_id,
+            worktree_id,
+            query_authority: None,
+            semantic_query_authority: None,
+            query_activation_revision: None,
+            query_activation_epoch: None,
+            query_activation_transition_digest: None,
+            query_activation_attempt: 0,
+            query_activation_redundancy: None,
+            semantic_vector_graph_provider: None,
+            scheduler,
+            serving_generation,
+            serving_generation_epoch,
+            serving_generation_installation,
+            graph_activation,
+            ignored_dependency_admissions,
+            hints,
+            wake: Arc::clone(&wake),
+            epoch,
+            pending_wake: Arc::clone(&pending_wake),
+            shutting_down,
+            reconcile_in_progress,
+            active_generation_encoded_bytes,
+            semantic_evaluation_publication_gate,
+            task,
+        });
         // Until retained decode/truth verification completes, reads see warming
         // instead of serving unproven bytes.
         Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Mount);
