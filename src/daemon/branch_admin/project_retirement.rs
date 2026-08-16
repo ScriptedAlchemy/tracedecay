@@ -691,7 +691,15 @@ mod tests {
         })
         .await;
         drop(request);
-        assert!(shutdown.await.is_clean());
+        let receipt = shutdown.await;
+        assert!(receipt.is_clean());
+        assert!(
+            receipt.outcomes.iter().any(|outcome| {
+                outcome.owner == "project_server_retirement[project-idle]"
+                    && outcome.status == ShutdownTaskStatus::Clean
+            }),
+            "shutdown must report the exact evicted owner through its retirement receipt"
+        );
         assert!(
             idle_witness.upgrade().is_none(),
             "joined retirement must release the exact evicted server"

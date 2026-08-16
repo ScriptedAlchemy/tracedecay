@@ -168,7 +168,7 @@ async fn wait_for_project_server_request_drains(servers: &[Arc<crate::mcp::McpSe
     }
 }
 
-async fn retire_project_servers(
+pub(in crate::daemon) async fn retire_project_servers(
     servers: Vec<Arc<crate::mcp::McpServer>>,
     route_registered: Option<Arc<AtomicBool>>,
 ) {
