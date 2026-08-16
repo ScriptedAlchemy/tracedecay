@@ -51,6 +51,8 @@ pub enum WorkProductApplicationErrorV1 {
     GraphAuthorityUnavailable,
     #[error("Work evidence authority is unavailable")]
     EvidenceAuthorityUnavailable,
+    #[error("Work evidence continuation is stale")]
+    EvidenceContinuationStale,
     #[error("Work proposal authority is unavailable")]
     ProposalAuthorityUnavailable,
 }

@@ -949,6 +949,17 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
         initial_continuation.participant_epoch, current.participant_epoch,
         "the initial continuation must carry the epoch returned by the activated evaluated query"
     );
+    assert_eq!(
+        current.ranked_anchors.len(),
+        1,
+        "page-one TaskSession ranking must complete before the participant roster changes"
+    );
+    assert_eq!(
+        current.hydrated.len(),
+        1,
+        "page-one TaskSession hydration must complete before the participant roster changes"
+    );
+    let previous_participant_epoch = initial_continuation.participant_epoch;
     advance_provider_transcript_participant_generation(home, project, identity);
     let refreshed = retrieve_over_sdk_mcp_and_dashboard(
         home,
@@ -977,6 +988,29 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
         refreshed_evidence.participant_epoch, current.participant_epoch,
         "the public transcript import must produce a newly frozen participant epoch"
     );
+    let mut rank_final_continuation = refreshed_evidence
+        .continuation
+        .clone()
+        .expect("the refreshed TaskSession page must expose its signed continuation");
+    assert_eq!(
+        rank_final_continuation.participant_epoch, refreshed_evidence.participant_epoch,
+        "the refreshed continuation must carry the epoch produced by the public roster change"
+    );
+    let signed_temporal_cursor = rank_final_continuation.temporal_cursor.clone();
+    let signed_ranking_cursor = rank_final_continuation.ranking_cursor.clone();
+    assert!(
+        signed_temporal_cursor.is_some(),
+        "the refreshed page must retain its current signed temporal continuation"
+    );
+    rank_final_continuation.participant_epoch = previous_participant_epoch;
+    assert_eq!(
+        rank_final_continuation.temporal_cursor, signed_temporal_cursor,
+        "the stale request must retain the current signed temporal continuation"
+    );
+    assert_eq!(
+        rank_final_continuation.ranking_cursor, signed_ranking_cursor,
+        "the stale request must retain the current signed ranking continuation"
+    );
 
     let (status, revoked) = dashboard.retrieve_evidence(&WorkEvidenceRetrieveRequestV1 {
         selection: selection.clone(),
@@ -988,7 +1022,7 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
             attempt: identity.clone(),
         }),
         continuation: Some(WorkEvidenceContinuationV1::TaskSession {
-            continuation: initial_continuation,
+            continuation: rank_final_continuation,
         }),
         observed_at: now(),
     });

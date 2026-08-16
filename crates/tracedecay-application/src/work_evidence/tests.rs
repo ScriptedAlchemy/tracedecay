@@ -293,6 +293,7 @@ impl WorkAttemptReceiptReadPortV1 for Receipts {
 #[derive(Default)]
 struct Sessions {
     requests: Mutex<Vec<WorkTaskSessionRequestV1>>,
+    error: Option<WorkEvidenceHydrationErrorV1>,
 }
 
 impl WorkTaskSessionPortV1 for Sessions {
@@ -307,6 +308,9 @@ impl WorkTaskSessionPortV1 for Sessions {
             reauthorization
                 .reauthorize_task_session(context, &request)
                 .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
+            if let Some(error) = self.error {
+                return Err(error);
+            }
             Ok(WorkTaskSessionEvidenceV1 {
                 task_id: request.task_id,
                 verified_version: request.verified_version,
@@ -386,47 +390,49 @@ fn request() -> WorkEvidenceRetrieveRequestV1 {
     }
 }
 
-#[test]
-fn partial_owning_source_never_reports_complete_outer_coverage() {
-    assert_eq!(
-        overall_coverage_state(&[], &[], true),
-        WorkEvidenceCoverageStateV1::Partial,
-    );
-    assert_eq!(
-        overall_coverage_state(&[], &[], false),
-        WorkEvidenceCoverageStateV1::Complete,
-    );
-}
-
-#[tokio::test]
-async fn task_root_reauthorizes_and_delegates_session_identity_without_task_kernel_input() {
-    let (graph, attempt, link) = rooted_graph();
-    let reads = Arc::new(AtomicUsize::new(0));
-    let provider_session = ObservationSourceIdentityV1::for_provider(
+fn provider_session() -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::for_provider(
         id::<ProviderId>("codex"),
         id::<SessionId>("session.provider.reported"),
     )
-    .unwrap();
-    let route = WorkProviderRouteV1::new(
+    .unwrap()
+}
+
+fn provider_route() -> WorkProviderRouteV1 {
+    WorkProviderRouteV1::new(
         id::<ProviderId>("provider.codex"),
         id::<WorkProviderRouteId>("route.codex.app-server"),
     )
-    .unwrap();
-    let receipt = WorkAttemptReceiptV1 {
-        identity: attempt.clone(),
+    .unwrap()
+}
+
+fn provider_session_receipt(identity: WorkAttemptIdentityV1) -> WorkAttemptReceiptV1 {
+    let route = provider_route();
+    WorkAttemptReceiptV1 {
+        identity: identity.clone(),
         artifacts: Vec::new(),
         evidence: Some(WorkAttemptEvidenceRecordV1 {
-            identity: attempt.clone(),
+            identity,
             requested_route: route.clone(),
             actual_route: Some(route),
             outcome: WorkAttemptProviderOutcomeV1::Exited { code: 0 },
             stdout: None,
             stderr: None,
-            provider_session: Some(provider_session.clone()),
+            provider_session: Some(provider_session()),
             provider_fallback: None,
             observed_at: UtcMicros(200),
         }),
-    };
+    }
+}
+
+fn task_session_service<'a>(
+    sessions: &'a Sessions,
+) -> (
+    WorkEvidenceRetrievalServiceV1<RootPort, Owner, Receipts, &'a Sessions, Anchors>,
+    Arc<AtomicUsize>,
+) {
+    let (graph, identity, link) = rooted_graph();
+    let reads = Arc::new(AtomicUsize::new(0));
     let roots = RootPort {
         root: VerifiedWorkEvidenceRootV1 {
             verified_version: verified(),
@@ -442,15 +448,55 @@ async fn task_root_reauthorizes_and_delegates_session_identity_without_task_kern
         },
         reads: reads.clone(),
     };
-    let sessions = Sessions::default();
     let service = WorkEvidenceRetrievalServiceV1::new(
         roots,
         Owner,
-        Receipts { receipt },
-        &sessions,
+        Receipts {
+            receipt: provider_session_receipt(identity),
+        },
+        sessions,
         Anchors,
         binding(),
     );
+    (service, reads)
+}
+
+fn task_session_continuation_request() -> WorkEvidenceRetrieveRequestV1 {
+    let mut request = request();
+    let attempt = attempt(&request.task_id);
+    request.expansion = Some(WorkEvidenceExpansionSelectorV1::TaskSession {
+        attempt: attempt.clone(),
+    });
+    request.continuation = Some(WorkEvidenceContinuationV1::TaskSession {
+        continuation: WorkTaskSessionContinuationV1 {
+            verified_version: request.verified_version.clone(),
+            attempt,
+            source: provider_session(),
+            participant_epoch: digest('e'),
+            temporal_cursor: None,
+            ranking_cursor: None,
+        },
+    });
+    request
+}
+
+#[test]
+fn partial_owning_source_never_reports_complete_outer_coverage() {
+    assert_eq!(
+        overall_coverage_state(&[], &[], true),
+        WorkEvidenceCoverageStateV1::Partial,
+    );
+    assert_eq!(
+        overall_coverage_state(&[], &[], false),
+        WorkEvidenceCoverageStateV1::Complete,
+    );
+}
+
+#[tokio::test]
+async fn task_root_reauthorizes_and_delegates_session_identity_without_task_kernel_input() {
+    let sessions = Sessions::default();
+    let (service, reads) = task_session_service(&sessions);
+    let expected_attempt = attempt(&id("task.work-evidence"));
 
     let result = service.retrieve(&context(), request()).await.unwrap();
 
@@ -469,14 +515,79 @@ async fn task_root_reauthorizes_and_delegates_session_identity_without_task_kern
     assert_eq!(requests[0].selection, selection());
     assert_eq!(requests[0].task_id.as_str(), "task.work-evidence");
     assert_eq!(requests[0].verified_version, verified());
-    assert_eq!(requests[0].attempt, attempt);
+    assert_eq!(requests[0].attempt, expected_attempt);
     assert_eq!(
         requests[0].accepted_attempts,
-        BTreeSet::from([attempt.clone()])
+        BTreeSet::from([expected_attempt.clone()])
     );
-    assert_eq!(requests[0].source, provider_session);
+    assert_eq!(requests[0].source, provider_session());
     assert_eq!(requests[0].temporal, TemporalModeV1::Forensic);
     assert_eq!(requests[0].continuation, None);
+}
+
+#[tokio::test]
+async fn stale_matched_task_session_continuation_bubbles_to_the_caller() {
+    let sessions = Sessions {
+        error: Some(WorkEvidenceHydrationErrorV1::Stale),
+        ..Default::default()
+    };
+    let (service, _reads) = task_session_service(&sessions);
+
+    assert_eq!(
+        service
+            .retrieve(&context(), task_session_continuation_request())
+            .await,
+        Err(WorkProductApplicationErrorV1::EvidenceContinuationStale),
+    );
+    assert_eq!(sessions.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unavailable_task_session_continuation_remains_a_partial_read() {
+    let sessions = Sessions {
+        error: Some(WorkEvidenceHydrationErrorV1::Unavailable),
+        ..Default::default()
+    };
+    let (service, _reads) = task_session_service(&sessions);
+
+    let result = service
+        .retrieve(&context(), task_session_continuation_request())
+        .await
+        .expect("unavailable TaskSession evidence must remain a successful partial read");
+
+    assert_eq!(result.coverage.state, WorkEvidenceCoverageStateV1::Partial);
+    assert_eq!(
+        result.omissions,
+        vec![WorkEvidenceOmissionV1 {
+            relation: "task_session".to_owned(),
+            reason: WorkEvidenceOmissionReasonV1::Unavailable,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn stale_task_session_without_a_matched_continuation_remains_an_omission() {
+    let sessions = Sessions {
+        error: Some(WorkEvidenceHydrationErrorV1::Stale),
+        ..Default::default()
+    };
+    let (service, _reads) = task_session_service(&sessions);
+    let mut request = task_session_continuation_request();
+    request.continuation = None;
+
+    let result = service
+        .retrieve(&context(), request)
+        .await
+        .expect("fresh TaskSession reads may disclose stale evidence as an omission");
+
+    assert_eq!(result.coverage.state, WorkEvidenceCoverageStateV1::Partial);
+    assert_eq!(
+        result.omissions,
+        vec![WorkEvidenceOmissionV1 {
+            relation: "task_session".to_owned(),
+            reason: WorkEvidenceOmissionReasonV1::Stale,
+        }]
+    );
 }
 
 #[tokio::test]
