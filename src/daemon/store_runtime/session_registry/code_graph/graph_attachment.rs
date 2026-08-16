@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use tracedecay_graph_db::{GraphDb, GraphDbRegistration};
+use tracedecay_graph_db::{GraphDbLeaseV1, GraphDbRegistration};
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalGraphStoreLeaseV1, StoreRuntimeKey, StoreRuntimeRegistry,
 };
@@ -15,7 +15,7 @@ use super::super::{Result, session_registry_error};
 use super::{AtomicGraphCancellationV1, GRAPH_OPEN_DEADLINE};
 
 pub(in crate::daemon::store_runtime::session_registry) struct SessionRelationGraphAttachmentV1 {
-    graph: Arc<GraphDb>,
+    graph: GraphDbLeaseV1,
     binding: StoreRuntimeBindingV1,
     verified_locator: VerifiedStoreLocatorV1,
 }
@@ -23,7 +23,11 @@ pub(in crate::daemon::store_runtime::session_registry) struct SessionRelationGra
 impl SessionRelationGraphAttachmentV1 {
     pub(in crate::daemon::store_runtime::session_registry) fn into_parts(
         self,
-    ) -> (Arc<GraphDb>, StoreRuntimeBindingV1, VerifiedStoreLocatorV1) {
+    ) -> (
+        GraphDbLeaseV1,
+        StoreRuntimeBindingV1,
+        VerifiedStoreLocatorV1,
+    ) {
         (self.graph, self.binding, self.verified_locator)
     }
 }

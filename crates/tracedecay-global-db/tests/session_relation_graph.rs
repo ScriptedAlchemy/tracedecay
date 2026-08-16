@@ -16,8 +16,9 @@ use tracedecay_global_db::session_temporal::relations::{
 
 use sha2::{Digest, Sha256};
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphDbOwner, GraphDbRegistration, GraphDbRegistry,
-    GraphDbRegistryConfig, NeverCancelled,
+    GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwner, GraphDbRegistration,
+    GraphDbRegistry, GraphDbRegistryConfig, GraphDbRetirementOutcome, GraphDbRetirementTarget,
+    NeverCancelled,
 };
 use tracedecay_store::{
     BrainId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
@@ -53,7 +54,7 @@ fn occurrence_id(seed: &str) -> MessageOccurrenceIdV1 {
 
 fn memory_relation_store() -> SessionRelationGraphStore {
     let owner = GraphDbOwner::memory(Arc::new(NeverCancelled)).expect("memory relation graph");
-    SessionRelationGraphStore::new(owner.handle())
+    SessionRelationGraphStore::new(owner.lease())
 }
 
 #[derive(Debug)]
@@ -392,7 +393,7 @@ fn project_and_profile_scopes_do_not_alias_identical_session_generations() {
 }
 
 #[test]
-fn profile_relation_projection_survives_a_persistent_graph_restart() {
+fn profile_relation_projection_reopens_after_final_clone_allows_retirement() {
     let temporary = TempDir::new().expect("temporary graph root");
     let graph_path = temporary.path().join("profile-session-relations.grafeo");
     let mut relation_projection = projection(7);
@@ -402,18 +403,42 @@ fn profile_relation_projection_survives_a_persistent_graph_restart() {
     let registry =
         GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).expect("test graph registry");
     let request = persistent_registration(graph_path);
+    let retirement_target = GraphDbRetirementTarget::new(
+        request.authority_lease.binding().clone(),
+        request.authority_lease.verified_locator().clone(),
+    );
     {
-        let database: Arc<GraphDb> = registry
+        let database: GraphDbLeaseV1 = registry
             .resolve(request.clone())
             .expect("open persistent graph");
-        SessionRelationGraphStore::new(database)
+        let store = SessionRelationGraphStore::new(database);
+        store
             .replace(&relation_projection)
             .expect("publish profile projection");
+        let retained_clone = store.clone();
+        drop(store);
+        assert!(matches!(
+            registry.reserve_retirement_batch(vec![retirement_target.clone()]),
+            Err(GraphDbError::Conflict)
+        ));
+        drop(retained_clone);
     }
-    assert!(registry.close(&request).expect("close persistent graph"));
+    let mut retirement = registry
+        .reserve_retirement_batch(vec![retirement_target.clone()])
+        .expect("reserve unleased persistent graph retirement");
+    let commit = retirement
+        .commit(
+            Arc::new(NeverCancelled),
+            Instant::now() + Duration::from_secs(30),
+        )
+        .expect("commit persistent graph retirement");
+    assert!(matches!(
+        commit.outcomes(),
+        [GraphDbRetirementOutcome::Closed(target)] if target == &retirement_target
+    ));
 
-    let reopened: Arc<GraphDb> = registry
-        .reopen_raw_for_harness(request)
+    let reopened: GraphDbLeaseV1 = registry
+        .reopen_for_harness(request)
         .expect("reopen persistent graph");
     let visits = SessionRelationGraphStore::new(reopened)
         .summary_sources(
