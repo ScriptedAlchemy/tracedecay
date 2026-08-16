@@ -24,7 +24,7 @@ use tracedecay_usecases::session::lcm::{
 };
 
 use super::DaemonLcmAuthority;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 
 const LCM_ACTOR_ID: &str = "actor.daemon.lcm";
 const LCM_GRANT_ID: &str = "grant.daemon.lcm";
@@ -232,7 +232,7 @@ fn identity_matches_shard(identity: &ResolvedSessionIdentity, shard: &StoreShard
 }
 
 pub(crate) fn mount_registered_lcm_authority(
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     identity: ResolvedSessionIdentity,
     expected_shard: &StoreShardIdV1,
 ) -> Option<Arc<dyn MountedLcmAuthorityPort>> {

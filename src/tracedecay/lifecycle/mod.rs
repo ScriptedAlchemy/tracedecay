@@ -14,7 +14,7 @@ use crate::config::{
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::storage::{self, StoreLayout};
 use crate::support::weak_registry::WeakRegistry;
 use tokio::sync::Mutex as AsyncMutex;
@@ -316,8 +316,8 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
         store_layout: StoreLayout,
-        configuration_database: Arc<RegisteredGlobalDb>,
-        profile_database: Arc<RegisteredGlobalDb>,
+        configuration_database: RegisteredGlobalDbLeaseV1,
+        profile_database: RegisteredGlobalDbLeaseV1,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
         // Computed once and reused below (for `active_branch`) instead of
@@ -542,8 +542,8 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
         store_layout: StoreLayout,
-        configuration_database: Arc<RegisteredGlobalDb>,
-        profile_database: Arc<RegisteredGlobalDb>,
+        configuration_database: RegisteredGlobalDbLeaseV1,
+        profile_database: RegisteredGlobalDbLeaseV1,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
@@ -744,8 +744,8 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
         store_layout: StoreLayout,
-        configuration_database: Arc<RegisteredGlobalDb>,
-        profile_database: Arc<RegisteredGlobalDb>,
+        configuration_database: RegisteredGlobalDbLeaseV1,
+        profile_database: RegisteredGlobalDbLeaseV1,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);

@@ -69,7 +69,7 @@ pub(super) async fn execute_work_application(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
-    let activity_database = Arc::clone(&registered.database);
+    let activity_database = registered.database.clone();
     let activity_root = project_root.clone();
     let mutates = work_invocation_mutates(&request);
     let response = request_dispatch::dispatch_work_application(
@@ -105,7 +105,7 @@ pub(super) async fn execute_work_application(
 }
 
 fn publish_committed_task_activity_in_background(
-    database: Arc<crate::global_db::RegisteredGlobalDb>,
+    database: crate::global_db::RegisteredGlobalDbLeaseV1,
     project_root: PathBuf,
     detail: Option<String>,
 ) {

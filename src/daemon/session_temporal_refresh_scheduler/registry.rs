@@ -17,7 +17,7 @@ use super::wake::{
     SessionTemporalRefreshWakeState,
 };
 use super::worker::run_session_temporal_refresh_scheduler;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 
 #[derive(Default, Debug, Eq, PartialEq)]
 pub(super) struct SessionTemporalRefreshPassReport {
@@ -144,7 +144,7 @@ impl Drop for SessionTemporalRefreshSchedulerRegistry {
 impl SessionTemporalRefreshSchedulerRegistry {
     fn spawn_entry(
         &self,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         route: Option<SessionTemporalRefreshWake>,
         history: Option<SharedSessionHistoricalIngestor>,
     ) -> SessionTemporalRefreshSchedulerEntry {
@@ -163,7 +163,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             let mut panic_attempt = 0u32;
             loop {
                 workers.spawn(run_session_temporal_refresh_scheduler(
-                    Arc::clone(&database),
+                    database.clone(),
                     Arc::clone(&worker_state),
                     Arc::clone(&projector),
                     Arc::clone(&worker_history),
@@ -211,7 +211,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     pub(in crate::daemon) async fn ensure_project(
         &self,
         owner: StoreOwnerKey,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> SessionTemporalRefreshWake {
         if self.shutting_down.load(Ordering::Acquire) {
             return inert_session_temporal_refresh_wake();
@@ -264,7 +264,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     pub(in crate::daemon) async fn ensure_profile(
         &self,
         database_path: std::path::PathBuf,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> SessionTemporalRefreshWake {
         if self.shutting_down.load(Ordering::Acquire) {
             return inert_session_temporal_refresh_wake();
@@ -310,7 +310,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     pub(in crate::daemon) async fn ensure_project_with_history(
         &self,
         owner: StoreOwnerKey,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         history: SharedSessionHistoricalIngestor,
     ) -> SessionTemporalRefreshWake {
         let wake = self.ensure_project(owner.clone(), database).await;
@@ -332,7 +332,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     pub(in crate::daemon) async fn ensure_profile_with_history(
         &self,
         database_path: std::path::PathBuf,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         history: SharedSessionHistoricalIngestor,
     ) -> SessionTemporalRefreshWake {
         let wake = self.ensure_profile(database_path.clone(), database).await;
@@ -355,7 +355,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         &self,
         old_owner: &StoreOwnerKey,
         new_owner: StoreOwnerKey,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) {
         if old_owner == &new_owner {
             self.ensure_project(new_owner, database).await;

@@ -1155,7 +1155,7 @@ mod tests {
         // must refuse most of them without blocking the query that produced
         // them, and every refusal must be counted.
         let producer =
-            BoundedObservabilityProducerV1::start(std::sync::Arc::clone(&db), identity.clone(), 1)
+            BoundedObservabilityProducerV1::start(std::sync::db.clone(), identity.clone(), 1)
                 .expect("bounded producer");
 
         let source = |kind: &str| ObservedWithCoverageV1 {

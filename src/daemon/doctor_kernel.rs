@@ -1231,9 +1231,9 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     project_id: tracedecay_domain::ProjectId,
     layout: crate::storage::StoreLayout,
     graph: crate::db::Database,
-    registry: Arc<crate::global_db::RegisteredGlobalDb>,
-    profile_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
-    project_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
+    registry: crate::global_db::RegisteredGlobalDbLeaseV1,
+    profile_sessions: crate::global_db::RegisteredGlobalDbLeaseV1,
+    project_sessions: crate::global_db::RegisteredGlobalDbLeaseV1,
     profile_root: PathBuf,
     host_home: Option<PathBuf>,
     remote_operational: RemoteOperationalReadV1,
@@ -1250,8 +1250,8 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let layout = layout.clone();
         let graph = graph.clone();
         let registry = Arc::clone(&registry);
-        let profile_sessions = Arc::clone(&profile_sessions);
-        let project_sessions = Arc::clone(&project_sessions);
+        let profile_sessions = profile_sessions.clone();
+        let project_sessions = project_sessions.clone();
         let profile_root = profile_root.clone();
         let host_home = host_home.clone();
         let remote_operational = remote_operational.clone();

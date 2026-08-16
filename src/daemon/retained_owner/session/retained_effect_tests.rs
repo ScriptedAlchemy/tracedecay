@@ -33,7 +33,7 @@ use crate::daemon::session_retrieval::{
     DaemonSessionRetrievalRoot, DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
 };
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::server::{DaemonSessionRefreshService, DaemonWorkflowIndexReadService};
 use crate::mcp::tools::{SessionRefreshServiceOutcome, SessionRefreshServicePort};
@@ -44,7 +44,7 @@ const BRANCH_ID: &str = "branch.project.test";
 
 struct RetiredRefreshFixture {
     _runtime: HostAdmissionTestRuntimeV1,
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     registry: SessionTemporalRefreshSchedulerRegistry,
     refresh: Arc<DaemonSessionRefreshService>,
     application: RetainedSurfaceServiceV1<'static>,
@@ -76,7 +76,7 @@ impl RetiredRefreshFixture {
         let owner = owner_for(&database, &project_id);
         let registry = SessionTemporalRefreshSchedulerRegistry::default();
         let wake = registry
-            .ensure_project(owner.clone(), Arc::clone(&database))
+            .ensure_project(owner.clone(), database.clone())
             .await;
         registry.retire_project(&owner).await;
 
@@ -93,17 +93,17 @@ impl RetiredRefreshFixture {
         let session_root_id = identity.root_id().clone();
         let configuration_digest = ManifestDigest::new(DIGEST).expect("configuration digest");
         let retrieval = DaemonSessionRetrievalService::new(
-            Arc::clone(&database),
+            database.clone(),
             retrieval_root,
             Some(wake.clone()),
         )
         .expect("project retrieval service");
         let refresh = Arc::new(DaemonSessionRefreshService::new(
-            Arc::clone(&database),
+            database.clone(),
             wake,
             Some(project_id.as_str().to_owned()),
         ));
-        let workflow_index = Arc::new(DaemonWorkflowIndexReadService::new(Arc::clone(&database)));
+        let workflow_index = Arc::new(DaemonWorkflowIndexReadService::new(database.clone()));
         let port = DirectRetainedSessionPortV1::project(ProjectRetainedSessionAuthoritiesV1 {
             project_root: project_root.clone(),
             project_id: project_id.clone(),
@@ -113,7 +113,7 @@ impl RetiredRefreshFixture {
             configuration_digest: configuration_digest.clone(),
             refresh: refresh.clone(),
             retrieval: Arc::new(retrieval) as Arc<dyn SessionApplicationRetrievalPortV1>,
-            session_database: Arc::clone(&database),
+            session_database: database.clone(),
             workflow_index,
         });
         let application = RetainedSurfaceServiceV1::new(
@@ -282,7 +282,7 @@ async fn reopen_and_settle(
         .expect("reopened project database");
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
     let wake = registry
-        .ensure_project(owner_for(&database, project_id), Arc::clone(&database))
+        .ensure_project(owner_for(&database, project_id), database.clone())
         .await;
     assert!(
         wake.wake_and_wait_until_idle(Duration::from_secs(2)).await,

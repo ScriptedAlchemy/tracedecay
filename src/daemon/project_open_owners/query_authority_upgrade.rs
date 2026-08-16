@@ -27,7 +27,7 @@ pub(super) enum DeferredQueryAuthorityMountV1 {
     /// activation); cursor keys are reloaded at attempt time from the same
     /// durable session store the open-time mount used.
     CoreFallback {
-        session_db: Arc<crate::global_db::RegisteredGlobalDb>,
+        session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
     },
 }
 

@@ -9,7 +9,7 @@ use tracedecay_tool_catalog::BindingSurface;
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::daemon_client::InvocationCancellationPolicy;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -339,7 +339,7 @@ pub(super) async fn dispatch_info_tools(
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
     selected_scope_prefix: Option<&str>,
-    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    active_project_session_db: Option<&RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match tool_name {
@@ -522,7 +522,7 @@ pub(super) async fn dispatch_analysis_tools(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
-    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    active_project_session_db: Option<&RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match tool_name {
@@ -760,7 +760,7 @@ pub(super) async fn dispatch_retained_application_tools(
     cg: &TraceDecay,
     mut args: Value,
     _scope_prefix: Option<&str>,
-    _active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    _active_project_session_db: Option<&RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     let retained_operation = super::retained_catalog::retained_mcp_operation(tool_name, &args)

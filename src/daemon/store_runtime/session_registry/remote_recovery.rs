@@ -22,7 +22,7 @@ use tracedecay_store::{RemoteWriterFenceInstallV1, StoreShardIdV1};
 use super::{
     DatabaseAuthority, DestructiveMaintenanceReservation, DestructiveMaintenanceTarget,
     LocalProfileIdentityAuthorityV1, LocalStoreLocatorResolutionV1, LocalStoreRuntimeResolverV1,
-    ProfileAuthorityPin, RegisteredGlobalDb, Result, StoreRuntimeKey, StoreRuntimeRegistry,
+    ProfileAuthorityPin, RegisteredGlobalDbLeaseV1, Result, StoreRuntimeKey, StoreRuntimeRegistry,
     registry_open_error, session_registry_error,
 };
 
@@ -58,7 +58,7 @@ pub(super) struct RemoteRecoveryPublicationContextV1 {
     graph_registry: GraphDbRegistry,
     graph_lifecycle_cancelled: Arc<AtomicBool>,
     profile_pin: ProfileAuthorityPin,
-    project_sessions: Arc<tokio::sync::Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>>,
+    project_sessions: Arc<tokio::sync::Mutex<BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>>>,
     replay: Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
     session_sync_service:
         Arc<OnceLock<Weak<crate::daemon::session_sync::DaemonSessionSyncService>>>,
@@ -81,7 +81,7 @@ impl RemoteRecoveryPublicationContextV1 {
         graph_registry: GraphDbRegistry,
         graph_lifecycle_cancelled: Arc<AtomicBool>,
         profile_pin: ProfileAuthorityPin,
-        project_sessions: Arc<tokio::sync::Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>>,
+        project_sessions: Arc<tokio::sync::Mutex<BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>>>,
         replay: Arc<
             crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1,
         >,
@@ -152,7 +152,7 @@ impl RemoteRecoveryPublicationContextV1 {
 
     async fn abort_and_remount_restore(
         &self,
-        mounted: &mut BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>,
+        mounted: &mut BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>,
         project_id: ProjectId,
         expected_opened_file_identity: u64,
         reservation: DestructiveMaintenanceReservation,
@@ -177,7 +177,7 @@ impl RemoteRecoveryPublicationContextV1 {
 
     async fn finish_published_restore(
         &self,
-        mut mounted: tokio::sync::OwnedMutexGuard<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
+        mut mounted: tokio::sync::OwnedMutexGuard<BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>>,
         project_id: ProjectId,
         destination: &Path,
         rollback: &Path,

@@ -119,7 +119,7 @@ async fn bounded_producer_persists_through_registered_authority_and_cancels_clos
         policy_revision: "policy.v1".into(),
     };
     let producer =
-        BoundedObservabilityProducerV1::start(Arc::clone(&db), identity, 4).expect("producer");
+        BoundedObservabilityProducerV1::start(db.clone(), identity, 4).expect("producer");
 
     let mut leaking = envelope(&scope, "boot:producer", 9, 900_000);
     leaking.trace_id = "/private/operator/path".into();
@@ -158,8 +158,8 @@ async fn bounded_producer_stamps_its_mounted_identity_and_preserves_delayed_evid
         configuration_revision: "configuration.mounted.v1".into(),
         policy_revision: "policy.mounted.v1".into(),
     };
-    let producer = BoundedObservabilityProducerV1::start(Arc::clone(&db), identity.clone(), 4)
-        .expect("producer");
+    let producer =
+        BoundedObservabilityProducerV1::start(db.clone(), identity.clone(), 4).expect("producer");
 
     let mut delayed = envelope(&scope, "boot:caller", 41, 1_000_000);
     delayed.producer_revision = "producer.caller.v1".into();
@@ -215,7 +215,7 @@ async fn durable_owner_replay_reuses_the_exact_delivery_across_producer_restart(
         policy_revision: "policy.owner.v1".into(),
     };
     let producer =
-        BoundedObservabilityProducerV1::start(Arc::clone(&db), identity, 4).expect("producer");
+        BoundedObservabilityProducerV1::start(db.clone(), identity, 4).expect("producer");
     let owner = envelope(&scope, "caller", 71, 7_100_000);
     assert_eq!(
         producer
@@ -233,7 +233,7 @@ async fn durable_owner_replay_reuses_the_exact_delivery_across_producer_restart(
         configuration_revision: "configuration.owner.v2".into(),
         policy_revision: "policy.owner.v2".into(),
     };
-    let restarted = BoundedObservabilityProducerV1::start(Arc::clone(&db), restarted_identity, 4)
+    let restarted = BoundedObservabilityProducerV1::start(db.clone(), restarted_identity, 4)
         .expect("restarted producer");
     assert_eq!(
         restarted
@@ -284,7 +284,7 @@ async fn live_queued_owner_claim_is_not_recovered_as_delayed_work() {
         .expect("hold registered writer");
     let producer = Arc::new(
         BoundedObservabilityProducerV1::start(
-            Arc::clone(&db),
+            db.clone(),
             ObservabilityProducerIdentityV1 {
                 authorized_scope_ref: scope.clone(),
                 process_boot_id: "boot:live-owner".into(),
@@ -383,7 +383,7 @@ async fn producer_idle_worker_rebuilds_a_dirty_daily_rollup_without_a_request() 
     .expect("record newer unrelated observability event");
 
     let producer = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
+        db.clone(),
         ObservabilityProducerIdentityV1 {
             authorized_scope_ref: scope.clone(),
             process_boot_id: "boot:rollup-worker".into(),
@@ -421,7 +421,7 @@ async fn persisted_topology_wakes_idle_rollup_after_unrelated_queue_tail() {
     let scope = "project.observability.v2".to_owned();
     let day = 259_200_i64;
     let producer = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
+        db.clone(),
         ObservabilityProducerIdentityV1 {
             authorized_scope_ref: scope.clone(),
             process_boot_id: "boot:rollup-source-wakeup".into(),
@@ -487,7 +487,7 @@ async fn stale_daily_projection_releases_its_claim_and_leaves_the_day_dirty() {
         .expect("record stale topology source event");
 
     let producer = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
+        db.clone(),
         ObservabilityProducerIdentityV1 {
             authorized_scope_ref: scope.clone(),
             process_boot_id: "boot:rollup-refusal".into(),
@@ -561,7 +561,7 @@ async fn restart_recovers_pending_owner_delivery_without_allocating_a_new_carrie
     .expect("pending durable claim");
 
     let restarted = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
+        db.clone(),
         ObservabilityProducerIdentityV1 {
             authorized_scope_ref: scope.clone(),
             process_boot_id: "boot:pending-restarted".into(),
@@ -605,7 +605,7 @@ async fn nonblocking_owner_offer_is_claimed_by_worker_and_replay_keeps_first_del
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
     let first = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
+        db.clone(),
         ObservabilityProducerIdentityV1 {
             authorized_scope_ref: scope.clone(),
             process_boot_id: "boot:nonblocking-first".into(),
@@ -626,7 +626,7 @@ async fn nonblocking_owner_offer_is_claimed_by_worker_and_replay_keeps_first_del
     first.shutdown().await.expect("first shutdown");
 
     let restarted = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
+        db.clone(),
         ObservabilityProducerIdentityV1 {
             authorized_scope_ref: scope.clone(),
             process_boot_id: "boot:nonblocking-restarted".into(),
@@ -698,7 +698,7 @@ async fn drops_carried_by_a_later_normal_event_remain_explicit_and_counted() {
         .await
         .expect("hold registered writer");
     let producer =
-        BoundedObservabilityProducerV1::start(Arc::clone(&db), identity, 1).expect("producer");
+        BoundedObservabilityProducerV1::start(db.clone(), identity, 1).expect("producer");
     assert_eq!(
         producer
             .try_emit(envelope(&scope, "boot:carried-drops", 1, 1))
@@ -814,7 +814,7 @@ async fn cancellation_is_bounded_when_the_registered_writer_is_blocked() {
         .await
         .expect("hold registered writer");
     let producer = BoundedObservabilityProducerV1::start_with_deadlines(
-        Arc::clone(&db),
+        db.clone(),
         identity,
         1,
         ObservabilityProducerDeadlinesV1 {
@@ -1034,7 +1034,7 @@ pub mod work_rollup_harness {
     struct PreparedWorkRollupCase {
         _pin: tracedecay_runtime_core::config::PinnedUserDataDir,
         _runtime: RegisteredGlobalDbTestRuntime,
-        database: Arc<tracedecay_global_db::RegisteredGlobalDb>,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         producer: BoundedObservabilityProducerV1,
         dropped_sources: usize,
         setup_elapsed: Duration,
@@ -1494,7 +1494,7 @@ pub mod work_rollup_harness {
         .expect("registered fresh-store runtime");
         let database = runtime.profile_database_arc();
         let producer = BoundedObservabilityProducerV1::start(
-            Arc::clone(&database),
+            database.clone(),
             ObservabilityProducerIdentityV1 {
                 authorized_scope_ref: SCOPE.to_owned(),
                 process_boot_id: "boot.work-rollup.rc01".to_owned(),

@@ -73,7 +73,7 @@ async fn runtime(
 ) -> (
     tempfile::TempDir,
     ProjectId,
-    Arc<crate::global_db::RegisteredGlobalDb>,
+    crate::global_db::RegisteredGlobalDbLeaseV1,
 ) {
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new(format!("project.{name}")).expect("project id");
@@ -97,7 +97,7 @@ async fn project_runtime_reuses_one_producer_and_shutdown_flushes_it() {
     let first = service
         .mount_observability_producer(
             root.clone(),
-            Arc::clone(&database),
+            database.clone(),
             project_id.clone(),
             digest('a'),
             digest('b'),
@@ -107,7 +107,7 @@ async fn project_runtime_reuses_one_producer_and_shutdown_flushes_it() {
     let second = service
         .mount_observability_producer(
             root.clone(),
-            Arc::clone(&database),
+            database.clone(),
             project_id.clone(),
             digest('a'),
             digest('b'),
@@ -155,7 +155,7 @@ async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown
     let first = first_service
         .mount_observability_producer(
             root.clone(),
-            Arc::clone(&database),
+            database.clone(),
             project_id.clone(),
             digest('c'),
             digest('d'),
@@ -168,7 +168,7 @@ async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown
     let restarted = restarted_service
         .mount_observability_producer(
             root,
-            Arc::clone(&database),
+            database.clone(),
             project_id.clone(),
             digest('c'),
             digest('d'),
@@ -193,7 +193,7 @@ async fn each_producer_lifetime_uses_a_disjoint_ordered_stream() {
     let first = first_service
         .mount_observability_producer(
             PathBuf::from("/project/observability-stream-identity"),
-            Arc::clone(&database),
+            database.clone(),
             project_id.clone(),
             digest('1'),
             digest('2'),
@@ -203,7 +203,7 @@ async fn each_producer_lifetime_uses_a_disjoint_ordered_stream() {
     let first_reconciled = first_service
         .mount_observability_producer(
             PathBuf::from("/project/observability-stream-identity"),
-            Arc::clone(&database),
+            database.clone(),
             project_id.clone(),
             digest('1'),
             digest('2'),
@@ -218,7 +218,7 @@ async fn each_producer_lifetime_uses_a_disjoint_ordered_stream() {
     let linked = first_service
         .mount_observability_producer(
             PathBuf::from("/project/observability-stream-identity-linked"),
-            Arc::clone(&database),
+            database.clone(),
             project_id.clone(),
             digest('1'),
             digest('2'),
@@ -237,7 +237,7 @@ async fn each_producer_lifetime_uses_a_disjoint_ordered_stream() {
     let restarted = restarted_service
         .mount_observability_producer(
             PathBuf::from("/project/observability-stream-identity"),
-            Arc::clone(&database),
+            database.clone(),
             project_id.clone(),
             digest('1'),
             digest('2'),
@@ -331,7 +331,7 @@ async fn exact_profile_routing_collapses_linked_roots_without_crossing_profiles(
     let producer_a = service
         .mount_observability_producer(
             root_a,
-            Arc::clone(&database_a),
+            database_a.clone(),
             project_id.clone(),
             digest('1'),
             digest('2'),
@@ -385,7 +385,7 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database) = runtime("observability-shutdown-failure").await;
     let producer = BoundedObservabilityProducerV1::start_with_deadlines(
-        Arc::clone(&database),
+        database.clone(),
         ObservabilityProducerIdentityV1 {
             authorized_scope_ref: project_id.as_str().to_owned(),
             process_boot_id: "daemon:shutdown-failure".to_owned(),
@@ -400,7 +400,7 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
         },
     )
     .expect("producer");
-    let registered = RegisteredObservabilityProducerV1::new(Arc::clone(&database), producer, 1)
+    let registered = RegisteredObservabilityProducerV1::new(database.clone(), producer, 1)
         .expect("registered observability producer");
     let blocker = database
         .begin_write_transaction()

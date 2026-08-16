@@ -785,8 +785,8 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
             project_root,
             transcript_source_home: None,
             project_sessions,
-            user_sessions: Arc::clone(&profile_sessions),
-            registry: Arc::clone(&profile_sessions),
+            user_sessions: profile_sessions.clone(),
+            registry: profile_sessions.clone(),
             startup_import: false,
             project_refresh:
                 crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::configuration::{ConfigurationRevisionId, UserProfileId};
 use tracedecay_domain::{Confidence, FactId, FactOwnerV1, SessionId, TemporalCoverageCountsV1};
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
 use super::*;
@@ -32,7 +32,7 @@ use user_scope_graph_runtime::bind_profile_memory_graph_runtime;
 
 struct FixtureProfileRuntime {
     profile_id: UserProfileId,
-    sessions: Arc<RegisteredGlobalDb>,
+    sessions: RegisteredGlobalDbLeaseV1,
     memory: Database,
 }
 
@@ -41,8 +41,8 @@ impl ProfileRuntime for FixtureProfileRuntime {
         &self.profile_id
     }
 
-    fn profile_sessions(&self) -> RuntimeFuture<'_, Arc<RegisteredGlobalDb>> {
-        Box::pin(async { Ok(Arc::clone(&self.sessions)) })
+    fn profile_sessions(&self) -> RuntimeFuture<'_, RegisteredGlobalDbLeaseV1> {
+        Box::pin(async { Ok(self.sessions.clone()) })
     }
 
     fn open_user_memory_db(&self) -> RuntimeFuture<'_, Database> {

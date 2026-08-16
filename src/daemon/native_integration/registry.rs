@@ -41,7 +41,7 @@ use tracedecay_usecases::stack_coordinator::{
 
 #[cfg(test)]
 use crate::db::engine::TestConnection;
-use crate::global_db::{RegisteredGlobalDb, VerifiedGraphRuntimePortV1};
+use crate::global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use super::stack_runtime::DaemonGitHubStackRuntimeV1;
@@ -110,7 +110,7 @@ struct NativeIntegrationStoreRegistry {
 impl NativeIntegrationStoreRegistry {
     fn ensure(
         &self,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> NativeIntegrationStoreResult<SharedDaemonNativeIntegrationStore> {
         // The registered runtime authority already supplies the canonical
         // database identity; a fresh SQLite shard may not have materialized
@@ -318,7 +318,7 @@ impl DaemonNativeIntegrationOwner {
     /// creates a second queue actor or a second background drain task.
     pub(crate) fn mount_github_stack_runtime(
         &self,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
         coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
@@ -391,7 +391,7 @@ impl DaemonNativeIntegrationServiceRegistry {
     /// then durable startup recovery. A failed recovery mounts nothing.
     pub(crate) async fn ensure(
         &self,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         repository_root: PathBuf,
         project_id: ProjectId,
         repository_id: RepositoryId,

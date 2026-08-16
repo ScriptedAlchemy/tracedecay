@@ -291,7 +291,7 @@ pub(crate) struct DaemonInvocationService {
     work_attempt_processes: Arc<work_attempt_exec::WorkAttemptProcessRegistryV1>,
     worktree_holder_admission: crate::daemon::native_integration::WorktreeHolderAdmissionFenceV1,
     session_holder_databases:
-        Arc<Mutex<BTreeMap<PathBuf, Arc<crate::global_db::RegisteredGlobalDb>>>>,
+        Arc<Mutex<BTreeMap<PathBuf, crate::global_db::RegisteredGlobalDbLeaseV1>>>,
 }
 
 #[cfg(test)]
@@ -400,7 +400,7 @@ impl DaemonInvocationService {
     /// cleanup holders even when no project-store mirror exists.
     pub(crate) async fn mount_session_holder_databases(
         &self,
-        databases: impl IntoIterator<Item = Arc<crate::global_db::RegisteredGlobalDb>>,
+        databases: impl IntoIterator<Item = crate::global_db::RegisteredGlobalDbLeaseV1>,
     ) {
         let mut mounted = self.session_holder_databases.lock().await;
         for database in databases {

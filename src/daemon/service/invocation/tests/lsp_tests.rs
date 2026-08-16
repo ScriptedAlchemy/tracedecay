@@ -409,7 +409,7 @@ struct LspDeliveryFixture {
     recorder: Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>,
     authority: Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
     producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
-    db: Arc<crate::global_db::RegisteredGlobalDb>,
+    db: crate::global_db::RegisteredGlobalDbLeaseV1,
 }
 
 async fn lsp_delivery_fixture() -> LspDeliveryFixture {
@@ -433,7 +433,7 @@ async fn lsp_delivery_fixture() -> LspDeliveryFixture {
     };
     let producer = Arc::new(
         tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
-            Arc::clone(&db),
+            db.clone(),
             identity.clone(),
             8,
         )
@@ -441,7 +441,7 @@ async fn lsp_delivery_fixture() -> LspDeliveryFixture {
     );
     let authority = Arc::new(
         tracedecay_usecases::observability::DeliverySettlementAuthorityV1::new(
-            Arc::clone(&db),
+            db.clone(),
             Arc::clone(&producer),
             identity,
         )

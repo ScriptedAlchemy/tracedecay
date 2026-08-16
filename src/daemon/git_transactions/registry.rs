@@ -13,7 +13,7 @@ use tracedecay_store::{GitIndexTransactionStoreError, GitIndexTransactionStoreRe
 
 #[cfg(test)]
 use crate::db::engine::TestConnection;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 
 use super::DaemonGitIndexTransactionStore;
 use super::SharedDaemonGitIndexTransactionStore;
@@ -31,7 +31,7 @@ impl GitIndexTransactionStoreRegistry {
     /// Returns the existing actor for `database`, or opens exactly one.
     pub(crate) fn ensure(
         &self,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> GitIndexTransactionStoreResult<SharedDaemonGitIndexTransactionStore> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(GitIndexTransactionStoreError::Unavailable);

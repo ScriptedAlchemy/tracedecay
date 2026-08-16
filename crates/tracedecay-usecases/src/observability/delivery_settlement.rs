@@ -8,7 +8,7 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::{
     DeliveryAttemptClaimV1, DeliverySourceReceiptReadV1, DurableDeliverySettlementReceiptV1,
-    PendingDeliverySourceReceiptV1, RegisteredGlobalDb,
+    PendingDeliverySourceReceiptV1, RegisteredGlobalDbLeaseV1,
 };
 
 use super::delivery_spool::recorder_spool_root;
@@ -27,14 +27,14 @@ pub struct DeliverySettlementEmissionV1 {
 /// complete census to Plan 26 observability. Callers may replay an exact
 /// receipt; this type does not scan or fabricate receipts after process loss.
 pub struct DeliverySettlementAuthorityV1 {
-    db: Arc<RegisteredGlobalDb>,
+    db: RegisteredGlobalDbLeaseV1,
     producer: Arc<BoundedObservabilityProducerV1>,
     identity: ObservabilityProducerIdentityV1,
 }
 
 impl DeliverySettlementAuthorityV1 {
     pub fn new(
-        db: Arc<RegisteredGlobalDb>,
+        db: RegisteredGlobalDbLeaseV1,
         producer: Arc<BoundedObservabilityProducerV1>,
         identity: ObservabilityProducerIdentityV1,
     ) -> Result<Self, &'static str> {

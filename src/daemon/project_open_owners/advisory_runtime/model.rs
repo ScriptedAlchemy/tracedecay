@@ -12,7 +12,7 @@ use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 pub(crate) struct ProjectOpenDependentOwnerState {
     pub(in crate::daemon::project_open_owners) database: crate::db::Database,
     pub(in crate::daemon::project_open_owners) session_db:
-        Arc<crate::global_db::RegisteredGlobalDb>,
+        crate::global_db::RegisteredGlobalDbLeaseV1,
     pub(in crate::daemon::project_open_owners) graph: Arc<crate::tracedecay::TraceDecay>,
     pub(in crate::daemon::project_open_owners) code_graph:
         Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,

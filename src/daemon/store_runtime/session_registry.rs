@@ -16,7 +16,7 @@ use super::register_registered_schema_installer;
 use super::registry::{
     DestructiveMaintenanceReservation, DestructiveMaintenanceTarget,
     LifecycleShardRuntimePublisher, ProfileAuthorityPin, ProfileAuthorityPinResult,
-    StoreRuntimeHandle, StoreRuntimeKey, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
+    StoreRuntimeClientLease, StoreRuntimeKey, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeResolver,
 };
 use super::resolver::{
@@ -26,7 +26,7 @@ use super::resolver::{
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 
 mod code_graph;
 mod code_graph_manifest;
@@ -89,10 +89,10 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     graph_manifest_provider: Arc<code_graph_manifest::DaemonCodeGraphManifestProviderV1>,
     graph_lifecycle_cancelled: Arc<AtomicBool>,
     profile_pin: ProfileAuthorityPin,
-    profile_runtime: StoreRuntimeHandle,
-    profile_database: Mutex<Option<Arc<RegisteredGlobalDb>>>,
+    profile_runtime: StoreRuntimeClientLease,
+    profile_database: Mutex<Option<RegisteredGlobalDbLeaseV1>>,
     profile_memory: Mutex<Option<Arc<Database>>>,
-    profile_sessions: Mutex<Option<Arc<RegisteredGlobalDb>>>,
+    profile_sessions: Mutex<Option<RegisteredGlobalDbLeaseV1>>,
     remote_nodes: Mutex<BTreeMap<BrainNodeId, Arc<Database>>>,
     remote_credential_authority:
         Arc<crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1>,
@@ -105,7 +105,7 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
         >,
     >,
     project_memory: Arc<Mutex<BTreeMap<ProjectId, Arc<Database>>>>,
-    project_sessions: Arc<Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>>,
+    project_sessions: Arc<Mutex<BTreeMap<ProjectId, RegisteredGlobalDbLeaseV1>>>,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     retained_hook_tasks: RetainedHookTasks,
     memory_graph_reconciliation_tasks: Arc<RetainedMemoryGraphReconciliationTasksV1>,
@@ -222,7 +222,7 @@ impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {
         self.identity.profile_id()
     }
 
-    fn profile_sessions(&self) -> RuntimeFuture<'_, Arc<RegisteredGlobalDb>> {
+    fn profile_sessions(&self) -> RuntimeFuture<'_, RegisteredGlobalDbLeaseV1> {
         Box::pin(DaemonSessionRuntimeRegistryV1::profile_sessions(self))
     }
 
@@ -276,7 +276,7 @@ async fn open_runtime(
     database_authority: Option<DatabaseAuthority>,
     initialize_if_missing: bool,
     operation: &'static str,
-) -> Result<StoreRuntimeHandle> {
+) -> Result<StoreRuntimeClientLease> {
     open_runtime_with_presence(
         registry,
         resolver,
@@ -301,7 +301,7 @@ async fn open_runtime_during_remote_restore(
     profile_pin: Option<ProfileAuthorityPin>,
     expected_opened_file_identity: u64,
     operation: &'static str,
-) -> Result<StoreRuntimeHandle> {
+) -> Result<StoreRuntimeClientLease> {
     open_runtime_with_presence(
         registry,
         resolver,
@@ -330,7 +330,7 @@ async fn open_runtime_with_presence(
     allow_remote_restore_fence: bool,
     required_opened_file_identity: Option<u64>,
     operation: &'static str,
-) -> Result<(StoreRuntimeHandle, bool)> {
+) -> Result<(StoreRuntimeClientLease, bool)> {
     let key = StoreRuntimeKey::new(shard_id.clone(), incarnation);
     let locator = match resolver.resolve_key(&key) {
         LocalStoreLocatorResolutionV1::Resolved(locator) => locator,

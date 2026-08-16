@@ -15,7 +15,7 @@ use tracedecay_usecases::host_admission::{
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::support::weak_registry::WeakRegistry;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
@@ -82,9 +82,9 @@ pub struct HostAdmissionTestRuntimeV1 {
     profile_id: UserProfileId,
     profile_root: PathBuf,
     project_id: Option<ProjectId>,
-    profile_database: Arc<RegisteredGlobalDb>,
-    profile_registered: Arc<RegisteredGlobalDb>,
-    project_registered: Option<Arc<RegisteredGlobalDb>>,
+    profile_database: RegisteredGlobalDbLeaseV1,
+    profile_registered: RegisteredGlobalDbLeaseV1,
+    project_registered: Option<RegisteredGlobalDbLeaseV1>,
     session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     _database_scope: DaemonDatabaseScope,
 }
@@ -178,7 +178,7 @@ impl HostAdmissionTestRuntimeV1 {
             profile_root: self.profile_root.clone(),
             project_id: Some(project_id),
             profile_database: Arc::clone(&self.profile_database),
-            profile_registered: Arc::clone(&self.profile_registered),
+            profile_registered: self.profile_registered.clone(),
             project_registered: Some(registered),
             session_registry: Arc::clone(&self.session_registry),
             _database_scope: database_scope,
@@ -297,10 +297,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub(crate) fn registered_database_arc(
         &self,
         scope: HostAdmissionScope,
-    ) -> Option<Arc<RegisteredGlobalDb>> {
+    ) -> Option<RegisteredGlobalDbLeaseV1> {
         match scope {
             HostAdmissionScope::Project => self.project_registered.clone(),
-            HostAdmissionScope::Profile => Some(Arc::clone(&self.profile_registered)),
+            HostAdmissionScope::Profile => Some(self.profile_registered.clone()),
         }
     }
 
@@ -835,7 +835,7 @@ impl HostAdmissionTestRuntimeV1 {
                     message: "registered ProjectSessions mount is unavailable".to_owned(),
                 })?;
         let profile_database = Arc::clone(&self.profile_database);
-        let profile_sessions = Arc::clone(&self.profile_registered);
+        let profile_sessions = self.profile_registered.clone();
         let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
         let mut context =
             crate::mcp::server::McpServerConstructionContext::direct(cg, scope_prefix)
@@ -894,7 +894,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[cfg(test)]
-    fn project_configuration_database_for_test(&self) -> Result<Arc<RegisteredGlobalDb>> {
+    fn project_configuration_database_for_test(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         self.project_registered
             .clone()
             .ok_or_else(|| TraceDecayError::Database {
@@ -1073,7 +1073,7 @@ impl HostAdmissionTestRuntimeV1 {
         open_options: &TraceDecayOpenOptions,
     ) -> Result<(
         tracedecay_runtime_core::storage::StoreLayout,
-        Arc<RegisteredGlobalDb>,
+        RegisteredGlobalDbLeaseV1,
     )> {
         let project_id = self
             .project_id

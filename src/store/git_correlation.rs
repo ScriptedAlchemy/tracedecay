@@ -63,7 +63,7 @@ fn shared_git_evidence_publication_lock_for_identity(
 
 /// Adapter over an already-open project-sessions database.
 ///
-/// The holder `D` is generic so callers that own an `Arc<RegisteredGlobalDb>`
+/// The holder `D` is generic so callers that own a `RegisteredGlobalDbLeaseV1`
 /// can build a lifetime-free (`'static`) adapter. A borrowed adapter makes the
 /// `GitCorrelationSessionStore` impl apply only "for some specific lifetime",
 /// so any future that holds one across an await and must then prove `Send`

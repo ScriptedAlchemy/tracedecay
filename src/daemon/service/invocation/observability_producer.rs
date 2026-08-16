@@ -35,7 +35,7 @@ fn daemon_observability_producer_identity(
 
 fn registered_observability_producer_matches_mount(
     registered: &RegisteredObservabilityProducerV1,
-    database: &Arc<crate::global_db::RegisteredGlobalDb>,
+    database: &crate::global_db::RegisteredGlobalDbLeaseV1,
     project_id: &ProjectId,
     configuration_revision: &ManifestDigest,
     policy_revision: &ManifestDigest,
@@ -57,7 +57,7 @@ impl DaemonInvocationService {
     pub(crate) async fn mount_observability_producer(
         &self,
         project_root: PathBuf,
-        database: Arc<crate::global_db::RegisteredGlobalDb>,
+        database: crate::global_db::RegisteredGlobalDbLeaseV1,
         project_id: ProjectId,
         configuration_revision: ManifestDigest,
         policy_revision: ManifestDigest,
@@ -91,7 +91,7 @@ impl DaemonInvocationService {
                     )?;
                     let producer =
                         tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
-                            Arc::clone(&database),
+                            database.clone(),
                             identity,
                             DAEMON_OBSERVABILITY_QUEUE_CAPACITY,
                         )
@@ -101,7 +101,7 @@ impl DaemonInvocationService {
                             ),
                         })?;
                     RegisteredObservabilityProducerV1::new(
-                        Arc::clone(&database),
+                        database.clone(),
                         producer,
                         DAEMON_DELIVERY_SETTLEMENT_QUEUE_CAPACITY,
                     )

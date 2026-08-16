@@ -20,13 +20,13 @@ use super::wake::{
     PendingBeginRequestGuard, RecoverySelectionGuard, SessionTemporalRefreshRetryClass,
     SessionTemporalRefreshWakeState, TerminalAttemptGuard,
 };
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::store::{
     GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
 
 pub(super) async fn run_session_temporal_refresh_scheduler(
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     state: Arc<SessionTemporalRefreshWakeState>,
     projector: Arc<dyn SessionTemporalRefreshProjector>,
     history: Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
@@ -366,7 +366,7 @@ async fn apply_refresh_effect(
 }
 
 async fn project_running_refresh(
-    database: &Arc<RegisteredGlobalDb>,
+    database: &RegisteredGlobalDbLeaseV1,
     store: &GlobalDbSessionTemporalStore<'_>,
     state: &SessionTemporalRefreshWakeState,
     projector: &dyn SessionTemporalRefreshProjector,
@@ -458,7 +458,7 @@ fn recovery_key(recovery: &SessionRefreshRecoveryV1) -> String {
 }
 
 pub(super) async fn run_session_temporal_refresh_pass(
-    database: &Arc<RegisteredGlobalDb>,
+    database: &RegisteredGlobalDbLeaseV1,
     state: &Arc<SessionTemporalRefreshWakeState>,
     projector: &dyn SessionTemporalRefreshProjector,
     policy: SessionTemporalRefreshPolicy,

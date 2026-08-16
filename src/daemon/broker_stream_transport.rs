@@ -470,7 +470,7 @@ mod peer_close_tests {
         recorder: Arc<BoundedDeliverySettlementRecorderV1>,
         authority: Arc<DeliverySettlementAuthorityV1>,
         producer: Arc<BoundedObservabilityProducerV1>,
-        db: Arc<crate::global_db::RegisteredGlobalDb>,
+        db: crate::global_db::RegisteredGlobalDbLeaseV1,
         project_id: ProjectId,
     }
 
@@ -494,11 +494,11 @@ mod peer_close_tests {
             policy_revision: "rmcp-delivery-policy.v1".to_owned(),
         };
         let producer = Arc::new(
-            BoundedObservabilityProducerV1::start(Arc::clone(&db), identity.clone(), 8)
+            BoundedObservabilityProducerV1::start(db.clone(), identity.clone(), 8)
                 .expect("producer"),
         );
         let authority = Arc::new(
-            DeliverySettlementAuthorityV1::new(Arc::clone(&db), Arc::clone(&producer), identity)
+            DeliverySettlementAuthorityV1::new(db.clone(), Arc::clone(&producer), identity)
                 .expect("settlement authority"),
         );
         let recorder = Arc::new(

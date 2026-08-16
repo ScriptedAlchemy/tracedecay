@@ -11,15 +11,15 @@ use tracedecay_domain::{ObservationScopeV1, RetrievalAnchorRecordV2, RetrievalAn
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::RegisteredGlobalDb;
+use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 #[derive(Clone)]
 pub struct RegisteredGitTopologyAnchorAuthorityV2 {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 }
 
 impl RegisteredGitTopologyAnchorAuthorityV2 {
-    pub fn new(database: Arc<RegisteredGlobalDb>) -> Self {
+    pub fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self { database }
     }
 

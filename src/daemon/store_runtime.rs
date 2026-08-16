@@ -2,11 +2,11 @@
 //!
 //! `src/daemon/store_runtime/` was 12.9K lines that referenced `crate::db` 59
 //! times and `crate::storage` 14 times against 25 genuine `crate::daemon`
-//! references, and `StoreRuntimeHandle` holds a `db::DatabaseAuthority`. It now
+//! references, and `StoreRuntimeClientLease` holds a `db::DatabaseAuthority`. It now
 //! lives in `tracedecay_runtime_core::store_runtime`; this glob keeps every
 //! historical `crate::daemon::store_runtime::…` path resolving.
 //!
-//! `session_registry` did **not** follow. It stores `Arc<RegisteredGlobalDb>`
+//! `session_registry` did **not** follow. It stores `RegisteredGlobalDbLeaseV1`
 //! in its public surface, and `tracedecay-global-db` depends on the kernel —
 //! so the kernel taking that edge is a Cargo cycle. It also reaches
 //! `daemon::{authority,

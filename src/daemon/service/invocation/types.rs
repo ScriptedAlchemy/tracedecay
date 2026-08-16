@@ -140,7 +140,7 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
 /// Retained daemon state for the typed LSP invocation operations.
 #[derive(Clone)]
 pub(in crate::daemon::service) struct RegisteredWorkRuntime {
-    pub(super) database: Arc<crate::global_db::RegisteredGlobalDb>,
+    pub(super) database: crate::global_db::RegisteredGlobalDbLeaseV1,
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
     pub(super) authority_digest: ManifestDigest,

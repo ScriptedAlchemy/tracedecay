@@ -28,7 +28,7 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use tracedecay_usecases::host_admission::HostAdmissionScope;
@@ -234,7 +234,7 @@ impl EmptyProjector {
 impl SessionTemporalRefreshProjector for EmptyProjector {
     fn project<'a>(
         &'a self,
-        database: &'a Arc<RegisteredGlobalDb>,
+        database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         self.calls.fetch_add(1, Ordering::AcqRel);
@@ -610,7 +610,7 @@ struct PrematureFailureProjector {
 impl SessionTemporalRefreshProjector for PrematureFailureProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         self.calls.fetch_add(1, Ordering::AcqRel);
@@ -669,7 +669,7 @@ struct TerminalProjector;
 impl SessionTemporalRefreshProjector for TerminalProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async move {
@@ -760,7 +760,7 @@ struct BlockingProjector {
 impl SessionTemporalRefreshProjector for BlockingProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         let started = Arc::clone(&self.started);
@@ -838,7 +838,7 @@ impl RecordingDeferredProjector {
 impl SessionTemporalRefreshProjector for RecordingDeferredProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         self.sessions
@@ -924,7 +924,7 @@ struct PanicOnceProjector {
 impl SessionTemporalRefreshProjector for PanicOnceProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         let should_panic = !self.panicked.swap(true, Ordering::AcqRel);
@@ -992,7 +992,7 @@ struct PendingProjector;
 impl SessionTemporalRefreshProjector for PendingProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         _recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(std::future::pending())
@@ -1004,7 +1004,7 @@ struct TerminalErrorProjector;
 impl SessionTemporalRefreshProjector for TerminalErrorProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         _recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async {
@@ -1053,7 +1053,7 @@ struct NonCanonicalTerminalProjector;
 impl SessionTemporalRefreshProjector for NonCanonicalTerminalProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         _recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async {

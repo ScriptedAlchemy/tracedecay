@@ -10,7 +10,7 @@ use tracedecay_application::source_edit::{
 };
 use tracedecay_dashboard_api::DashboardProjectRuntime;
 use tracedecay_domain::{FactOwnerV1, ProjectId, UserProfileId};
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::StoreLayout;
@@ -43,7 +43,7 @@ impl ProjectRuntime for TraceDecay {
         self.store_runtime_registry().profile_id()
     }
 
-    fn profile_database(&self) -> &Arc<RegisteredGlobalDb> {
+    fn profile_database(&self) -> &RegisteredGlobalDbLeaseV1 {
         TraceDecay::profile_database(self)
     }
 
@@ -51,7 +51,7 @@ impl ProjectRuntime for TraceDecay {
         &self,
         project_id: ProjectId,
         roots: Vec<PathBuf>,
-    ) -> RuntimeFuture<'_, Arc<RegisteredGlobalDb>> {
+    ) -> RuntimeFuture<'_, RegisteredGlobalDbLeaseV1> {
         Box::pin(async move {
             TraceDecay::store_runtime_registry(self)
                 .project_sessions(project_id, roots)

@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::global_db::{
-    RegisteredGlobalDb, registry_maintenance::RegistryGcReport,
+    RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, registry_maintenance::RegistryGcReport,
     registry_maintenance::RegistryOrphanRelinkApplyReport,
     registry_maintenance::RegistryOrphanRelinkReport,
 };
 
 pub struct ProfileRegistryMaintenanceRuntime {
-    profile_database: Arc<RegisteredGlobalDb>,
+    profile_database: RegisteredGlobalDbLeaseV1,
 }
 
 impl ProfileRegistryMaintenanceRuntime {

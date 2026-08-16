@@ -9,7 +9,7 @@ use tracedecay_store::{
     SessionRefreshProgressV1, SessionTemporalProjectionBatchV1,
 };
 
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 
 #[derive(Clone, Copy, Debug)]
@@ -82,7 +82,7 @@ pub(in crate::daemon) type SessionTemporalRefreshProjectionFuture<'a> = Pin<
 pub(in crate::daemon) trait SessionTemporalRefreshProjector: Send + Sync {
     fn project<'a>(
         &'a self,
-        database: &'a Arc<RegisteredGlobalDb>,
+        database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a>;
 }
@@ -94,7 +94,7 @@ pub(super) struct DeferredSessionTemporalProjector;
 impl SessionTemporalRefreshProjector for DeferredSessionTemporalProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         _recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async { Ok(SessionTemporalRefreshEffect::Deferred) })
@@ -106,7 +106,7 @@ pub(super) struct CanonicalSessionTemporalProjector;
 impl SessionTemporalRefreshProjector for CanonicalSessionTemporalProjector {
     fn project<'a>(
         &'a self,
-        database: &'a Arc<RegisteredGlobalDb>,
+        database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async move {

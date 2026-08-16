@@ -488,7 +488,7 @@ impl Default for MaintenanceCoordinator {
 /// database or a mounted project graph. Arcs are cloned into the item so the
 /// store stays alive for the duration of the writer-held critical section.
 enum MaintenanceStoreWork {
-    Session(Arc<crate::global_db::RegisteredGlobalDb>),
+    Session(crate::global_db::RegisteredGlobalDbLeaseV1),
     Graph(Arc<crate::tracedecay::TraceDecay>),
 }
 
@@ -554,7 +554,7 @@ fn code_generation_retention_is_eligible(
 impl MaintenanceCoordinator {
     pub(super) async fn spawn(
         profile_root: PathBuf,
-        profile_database: Arc<crate::global_db::RegisteredGlobalDb>,
+        profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
         code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: crate::config::RetentionConfig,
@@ -599,7 +599,7 @@ impl MaintenanceCoordinator {
     async fn run(
         &self,
         profile_root: PathBuf,
-        profile_database: Arc<crate::global_db::RegisteredGlobalDb>,
+        profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
         administration: StoreAdministration,
         code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: crate::config::RetentionConfig,
@@ -668,7 +668,7 @@ impl MaintenanceCoordinator {
         for database in &session_databases {
             work.push((
                 format!("s:{}", database.db_path().display()),
-                MaintenanceStoreWork::Session(Arc::clone(database)),
+                MaintenanceStoreWork::Session(database.clone()),
             ));
         }
         for graph in &project_graphs {

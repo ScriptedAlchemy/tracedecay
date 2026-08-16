@@ -25,8 +25,8 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{ProjectId, UtcMicros};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::GlobalDbConfigurationControlStore;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
@@ -833,7 +833,7 @@ pub fn runtime_configuration_for_layout(
 pub(crate) async fn resolve_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 ) -> Result<PinnedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     validate_registered_configuration_database(&target, database.as_ref())?;
@@ -865,7 +865,7 @@ pub(crate) struct OpenedRuntimeConfiguration {
     /// Exact daemon-owned registered session runtime used to resolve this
     /// snapshot. Configuration composition retains this authority directly;
     /// it never reacquires the physical database by path.
-    pub(crate) registered_database: Arc<RegisteredGlobalDb>,
+    pub(crate) registered_database: RegisteredGlobalDbLeaseV1,
 }
 
 fn usecase_runtime_configuration(
@@ -920,7 +920,7 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
         &'a self,
         project_root: &'a Path,
         layout: &'a crate::storage::StoreLayout,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
         'a,
         tracedecay_usecases::config::OpenedRuntimeConfiguration,
@@ -937,7 +937,7 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
         &'a self,
         project_root: &'a Path,
         layout: &'a crate::storage::StoreLayout,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
         'a,
         tracedecay_usecases::config::OpenedRuntimeConfiguration,
@@ -958,7 +958,7 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
         &'a self,
         project_root: &'a Path,
         layout: &'a crate::storage::StoreLayout,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
         'a,
         tracedecay_usecases::config::PinnedRuntimeConfiguration,
@@ -979,7 +979,7 @@ impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
         &'a self,
         project_root: &'a Path,
         layout: &'a crate::storage::StoreLayout,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
         'a,
         tracedecay_usecases::config::PinnedRuntimeConfiguration,
@@ -1020,7 +1020,7 @@ pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
 pub(crate) async fn open_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 ) -> Result<OpenedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     validate_registered_configuration_database(&target, database.as_ref())?;
@@ -1185,7 +1185,7 @@ async fn open_runtime_configuration_from_store(
 pub(crate) async fn ensure_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 ) -> Result<PinnedRuntimeConfiguration> {
     Ok(
         open_runtime_configuration_for_registered_database(project_root, layout, database)
@@ -1199,7 +1199,7 @@ pub(crate) async fn ensure_runtime_configuration_for_registered_database(
 pub(crate) async fn open_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 ) -> Result<OpenedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     validate_registered_configuration_database(&target, database.as_ref())?;
@@ -1251,7 +1251,7 @@ fn validate_registered_configuration_database(
 pub(crate) async fn load_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 ) -> Result<PinnedRuntimeConfiguration> {
     Ok(
         open_runtime_configuration_for_registered_database_read_only(

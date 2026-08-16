@@ -40,8 +40,8 @@ use crate::ports::project_runtime::ProfileIdentity;
 use crate::ports::session_evidence::LcmScope;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::TraceDecay;
-use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::ranking::DiversityLimits;
@@ -120,7 +120,7 @@ pub struct AuthorizedAutomationSessionRetrieval<'a, A, P, E> {
 }
 
 struct ProductionAutomationSessionRetrieval {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     identity: ResolvedSessionIdentity,
     anchor_session_id: SessionId,
 }
@@ -596,7 +596,7 @@ fn project_automation_identity(
 }
 
 async fn registered_automation_retrieval_for_identity(
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     identity: ResolvedSessionIdentity,
 ) -> Box<dyn AutomationSessionRetrieval> {
     let Some(anchor_session_id) = active_registered_automation_anchor(&database).await else {
@@ -626,7 +626,7 @@ fn profile_automation_identity(
 }
 
 pub async fn registered_project_automation_retrieval(
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     profile_identity: &dyn ProfileIdentity,
     project_id: &ProjectId,
 ) -> Result<Box<dyn AutomationSessionRetrieval>> {
@@ -866,8 +866,7 @@ mod authority_tests {
         let profile_identity =
             profile_automation_identity(&profile_shard, &identity).expect("profile identity");
         let profile_retrieval =
-            registered_automation_retrieval_for_identity(Arc::clone(&database), profile_identity)
-                .await;
+            registered_automation_retrieval_for_identity(database.clone(), profile_identity).await;
         assert_eq!(
             typed_reject_reason(profile_retrieval.as_ref()).await,
             "session_evidence_retrieval_unavailable"

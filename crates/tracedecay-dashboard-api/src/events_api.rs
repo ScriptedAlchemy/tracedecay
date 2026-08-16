@@ -982,7 +982,7 @@ mod tests {
 
     async fn registered_database_for_test(
         path: &Path,
-    ) -> std::sync::Arc<tracedecay_global_db::RegisteredGlobalDb> {
+    ) -> tracedecay_global_db::RegisteredGlobalDbLeaseV1 {
         use tracedecay_runtime_core::db::{
             Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
         };
@@ -1004,13 +1004,11 @@ mod tests {
         let authority = runtime
             .database_authority("attach dashboard registry fixture")
             .expect("registered runtime authority");
-        std::sync::Arc::new(
-            tracedecay_global_db::RegisteredGlobalDb::migrate_and_attach(
-                runtime, binding, locator, authority,
-            )
-            .await
-            .expect("registered dashboard fixture"),
+        tracedecay_global_db::RegisteredGlobalDb::migrate_and_attach(
+            runtime, binding, locator, authority,
         )
+        .await
+        .expect("registered dashboard fixture")
     }
 
     fn scope() -> DashboardScopeV1 {

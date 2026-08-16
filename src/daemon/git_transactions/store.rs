@@ -28,6 +28,7 @@ use tracedecay_store::{
 use crate::db::engine::TestConnection;
 use crate::global_db::{
     GitIndexReadExecutor, GlobalDbGitIndexTransactionStore, RegisteredGlobalDb,
+    RegisteredGlobalDbLeaseV1,
 };
 
 /// The actor queue is intentionally finite: saturation fails closed instead of
@@ -85,7 +86,7 @@ pub(crate) struct DaemonGitIndexTransactionStore {
 }
 
 enum ActorDatabase {
-    Registered(Arc<RegisteredGlobalDb>),
+    Registered(RegisteredGlobalDbLeaseV1),
     #[cfg(test)]
     Engine {
         database: Box<TestConnection>,
@@ -147,7 +148,9 @@ struct PreviewGcTestObserver {
 }
 
 impl DaemonGitIndexTransactionStore {
-    pub(crate) fn open(database: Arc<RegisteredGlobalDb>) -> GitIndexTransactionStoreResult<Self> {
+    pub(crate) fn open(
+        database: RegisteredGlobalDbLeaseV1,
+    ) -> GitIndexTransactionStoreResult<Self> {
         Self::open_actor(ActorDatabase::Registered(database))
     }
 

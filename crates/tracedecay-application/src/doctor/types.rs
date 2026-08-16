@@ -33,7 +33,7 @@ pub enum DoctorFindingFamilyV1 {
     /// `ProjectConfigurationRuntime` / `ConfigurationControlPlane`.
     Configuration,
     /// Store, graph, and temporal runtime health plus migration coverage
-    /// (`RuntimeReadOperationV1` health family, `StoreRuntimeHandle`).
+    /// (`RuntimeReadOperationV1` health family, `StoreRuntimeClientLease`).
     StorageRuntime,
     /// Storage retention, size, and efficiency over canonical observability
     /// read models. Distinct from [`Self::StorageRuntime`] health: this

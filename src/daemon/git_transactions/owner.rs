@@ -24,8 +24,8 @@ use tracedecay_tool_catalog::CapabilityId;
 use crate::catalog_composition::build_application_catalog_snapshot;
 #[cfg(test)]
 use crate::db::engine::{TestConnection, TransactionBehavior};
-use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::configuration::ConfigurationControlStore;
 
@@ -443,7 +443,7 @@ pub(crate) struct DaemonGitIndexShutdownReceiptV1 {
 impl DaemonGitIndexTransactionServiceRegistry {
     pub(crate) async fn ensure(
         &self,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         repository_root: PathBuf,
         project_id: ProjectId,
         observed_at: UtcMicros,
@@ -591,7 +591,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         &self,
         repository_root: &std::path::Path,
         access: ProjectSourceAccessSnapshot,
-        configuration_database: Arc<RegisteredGlobalDb>,
+        configuration_database: RegisteredGlobalDbLeaseV1,
         runtime: tokio::runtime::Handle,
     ) -> Result<(), GitIndexTransactionPortError> {
         if self.shutdown_fenced.load(Ordering::SeqCst) {

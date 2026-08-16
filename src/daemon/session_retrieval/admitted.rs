@@ -41,7 +41,7 @@ impl DaemonSessionRetrievalService {
     /// registered profile shard and retained session identity supplied by the
     /// daemon composition root.
     pub(crate) fn new_admitted_profile(
-        database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+        database: crate::global_db::RegisteredGlobalDbLeaseV1,
         identity: ResolvedSessionIdentity,
     ) -> Option<Self> {
         if identity.project_id().is_some()

@@ -16,7 +16,7 @@ use tracedecay_runtime_core::{
         },
     },
     errors::TraceDecayError,
-    store_runtime::{VerifiedGraphRuntimePortV1, registry::StoreRuntimeHandle},
+    store_runtime::{VerifiedGraphRuntimePortV1, registry::StoreRuntimeClientLease},
 };
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
 
@@ -28,15 +28,62 @@ pub use delivery_settlement::{
     PendingDeliverySourceReceiptV1, WorkAttemptDeliveryCensusReadV1,
 };
 
+/// Cloneable client authority for a registered global database.
+///
+/// The token keeps the registered database and its runtime client lease alive
+/// until every clone is dropped. The raw shared owner remains private to this
+/// crate, so a caller cannot bypass the registered lifetime boundary.
+#[derive(Clone)]
+pub struct RegisteredGlobalDbLeaseV1 {
+    token: Arc<RegisteredGlobalDbLeaseToken>,
+}
+
+struct RegisteredGlobalDbLeaseToken {
+    database: RegisteredGlobalDb,
+}
+
+impl std::ops::Deref for RegisteredGlobalDbLeaseV1 {
+    type Target = RegisteredGlobalDb;
+
+    fn deref(&self) -> &Self::Target {
+        &self.token.database
+    }
+}
+
+impl AsRef<RegisteredGlobalDb> for RegisteredGlobalDbLeaseV1 {
+    fn as_ref(&self) -> &RegisteredGlobalDb {
+        self
+    }
+}
+
+impl std::borrow::Borrow<RegisteredGlobalDb> for RegisteredGlobalDbLeaseV1 {
+    fn borrow(&self) -> &RegisteredGlobalDb {
+        self
+    }
+}
+
+impl RegisteredGlobalDbLeaseV1 {
+    fn from_database(database: RegisteredGlobalDb) -> Self {
+        Self {
+            token: Arc::new(RegisteredGlobalDbLeaseToken { database }),
+        }
+    }
+
+    /// Whether both leases retain the same registered-database client token.
+    pub fn shares_client_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.token, &other.token)
+    }
+}
+
 pub struct RegisteredGlobalDb {
     read_connection: ReadConnection,
     write_connection: Connection,
-    runtime: StoreRuntimeHandle,
+    runtime: StoreRuntimeClientLease,
     authority: DatabaseAuthority,
     project_graph: OnceLock<Arc<dyn VerifiedGraphRuntimePortV1>>,
     session_relation_graph: OnceLock<(
         crate::session_temporal::relations::SessionRelationScope,
-        Arc<tracedecay_graph_db::GraphDb>,
+        tracedecay_graph_db::GraphDbLeaseV1,
         StoreRuntimeBindingV1,
         VerifiedStoreLocatorV1,
     )>,
@@ -347,11 +394,11 @@ impl RegisteredGlobalDb {
     /// stepped forward from an older shape: a store at any other shape is a
     /// typed refusal from [`super::ensure_registered_schema`].
     pub async fn migrate_and_attach(
-        runtime: StoreRuntimeHandle,
+        runtime: StoreRuntimeClientLease,
         expected_binding: tracedecay_store::StoreRuntimeBindingV1,
         expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
         authority: DatabaseAuthority,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
         let write_connection =
             registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
         crate::registered_legacy_relations::reject_legacy_session_relation_shape(
@@ -366,12 +413,12 @@ impl RegisteredGlobalDb {
     /// Installs only admission-critical schema before publishing a daemon
     /// runtime. The returned plan owns resumable historical convergence.
     pub async fn migrate_and_attach_for_daemon(
-        runtime: StoreRuntimeHandle,
+        runtime: StoreRuntimeClientLease,
         expected_binding: tracedecay_store::StoreRuntimeBindingV1,
         expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
         authority: DatabaseAuthority,
     ) -> tracedecay_runtime_core::errors::Result<(
-        Self,
+        RegisteredGlobalDbLeaseV1,
         super::schema_stages::RegisteredSchemaConvergence,
     )> {
         let write_connection =
@@ -402,10 +449,10 @@ impl RegisteredGlobalDb {
     }
 
     async fn finish_attach(
-        runtime: StoreRuntimeHandle,
+        runtime: StoreRuntimeClientLease,
         write_connection: Connection,
         authority: DatabaseAuthority,
-    ) -> tracedecay_runtime_core::errors::Result<Self> {
+    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
         let read_connection = write_connection.read_only();
         let database = Self {
             read_connection,
@@ -424,7 +471,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| {
                 registered_error("rearm queued projection retries", error.durable_detail())
             })?;
-        Ok(database)
+        Ok(RegisteredGlobalDbLeaseV1::from_database(database))
     }
 
     pub fn read_connection(&self) -> &ReadConnection {
@@ -569,7 +616,7 @@ impl RegisteredGlobalDb {
     /// `RuntimeExternalSourceStore`, `GlobalDbObservationStore` — without this
     /// crate naming a root type (see this crate's `lib.rs` module doc for the
     /// "Dependency edges" note).
-    pub fn runtime(&self) -> &StoreRuntimeHandle {
+    pub fn runtime(&self) -> &StoreRuntimeClientLease {
         &self.runtime
     }
 
@@ -1172,7 +1219,7 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
 }
 
 fn registered_connection(
-    runtime: &StoreRuntimeHandle,
+    runtime: &StoreRuntimeClientLease,
     expected_binding: &tracedecay_store::StoreRuntimeBindingV1,
     expected_locator: &tracedecay_store::VerifiedStoreLocatorV1,
     authority: &DatabaseAuthority,
@@ -1196,7 +1243,7 @@ fn registered_connection(
 }
 
 fn validate_registered_locator(
-    runtime: &StoreRuntimeHandle,
+    runtime: &StoreRuntimeClientLease,
     expected_binding: &tracedecay_store::StoreRuntimeBindingV1,
     expected_locator: &tracedecay_store::VerifiedStoreLocatorV1,
     authority: &DatabaseAuthority,
@@ -1323,6 +1370,7 @@ mod workflow_schema_tests;
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         fs,
         sync::{Arc, Condvar, Mutex},
         time::Duration,
@@ -1333,6 +1381,32 @@ mod tests {
     use tracedecay_store::{StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
     use super::*;
+
+    #[tokio::test]
+    async fn registered_database_lease_keeps_runtime_alive_after_map_owner_drops() {
+        let harness = crate::tests::harness::RegisteredGlobalDbHarness::open(
+            "registered-global-db-lease-foreign-survival",
+        )
+        .await;
+        let mut owners = BTreeMap::from([("profile", harness.mount().await)]);
+        let foreign: RegisteredGlobalDbLeaseV1 = owners
+            .get("profile")
+            .expect("map owner contains the registered database")
+            .clone();
+        assert!(
+            foreign.shares_client_with(
+                owners
+                    .get("profile")
+                    .expect("map owner retains the same client token")
+            )
+        );
+        let runtime_identity = foreign.runtime().runtime_identity();
+
+        owners.clear();
+
+        assert_eq!(foreign.runtime().runtime_identity(), runtime_identity);
+        assert!(foreign.runtime().begin_operation().is_ok());
+    }
 
     #[derive(Default)]
     struct AuthorityGate {
