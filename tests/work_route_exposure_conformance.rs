@@ -58,8 +58,7 @@ use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::DaemonInvocationClient;
 use tracedecay::storage::PrivateStoreIo;
 use tracedecay_application::{
-    EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1, EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1,
-    work_executable_binding_registry,
+    EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1, work_executable_binding_registry,
 };
 use tracedecay_domain::ProjectId;
 use tracedecay_tool_catalog::RouteExposureV1;
@@ -1017,29 +1016,19 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         .build()
         .into();
     let route = fixture.external_url(route_path);
-    let expected_descriptor_identities = EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
+    let expected_metric_names = EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
         .iter()
-        .map(|(metric, unit, denominator)| {
-            (
-                EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1.to_owned(),
-                (*metric).to_owned(),
-                (*unit).to_owned(),
-                (*denominator).to_owned(),
-            )
-        })
+        .map(|(metric, _, _)| (*metric).to_owned())
         .collect::<Vec<_>>();
-    let expected_descriptor_set = expected_descriptor_identities
+    let expected_metric_name_set = expected_metric_names
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let expected_metric_names = expected_descriptor_identities
-        .iter()
-        .map(|(_, metric, _, _)| metric.clone())
-        .collect::<BTreeSet<_>>();
     let descriptor_identities = |metrics: &Value| {
-        let reported = metrics["measurements"]
+        let measurements = metrics["measurements"]
             .as_array()
-            .expect("topology metrics measurements array")
+            .expect("topology metrics measurements array");
+        let reported = measurements
             .iter()
             .map(|measurement| {
                 (
@@ -1059,19 +1048,21 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
                         .as_str()
                         .expect("measurement descriptor denominator")
                         .to_owned(),
+                    serde_json::to_string(&measurement["dimensions"])
+                        .expect("serializable measurement dimensions"),
                 )
             })
             .collect::<BTreeSet<_>>();
         let metric_names = reported
             .iter()
-            .map(|(_, metric, _, _)| metric.clone())
+            .map(|(_, metric, _, _, _)| metric.clone())
             .collect::<BTreeSet<_>>();
-        let stable = expected_descriptor_identities
+        let stable = expected_metric_names
             .iter()
-            .filter(|identity| reported.contains(*identity))
+            .filter(|metric| metric_names.contains(*metric))
             .cloned()
             .collect::<Vec<_>>();
-        (reported, metric_names, stable)
+        (measurements.len(), reported, metric_names, stable)
     };
 
     let anonymous = agent
@@ -1104,25 +1095,27 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         "{initial_metrics}"
     );
     let (
-        initial_reported_descriptor_identities,
+        initial_measurement_count,
+        initial_reported_cell_identities,
         initial_metric_names,
-        initial_descriptor_identities,
+        initial_canonical_metric_names,
     ) = descriptor_identities(initial_metrics);
-    assert!(
-        expected_descriptor_set.is_subset(&initial_reported_descriptor_identities),
-        "an empty authorized horizon must retain every canonical topology metric descriptor identity: {initial_metrics}"
+    assert_eq!(
+        initial_measurement_count,
+        initial_reported_cell_identities.len(),
+        "an empty authorized horizon must not emit duplicate topology metric cells: {initial_metrics}"
     );
     assert_eq!(
-        initial_metric_names, expected_metric_names,
+        initial_metric_names, expected_metric_name_set,
         "an empty authorized horizon must not emit an unknown topology metric descriptor family: {initial_metrics}"
     );
     assert!(
-        initial_reported_descriptor_identities.len() > expected_descriptor_identities.len(),
+        initial_reported_cell_identities.len() > expected_metric_names.len(),
         "an empty authorized horizon must retain dimensional topology metric identities: {initial_metrics}"
     );
     assert_eq!(
-        initial_descriptor_identities, expected_descriptor_identities,
-        "an empty authorized horizon must retain the complete canonical topology metric descriptor identity: {initial_metrics}"
+        initial_canonical_metric_names, expected_metric_names,
+        "an empty authorized horizon must retain every canonical topology metric family in catalog order: {initial_metrics}"
     );
     assert!(
         initial_metrics["measurements"]
@@ -1170,29 +1163,31 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         "{restored_metrics}"
     );
     let (
-        restored_reported_descriptor_identities,
+        restored_measurement_count,
+        restored_reported_cell_identities,
         restored_metric_names,
-        restored_descriptor_identities,
+        restored_canonical_metric_names,
     ) = descriptor_identities(restored_metrics);
-    assert!(
-        expected_descriptor_set.is_subset(&restored_reported_descriptor_identities),
-        "a restarted topology metrics route must retain every canonical metric descriptor identity: {restored_metrics}"
+    assert_eq!(
+        restored_measurement_count,
+        restored_reported_cell_identities.len(),
+        "a restarted topology metrics route must not emit duplicate metric cells: {restored_metrics}"
     );
     assert_eq!(
-        restored_metric_names, expected_metric_names,
+        restored_metric_names, expected_metric_name_set,
         "a restarted topology metrics route must not emit an unknown metric descriptor family: {restored_metrics}"
     );
     assert!(
-        restored_reported_descriptor_identities.len() > expected_descriptor_identities.len(),
+        restored_reported_cell_identities.len() > expected_metric_names.len(),
         "a restarted topology metrics route must retain dimensional metric identities: {restored_metrics}"
     );
     assert_eq!(
-        restored_descriptor_identities, expected_descriptor_identities,
-        "a restarted topology metrics route must retain the complete canonical metric descriptor identity: {restored_metrics}"
+        restored_canonical_metric_names, expected_metric_names,
+        "a restarted topology metrics route must retain every canonical metric family in catalog order: {restored_metrics}"
     );
     assert_eq!(
-        restored_reported_descriptor_identities, initial_reported_descriptor_identities,
-        "a physical restart must preserve every topology metric descriptor identity: {restored_metrics}"
+        restored_reported_cell_identities, initial_reported_cell_identities,
+        "a physical restart must preserve every topology metric cell identity: {restored_metrics}"
     );
     assert!(
         restored_metrics["measurements"]

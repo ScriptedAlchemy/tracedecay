@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use tracedecay_domain::CoverageStateV1;
 
 use crate::observability::{
@@ -108,59 +106,6 @@ pub(super) fn measurement_with_local_support(
     local_support: u64,
 ) -> ExecutionTopologyMeasurementV1 {
     measurement(input).with_local_support(local_support)
-}
-
-/// Appends one dimensionless typed absence for every catalog descriptor a
-/// valid projection did not otherwise produce. Populated dimension cells stay
-/// intact; this only prevents conditionally projected descriptor families from
-/// disappearing when their eligible population is empty.
-pub(super) fn append_missing_descriptor_measurements(
-    measurements: &mut Vec<ExecutionTopologyMeasurementV1>,
-    context: &ProjectionContext,
-) {
-    let missing = {
-        let present = measurements
-            .iter()
-            .map(|measurement| {
-                (
-                    measurement.value.metric.as_str(),
-                    measurement.value.unit.as_str(),
-                    measurement.value.denominator.as_str(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
-            .into_iter()
-            .filter(|descriptor| !present.contains(descriptor))
-            .collect::<Vec<_>>()
-    };
-    let coverage = MetricCoverageV1 {
-        eligible: context.complete.then_some(0),
-        observed: 0,
-        completed: 0,
-        censored: 0,
-        unknown: u64::from(!context.complete),
-        excluded: 0,
-        state: context.source_state,
-    };
-    let unavailable = if context.complete {
-        ExecutionMetricUnavailableV1::NoEligibleEvidence
-    } else {
-        ExecutionMetricUnavailableV1::CoverageFloorUnmet
-    };
-    for (metric, unit, denominator) in missing {
-        measurements.push(measurement(MeasurementInput {
-            metric,
-            unit,
-            denominator,
-            evidence_class: MetricEvidenceClassV1::Measurement,
-            dimensions: Vec::new(),
-            coverage: coverage.clone(),
-            value: None,
-            unavailable: Some(unavailable),
-            context,
-        }));
-    }
 }
 
 pub(super) fn unavailable_model(
@@ -361,6 +306,8 @@ pub const EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1: [(&str, &str, &str); 19] = [
 
 #[cfg(test)]
 mod descriptor_tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -408,25 +355,6 @@ mod descriptor_tests {
             horizon.until_micros,
             &[rollup.fragment],
         );
-        let expected = EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let actual = model
-            .measurements
-            .iter()
-            .map(|measurement| {
-                (
-                    measurement.value.metric.as_str(),
-                    measurement.value.unit.as_str(),
-                    measurement.value.denominator.as_str(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        assert!(
-            expected.is_subset(&actual),
-            "the normal projection must retain every canonical descriptor identity"
-        );
         let expected_metric_names = EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
             .iter()
             .map(|(metric, _, _)| *metric)
@@ -437,9 +365,32 @@ mod descriptor_tests {
             .map(|measurement| measurement.value.metric.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(actual_metric_names, expected_metric_names);
+        let full_cell_identities = model
+            .measurements
+            .iter()
+            .map(|measurement| {
+                (
+                    measurement.value.descriptor_revision.as_str(),
+                    measurement.value.metric.as_str(),
+                    measurement.value.unit.as_str(),
+                    measurement.value.denominator.as_str(),
+                    serde_json::to_string(&measurement.dimensions)
+                        .expect("serializable topology dimensions"),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(full_cell_identities.len(), model.measurements.len());
         assert!(
-            actual.len() > expected.len(),
+            full_cell_identities.len() > expected_metric_names.len(),
             "the normal projection must retain its dimensional descriptor identities"
+        );
+        assert!(
+            model.measurements.iter().all(|measurement| {
+                measurement.value.metric != "work_duplicate_effort_total"
+                    || measurement.value.unit != "events"
+                    || !measurement.dimensions.is_empty()
+            }),
+            "the normal projection must not synthesize a dimensionless duplicate-effort events cell"
         );
         assert!(model.measurements.iter().all(|measurement| {
             measurement.value.value.is_none()

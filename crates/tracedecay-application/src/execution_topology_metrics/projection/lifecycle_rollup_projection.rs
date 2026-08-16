@@ -199,6 +199,19 @@ fn project_merge_rollup(
             *total,
         ));
     }
+    if aggregate.merge_totals.is_empty() {
+        out.push(measurement(MeasurementInput {
+            metric: "work_merge_success_ratio",
+            unit: "ratio",
+            denominator: "observed_native_integrations",
+            evidence_class: MetricEvidenceClassV1::Measurement,
+            dimensions: Vec::new(),
+            coverage,
+            value: None,
+            unavailable: rate_refusal(context.complete, eligible, observed),
+            context,
+        }));
+    }
 }
 
 fn project_blocked_rollup(
@@ -263,6 +276,19 @@ fn project_blocked_rollup(
                 .copied()
                 .unwrap_or(0),
         ));
+    }
+    if aggregate.blocked_cause_unions.is_empty() {
+        out.push(measurement(MeasurementInput {
+            metric: "work_blocked_cause_seconds",
+            unit: "seconds",
+            denominator: "closed_blocked_intervals",
+            evidence_class: MetricEvidenceClassV1::Measurement,
+            dimensions: Vec::new(),
+            coverage,
+            value: None,
+            unavailable: refusal,
+            context,
+        }));
     }
 }
 
@@ -338,6 +364,19 @@ fn project_rerun_rollup(
             },
             *source_eligible,
         ));
+    }
+    if aggregate.rerun_totals.is_empty() {
+        out.push(measurement(MeasurementInput {
+            metric: "work_rerun_rate",
+            unit: "ratio",
+            denominator: "eligible_original_attempts",
+            evidence_class: MetricEvidenceClassV1::Measurement,
+            dimensions: Vec::new(),
+            coverage,
+            value: None,
+            unavailable: rate_refusal(context.complete, eligible, observed),
+            context,
+        }));
     }
 }
 
@@ -416,9 +455,20 @@ fn project_delivery_rollup(
             denominator: "attempted_deliveries",
             evidence_class: MetricEvidenceClassV1::Measurement,
             dimensions: Vec::new(),
-            coverage,
+            coverage: coverage.clone(),
             value: None,
             unavailable: Some(ExecutionMetricUnavailableV1::NoEligibleEvidence),
+            context,
+        }));
+        out.push(measurement(MeasurementInput {
+            metric: "work_delivery_duplicate_ratio",
+            unit: "ratio",
+            denominator: "attempted_deliveries",
+            evidence_class: MetricEvidenceClassV1::Measurement,
+            dimensions: Vec::new(),
+            coverage,
+            value: None,
+            unavailable: refusal,
             context,
         }));
         return;
@@ -471,5 +521,124 @@ fn project_delivery_rollup(
             },
             surface_attempted,
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::execution_topology_metrics::RATE_MIN_ELIGIBLE_CASES_V1;
+    use crate::observability::ObservabilityHorizonV1;
+
+    #[test]
+    fn empty_conditional_descriptors_preserve_their_family_coverage() {
+        let rate_eligible = RATE_MIN_ELIGIBLE_CASES_V1;
+        let aggregate = ExecutionTopologyLifecycleRollupV1 {
+            merge_eligible: rate_eligible,
+            merge_unknown: rate_eligible,
+            blocked_eligible: 1,
+            blocked_censored: 1,
+            rerun_eligible: rate_eligible,
+            rerun_unknown: rate_eligible,
+            delivery_attempted: 1,
+            delivery_unknown: 1,
+            ..ExecutionTopologyLifecycleRollupV1::default()
+        };
+        let context = ProjectionContext {
+            horizon: ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: 1,
+            },
+            watermark: "analytics:family-coverage".to_owned(),
+            complete: true,
+            source_state: CoverageStateV1::Known,
+        };
+        let mut measurements = Vec::new();
+        aggregate
+            .project_with_carry(
+                &ExecutionTopologyLifecycleCarryV1::default(),
+                &context,
+                &mut measurements,
+            )
+            .unwrap();
+
+        for (metric, unavailable, coverage) in [
+            (
+                "work_merge_success_ratio",
+                ExecutionMetricUnavailableV1::CoverageFloorUnmet,
+                MetricCoverageV1 {
+                    eligible: Some(rate_eligible),
+                    observed: 0,
+                    completed: 0,
+                    censored: 0,
+                    unknown: rate_eligible,
+                    excluded: 0,
+                    state: CoverageStateV1::Partial,
+                },
+            ),
+            (
+                "work_blocked_cause_seconds",
+                ExecutionMetricUnavailableV1::UnboundedInterval,
+                MetricCoverageV1 {
+                    eligible: Some(1),
+                    observed: 0,
+                    completed: 0,
+                    censored: 1,
+                    unknown: 0,
+                    excluded: 0,
+                    state: CoverageStateV1::Partial,
+                },
+            ),
+            (
+                "work_rerun_rate",
+                ExecutionMetricUnavailableV1::CoverageFloorUnmet,
+                MetricCoverageV1 {
+                    eligible: Some(rate_eligible),
+                    observed: 0,
+                    completed: 0,
+                    censored: 0,
+                    unknown: rate_eligible,
+                    excluded: 0,
+                    state: CoverageStateV1::Partial,
+                },
+            ),
+            (
+                "work_delivery_duplicate_ratio",
+                ExecutionMetricUnavailableV1::CoverageFloorUnmet,
+                MetricCoverageV1 {
+                    eligible: Some(1),
+                    observed: 0,
+                    completed: 0,
+                    censored: 0,
+                    unknown: 1,
+                    excluded: 0,
+                    state: CoverageStateV1::Partial,
+                },
+            ),
+        ] {
+            let measurement = measurements
+                .iter()
+                .find(|measurement| {
+                    measurement.value.metric == metric && measurement.dimensions.is_empty()
+                })
+                .unwrap();
+            assert_eq!(measurement.value.value, None, "metric={metric}");
+            assert_eq!(
+                measurement.unavailable,
+                Some(unavailable),
+                "metric={metric}"
+            );
+            assert_eq!(measurement.value.coverage, coverage, "metric={metric}");
+            assert_eq!(
+                measurement.value.denominator_value, coverage.eligible,
+                "metric={metric}"
+            );
+            assert_ne!(
+                measurement.unavailable,
+                Some(ExecutionMetricUnavailableV1::NoEligibleEvidence),
+                "metric={metric}"
+            );
+        }
     }
 }
