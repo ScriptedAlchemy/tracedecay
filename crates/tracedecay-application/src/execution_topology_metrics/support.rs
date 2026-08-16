@@ -9,8 +9,7 @@ use crate::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 use super::projection::ProjectionContext;
 use super::{
     CONFLICT_MIN_ADJUDICATED_CASES_V1, EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1,
-    EXECUTION_TOPOLOGY_PROJECTOR_REVISION_V1, ExecutionConcurrencyPhaseV1,
-    ExecutionDuplicateKindV1, ExecutionMetricUnavailableV1, ExecutionQuantityUnitV1,
+    EXECUTION_TOPOLOGY_PROJECTOR_REVISION_V1, ExecutionMetricUnavailableV1,
     ExecutionTopologyDimensionV1, ExecutionTopologyMeasurementV1, ExecutionTopologyMetricsV1,
     MAX_CENSORING_RATIO_V1, MAX_METRIC_DIMENSIONS_V1, MIN_COVERAGE_RATIO_V1,
     RATE_MIN_ELIGIBLE_CASES_V1,
@@ -309,6 +308,9 @@ pub const EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1: [(&str, &str, &str); 19] = [
 mod descriptor_tests {
     use std::collections::BTreeSet;
 
+    use super::super::{
+        ExecutionConcurrencyPhaseV1, ExecutionDuplicateKindV1, ExecutionQuantityUnitV1,
+    };
     use super::*;
 
     #[test]
