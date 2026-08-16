@@ -18,15 +18,15 @@ use tracedecay_store::{
 };
 
 use super::Database;
-// The store-runtime registry moved into this kernel, so the fact store reaches
-// the concrete handle directly rather than through an erased port.
-use crate::store_runtime::registry::StoreRuntimeHandle;
+use crate::store_runtime::registry::StoreRuntimeClientLease;
 
 const COMMIT_OPERATION: &str = "commit fact through storage runtime";
 const CURRENT_OPERATION: &str = "query current fact through storage runtime";
 const LINEAGE_OPERATION: &str = "query fact lineage through storage runtime";
 
-pub(super) fn retained_fact_runtime(db: &Database) -> FactStoreResult<Option<&StoreRuntimeHandle>> {
+pub(super) fn retained_fact_runtime(
+    db: &Database,
+) -> FactStoreResult<Option<&StoreRuntimeClientLease>> {
     let runtime = db.retained_runtime();
     if !fact_capable_scope(&runtime.binding().shard_id.scope) {
         return Ok(None);
@@ -35,7 +35,7 @@ pub(super) fn retained_fact_runtime(db: &Database) -> FactStoreResult<Option<&St
     Ok(Some(runtime))
 }
 
-fn validate_mount(db: &Database, runtime: &StoreRuntimeHandle) -> FactStoreResult<()> {
+fn validate_mount(db: &Database, runtime: &StoreRuntimeClientLease) -> FactStoreResult<()> {
     let current_file_identity = crate::db::sqlite_generation_identity(db.canonical_database_path())
         .map_err(|error| {
             runtime_error(
@@ -125,7 +125,7 @@ pub(super) fn validate_owner_binding(
 
 pub(super) async fn commit_fact(
     db: &Database,
-    runtime: &StoreRuntimeHandle,
+    runtime: &StoreRuntimeClientLease,
     batch: FactWriteBatch,
     write_control: &FactWriteControl,
 ) -> FactStoreResult<FactCommitOutcome> {
@@ -237,7 +237,7 @@ fn finish_commit_outcome(
 }
 
 pub(super) fn query_fact_current(
-    runtime: &StoreRuntimeHandle,
+    runtime: &StoreRuntimeClientLease,
     query: FactCurrentQuery,
 ) -> FactStoreResult<Option<StoredFactV1>> {
     validate_owner_binding(runtime.binding(), query.owner(), CURRENT_OPERATION)?;
@@ -255,7 +255,7 @@ pub(super) fn query_fact_current(
 }
 
 pub(super) fn query_fact_lineage(
-    runtime: &StoreRuntimeHandle,
+    runtime: &StoreRuntimeClientLease,
     query: FactLineageQuery,
 ) -> FactStoreResult<Vec<tracedecay_domain::FactLineageEventV1>> {
     validate_owner_binding(runtime.binding(), query.owner(), LINEAGE_OPERATION)?;
@@ -273,7 +273,7 @@ pub(super) fn query_fact_lineage(
 }
 
 fn dispatch_fact_read(
-    runtime: &StoreRuntimeHandle,
+    runtime: &StoreRuntimeClientLease,
     operation: FactReadOperationV1,
     operation_name: &'static str,
 ) -> FactStoreResult<FactReadResultV1> {

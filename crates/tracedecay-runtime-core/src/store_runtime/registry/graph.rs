@@ -139,6 +139,7 @@ impl StoreRuntimeRegistry {
         key: StoreRuntimeKey,
     ) -> Result<Arc<CanonicalGraphStoreLeaseV1>, StoreRuntimeRegistryFailure> {
         validate_graph_scope(&key)?;
+        self.reject_retiring_graph_admission(&key)?;
         let resolved = self.inner.resolver.resolve_graph(&key).await?;
         if !resolved.matches(&key) {
             return Err(StoreRuntimeRegistryFailure::LocatorIdentityMismatch {
@@ -148,6 +149,7 @@ impl StoreRuntimeRegistry {
         }
 
         let mut state = self.lock_state();
+        self.reject_retiring_graph_admission_locked(&state, &key)?;
         if let Some(retained) = state
             .graph_publications
             .iter()
@@ -266,6 +268,49 @@ impl StoreRuntimeRegistry {
         true
     }
 
+    fn reject_retiring_graph_admission(
+        &self,
+        key: &StoreRuntimeKey,
+    ) -> Result<(), StoreRuntimeRegistryFailure> {
+        let state = self.lock_state();
+        self.reject_retiring_graph_admission_locked(&state, key)
+    }
+
+    fn reject_retiring_graph_admission_locked(
+        &self,
+        state: &super::RegistryState,
+        key: &StoreRuntimeKey,
+    ) -> Result<(), StoreRuntimeRegistryFailure> {
+        let Some(entry) = state.entries.get(key) else {
+            return Ok(());
+        };
+        match entry {
+            RegistryEntry::Retiring(_) => {
+                Err(StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                    key: Box::new(key.clone()),
+                })
+            }
+            RegistryEntry::Committing(_) => {
+                Err(StoreRuntimeRegistryFailure::RuntimeRetirementCommitting {
+                    key: Box::new(key.clone()),
+                })
+            }
+            RegistryEntry::Faulted(_) => {
+                Err(StoreRuntimeRegistryFailure::RuntimeRetirementFaulted {
+                    key: Box::new(key.clone()),
+                })
+            }
+            RegistryEntry::DurabilityUncertain(_) => Err(
+                StoreRuntimeRegistryFailure::RuntimeRetirementDurabilityUncertain {
+                    key: Box::new(key.clone()),
+                },
+            ),
+            RegistryEntry::Opening(_) | RegistryEntry::Ready(_) | RegistryEntry::Evicting(_) => {
+                Ok(())
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn retained_graph_publications_for_test(&self) -> usize {
         self.lock_state().graph_publications.len()
@@ -276,6 +321,11 @@ fn entry_binding(entry: &RegistryEntry) -> &StoreRuntimeBindingV1 {
     match entry {
         RegistryEntry::Opening(opening) => &opening.binding,
         RegistryEntry::Ready(ready) => ready.owner.binding(),
+        RegistryEntry::Retiring(retiring) => retiring.owner.binding(),
+        RegistryEntry::Committing(committing) => committing.owner.binding(),
+        RegistryEntry::Faulted(faulted) | RegistryEntry::DurabilityUncertain(faulted) => {
+            faulted.owner.binding()
+        }
         RegistryEntry::Evicting(evicting) => evicting.owner.binding(),
     }
 }

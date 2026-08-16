@@ -128,6 +128,16 @@ pub struct ShardRuntimeHealthSnapshot {
     pub health: ShardRuntimeHealth,
 }
 
+/// Exact lease census used only by registry retirement preflight. Runtime
+/// leases remain separate from client-lifetime tokens so a caller cannot hide
+/// a direct lease behind aggregate health telemetry.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ShardRuntimeRetirementLeaseCounts {
+    pub(crate) clients: usize,
+    pub(crate) operations: usize,
+    pub(crate) runtime_leases: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShardRuntimeEvictionBlocker {
     NotReady {
@@ -375,6 +385,16 @@ impl ShardRuntime {
 
     pub fn health_snapshot(&self) -> ShardRuntimeHealthSnapshot {
         self.health_snapshot_at(Instant::now())
+    }
+
+    pub(crate) fn retirement_lease_counts(&self) -> ShardRuntimeRetirementLeaseCounts {
+        let mut state = self.lock_state();
+        state.prune_expired_runtime_leases(utc_now());
+        ShardRuntimeRetirementLeaseCounts {
+            clients: state.client_lifetime_leases.len(),
+            operations: state.operation_lifetime_leases.len(),
+            runtime_leases: state.runtime_leases.len(),
+        }
     }
 
     pub(crate) fn health_snapshot_at(&self, now: Instant) -> ShardRuntimeHealthSnapshot {

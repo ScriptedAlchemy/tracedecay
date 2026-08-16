@@ -157,7 +157,7 @@ impl StoreRuntimeRegistry {
                     );
                 }
             }
-            if let Err(failure) = validate_profile_authority(&state, request) {
+            if let Err(failure) = validate_profile_authority(self, &state, request) {
                 return StoreRuntimeOpenBegin::Rejected(failure);
             }
             if let Some((_, graph)) = state
@@ -224,6 +224,26 @@ impl StoreRuntimeRegistry {
                     }
                     RegistryEntry::Evicting(_) => StoreRuntimeOpenBegin::Rejected(
                         StoreRuntimeRegistryFailure::RuntimeEvictionInProgress {
+                            key: Box::new(key),
+                        },
+                    ),
+                    RegistryEntry::Retiring(_) => StoreRuntimeOpenBegin::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                            key: Box::new(key),
+                        },
+                    ),
+                    RegistryEntry::Committing(_) => StoreRuntimeOpenBegin::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementCommitting {
+                            key: Box::new(key),
+                        },
+                    ),
+                    RegistryEntry::Faulted(_) => StoreRuntimeOpenBegin::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementFaulted {
+                            key: Box::new(key),
+                        },
+                    ),
+                    RegistryEntry::DurabilityUncertain(_) => StoreRuntimeOpenBegin::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementDurabilityUncertain {
                             key: Box::new(key),
                         },
                     ),
@@ -505,9 +525,24 @@ fn retained_database_key(state: &RegistryState, path: &std::path::Path) -> Optio
             RegistryEntry::Evicting(evicting) if evicting.owner.writer_present() => {
                 Some(evicting.owner.canonical_path())
             }
-            RegistryEntry::Opening(_) | RegistryEntry::Ready(_) | RegistryEntry::Evicting(_) => {
-                None
+            RegistryEntry::Retiring(retiring) if retiring.owner.writer_present() => {
+                Some(retiring.owner.canonical_path())
             }
+            RegistryEntry::Committing(committing) if committing.owner.writer_present() => {
+                Some(committing.owner.canonical_path())
+            }
+            RegistryEntry::Faulted(faulted) | RegistryEntry::DurabilityUncertain(faulted)
+                if faulted.owner.writer_present() =>
+            {
+                Some(faulted.owner.canonical_path())
+            }
+            RegistryEntry::Opening(_)
+            | RegistryEntry::Ready(_)
+            | RegistryEntry::Retiring(_)
+            | RegistryEntry::Committing(_)
+            | RegistryEntry::Faulted(_)
+            | RegistryEntry::DurabilityUncertain(_)
+            | RegistryEntry::Evicting(_) => None,
         };
         candidate
             .is_some_and(|candidate| candidate == path)
@@ -586,6 +621,7 @@ impl OpenAttemptGuard {
                             locator,
                             opened_file_identity,
                             database_authority,
+                            database_facades: std::sync::atomic::AtomicUsize::new(0),
                         });
                         let owner = Arc::new(StoreRuntimeOwnerAttachment { source });
                         if self.key.is_profile() {
