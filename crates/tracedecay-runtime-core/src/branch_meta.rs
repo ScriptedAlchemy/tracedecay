@@ -658,6 +658,77 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_graph_source_publications_allocate_distinct_epochs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut meta = BranchMeta::new_for_dir(dir.path(), "main");
+        meta.add_branch("feature/one", crate::config::DB_FILENAME, "main");
+        meta.add_branch("feature/two", crate::config::DB_FILENAME, "main");
+        save_branch_meta(dir.path(), &meta).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let first_dir = dir.path().to_path_buf();
+        let first_barrier = std::sync::Arc::clone(&barrier);
+        let second_dir = dir.path().to_path_buf();
+        let second_barrier = std::sync::Arc::clone(&barrier);
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            publish_graph_source(
+                &first_dir,
+                "feature/one",
+                BranchGraphSourceV1 {
+                    publication_epoch: BranchGraphPublicationEpochV1::new(1).unwrap(),
+                    project_id: "project.fixture".to_owned(),
+                    repository_id: "repository.fixture".to_owned(),
+                    worktree_id: "worktree.one".to_owned(),
+                    worktree_root: "/fixture/one".to_owned(),
+                    reference: "refs/heads/feature/one".to_owned(),
+                    source_oid: "a".repeat(40),
+                },
+            )
+        });
+        let second = std::thread::spawn(move || {
+            second_barrier.wait();
+            publish_graph_source(
+                &second_dir,
+                "feature/two",
+                BranchGraphSourceV1 {
+                    publication_epoch: BranchGraphPublicationEpochV1::new(1).unwrap(),
+                    project_id: "project.fixture".to_owned(),
+                    repository_id: "repository.fixture".to_owned(),
+                    worktree_id: "worktree.two".to_owned(),
+                    worktree_root: "/fixture/two".to_owned(),
+                    reference: "refs/heads/feature/two".to_owned(),
+                    source_oid: "b".repeat(40),
+                },
+            )
+        });
+
+        assert!(first.join().unwrap().unwrap());
+        assert!(second.join().unwrap().unwrap());
+
+        let meta = load_branch_meta(dir.path()).unwrap();
+        let first_epoch = meta.branches["feature/one"]
+            .graph_source
+            .as_ref()
+            .unwrap()
+            .publication_epoch
+            .get();
+        let second_epoch = meta.branches["feature/two"]
+            .graph_source
+            .as_ref()
+            .unwrap()
+            .publication_epoch
+            .get();
+        assert_ne!(first_epoch, second_epoch);
+        assert!(
+            [first_epoch, second_epoch]
+                .into_iter()
+                .all(|epoch| epoch <= 2),
+            "the locked publisher must allocate the first two epochs, got {first_epoch} and {second_epoch}"
+        );
+    }
+
+    #[test]
     fn roundtrip_json() {
         let mut meta = BranchMeta::new("main");
         meta.add_branch("feature/bar", "branches/feature_bar.db", "main");
