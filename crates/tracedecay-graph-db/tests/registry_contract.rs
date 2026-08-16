@@ -687,6 +687,15 @@ fn cancelled_retirement_commit_restores_all_preclose_entries() {
         registry.status(&second_request).unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
+    assert_eq!(
+        reservation
+            .commit(
+                Arc::new(NeverCancelled),
+                std::time::Instant::now() + Duration::from_secs(30),
+            )
+            .unwrap_err(),
+        GraphDbError::Conflict
+    );
 }
 
 #[test]
@@ -719,6 +728,15 @@ fn retirement_commit_reports_every_closed_exact_entry() {
     );
     assert_eq!(registry.status(&first_request).unwrap(), None);
     assert_eq!(registry.status(&second_request).unwrap(), None);
+    assert_eq!(
+        reservation
+            .commit(
+                Arc::new(NeverCancelled),
+                std::time::Instant::now() + Duration::from_secs(30),
+            )
+            .unwrap_err(),
+        GraphDbError::Conflict
+    );
 }
 
 #[test]
@@ -1164,7 +1182,7 @@ fn registry_retains_authority_lease_until_the_graph_is_closed() {
 }
 
 #[test]
-fn reset_required_is_retained_until_an_explicit_reopen() {
+fn reset_required_fault_is_retained_and_cannot_reopen() {
     use grafeo_engine::Config;
     use grafeo_engine::config::StorageFormat;
 
@@ -1192,8 +1210,18 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
     );
 
     std::fs::remove_file(&graph_path).unwrap();
-    let reopened = registry.reopen_for_harness(request).unwrap();
-    assert!(reopened.snapshot().is_ok());
+    assert!(matches!(
+        registry.reopen_for_harness(request.clone()),
+        Err(GraphDbError::ResetRequired { .. })
+    ));
+    assert_eq!(
+        registry.status(&request).unwrap(),
+        Some(GraphDbRegistryStatus::ResetRequired)
+    );
+    assert!(matches!(
+        registry.resolve(request),
+        Err(GraphDbError::ResetRequired { .. })
+    ));
 }
 
 #[test]
