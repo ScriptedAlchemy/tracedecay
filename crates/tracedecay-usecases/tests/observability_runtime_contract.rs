@@ -1025,6 +1025,45 @@ pub mod work_rollup_harness {
         pub total_elapsed: Duration,
     }
 
+    #[derive(Clone, Debug)]
+    struct PreparedWorkRollupCase {
+        _pin: tracedecay_runtime_core::config::PinnedUserDataDir,
+        _runtime: RegisteredGlobalDbTestRuntime,
+        database: Arc<tracedecay_global_db::RegisteredGlobalDb>,
+        producer: BoundedObservabilityProducerV1,
+        dropped_sources: usize,
+        setup_elapsed: Duration,
+        offer_elapsed: Duration,
+    }
+
+    /// Values unavailable on this host or absent from the mounted production
+    /// telemetry remain explicit rather than being fabricated as zero.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum WorkRollupMeasurement {
+        Measured(u64),
+        Unavailable,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct WorkRollupResourceSample {
+        pub rss_bytes: WorkRollupMeasurement,
+        pub rss_anon_bytes: WorkRollupMeasurement,
+        pub open_file_descriptors: WorkRollupMeasurement,
+        pub task_count: WorkRollupMeasurement,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct SettledWorkRollupReport {
+        pub control_operations: usize,
+        pub repeated_operations: usize,
+        pub semantic_output_identity: bool,
+        pub reconciliations: WorkRollupMeasurement,
+        pub database_reads: WorkRollupMeasurement,
+        pub repetition_elapsed: Vec<Duration>,
+        pub resources_before: WorkRollupResourceSample,
+        pub resources_after: WorkRollupResourceSample,
+    }
+
     fn id<T>(value: impl Into<String>) -> T
     where
         T: TryFrom<String>,
@@ -1250,9 +1289,9 @@ pub mod work_rollup_harness {
         raw == rollup
     }
 
-    pub async fn run_work_rollup_case() -> WorkRollupReport {
-        let total_started = Instant::now();
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    async fn prepare_work_rollup_case() -> PreparedWorkRollupCase {
+        let setup_started = Instant::now();
+        let pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let runtime = RegisteredGlobalDbTestRuntime::profile(
             tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
         )
@@ -1277,7 +1316,7 @@ pub mod work_rollup_harness {
             .expect("Work projection generation");
         let topology_generation =
             id::<WorkTopologyGenerationRefV1>(format!("sha256:{}", "c".repeat(64)));
-        let setup_elapsed = total_started.elapsed();
+        let setup_elapsed = setup_started.elapsed();
 
         let mut dropped_sources = 0;
         let offer_started = Instant::now();
@@ -1325,7 +1364,101 @@ pub mod work_rollup_harness {
                 &mut dropped_sources,
             );
         }
-        let offer_elapsed = offer_started.elapsed();
+
+        PreparedWorkRollupCase {
+            _pin: pin,
+            _runtime: runtime,
+            database,
+            producer,
+            dropped_sources,
+            setup_elapsed,
+            offer_elapsed: offer_started.elapsed(),
+        }
+    }
+
+    async fn read_full_day_rollup(
+        port: &RegisteredObservabilityPortV1<'_>,
+        context: &RequestContext,
+        full_day: &ObservabilityHorizonV1,
+    ) -> ExecutionTopologyMetricsV1 {
+        execution_topology_rollup_metrics(
+            port,
+            port,
+            context,
+            &ExecutionTopologyMetricsRequestV1 {
+                horizon: full_day.clone(),
+                max_events: MAX_EVENTS,
+            },
+        )
+        .await
+        .expect("application retained-rollup metrics read")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_status_bytes(key: &str) -> Option<u64> {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix(key))?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1024)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn linux_status_bytes(_key: &str) -> Option<u64> {
+        None
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_directory_count(path: &str, excludes_own_descriptor: bool) -> Option<u64> {
+        let entries = std::fs::read_dir(path).ok()?;
+        let count = entries.try_fold(0_u64, |count, entry| {
+            entry.ok()?.file_name();
+            count.checked_add(1)
+        })?;
+        Some(if excludes_own_descriptor {
+            count.saturating_sub(1)
+        } else {
+            count
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn linux_directory_count(_path: &str, _excludes_own_descriptor: bool) -> Option<u64> {
+        None
+    }
+
+    fn measured(value: Option<u64>) -> WorkRollupMeasurement {
+        value.map_or(
+            WorkRollupMeasurement::Unavailable,
+            WorkRollupMeasurement::Measured,
+        )
+    }
+
+    fn sample_work_rollup_resources() -> WorkRollupResourceSample {
+        WorkRollupResourceSample {
+            rss_bytes: measured(linux_status_bytes("VmRSS:")),
+            rss_anon_bytes: measured(linux_status_bytes("RssAnon:")),
+            // Opening /proc/self/fd consumes one descriptor while it is listed.
+            open_file_descriptors: measured(linux_directory_count("/proc/self/fd", true)),
+            task_count: measured(linux_directory_count("/proc/self/task", false)),
+        }
+    }
+
+    pub async fn run_work_rollup_case() -> WorkRollupReport {
+        let total_started = Instant::now();
+        let PreparedWorkRollupCase {
+            _pin: _pin,
+            _runtime: _runtime,
+            database,
+            producer,
+            dropped_sources,
+            setup_elapsed,
+            offer_elapsed,
+        } = prepare_work_rollup_case().await;
 
         let fragment_wait_started = Instant::now();
         producer
@@ -1446,6 +1579,69 @@ pub mod work_rollup_harness {
             raw_read_elapsed,
             application_read_elapsed,
             total_elapsed: total_started.elapsed(),
+        }
+    }
+
+    /// Repeats the retained-rollup application operation over one already-settled
+    /// runtime. No new owner receipts are offered after the control read.
+    pub async fn run_settled_work_rollup_case(repetitions: usize) -> SettledWorkRollupReport {
+        assert!(
+            repetitions > 0,
+            "a settled work-rollup measurement requires at least one repeat"
+        );
+        let PreparedWorkRollupCase {
+            _pin: _pin,
+            _runtime: _runtime,
+            database,
+            producer,
+            dropped_sources,
+            setup_elapsed: _setup_elapsed,
+            offer_elapsed: _offer_elapsed,
+        } = prepare_work_rollup_case().await;
+        assert_eq!(dropped_sources, 0, "the bounded fixture must settle fully");
+        producer
+            .shutdown()
+            .await
+            .expect("flush owner receipts and rebuild idle rollup");
+
+        let port = RegisteredObservabilityPortV1::new(database.as_ref());
+        let full_day = ObservabilityHorizonV1 {
+            since_micros: DAY_START_MICROS,
+            until_micros: DAY_START_MICROS + DAY_MICROS,
+        };
+        let context = read_context();
+        let control = read_full_day_rollup(&port, &context, &full_day).await;
+        assert_eq!(
+            control.coverage.state,
+            CoverageStateV1::Known,
+            "the control read must retain an application-readable rollup"
+        );
+
+        let resources_before = sample_work_rollup_resources();
+        let mut repetition_elapsed = Vec::with_capacity(repetitions);
+        for repetition in 1..=repetitions {
+            let started = Instant::now();
+            let repeated = read_full_day_rollup(&port, &context, &full_day).await;
+            repetition_elapsed.push(started.elapsed());
+            assert!(
+                equivalent_metrics(&control, &repeated),
+                "settled Work rollup changed on identical repetition {repetition}: \
+                 control={control:#?} repeated={repeated:#?}"
+            );
+        }
+        let resources_after = sample_work_rollup_resources();
+
+        SettledWorkRollupReport {
+            control_operations: 1,
+            repeated_operations: repetitions,
+            semantic_output_identity: true,
+            // This production journey mounts no Work-rollup reconciliation counter.
+            reconciliations: WorkRollupMeasurement::Unavailable,
+            // The registered port exposes no per-operation database-read counter.
+            database_reads: WorkRollupMeasurement::Unavailable,
+            repetition_elapsed,
+            resources_before,
+            resources_after,
         }
     }
 }

@@ -5,12 +5,14 @@ use std::time::Duration;
 mod observability_runtime_contract;
 
 use observability_runtime_contract::work_rollup_harness::{
-    READ_TRIPWIRE, SOURCE_COUNT, TRIPWIRE, WorkRollupReport, run_work_rollup_case,
+    READ_TRIPWIRE, SOURCE_COUNT, TRIPWIRE, WorkRollupMeasurement, WorkRollupReport,
+    WorkRollupResourceSample, run_settled_work_rollup_case, run_work_rollup_case,
 };
 use tracedecay_domain::CoverageStateV1;
 
 const WARMUP_REPETITIONS: usize = 3;
 const MEASURED_REPETITIONS: usize = 30;
+const SETTLED_REPETITIONS: usize = 30;
 const MIN_RECEIPTS_PER_SECOND: f64 = 256.0;
 
 fn percentile95(samples: &[Duration]) -> Duration {
@@ -18,6 +20,54 @@ fn percentile95(samples: &[Duration]) -> Duration {
     samples.sort_unstable();
     let rank = (samples.len() * 95).div_ceil(100);
     samples[rank.saturating_sub(1)]
+}
+
+fn measurement_json(
+    measurement: WorkRollupMeasurement,
+    unavailable_reason: &str,
+) -> serde_json::Value {
+    match measurement {
+        WorkRollupMeasurement::Measured(value) => serde_json::json!({
+            "state": "measured",
+            "value": value,
+        }),
+        WorkRollupMeasurement::Unavailable => serde_json::json!({
+            "state": "unavailable",
+            "reason": unavailable_reason,
+        }),
+    }
+}
+
+fn resource_delta_json(
+    before: WorkRollupMeasurement,
+    after: WorkRollupMeasurement,
+) -> serde_json::Value {
+    match (before, after) {
+        (WorkRollupMeasurement::Measured(before), WorkRollupMeasurement::Measured(after)) => {
+            serde_json::json!({
+                "state": "measured",
+                "before": before,
+                "after": after,
+                "delta": i128::from(after) - i128::from(before),
+            })
+        }
+        _ => serde_json::json!({"state": "unavailable"}),
+    }
+}
+
+fn resource_deltas_json(
+    before: &WorkRollupResourceSample,
+    after: &WorkRollupResourceSample,
+) -> serde_json::Value {
+    serde_json::json!({
+        "rss_bytes": resource_delta_json(before.rss_bytes, after.rss_bytes),
+        "rss_anon_bytes": resource_delta_json(before.rss_anon_bytes, after.rss_anon_bytes),
+        "open_file_descriptors": resource_delta_json(
+            before.open_file_descriptors,
+            after.open_file_descriptors,
+        ),
+        "task_count": resource_delta_json(before.task_count, after.task_count),
+    })
 }
 
 fn validate_completion(report: &WorkRollupReport) {
@@ -111,4 +161,59 @@ fn main() {
         journey_p95.as_secs_f64() * 1_000.0,
         total_p95.as_secs_f64() * 1_000.0,
     );
+
+    let settled = runtime.block_on(run_settled_work_rollup_case(SETTLED_REPETITIONS));
+    assert_eq!(settled.control_operations, 1);
+    assert_eq!(settled.repeated_operations, SETTLED_REPETITIONS);
+    assert_eq!(settled.repetition_elapsed.len(), SETTLED_REPETITIONS);
+    assert!(settled.semantic_output_identity);
+
+    let settled_p95 = percentile95(&settled.repetition_elapsed);
+    let settled_total_seconds = settled
+        .repetition_elapsed
+        .iter()
+        .map(Duration::as_secs_f64)
+        .sum::<f64>();
+    let settled_throughput = SETTLED_REPETITIONS as f64 / settled_total_seconds;
+    let settled_measurement = serde_json::json!({
+        "schema_version": 1,
+        "journey": "work_rollup_settled",
+        "fixture": {
+            "offered_sources": SOURCE_COUNT,
+            "warmup_repetitions": WARMUP_REPETITIONS,
+            "fresh_measured_repetitions": MEASURED_REPETITIONS,
+            "settled_repetitions": SETTLED_REPETITIONS,
+        },
+        "warm_latency": {
+            "p95_ms": settled_p95.as_secs_f64() * 1_000.0,
+            "max_ms": settled
+                .repetition_elapsed
+                .iter()
+                .max()
+                .map_or(0.0, |elapsed| elapsed.as_secs_f64() * 1_000.0),
+        },
+        "throughput": {
+            "operations_per_second": settled_throughput,
+        },
+        "settled_workload": {
+            "operations": {
+                "control": settled.control_operations,
+                "repeated": settled.repeated_operations,
+            },
+            "semantic_output_identity": settled.semantic_output_identity,
+            "reconciliations": measurement_json(
+                settled.reconciliations,
+                "no_work_rollup_reconciliation_counter_is_mounted",
+            ),
+            "database_reads": measurement_json(
+                settled.database_reads,
+                "no_per_operation_database_read_counter_is_mounted",
+            ),
+            "resources": resource_deltas_json(
+                &settled.resources_before,
+                &settled.resources_after,
+            ),
+        },
+    });
+    println!("{settled_measurement}");
 }
