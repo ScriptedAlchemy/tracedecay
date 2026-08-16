@@ -389,6 +389,7 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree_id,
             scheduler,
             serving_generation,
+            serving_generation_epoch,
             graph_activation,
             publication_gate,
             shutting_down,
@@ -409,6 +410,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.worktree_id.clone(),
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.serving_generation_epoch),
                 worktree.graph_activation.clone(),
                 Arc::clone(&worktree.semantic_evaluation_publication_gate),
                 Arc::clone(&worktree.shutting_down),
@@ -504,6 +506,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         let swap_scheduler = Arc::clone(&scheduler);
         let swap_serving_generation = Arc::clone(&serving_generation);
+        let swap_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let incumbent = serving.clone();
         let candidate = build.latest.clone();
         let swap_task = tokio::task::spawn_blocking(move || {
@@ -525,9 +528,12 @@ impl CodeIndexSchedulerRegistryV1 {
             if current.generation().manifest().generation_id != expected_generation {
                 return Err(CodeIndexIgnoredDependencyRefusalV1::StaleGeneration.into());
             }
-            *swap_serving_generation
+            let mut serving = swap_serving_generation
                 .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(candidate.clone());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *serving = Some(candidate.clone());
+            swap_serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+            drop(serving);
             let _ = scheduler.schedule_semantic_generation(candidate.generation());
             Ok::<_, CodeIndexSchedulerErrorV1>(())
         })

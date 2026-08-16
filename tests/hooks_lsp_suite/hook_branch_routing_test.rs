@@ -127,6 +127,14 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
     let first_epoch = source.publication_epoch.get();
     assert!(first_epoch >= 1, "sealed generation must carry an epoch");
 
+    // A fresh production composition has no in-memory serving generation. The
+    // replay must refresh and reseat the exact generation while retaining the
+    // already-sealed metadata (and its epoch) rather than treating the branch
+    // name alone as idempotence.
+    harness.shutdown().await;
+    let harness = ProductionProjectCompositionHarnessV1::open(&temp_root, [project.clone()])
+        .await
+        .unwrap();
     let replay_outcome = harness
         .track_worktree_branch(&project, &project, "feature/hook")
         .await
@@ -145,7 +153,7 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .expect("replayed branch must keep its sealed provenance");
     assert_eq!(
         replay_source, source,
-        "the exact branch/worktree/store route must not publish a replacement generation"
+        "a missing serving generation must reseat exact provenance without advancing its epoch"
     );
 
     // A retained generation at the same ref but an older commit is stale. The
