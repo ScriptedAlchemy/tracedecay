@@ -34,6 +34,9 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         Commands::HookCodexSessionStart => {
             Some(tracedecay::hooks::hook_codex_session_start().await)
         }
+        Commands::HookCodexUserPromptSubmit => {
+            Some(tracedecay::hooks::hook_codex_user_prompt_submit().await)
+        }
         Commands::HookCodexPostToolUse => Some(tracedecay::hooks::hook_codex_post_tool_use().await),
         Commands::HookHermesTerminalReceipt => {
             Some(tracedecay::hooks::hook_hermes_terminal_receipt().await)
