@@ -1865,7 +1865,7 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
         .map_err(|_error| {
             CodeIndexSchedulerErrorV1::SemanticSchedule("hook task failed".to_owned())
-        })?;
+        })??;
 
         let retiring = self.retiring.lock().await;
         if retiring.contains_key(project_root) {
