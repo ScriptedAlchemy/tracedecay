@@ -693,7 +693,7 @@ fn generation_matches_branch_source(
         && snapshot
             .source_revision
             .as_ref()
-            .map(tracedecay_domain::GitOidV1::as_str)
+            .map(tracedecay_domain::CommitId::as_str)
             == Some(source.source_oid.as_str())
 }
 
