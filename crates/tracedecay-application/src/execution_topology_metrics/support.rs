@@ -118,16 +118,22 @@ pub(super) fn append_missing_descriptor_measurements(
     measurements: &mut Vec<ExecutionTopologyMeasurementV1>,
     context: &ProjectionContext,
 ) {
-    let present = measurements
-        .iter()
-        .map(|measurement| {
-            (
-                measurement.value.metric.as_str(),
-                measurement.value.unit.as_str(),
-                measurement.value.denominator.as_str(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
+    let missing = {
+        let present = measurements
+            .iter()
+            .map(|measurement| {
+                (
+                    measurement.value.metric.as_str(),
+                    measurement.value.unit.as_str(),
+                    measurement.value.denominator.as_str(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
+            .into_iter()
+            .filter(|descriptor| !present.contains(descriptor))
+            .collect::<Vec<_>>()
+    };
     let coverage = MetricCoverageV1 {
         eligible: context.complete.then_some(0),
         observed: 0,
@@ -142,10 +148,7 @@ pub(super) fn append_missing_descriptor_measurements(
     } else {
         ExecutionMetricUnavailableV1::CoverageFloorUnmet
     };
-    for (metric, unit, denominator) in EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1 {
-        if present.contains(&(metric, unit, denominator)) {
-            continue;
-        }
+    for (metric, unit, denominator) in missing {
         measurements.push(measurement(MeasurementInput {
             metric,
             unit,
