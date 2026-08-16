@@ -16,8 +16,7 @@ use tracedecay_application::{
     ApplicationEnvelope, ApplicationInvocation, ApplicationInvocationExecutor,
     ApplicationInvocationFuture, ApplicationProblem, ApplicationProblemKind, ApplicationRequest,
     ApplicationResponse, CancellationContext, CancellationSignal, CancellationStage, Deadline,
-    InvocationError, InvocationTarget, OpaqueCursor, PageRequest, RequestId, RetryDirective,
-    SafeDiagnostic, StreamEvent, StreamEventKind, StreamTermination,
+    InvocationError, InvocationTarget, PageRequest, RequestId, RetryDirective, SafeDiagnostic,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
@@ -291,32 +290,6 @@ impl<T> DispatchedInvocation<T> {
             request_id,
             surface,
             invocation,
-        }
-    }
-}
-
-/// The canonical problem category for adapter presentation.
-pub fn canonical_problem_kind(problem: &ApplicationProblem) -> ApplicationProblemKind {
-    problem.kind()
-}
-
-/// Returns the one public shape shared by unknown, absent, and unauthorized
-/// bindings. It deliberately contains no request, argument, or resource value.
-pub fn concealed_not_found_or_not_authorized() -> ApplicationProblem {
-    ApplicationProblem::not_found_or_not_authorized(tracedecay_application::RetryDirective::Never)
-}
-
-/// The opaque cursor bytes to carry unchanged across adapter boundaries.
-pub fn canonical_cursor(page: &PageRequest) -> Option<&OpaqueCursor> {
-    page.cursor.as_ref()
-}
-
-/// Extracts a receipt-bearing terminal event without flattening stream state.
-pub fn canonical_stream_termination<T>(event: &StreamEvent<T>) -> Option<&StreamTermination> {
-    match &event.kind {
-        StreamEventKind::Terminal(termination) => Some(termination),
-        StreamEventKind::Item(_) | StreamEventKind::Progress { .. } | StreamEventKind::Gap(_) => {
-            None
         }
     }
 }

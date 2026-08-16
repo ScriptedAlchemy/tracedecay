@@ -73,22 +73,6 @@ async fn await_project_open_with_semantic_control<Output>(
     }
 }
 
-#[cfg(unix)]
-async fn await_unix_project_open<Output>(
-    control: Option<&SemanticInvocationControlV1>,
-    project_open: impl Future<Output = Output>,
-) -> std::result::Result<Output, tracedecay_application::ApplicationProblem> {
-    await_project_open_with_semantic_control(control, project_open).await
-}
-
-#[cfg(any(not(unix), test))]
-async fn await_portable_project_open<Output>(
-    control: Option<&SemanticInvocationControlV1>,
-    project_open: impl Future<Output = Output>,
-) -> std::result::Result<Output, tracedecay_application::ApplicationProblem> {
-    await_project_open_with_semantic_control(control, project_open).await
-}
-
 async fn await_lsp_project_open_upgrade(
     project_open_gates: &Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     route: &ProjectRouteKey,
@@ -232,7 +216,7 @@ pub(super) async fn execute_portable_daemon_invocation(
     let workflow_application = request.is_workflow_application();
     let mut project_path = None;
     if request.requires_project() {
-        let project_server = await_portable_project_open(
+        let project_server = await_project_open_with_semantic_control(
             semantic_control.as_ref(),
             Box::pin(portable_project_server_for_request(
                 lifecycle.clone(),
@@ -516,7 +500,7 @@ pub(super) async fn execute_daemon_invocation(
     let workflow_application = request.is_workflow_application();
     let mut project_path = None;
     if request.requires_project() {
-        let project_server = await_unix_project_open(
+        let project_server = await_project_open_with_semantic_control(
             semantic_control.as_ref(),
             engine.project_server_for_request(handshake, ProjectServerRequirement::Core),
         )
@@ -688,7 +672,7 @@ mod semantic_control_tests {
     #[tokio::test]
     async fn unix_dispatch_admits_controls_before_and_during_project_open() {
         let cancelled = cancelled_control();
-        let cancelled_problem = await_unix_project_open(Some(&cancelled), async {
+        let cancelled_problem = await_project_open_with_semantic_control(Some(&cancelled), async {
             panic!("pre-cancelled project open must not be polled");
         })
         .await
@@ -696,7 +680,7 @@ mod semantic_control_tests {
         assert_eq!(cancelled_problem.kind(), ApplicationProblemKind::Cancelled);
 
         let expired = active_control(0);
-        let expired_problem = await_unix_project_open(Some(&expired), async {
+        let expired_problem = await_project_open_with_semantic_control(Some(&expired), async {
             panic!("pre-expired project open must not be polled");
         })
         .await
@@ -705,7 +689,7 @@ mod semantic_control_tests {
 
         let expiring = active_control(2_000);
         let during_open_problem =
-            await_unix_project_open(Some(&expiring), std::future::pending::<()>())
+            await_project_open_with_semantic_control(Some(&expiring), std::future::pending::<()>())
                 .await
                 .expect_err("project open must observe deadline");
         assert_eq!(during_open_problem.kind(), ApplicationProblemKind::TimedOut);
@@ -714,7 +698,7 @@ mod semantic_control_tests {
     #[tokio::test]
     async fn portable_dispatch_admits_controls_before_and_during_project_open() {
         let cancelled = cancelled_control();
-        let cancelled_problem = await_portable_project_open(Some(&cancelled), async {
+        let cancelled_problem = await_project_open_with_semantic_control(Some(&cancelled), async {
             panic!("pre-cancelled project open must not be polled");
         })
         .await
@@ -722,7 +706,7 @@ mod semantic_control_tests {
         assert_eq!(cancelled_problem.kind(), ApplicationProblemKind::Cancelled);
 
         let expired = active_control(0);
-        let expired_problem = await_portable_project_open(Some(&expired), async {
+        let expired_problem = await_project_open_with_semantic_control(Some(&expired), async {
             panic!("pre-expired project open must not be polled");
         })
         .await
@@ -731,7 +715,7 @@ mod semantic_control_tests {
 
         let expiring = active_control(2_000);
         let during_open_problem =
-            await_portable_project_open(Some(&expiring), std::future::pending::<()>())
+            await_project_open_with_semantic_control(Some(&expiring), std::future::pending::<()>())
                 .await
                 .expect_err("project open must observe deadline");
         assert_eq!(during_open_problem.kind(), ApplicationProblemKind::TimedOut);

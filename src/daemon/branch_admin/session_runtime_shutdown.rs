@@ -80,14 +80,6 @@ impl StoreAdministration {
         Ok(registry)
     }
 
-    pub(in crate::daemon) async fn retained_runtime_registry(
-        &self,
-    ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
-    {
-        self.ensure_account_active().await?;
-        self.session_runtime_registry().await
-    }
-
     pub(in crate::daemon) async fn registered_runtime_registry(
         &self,
     ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>

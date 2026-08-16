@@ -26,8 +26,8 @@ mod project_invocation;
 /// The Unix and portable brokers share this state so an authenticated LSP
 /// session remains daemon-owned across client connections until it is detached
 /// or expires.
+#[derive(Clone)]
 pub(super) struct DaemonInvocationState {
-    pub(super) resident_memory: Arc<ProcessResidentMemoryV1>,
     pub(super) lsp_session_registry: Arc<tokio::sync::Mutex<LspSessionRegistry>>,
     pub(super) service: DaemonInvocationService,
     pub(super) github_credential_lifecycle:
@@ -38,21 +38,6 @@ pub(super) struct DaemonInvocationState {
         Arc<dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1>,
     semantic_projection_scheduler:
         tracedecay_usecases::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
-}
-
-impl Clone for DaemonInvocationState {
-    fn clone(&self) -> Self {
-        Self {
-            resident_memory: Arc::clone(&self.resident_memory),
-            lsp_session_registry: Arc::clone(&self.lsp_session_registry),
-            service: self.service.clone(),
-            github_credential_lifecycle: self.github_credential_lifecycle.clone(),
-            code_index_schedulers: self.code_index_schedulers.clone(),
-            query_authority_provider: self.query_authority_provider.clone(),
-            work_federated_query_authority: Arc::clone(&self.work_federated_query_authority),
-            semantic_projection_scheduler: self.semantic_projection_scheduler.clone(),
-        }
-    }
 }
 
 impl Default for DaemonInvocationState {
@@ -74,7 +59,6 @@ impl Default for DaemonInvocationState {
             provider: query_authority_provider.clone(),
         });
         Self {
-            resident_memory,
             lsp_session_registry: Arc::new(tokio::sync::Mutex::new(
                 LspSessionRegistry::default(),
             )),
@@ -851,12 +835,15 @@ mod resident_memory_tests {
         let cloned = state.clone();
 
         assert!(Arc::ptr_eq(
-            &state.resident_memory,
             state.code_index_schedulers.resident_memory(),
+            cloned.code_index_schedulers.resident_memory(),
         ));
-        assert!(Arc::ptr_eq(&state.resident_memory, &cloned.resident_memory));
         assert_eq!(
-            state.resident_memory.snapshot().limit_bytes,
+            state
+                .code_index_schedulers
+                .resident_memory()
+                .snapshot()
+                .limit_bytes,
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1
                 .get(),
         );

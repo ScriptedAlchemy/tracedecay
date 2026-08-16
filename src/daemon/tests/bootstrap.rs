@@ -918,7 +918,7 @@ async fn account_tombstone_denies_projectless_memory_and_profile_automation() {
     }
     let runtime_error = match engine
         .store_administration
-        .retained_runtime_registry()
+        .registered_runtime_registry()
         .await
     {
         Ok(_) => panic!("account tombstone must fence profile runtime openings"),

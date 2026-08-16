@@ -576,7 +576,6 @@ mod tests {
             large_pair.head.generation(),
             None,
             None,
-            100,
             &control,
         );
         assert!(
@@ -599,7 +598,6 @@ mod tests {
                 large_pair.head.generation(),
                 None,
                 None,
-                100,
                 &BranchGenerationReadControlV1 {
                     deadline: None,
                     cancellation: Some(cancellation),
@@ -616,7 +614,6 @@ mod tests {
                 large_pair.head.generation(),
                 None,
                 None,
-                100,
                 &BranchGenerationReadControlV1 {
                     deadline: Some(expired),
                     cancellation: None,

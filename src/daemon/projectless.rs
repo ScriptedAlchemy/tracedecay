@@ -370,7 +370,7 @@ async fn projectless_profile_retained_response(
     {
         return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
     }
-    let runtime_registry = match store_administration.retained_runtime_registry().await {
+    let runtime_registry = match store_administration.registered_runtime_registry().await {
         Ok(registry) => registry,
         Err(error) => {
             return crate::mcp::server::tool_error_response(id, tool_name, &error);

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cli::ProfileStorageAction;
+use tracedecay::display::format_bytes;
 
 pub(crate) async fn handle_profile_storage_action(
     action: ProfileStorageAction,
@@ -125,13 +126,7 @@ async fn handle_storage_report(
             }
             _ => unreachable!("clap requires project id and root together"),
         };
-        match offline {
-            Ok(report) => report,
-            Err(_) if daemon_owns_profile && tracedecay::daemon::daemon_reachable() => {
-                brokered_storage_report(project_id.as_deref(), project_root.as_deref()).await?
-            }
-            Err(error) => return Err(error),
-        }
+        offline?
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -246,21 +241,6 @@ async fn handle_storage_report(
         );
     }
     Ok(())
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
 }
 
 fn handle_backup_profile(destination: String, backup_id: String) -> tracedecay::errors::Result<()> {

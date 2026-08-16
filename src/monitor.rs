@@ -11,6 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::display::format_number;
+
 mod cost;
 
 use cost::{CostCache, CostCacheState};
@@ -595,18 +597,6 @@ fn update_color_for(recent: &[(String, String)], project: &str, tool_name: &str)
         Some(2) => "\x1b[33m",       // yellow: 3rd latest
         _ => "",
     }
-}
-
-fn format_number(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
 }
 
 #[cfg(test)]

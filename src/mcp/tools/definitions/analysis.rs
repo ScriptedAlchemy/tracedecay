@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use super::{
-    def, def_limit_path_tool, def_object, def_path_flag_tool, def_path_limit_tool, number_property,
+    def, def_object, def_path_flag_tool, def_path_limit_tool, number_property,
     string_property,
 };
 use crate::mcp::tools::ToolDefinition;
@@ -356,12 +356,12 @@ pub(super) fn def_gini() -> ToolDefinition {
 }
 
 pub(super) fn def_dependency_depth() -> ToolDefinition {
-    def_limit_path_tool(
+    def_path_limit_tool(
         "tracedecay_dependency_depth",
         "Dependency Depth",
         "Show the longest file-level dependency chains. Files at the end of long chains are fragile to upstream changes.",
-        "Maximum number of chains to return (default: 10)",
         "Filter to files under this directory path",
+        "Maximum number of chains to return (default: 10)",
     )
 }
 

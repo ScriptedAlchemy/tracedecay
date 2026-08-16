@@ -174,24 +174,6 @@ fn def_path_limit_tool(
     )
 }
 
-fn def_limit_path_tool(
-    name: &str,
-    title: &str,
-    description: &str,
-    limit_description: &str,
-    path_description: &str,
-) -> ToolDefinition {
-    def_object(
-        name,
-        title,
-        description,
-        json!({
-            "limit": number_property(limit_description),
-            "path": string_property(path_description)
-        }),
-    )
-}
-
 fn def_path_flag_tool(
     name: &str,
     title: &str,

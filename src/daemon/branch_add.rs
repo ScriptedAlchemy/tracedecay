@@ -9,10 +9,6 @@ const BRANCH_ADD_TOOL_NAME: &str = "tracedecay_admin_branch_add";
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 const PROJECT_PATH_UNAVAILABLE: &str = "project_path_unavailable";
 
-fn scheduler_unavailable(detail: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::project_route(CODE_INDEX_SCHEDULER_UNAVAILABLE, true, detail)
-}
-
 pub(super) struct BranchAddRequest {
     pub(super) id: serde_json::Value,
     branch: std::result::Result<String, String>,
@@ -147,11 +143,7 @@ fn typed_project_route_error(
     retryable: bool,
     detail: &str,
 ) -> JsonRpcResponse {
-    let error = if reason_code == CODE_INDEX_SCHEDULER_UNAVAILABLE {
-        scheduler_unavailable(detail)
-    } else {
-        TraceDecayError::project_route(reason_code, retryable, detail)
-    };
+    let error = TraceDecayError::project_route(reason_code, retryable, detail);
     JsonRpcResponse::error_with_data(
         id,
         ErrorCode::InternalError,

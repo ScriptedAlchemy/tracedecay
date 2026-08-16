@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use tracedecay_application::RequestId;
 use tracedecay_application::remote::recovery::{
@@ -67,8 +67,6 @@ pub(super) struct RecoveryRuntimeProbeV1 {
     interruption: Arc<AtomicU8>,
     commit_started: AtomicBool,
 }
-
-use std::sync::atomic::AtomicU8;
 
 impl RecoveryRuntimeProbeV1 {
     pub(super) fn new(

@@ -80,22 +80,6 @@ impl Drop for BranchReopenCompletion {
     }
 }
 
-/// Why a retained branch reopen was kicked. The two triggers differ only in
-/// whether the reopen re-checks for drift before running.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BranchReopenTrigger {
-    /// A request observed the served branch diverge from the live one.
-    Drift,
-}
-
-impl BranchReopenTrigger {
-    fn reason(self) -> &'static str {
-        match self {
-            Self::Drift => "branch_drift",
-        }
-    }
-}
-
 /// Retained startup reconciliation-admission task, joined or aborted before the code graph
 /// authority is released.
 #[derive(Default)]
@@ -427,7 +411,7 @@ impl McpServer {
         if !current.branch_drifted_with(&live_branch) {
             return (current, live_branch);
         }
-        self.spawn_branch_reopen(BranchReopenTrigger::Drift);
+        self.spawn_branch_reopen();
         (current, live_branch)
     }
 
@@ -438,14 +422,15 @@ impl McpServer {
     /// caller that finds the lane busy returns immediately: a reopen is already
     /// converging on the same live branch, and the next request observes the
     /// swap.
-    fn spawn_branch_reopen(&self, trigger: BranchReopenTrigger) {
+    fn spawn_branch_reopen(&self) {
         let Ok(reopen_guard) = Arc::clone(&self.branch_reopen).try_lock_owned() else {
             return;
         };
         let cg_cell = Arc::clone(&self.cg);
         let completion = BranchReopenCompletion(Arc::clone(&self.branch_reopen_completions));
         let reconcile = self.database_owner_reconciler.clone();
-        let reason = trigger.reason();
+        // A drift observation is the only trigger for a retained reopen.
+        let reason = "branch_drift";
         let _admitted = self.background_tasks.spawn(async move {
             let _completion = completion;
             let _reopen_guard = reopen_guard;

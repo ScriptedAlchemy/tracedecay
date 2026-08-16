@@ -212,7 +212,6 @@ pub(super) fn bounded_diff(
     head: &crate::code_index::production::CodeIndexPublishedGenerationV1,
     file_filter: Option<&str>,
     kind_filter: Option<&str>,
-    _limit: usize,
     control: &code_index_scheduler::branch_generations::BranchGenerationReadControlV1,
 ) -> Result<
     code_search::CodeIndexBranchDiffCompletedV1,
@@ -381,7 +380,6 @@ pub(super) fn code_index_branch_diff_executor(
                 generations.head.generation(),
                 request.file_filter.as_deref(),
                 request.kind_filter.as_deref(),
-                request.limit,
                 &control,
             ) {
                 Ok(completed) => completed,

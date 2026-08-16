@@ -262,8 +262,6 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
         .unwrap_or_default();
     let mut rows: Vec<ListRow> = Vec::with_capacity(project_paths.len());
     let mut token_errors: Vec<String> = Vec::new();
-    let mut total_size: u64 = 0;
-    let mut total_tokens: u64 = 0;
 
     for path in &project_paths {
         let mut location = global::classify_project_storage(path);
@@ -324,8 +322,6 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
                 .unwrap_or("no token total reported for this project");
             token_errors.push(format!("{}: {reason}", path.display()));
         }
-        total_size = total_size.saturating_add(size);
-        total_tokens = total_tokens.saturating_add(tokens.unwrap_or(0));
         rows.push(ListRow {
             path: path.clone(),
             status_label: location.status.label(),
@@ -344,8 +340,8 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
         return Ok(());
     }
 
-    total_size = rows.iter().map(|row| row.size).sum();
-    total_tokens = rows.iter().filter_map(|row| row.tokens).sum();
+    let total_size: u64 = rows.iter().map(|row| row.size).sum();
+    let total_tokens: u64 = rows.iter().filter_map(|row| row.tokens).sum();
 
     rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.path.cmp(&b.path)));
 
