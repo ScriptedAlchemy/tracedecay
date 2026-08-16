@@ -195,6 +195,40 @@ impl StoreRuntimeRegistry {
                     message: "exact registered runtime is still opening".to_owned(),
                 });
             }
+            RegistryEntry::Retiring(retiring) => {
+                state
+                    .entries
+                    .insert(key.clone(), RegistryEntry::Retiring(retiring));
+                return Err(StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                    key: Box::new(key),
+                });
+            }
+            RegistryEntry::Committing(committing) => {
+                state
+                    .entries
+                    .insert(key.clone(), RegistryEntry::Committing(committing));
+                return Err(StoreRuntimeRegistryFailure::RuntimeRetirementCommitting {
+                    key: Box::new(key),
+                });
+            }
+            RegistryEntry::Faulted(faulted) => {
+                state
+                    .entries
+                    .insert(key.clone(), RegistryEntry::Faulted(faulted));
+                return Err(StoreRuntimeRegistryFailure::RuntimeRetirementFaulted {
+                    key: Box::new(key),
+                });
+            }
+            RegistryEntry::DurabilityUncertain(faulted) => {
+                state
+                    .entries
+                    .insert(key.clone(), RegistryEntry::DurabilityUncertain(faulted));
+                return Err(
+                    StoreRuntimeRegistryFailure::RuntimeRetirementDurabilityUncertain {
+                        key: Box::new(key),
+                    },
+                );
+            }
             RegistryEntry::Evicting(evicting) => {
                 state
                     .entries
@@ -274,7 +308,7 @@ impl StoreRuntimeRegistry {
         };
         state.next_eviction_attempt = attempt;
         if let Err(error) = ready
-            .handle
+            .owner
             .runtime()
             .transition(RuntimeMaintenanceStateV1::Draining)
         {

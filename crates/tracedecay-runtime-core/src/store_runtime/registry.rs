@@ -19,6 +19,7 @@ mod graph;
 mod leases;
 mod open;
 mod ports;
+mod retirement;
 
 #[cfg(test)]
 mod tests;
@@ -26,6 +27,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -60,6 +62,10 @@ pub use ports::{
     LifecycleShardRuntimePublisher, ResolvedStoreLocator, RuntimeLocatorRecord,
     ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeRegistryFuture,
     StoreRuntimeResolver,
+};
+pub use retirement::{
+    StoreRuntimeRetirementBlocker, StoreRuntimeRetirementCommit, StoreRuntimeRetirementOutcome,
+    StoreRuntimeRetirementReservation, StoreRuntimeRetirementResult, StoreRuntimeRetirementTarget,
 };
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StoreRuntimeKey {
@@ -127,6 +133,83 @@ struct StoreRuntimeLeaseSource {
     locator: RuntimeLocatorRecord,
     opened_file_identity: u64,
     database_authority: Option<crate::db::DatabaseAuthority>,
+    database_facades: AtomicUsize,
+}
+
+impl StoreRuntimeLeaseSource {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.publication.binding
+    }
+
+    fn runtime(&self) -> &Arc<ShardRuntime> {
+        &self.runtime
+    }
+
+    fn locator(&self) -> &RuntimeLocatorRecord {
+        &self.locator
+    }
+
+    fn canonical_path(&self) -> &std::path::Path {
+        self.locator.path()
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        self.locator.verified()
+    }
+
+    fn opened_file_identity(&self) -> Option<u64> {
+        Some(self.opened_file_identity)
+    }
+
+    fn physical_snapshot(&self) -> PhysicalRuntimeSnapshot {
+        self.attachment.snapshot()
+    }
+
+    fn writer_present(&self) -> bool {
+        self.physical_snapshot().writer_present
+    }
+
+    fn validate_database_write_authority(
+        &self,
+        authority: &crate::db::DatabaseAuthority,
+        operation: &'static str,
+    ) -> Result<u64, StoreRuntimeRegistryFailure> {
+        authority
+            .require_active_write_scope(operation)
+            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation,
+                message: error.to_string(),
+            })?;
+        if authority.canonical_database_path() != self.locator().path() {
+            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation,
+                message: format!(
+                    "registered locator {} does not match database authority {}",
+                    self.locator().path().display(),
+                    authority.canonical_database_path().display()
+                ),
+            });
+        }
+        self.validate_opened_file_identity(operation)
+    }
+
+    fn validate_opened_file_identity(
+        &self,
+        operation: &'static str,
+    ) -> Result<u64, StoreRuntimeRegistryFailure> {
+        let current_file_identity = crate::db::sqlite_generation_identity(self.locator().path())
+            .map_err(|_| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation,
+                message: "could not verify the registered SQLite file identity".to_owned(),
+            })?;
+        if current_file_identity != self.opened_file_identity {
+            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation,
+                message: "database file identity changed after registry attachment".to_owned(),
+            });
+        }
+        Ok(self.opened_file_identity)
+    }
 }
 
 /// The registry's non-cloneable physical attachment. Callers receive only
@@ -176,6 +259,7 @@ impl StoreRuntimeClientLease {
     }
 
     pub(crate) fn into_database_attachment(self) -> DatabaseRuntimeAttachment {
+        self.inner.database_facades.fetch_add(1, Ordering::AcqRel);
         DatabaseRuntimeAttachment { client: self }
     }
 }
@@ -203,6 +287,17 @@ impl std::ops::Deref for DatabaseRuntimeAttachment {
 
     fn deref(&self) -> &Self::Target {
         &self.client
+    }
+}
+
+impl Drop for DatabaseRuntimeAttachment {
+    fn drop(&mut self) {
+        let previous = self
+            .client
+            .inner
+            .database_facades
+            .fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous != 0, "database facade accounting underflow");
     }
 }
 
@@ -307,7 +402,7 @@ impl StoreRuntimeClientLease {
         &self.inner.publication.binding
     }
 
-    pub(crate) fn runtime(&self) -> &ShardRuntime {
+    pub(super) fn runtime(&self) -> &ShardRuntime {
         &self.inner.runtime
     }
 
@@ -740,6 +835,24 @@ pub enum StoreRuntimeRegistryFailure {
     GraphLeaseTokenExhausted {
         key: Box<StoreRuntimeKey>,
     },
+    ProfilePinTokenExhausted {
+        key: Box<StoreRuntimeKey>,
+    },
+    RuntimeRetirementInProgress {
+        key: Box<StoreRuntimeKey>,
+    },
+    RuntimeRetirementCommitting {
+        key: Box<StoreRuntimeKey>,
+    },
+    RuntimeRetirementFaulted {
+        key: Box<StoreRuntimeKey>,
+    },
+    RuntimeRetirementDurabilityUncertain {
+        key: Box<StoreRuntimeKey>,
+    },
+    RetirementReservationLost {
+        key: Box<StoreRuntimeKey>,
+    },
     GraphLocatorConflict {
         key: Box<StoreRuntimeKey>,
         retained_path: PathBuf,
@@ -825,6 +938,18 @@ pub enum StoreRuntimeLookup {
     Evicting {
         key: Box<StoreRuntimeKey>,
     },
+    Retiring {
+        key: Box<StoreRuntimeKey>,
+    },
+    Committing {
+        key: Box<StoreRuntimeKey>,
+    },
+    Faulted {
+        key: Box<StoreRuntimeKey>,
+    },
+    DurabilityUncertain {
+        key: Box<StoreRuntimeKey>,
+    },
     Missing {
         key: Box<StoreRuntimeKey>,
     },
@@ -847,6 +972,18 @@ struct EvictingRuntime {
     owner: Arc<StoreRuntimeOwnerAttachment>,
 }
 
+struct RetiringRuntime {
+    owner: Arc<StoreRuntimeOwnerAttachment>,
+}
+
+struct CommittingRuntime {
+    owner: Arc<StoreRuntimeOwnerAttachment>,
+}
+
+struct FaultedRuntime {
+    owner: Arc<StoreRuntimeOwnerAttachment>,
+}
+
 struct DestructivePathReservation {
     root: PathBuf,
     database_paths: Vec<PathBuf>,
@@ -866,6 +1003,10 @@ struct RetainedGraphPublication {
 enum RegistryEntry {
     Opening(open::OpeningRuntime),
     Ready(ReadyRuntime),
+    Retiring(RetiringRuntime),
+    Committing(CommittingRuntime),
+    Faulted(FaultedRuntime),
+    DurabilityUncertain(FaultedRuntime),
     Evicting(EvictingRuntime),
 }
 
@@ -875,11 +1016,13 @@ struct RegistryState {
     graph_publications: BTreeMap<StoreRuntimeKey, RetainedGraphPublication>,
     destructive_paths: BTreeMap<u64, DestructivePathReservation>,
     profile_authorities: BTreeMap<StoreShardIdV1, StoreRuntimeBindingV1>,
+    profile_pin_tokens: BTreeMap<StoreRuntimeKey, BTreeSet<u64>>,
     next_destructive_attempt: u64,
     next_open_attempt: u64,
     next_eviction_attempt: u64,
     next_publication: u64,
     next_graph_lease_token: u64,
+    next_profile_pin_token: u64,
 }
 
 struct StoreRuntimeRegistryInner {
@@ -956,6 +1099,14 @@ impl StoreRuntimeRegistry {
                 }
             }
             Some(RegistryEntry::Opening(_)) => StoreRuntimeLookup::Opening { key: Box::new(key) },
+            Some(RegistryEntry::Retiring(_)) => StoreRuntimeLookup::Retiring { key: Box::new(key) },
+            Some(RegistryEntry::Committing(_)) => {
+                StoreRuntimeLookup::Committing { key: Box::new(key) }
+            }
+            Some(RegistryEntry::Faulted(_)) => StoreRuntimeLookup::Faulted { key: Box::new(key) },
+            Some(RegistryEntry::DurabilityUncertain(_)) => {
+                StoreRuntimeLookup::DurabilityUncertain { key: Box::new(key) }
+            }
             Some(RegistryEntry::Evicting(_)) => StoreRuntimeLookup::Evicting { key: Box::new(key) },
             None => state
                 .entries
@@ -971,6 +1122,25 @@ impl StoreRuntimeRegistry {
                                 })
                             }
                             RegistryEntry::Opening(_) => None,
+                            RegistryEntry::Retiring(retiring) => {
+                                Some(StoreRuntimeLookup::WrongIncarnation {
+                                    expected: Box::new(expected.clone()),
+                                    actual: Box::new(retiring.owner.binding().clone()),
+                                })
+                            }
+                            RegistryEntry::Committing(committing) => {
+                                Some(StoreRuntimeLookup::WrongIncarnation {
+                                    expected: Box::new(expected.clone()),
+                                    actual: Box::new(committing.owner.binding().clone()),
+                                })
+                            }
+                            RegistryEntry::Faulted(faulted)
+                            | RegistryEntry::DurabilityUncertain(faulted) => {
+                                Some(StoreRuntimeLookup::WrongIncarnation {
+                                    expected: Box::new(expected.clone()),
+                                    actual: Box::new(faulted.owner.binding().clone()),
+                                })
+                            }
                             RegistryEntry::Evicting(evicting) => {
                                 Some(StoreRuntimeLookup::WrongIncarnation {
                                     expected: Box::new(expected.clone()),
@@ -995,7 +1165,15 @@ impl StoreRuntimeRegistry {
         let state = self.lock_state();
         match state.entries.get(key) {
             Some(RegistryEntry::Ready(ready)) => ready.owner.issue_client_lease().ok(),
-            Some(RegistryEntry::Opening(_) | RegistryEntry::Evicting(_)) | None => None,
+            Some(
+                RegistryEntry::Opening(_)
+                | RegistryEntry::Retiring(_)
+                | RegistryEntry::Committing(_)
+                | RegistryEntry::Faulted(_)
+                | RegistryEntry::DurabilityUncertain(_)
+                | RegistryEntry::Evicting(_),
+            )
+            | None => None,
         }
     }
 
@@ -1016,6 +1194,26 @@ impl StoreRuntimeRegistry {
                     key: Box::new(key.clone()),
                 })
             }
+            Some(RegistryEntry::Retiring(_)) => {
+                Err(StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                    key: Box::new(key.clone()),
+                })
+            }
+            Some(RegistryEntry::Committing(_)) => {
+                Err(StoreRuntimeRegistryFailure::RuntimeRetirementCommitting {
+                    key: Box::new(key.clone()),
+                })
+            }
+            Some(RegistryEntry::Faulted(_)) => {
+                Err(StoreRuntimeRegistryFailure::RuntimeRetirementFaulted {
+                    key: Box::new(key.clone()),
+                })
+            }
+            Some(RegistryEntry::DurabilityUncertain(_)) => Err(
+                StoreRuntimeRegistryFailure::RuntimeRetirementDurabilityUncertain {
+                    key: Box::new(key.clone()),
+                },
+            ),
             None => Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "issue registered client lease",
                 message: "published runtime disappeared before its opener received a lease"
@@ -1042,7 +1240,15 @@ impl StoreRuntimeRegistry {
                 .filter_map(|entry| match entry {
                     RegistryEntry::Ready(ready) => Some(Arc::clone(&ready.owner.source)),
                     RegistryEntry::Opening(_) => None,
-                    RegistryEntry::Evicting(evicting) => Some(evicting.owner.clone()),
+                    RegistryEntry::Retiring(retiring) => Some(Arc::clone(&retiring.owner.source)),
+                    RegistryEntry::Committing(committing) => {
+                        Some(Arc::clone(&committing.owner.source))
+                    }
+                    RegistryEntry::Faulted(faulted)
+                    | RegistryEntry::DurabilityUncertain(faulted) => {
+                        Some(Arc::clone(&faulted.owner.source))
+                    }
+                    RegistryEntry::Evicting(evicting) => Some(Arc::clone(&evicting.owner.source)),
                 })
                 .collect::<Vec<_>>();
             let opening_shards = u32::try_from(opening_shards).unwrap_or(u32::MAX);

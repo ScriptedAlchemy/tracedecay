@@ -166,88 +166,116 @@ impl StoreRuntimeRegistry {
         &self,
         target: DestructiveMaintenanceTarget,
     ) -> Result<DestructiveMaintenanceReservation, StoreRuntimeRegistryFailure> {
-        let (attempt, closes) =
-            {
-                let mut state = self.lock_state();
-                if state.destructive_paths.values().any(|reservation| {
-                    paths_overlap(&target.root, &reservation.root)
-                        || target
-                            .database_paths
-                            .iter()
-                            .any(|path| reservation.database_paths.binary_search(path).is_ok())
-                }) {
-                    return Err(
-                        StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress {
-                            root: target.root.clone(),
-                        },
-                    );
-                }
-                if state.entries.values().any(|entry| match entry {
-                    RegistryEntry::Opening(opening) => opening
+        let (attempt, closes) = {
+            let mut state = self.lock_state();
+            if state.destructive_paths.values().any(|reservation| {
+                paths_overlap(&target.root, &reservation.root)
+                    || target
+                        .database_paths
+                        .iter()
+                        .any(|path| reservation.database_paths.binary_search(path).is_ok())
+            }) {
+                return Err(
+                    StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress {
+                        root: target.root.clone(),
+                    },
+                );
+            }
+            if state.entries.values().any(|entry| match entry {
+                RegistryEntry::Opening(opening) => {
+                    opening
                         .database_authority
                         .as_ref()
                         .is_some_and(|authority| {
                             target.includes_database_path(authority.canonical_database_path())
-                        }),
-                    RegistryEntry::Ready(_) | RegistryEntry::Evicting(_) => false,
-                }) {
-                    return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                        operation: "reserve destructive store maintenance",
-                        message: format!(
-                            "a runtime under '{}' is still opening",
-                            target.root.display()
-                        ),
-                    });
+                        })
                 }
-                if let Some(key) = state.entries.iter().find_map(|(key, entry)| match entry {
-                    RegistryEntry::Evicting(evicting)
-                        if target.includes_database_path(evicting.owner.locator().path()) =>
+                RegistryEntry::Ready(_)
+                | RegistryEntry::Retiring(_)
+                | RegistryEntry::Committing(_)
+                | RegistryEntry::Faulted(_)
+                | RegistryEntry::DurabilityUncertain(_)
+                | RegistryEntry::Evicting(_) => false,
+            }) {
+                return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "reserve destructive store maintenance",
+                    message: format!(
+                        "a runtime under '{}' is still opening",
+                        target.root.display()
+                    ),
+                });
+            }
+            if let Some(key) = state.entries.iter().find_map(|(key, entry)| match entry {
+                RegistryEntry::Evicting(evicting)
+                    if target.includes_database_path(evicting.owner.locator().path()) =>
+                {
+                    Some(key.clone())
+                }
+                RegistryEntry::Retiring(retiring)
+                    if target.includes_database_path(retiring.owner.locator().path()) =>
+                {
+                    Some(key.clone())
+                }
+                RegistryEntry::Committing(committing)
+                    if target.includes_database_path(committing.owner.locator().path()) =>
+                {
+                    Some(key.clone())
+                }
+                RegistryEntry::Faulted(faulted) | RegistryEntry::DurabilityUncertain(faulted)
+                    if target.includes_database_path(faulted.owner.locator().path()) =>
+                {
+                    Some(key.clone())
+                }
+                RegistryEntry::Opening(_)
+                | RegistryEntry::Ready(_)
+                | RegistryEntry::Retiring(_)
+                | RegistryEntry::Committing(_)
+                | RegistryEntry::Faulted(_)
+                | RegistryEntry::DurabilityUncertain(_)
+                | RegistryEntry::Evicting(_) => None,
+            }) {
+                return Err(StoreRuntimeRegistryFailure::RuntimeEvictionInProgress {
+                    key: Box::new(key),
+                });
+            }
+            let attempt = state
+                .next_destructive_attempt
+                .checked_add(1)
+                .ok_or(StoreRuntimeRegistryFailure::EvictionAttemptExhausted)?;
+            state.next_destructive_attempt = attempt;
+            let closes = state
+                .entries
+                .values()
+                .filter_map(|entry| match entry {
+                    RegistryEntry::Ready(ready)
+                        if target.includes_database_path(ready.owner.locator().path()) =>
                     {
-                        Some(key.clone())
+                        ready
+                            .owner
+                            .database_authority
+                            .clone()
+                            .map(|authority| (ready.owner.binding().clone(), authority))
                     }
                     RegistryEntry::Opening(_)
                     | RegistryEntry::Ready(_)
+                    | RegistryEntry::Retiring(_)
+                    | RegistryEntry::Committing(_)
+                    | RegistryEntry::Faulted(_)
+                    | RegistryEntry::DurabilityUncertain(_)
                     | RegistryEntry::Evicting(_) => None,
-                }) {
-                    return Err(StoreRuntimeRegistryFailure::RuntimeEvictionInProgress {
-                        key: Box::new(key),
-                    });
-                }
-                let attempt = state
-                    .next_destructive_attempt
-                    .checked_add(1)
-                    .ok_or(StoreRuntimeRegistryFailure::EvictionAttemptExhausted)?;
-                state.next_destructive_attempt = attempt;
-                let closes = state
-                    .entries
-                    .values()
-                    .filter_map(|entry| match entry {
-                        RegistryEntry::Ready(ready)
-                            if target.includes_database_path(ready.owner.locator().path()) =>
-                        {
-                            ready
-                                .handle
-                                .inner
-                                .database_authority
-                                .clone()
-                                .map(|authority| (ready.owner.binding().clone(), authority))
-                        }
-                        RegistryEntry::Opening(_)
-                        | RegistryEntry::Ready(_)
-                        | RegistryEntry::Evicting(_) => None,
-                    })
-                    .collect::<Vec<_>>();
-                let (released, _) = tokio::sync::watch::channel(false);
-                state.destructive_paths.insert(
-                    attempt,
-                    DestructivePathReservation {
-                        root: target.root.clone(),
-                        database_paths: target.database_paths.clone(),
-                        released,
-                    },
-                );
-                (attempt, closes)
-            };
+                })
+                .collect::<Vec<_>>();
+            let (released, _) = tokio::sync::watch::channel(false);
+            state.destructive_paths.insert(
+                attempt,
+                DestructivePathReservation {
+                    root: target.root.clone(),
+                    database_paths: target.database_paths.clone(),
+                    released,
+                },
+            );
+            (attempt, closes)
+        };
 
         let mut reservation_guard = DestructiveReservationGuard::new(self.clone(), attempt);
         let mut closed = Vec::with_capacity(closes.len());

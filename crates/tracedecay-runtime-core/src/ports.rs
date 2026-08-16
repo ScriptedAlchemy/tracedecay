@@ -8,7 +8,7 @@
 //! The store-runtime registry is no longer one of them. `StoreRuntimeSource`
 //! existed only because `daemon::store_runtime` had stayed in the root; that
 //! tree now lives in `crate::store_runtime`, so `db::connection` retains the
-//! concrete `store_runtime::registry::StoreRuntimeHandle` directly and the port
+//! concrete `store_runtime::registry::StoreRuntimeClientLease` directly and the port
 //! was deleted.
 //!
 //! Every port fails closed (or degrades to a documented no-op) when the root
