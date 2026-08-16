@@ -319,6 +319,14 @@ pub(super) async fn evaluate_native_profile(
         )
         .expect("evaluation time"),
     );
+    // Exercise the same identity authority the production client uses. A
+    // vector generation is a `sha256:<hex>` digest, which cannot be embedded
+    // in a daemon request token; doing so truthfully fails at request
+    // validation before the evaluator is reached.
+    let request_id = crate::request_identity::mint_global_request_id(
+        crate::request_identity::GlobalRequestSurface::SemanticEvaluation,
+    )
+    .expect("mint a production semantic-evaluation request id");
     let response = resources
         .invocation
         .service
@@ -329,17 +337,7 @@ pub(super) async fn evaluate_native_profile(
             None,
             None,
             crate::daemon_contract::DaemonInvocationRequest::semantic_evaluate_and_publish(
-                format!(
-                    "semantic-native-evaluation-{}",
-                    candidate
-                        .compatibility
-                        .semantic
-                        .as_ref()
-                        .expect("semantic pins")
-                        .vector_generation_id
-                        .as_digest()
-                        .as_str()
-                ),
+                request_id.as_str(),
                 candidate,
                 observed_at,
                 tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
