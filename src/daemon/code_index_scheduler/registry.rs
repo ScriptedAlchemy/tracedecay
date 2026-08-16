@@ -229,6 +229,23 @@ pub(in crate::daemon) enum ServingGenerationRollbackOutcomeV1 {
     NoMatch,
 }
 
+/// Opaque ownership of one exact serving-slot installation. The token is
+/// minted by the serving-slot CAS and is invalidated by every later slot
+/// replacement, even when a replacement reuses the same generation id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::daemon) struct ServingGenerationInstallationV1 {
+    token: u64,
+    serving_epoch: u64,
+    generation_id: CodeGenerationId,
+}
+
+/// Result of claiming one exact serving generation for a branch publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::daemon) enum ServingGenerationInstallationOutcomeV1 {
+    Installed(ServingGenerationInstallationV1),
+    NoMatch,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CodeIndexGenerationPublishedV1 {
     pub project_root: PathBuf,
@@ -272,6 +289,12 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
         Option<Arc<dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1>>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    /// Monotonic replacement epoch for the serving slot. It invalidates a
+    /// branch-publication token even if a future worker re-seats an equal id.
+    serving_generation_epoch: Arc<AtomicU64>,
+    /// One in-flight branch publication may own a serving-slot installation.
+    /// It is paired with `serving_generation_epoch` under the slot CAS.
+    serving_generation_installation: Arc<Mutex<Option<ServingGenerationInstallationV1>>>,
     graph_activation: CodeGraphActivationAuthorityV1,
     ignored_dependency_admissions: Arc<
         Mutex<
@@ -522,6 +545,7 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
     /// followers wake and resolve through `mounted` after the owner settles.
     cold_mount_reservations: Arc<Mutex<BTreeMap<PathBuf, Arc<ColdMountReservationSlotV1>>>>,
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
+    serving_generation_installation_tokens: Arc<AtomicU64>,
     generation_publications: tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
     activations: Arc<Mutex<BTreeMap<ManifestDigest, Weak<super::CodeIndexActivationV1>>>>,
@@ -1193,43 +1217,141 @@ impl CodeIndexSchedulerRegistryV1 {
             if worktree.repository_id == scope.repository_id
                 && worktree.worktree_id == scope.worktree_id
             {
-                *worktree
+                let mut serving = worktree
                     .serving_generation
                     .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *serving = None;
+                worktree
+                    .serving_generation_epoch
+                    .fetch_add(1, Ordering::AcqRel);
             }
         }
     }
 
-    /// Retire one retained generation only when it is still the exact
-    /// generation installed by the caller. This is the serving-generation CAS
-    /// companion to branch metadata rollback: it must never clear a newer or
-    /// foreign generation that replaced the failed publication.
-    pub(in crate::daemon) async fn retire_serving_generation_if_exact(
+    /// Atomically marks the exact current serving generation as owned by one
+    /// branch publication. A subsequent serving-slot replacement invalidates
+    /// this token before rollback can observe it.
+    pub(in crate::daemon) async fn install_exact_serving_generation(
         &self,
         project_root: &Path,
-        expected: &CodeGenerationId,
+        expected: &Arc<CodeIndexPublishedGenerationV1>,
+    ) -> ServingGenerationInstallationOutcomeV1 {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return ServingGenerationInstallationOutcomeV1::NoMatch;
+        };
+        let (serving_generation, serving_epoch, installation_slot) = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return ServingGenerationInstallationOutcomeV1::NoMatch;
+            };
+            (
+                Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.serving_generation_epoch),
+                Arc::clone(&worktree.serving_generation_installation),
+            )
+        };
+        let serving = serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(current) = serving.as_ref() else {
+            return ServingGenerationInstallationOutcomeV1::NoMatch;
+        };
+        if !Arc::ptr_eq(current.generation(), expected) {
+            return ServingGenerationInstallationOutcomeV1::NoMatch;
+        }
+        let serving_epoch = serving_epoch.load(Ordering::Acquire);
+        let token = match self.serving_generation_installation_tokens.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| current.checked_add(1),
+        ) {
+            Ok(token) => token,
+            Err(_) => return ServingGenerationInstallationOutcomeV1::NoMatch,
+        };
+        let installation = ServingGenerationInstallationV1 {
+            token,
+            serving_epoch,
+            generation_id: current.generation().manifest().generation_id.clone(),
+        };
+        let mut active_installation = installation_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active_installation
+            .as_ref()
+            .is_some_and(|existing| existing.serving_epoch == serving_epoch)
+        {
+            return ServingGenerationInstallationOutcomeV1::NoMatch;
+        }
+        *active_installation = Some(installation.clone());
+        ServingGenerationInstallationOutcomeV1::Installed(installation)
+    }
+
+    /// Completes an exact serving-slot installation after its matching branch
+    /// metadata CAS commits. A no-match means a foreign publication replaced
+    /// the slot, so the caller must roll its metadata back without clearing
+    /// the foreign serving generation.
+    pub(in crate::daemon) async fn commit_serving_generation_installation(
+        &self,
+        project_root: &Path,
+        installation: &ServingGenerationInstallationV1,
+    ) -> ServingGenerationRollbackOutcomeV1 {
+        self.resolve_serving_generation_installation(project_root, installation, false)
+            .await
+    }
+
+    /// Retires the serving generation only when this operation's metadata
+    /// rollback succeeded and its exact installation token is still current.
+    pub(in crate::daemon) async fn retire_owned_serving_generation(
+        &self,
+        project_root: &Path,
+        installation: &ServingGenerationInstallationV1,
+    ) -> ServingGenerationRollbackOutcomeV1 {
+        self.resolve_serving_generation_installation(project_root, installation, true)
+            .await
+    }
+
+    async fn resolve_serving_generation_installation(
+        &self,
+        project_root: &Path,
+        installation: &ServingGenerationInstallationV1,
+        retire: bool,
     ) -> ServingGenerationRollbackOutcomeV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return ServingGenerationRollbackOutcomeV1::NoMatch;
         };
-        let serving_generation = {
+        let (serving_generation, serving_epoch, active_installation) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return ServingGenerationRollbackOutcomeV1::NoMatch;
             };
-            Arc::clone(&worktree.serving_generation)
+            (
+                Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.serving_generation_epoch),
+                Arc::clone(&worktree.serving_generation_installation),
+            )
         };
         let mut serving = serving_generation
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if serving
-            .as_ref()
-            .is_none_or(|current| current.generation().manifest().generation_id != *expected)
+        if serving_epoch.load(Ordering::Acquire) != installation.serving_epoch
+            || serving.as_ref().is_none_or(|current| {
+                current.generation().manifest().generation_id != installation.generation_id
+            })
         {
             return ServingGenerationRollbackOutcomeV1::NoMatch;
         }
-        *serving = None;
+        let mut active_installation = active_installation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active_installation.as_ref() != Some(installation) {
+            return ServingGenerationRollbackOutcomeV1::NoMatch;
+        }
+        *active_installation = None;
+        if retire {
+            *serving = None;
+            serving_epoch.fetch_add(1, Ordering::AcqRel);
+        }
         ServingGenerationRollbackOutcomeV1::Cleared
     }
 
@@ -1684,6 +1806,8 @@ impl CodeIndexSchedulerRegistryV1 {
         // complete identity-valid generation as stale serving before refresh
         // claims freshness; missing Git authority still leaves this empty.
         let serving_generation = Arc::new(RwLock::new(None));
+        let serving_generation_epoch = Arc::new(AtomicU64::new(0));
+        let serving_generation_installation = Arc::new(Mutex::new(None));
         let hints = Arc::clone(&opened.hints);
         let wake = Arc::clone(&opened.wake);
         let epoch = Arc::clone(&opened.epoch);
@@ -1695,6 +1819,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
+        let worker_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let worker_wake = Arc::clone(&wake);
         let worker_pending_wake = Arc::clone(&pending_wake);
         let worker_cadence_telemetry = Arc::clone(&self.cadence_telemetry);
@@ -1746,6 +1871,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 let scheduler = Arc::clone(&worker_scheduler);
                 let serving_generation = Arc::clone(&worker_serving_generation);
+                let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
                 // Cover wake claim through failed-arrival restoration so admission
                 // never misreads in-flight owner work as plain unavailability.
                 let _reconcile_pass =
@@ -1803,6 +1929,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         } else {
                             let swap_scheduler = Arc::clone(&scheduler);
                             let swap_serving = Arc::clone(&serving_generation);
+                            let swap_serving_epoch = Arc::clone(&serving_generation_epoch);
                             let _ = tokio::task::spawn_blocking(move || {
                                 let scheduler = swap_scheduler
                                     .lock()
@@ -1811,10 +1938,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                     .active_publication_matches(&retained)
                                     .unwrap_or(false)
                                 {
-                                    *swap_serving
+                                    let mut serving = swap_serving
                                         .write()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                        Some(retained.clone());
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    *serving = Some(retained.clone());
+                                    swap_serving_epoch.fetch_add(1, Ordering::AcqRel);
+                                    drop(serving);
                                     let _ = scheduler
                                         .schedule_semantic_generation(retained.generation());
                                 }
@@ -1868,6 +1997,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 if let Ok((Ok(_), Some(latest), _)) = &result {
                     let scheduler = Arc::clone(&worker_scheduler);
                     let serving_generation = Arc::clone(&worker_serving_generation);
+                    let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
                     let latest = latest.clone();
                     let serving_swap = tokio::task::spawn_blocking(move || {
                         let scheduler = scheduler
@@ -1879,10 +2009,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                     .to_owned(),
                             ));
                         }
-                        *serving_generation
+                        let mut serving = serving_generation
                             .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(latest.clone());
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        *serving = Some(latest.clone());
+                        serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+                        drop(serving);
                         let _ = scheduler.schedule_semantic_generation(latest.generation());
                         Ok::<_, CodeIndexSchedulerErrorV1>(())
                     })
@@ -1959,6 +2091,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 semantic_vector_graph_provider: None,
                 scheduler,
                 serving_generation,
+                serving_generation_epoch,
+                serving_generation_installation,
                 graph_activation,
                 ignored_dependency_admissions,
                 hints,

@@ -37,6 +37,7 @@ impl CodeIndexSchedulerRegistryV1 {
             background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
                 super::bounded_daemon_admission_permits(),
             )),
+            serving_generation_installation_tokens: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             generation_publications,
             cadence_telemetry: Arc::new(std::sync::Mutex::new(
                 super::CodeIndexCadenceTelemetryV1::default(),

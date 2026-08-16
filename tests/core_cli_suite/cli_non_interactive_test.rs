@@ -1793,13 +1793,12 @@ fn branch_add_tracks_the_branch_on_the_single_project_store() {
     let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args(["branch", "add", "feature/new"]);
     let output = run_with_timeout(command, cli_timeout());
-    let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
-        output.status.success() || stderr.contains("file is not a database"),
-        "branch add should track the branch on the profile-sharded store\nstdout:\n{}\nstderr:\n{}",
+        output.status.success(),
+        "branch add must complete the daemon's exact branch sealing journey\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
-        stderr
+        String::from_utf8_lossy(&output.stderr)
     );
     let meta = tracedecay::branch_meta::load_branch_meta(&shard_root)
         .expect("branch add must publish tracking metadata in the profile shard");
@@ -1811,6 +1810,58 @@ fn branch_add_tracks_the_branch_on_the_single_project_store() {
         entry.served_by_project_store(),
         "tracked branch must be served by the single project store, found '{}'",
         entry.db_file
+    );
+    let source = entry
+        .graph_source
+        .as_ref()
+        .expect("branch add must seal exact branch provenance before replying");
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&project_root)
+        .output()
+        .expect("git rev-parse should run");
+    assert!(head.status.success(), "git rev-parse HEAD must succeed");
+    assert_eq!(source.project_id, project_id);
+    assert!(!source.repository_id.is_empty());
+    assert!(!source.worktree_id.is_empty());
+    let sealed_worktree = PathBuf::from(&source.worktree_root);
+    assert_eq!(
+        sealed_worktree.canonicalize().unwrap(),
+        sealed_worktree,
+        "the sealed worktree path must be canonical provenance"
+    );
+    let sealed_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&sealed_worktree)
+        .output()
+        .expect("git rev-parse should run in the sealed worktree");
+    assert!(
+        sealed_head.status.success(),
+        "sealed worktree must resolve HEAD"
+    );
+    let sealed_reference = Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .current_dir(&sealed_worktree)
+        .output()
+        .expect("git symbolic-ref should run in the sealed worktree");
+    assert!(
+        sealed_reference.status.success(),
+        "sealed worktree must keep an attached source ref"
+    );
+    assert_eq!(
+        source.reference,
+        String::from_utf8_lossy(&sealed_reference.stdout).trim(),
+        "the daemon must record the exact ref actually indexed"
+    );
+    assert_eq!(
+        source.source_oid,
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "the daemon branch-add journey must seal the exact branch head"
+    );
+    assert_eq!(
+        source.source_oid,
+        String::from_utf8_lossy(&sealed_head.stdout).trim(),
+        "the stored OID must belong to the recorded source worktree"
     );
     assert!(
         !shard_root.join("branches").exists(),
