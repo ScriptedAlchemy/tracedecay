@@ -46,6 +46,7 @@ use tracedecay_usecases::semantic_runtime::{
     SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
 };
 
+use super::registry::ColdMountOpenEventV1;
 use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
     CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1,
@@ -3553,6 +3554,335 @@ async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coales
         admitted, 1,
         "the registry must atomically claim one query admission before worker wake coalescing"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_cold_mount_holds_its_reservation_until_blocking_open_finishes() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn cancel() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+    registry.install_cold_mount_open_gate(fixture.path());
+
+    let leader = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_open_events(fixture.path(), 1)
+        .await;
+
+    let follower = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry.wait_for_cold_mount_follower(fixture.path()).await;
+    leader.abort();
+    assert!(
+        leader.await.is_err(),
+        "caller cancellation joins as cancelled"
+    );
+
+    registry.release_cold_mount_open_gate(fixture.path());
+    assert!(
+        follower
+            .await
+            .expect("follower mount task joins")
+            .expect("follower retries after the detached open settles"),
+        "the follower becomes the one canonical owner after the cancelled caller's open ends"
+    );
+    let events = registry.cold_mount_open_events(fixture.path());
+    let first_finished = events
+        .iter()
+        .position(|event| *event == ColdMountOpenEventV1::Finished)
+        .expect("first blocking open finished");
+    let second_started = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| **event == ColdMountOpenEventV1::Started)
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("retry opens after the detached open settles");
+
+    registry.shutdown().await;
+
+    assert!(
+        first_finished < second_started,
+        "a cancelled caller must retain its reservation until its detached blocking open has finished"
+    );
+}
+
+#[tokio::test]
+async fn failed_cold_mount_releases_its_reservation_for_retry() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retry() {}\n")]);
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let bad_store_root = TempDir::new().expect("bad store root");
+    let bad_store = bad_store_root.path().join("not-a-directory");
+    std::fs::write(&bad_store, "not a directory").expect("write failing store path");
+
+    assert!(
+        registry
+            .mount_worktree(test_project_id(), fixture.path(), bad_store, None)
+            .await
+            .is_err(),
+        "the first cold open fails through the typed scheduler error"
+    );
+    let retry_store = TempDir::new().expect("retry store root");
+    assert!(
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                retry_store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("failed cold mount must release its exact reservation"),
+        "retry owns the root after the failed open finishes"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn distinct_cold_mounts_respect_capacity_before_opening() {
+    let first = GitFixture::new(&[("src/lib.rs", "pub fn first() {}\n")]);
+    let second = GitFixture::new(&[("src/lib.rs", "pub fn second() {}\n")]);
+    let third = GitFixture::new(&[("src/lib.rs", "pub fn third() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(2, 0);
+    registry.install_cold_mount_open_gate(first.path());
+    registry.install_cold_mount_open_gate(second.path());
+    registry.install_cold_mount_open_observer(third.path());
+
+    let first_mount = {
+        let registry = registry.clone();
+        let project_root = first.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_open_events(first.path(), 1)
+        .await;
+    let second_mount = {
+        let registry = registry.clone();
+        let project_root = second.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_open_events(second.path(), 1)
+        .await;
+
+    let capacity = registry
+        .mount_worktree(
+            test_project_id(),
+            third.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect_err("the N+1 distinct root must be refused before opening");
+    registry.release_cold_mount_open_gate(first.path());
+    registry.release_cold_mount_open_gate(second.path());
+    assert!(
+        first_mount
+            .await
+            .expect("first mount task joins")
+            .expect("first mount"),
+        "first reserved root mounts"
+    );
+    assert!(
+        second_mount
+            .await
+            .expect("second mount task joins")
+            .expect("second mount"),
+        "second reserved root mounts"
+    );
+
+    registry.shutdown().await;
+
+    assert!(matches!(
+        capacity,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("capacity is exhausted")
+    ));
+    assert!(
+        registry.cold_mount_open_events(third.path()).is_empty(),
+        "the rejected N+1 root never starts its expensive blocking open"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background worker at its dequeue point");
+    registry.clear_pending_wake_for_scope(&scope).await;
+    registry.install_query_claim_gate(&scope);
+
+    let request = {
+        let registry = registry.clone();
+        let scope = scope.clone();
+        tokio::spawn(async move { registry.request_query_background_reconcile(&scope).await })
+    };
+    registry.wait_for_query_claim(&scope).await;
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
+            .await,
+        "foreign hint wake is accepted for the mounted root"
+    );
+    registry.release_query_claim(&scope);
+    assert!(
+        !request.await.expect("query admission task joins"),
+        "the fresh query declines its own reconcile after the foreign wake arrives"
+    );
+    let stamped = registry
+        .pending_wake_micros_for_scope(&scope)
+        .await
+        .expect("mounted worktree");
+
+    drop(admission);
+    registry.shutdown().await;
+
+    assert_ne!(
+        stamped, 0,
+        "dropping a query-owned claim must not erase a foreign coalesced wake"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_waits_for_and_fences_a_cold_mount_open() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn shutdown() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+    registry.install_cold_mount_open_gate(fixture.path());
+    let mount = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_open_events(fixture.path(), 1)
+        .await;
+    let mut cancelled = registry
+        .subscribe_cold_mount_cancellation(fixture.path())
+        .expect("cold mount reservation");
+    let shutdown = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.shutdown().await })
+    };
+    let _ = cancelled.changed().await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown waits for the in-flight blocking open after fencing it"
+    );
+    registry.release_cold_mount_open_gate(fixture.path());
+    let mount_error = mount
+        .await
+        .expect("mount task joins")
+        .expect_err("shutdown fences publication after the open ends");
+    shutdown.await.expect("shutdown task joins");
+
+    assert!(matches!(
+        mount_error,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("shutting down")
+    ));
+    assert_eq!(registry.memory_stats().await.mounted_worktrees, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retirement_waits_for_and_fences_an_exact_cold_mount_open() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retire() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+    registry.install_cold_mount_open_gate(fixture.path());
+    let mount = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_open_events(fixture.path(), 1)
+        .await;
+    let mut cancelled = registry
+        .subscribe_cold_mount_cancellation(fixture.path())
+        .expect("cold mount reservation");
+    let roots = BTreeSet::from([fixture.path().canonicalize().expect("canonical root")]);
+    let retirement = {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            registry
+                .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
+                .await
+        })
+    };
+    let _ = cancelled.changed().await;
+    registry.release_cold_mount_open_gate(fixture.path());
+    let mount_error = mount
+        .await
+        .expect("mount task joins")
+        .expect_err("retirement fences publication after the open ends");
+    assert!(
+        retirement.await.expect("retirement task joins"),
+        "retirement joins the cancelled cold-open reservation"
+    );
+    assert_eq!(registry.memory_stats().await.mounted_worktrees, 0);
+    assert!(
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("retired reservation is released after its open joins"),
+        "a new owner may mount only after retirement completes"
+    );
+    registry.shutdown().await;
+
+    assert!(matches!(
+        mount_error,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("retiring")
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
