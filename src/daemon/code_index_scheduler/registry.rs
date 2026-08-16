@@ -87,6 +87,22 @@ fn cold_mount_admission_barriers() -> &'static Mutex<BTreeMap<PathBuf, Arc<tokio
 }
 
 #[cfg(test)]
+struct ColdMountPostCheckTestControlV1 {
+    reached: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+fn cold_mount_post_check_controls()
+-> &'static Mutex<BTreeMap<PathBuf, Arc<ColdMountPostCheckTestControlV1>>> {
+    static CONTROLS: std::sync::OnceLock<
+        Mutex<BTreeMap<PathBuf, Arc<ColdMountPostCheckTestControlV1>>>,
+    > = std::sync::OnceLock::new();
+    CONTROLS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ColdMountOpenEventV1 {
     Started,
@@ -168,6 +184,34 @@ fn query_admission_controls()
     CONTROLS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+/// Deterministically holds a cancelling query's wake claim while it owns the
+/// canonical wake state. A foreign producer announces before it contends on
+/// that state lock, which exercises the old split-CAS interleaving without a
+/// timing race.
+#[cfg(test)]
+struct PendingWakeDropGateTestV1 {
+    drop_reached: AtomicBool,
+    drop_entered: tokio::sync::Notify,
+    drop_released: Mutex<bool>,
+    drop_release: Condvar,
+    foreign_attempted: AtomicBool,
+    foreign_entered: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl PendingWakeDropGateTestV1 {
+    fn new() -> Self {
+        Self {
+            drop_reached: AtomicBool::new(false),
+            drop_entered: tokio::sync::Notify::new(),
+            drop_released: Mutex::new(false),
+            drop_release: Condvar::new(),
+            foreign_attempted: AtomicBool::new(false),
+            foreign_entered: tokio::sync::Notify::new(),
+        }
+    }
+}
+
 /// One mounted worktree's code scope identity and serving generation, read
 /// without touching the scheduler mutex.
 pub(in crate::daemon) struct CodeIndexServingScopeV1 {
@@ -232,16 +276,10 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     hints: Arc<Mutex<PendingHintsV1>>,
     wake: Arc<tokio::sync::Notify>,
     epoch: Arc<AtomicU64>,
-    /// Unix micros of the earliest pending wake not yet consumed by a receipt.
-    pending_wake_micros: Arc<AtomicU64>,
-    /// Packed [`CodeIndexCadenceTriggerV1`] for the pending wake.
-    pending_wake_trigger: Arc<AtomicU64>,
-    /// Exact ownership token for the pending wake. Every coalesced producer
-    /// advances it before a cancelling query can clear its own claim.
-    pending_wake_owner: Arc<AtomicU64>,
-    /// Monotonic token source for `pending_wake_owner`, scoped to this exact
-    /// mounted worktree lifecycle.
-    next_pending_wake_owner: Arc<AtomicU64>,
+    /// The exact pending wake state. Its one lock linearizes ownership, arrival
+    /// timestamp, and trigger so a cancelling query cannot erase a coalesced
+    /// foreign wake between independent atomic updates.
+    pending_wake: Arc<PendingWakeV1>,
     shutting_down: Arc<AtomicBool>,
     /// Count of in-flight owner passes; nonzero means activation or reconcile
     /// work is running for this worktree.
@@ -315,55 +353,126 @@ enum ColdMountAdmissionV1 {
     Follower(tokio::sync::watch::Receiver<()>),
 }
 
+/// One exact worktree's pending worker wake. `micros == 0` means no pending
+/// arrival, and every nonzero arrival is held by one nonzero owner token.
+struct PendingWakeStateV1 {
+    micros: u64,
+    trigger: u64,
+    owner: u64,
+    next_owner: u64,
+}
+
+/// The single synchronization authority for one worktree's coalesced wake.
+/// The state lock makes timestamp, trigger, and claim ownership one
+/// linearizable transition: no producer can arrive between a claim's owner
+/// release and its marker release.
+struct PendingWakeV1 {
+    state: Mutex<PendingWakeStateV1>,
+    #[cfg(test)]
+    drop_gate: Mutex<Option<Arc<PendingWakeDropGateTestV1>>>,
+}
+
+impl Default for PendingWakeV1 {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(PendingWakeStateV1::default()),
+            #[cfg(test)]
+            drop_gate: Mutex::new(None),
+        }
+    }
+}
+
+impl PendingWakeV1 {
+    #[cfg(test)]
+    fn note_foreign_wake_attempt_for_test(&self) {
+        let gate = self
+            .drop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate
+            && gate.drop_reached.load(Ordering::Acquire)
+        {
+            gate.foreign_attempted.store(true, Ordering::Release);
+            gate.foreign_entered.notify_waiters();
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_claim_drop_for_test(&self) {
+        let gate = self
+            .drop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            gate.drop_reached.store(true, Ordering::Release);
+            gate.drop_entered.notify_waiters();
+            let mut released = gate
+                .drop_released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = gate
+                    .drop_release
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+    }
+}
+
+impl Default for PendingWakeStateV1 {
+    fn default() -> Self {
+        Self {
+            micros: 0,
+            trigger: 0,
+            owner: 0,
+            next_owner: 1,
+        }
+    }
+}
+
+impl PendingWakeStateV1 {
+    fn next_owner(&mut self) -> u64 {
+        let owner = self.next_owner;
+        self.next_owner = self.next_owner.wrapping_add(1);
+        if self.next_owner == 0 {
+            self.next_owner = 1;
+        }
+        owner
+    }
+}
+
 /// Owns one exact pending wake marker until worker dispatch succeeds or the
-/// request is cancelled/rejected. The compare-and-swap in `Drop` cannot erase
-/// another caller's marker.
+/// request is cancelled/rejected. Dropping a claim releases its owner and
+/// marker under the same state lock, so it cannot erase a foreign wake.
 struct PendingWakeClaimV1 {
-    pending_wake_micros: Arc<AtomicU64>,
-    pending_wake_trigger: Arc<AtomicU64>,
-    pending_wake_owner: Arc<AtomicU64>,
+    pending_wake: Arc<PendingWakeV1>,
     claimed_micros: u64,
     owner: u64,
     settled: bool,
 }
 
 impl PendingWakeClaimV1 {
-    fn claim(
-        pending_wake_micros: Arc<AtomicU64>,
-        pending_wake_trigger: Arc<AtomicU64>,
-        pending_wake_owner: Arc<AtomicU64>,
-        next_pending_wake_owner: Arc<AtomicU64>,
-    ) -> Option<Self> {
-        let owner = Self::next_owner(&next_pending_wake_owner);
-        pending_wake_owner
-            .compare_exchange(0, owner, Ordering::AcqRel, Ordering::Acquire)
-            .ok()?;
-        let claimed_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
-        if pending_wake_micros
-            .compare_exchange(0, claimed_micros, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            let _ =
-                pending_wake_owner.compare_exchange(owner, 0, Ordering::AcqRel, Ordering::Acquire);
+    fn claim(pending_wake: Arc<PendingWakeV1>) -> Option<Self> {
+        let mut state = pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.micros != 0 {
             return None;
         }
+        let claimed_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
+        let owner = state.next_owner();
+        state.micros = claimed_micros;
+        state.owner = owner;
         Some(Self {
-            pending_wake_micros,
-            pending_wake_trigger,
-            pending_wake_owner,
+            pending_wake,
             claimed_micros,
             owner,
             settled: false,
         })
-    }
-
-    fn next_owner(next_pending_wake_owner: &AtomicU64) -> u64 {
-        loop {
-            let owner = next_pending_wake_owner.fetch_add(1, Ordering::AcqRel);
-            if owner != 0 {
-                return owner;
-            }
-        }
     }
 
     fn settle(mut self) {
@@ -373,17 +482,19 @@ impl PendingWakeClaimV1 {
 
 impl Drop for PendingWakeClaimV1 {
     fn drop(&mut self) {
-        if !self.settled
-            && self
-                .pending_wake_owner
-                .compare_exchange(self.owner, 0, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            && self
-                .pending_wake_micros
-                .compare_exchange(self.claimed_micros, 0, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
-            self.pending_wake_trigger.store(0, Ordering::Release);
+        if !self.settled {
+            let mut state = self
+                .pending_wake
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            #[cfg(test)]
+            self.pending_wake.pause_claim_drop_for_test();
+            if state.owner == self.owner && state.micros == self.claimed_micros {
+                state.micros = 0;
+                state.trigger = 0;
+                state.owner = 0;
+            }
         }
     }
 }
@@ -514,6 +625,59 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(project_root, barrier);
         assert!(replaced.is_none(), "cold-mount barrier already installed");
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_cold_mount_post_check_gate(&self, project_root: &Path) {
+        let project_root = project_root
+            .canonicalize()
+            .expect("canonical test project root");
+        let replaced = cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root,
+                Arc::new(ColdMountPostCheckTestControlV1 {
+                    reached: AtomicBool::new(false),
+                    entered: tokio::sync::Notify::new(),
+                    release: tokio::sync::Notify::new(),
+                }),
+            );
+        assert!(
+            replaced.is_none(),
+            "cold-mount post-check gate already installed"
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_cold_mount_post_check(&self, project_root: &Path) {
+        let project_root = project_root
+            .canonicalize()
+            .expect("canonical test project root");
+        let control = cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&project_root)
+            .cloned()
+            .expect("cold-mount post-check gate");
+        let entered = control.entered.notified();
+        if !control.reached.load(Ordering::Acquire) {
+            entered.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn release_cold_mount_post_check(&self, project_root: &Path) {
+        let project_root = project_root
+            .canonicalize()
+            .expect("canonical test project root");
+        cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&project_root)
+            .expect("cold-mount post-check gate")
+            .release
+            .notify_one();
     }
 
     #[cfg(test)]
@@ -680,6 +844,15 @@ impl CodeIndexSchedulerRegistryV1 {
             .cold_mount_reservations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Shutdown closes this same semaphore before it waits for outstanding
+        // reservations. Checking while the reservation lock is held is the
+        // admission linearization point: no caller that observed it open
+        // earlier can reserve a new cold open after close.
+        if self.background_reconcile_admission.is_closed() {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler is shutting down".to_owned(),
+            ));
+        }
         if let Some(slot) = reservations.get(project_root) {
             return if slot.is_retired() {
                 Err(CodeIndexSchedulerErrorV1::Identity(
@@ -783,6 +956,21 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     #[cfg(test)]
+    async fn pause_cold_mount_after_outer_check_for_test(project_root: &Path) {
+        let control = cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .cloned();
+        let Some(control) = control else {
+            return;
+        };
+        control.reached.store(true, Ordering::Release);
+        control.entered.notify_waiters();
+        control.release.notified().await;
+    }
+
+    #[cfg(test)]
     fn cold_mount_open_control_for_test(
         project_root: &Path,
     ) -> Option<Arc<ColdMountOpenTestControlV1>> {
@@ -839,6 +1027,104 @@ impl CodeIndexSchedulerRegistryV1 {
             .cloned()
     }
 
+    #[cfg(test)]
+    async fn pending_wake_for_scope_for_test(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<Arc<PendingWakeV1>> {
+        let mounted = self.mounted.lock().await;
+        {
+            let mut matched = mounted.values().filter(|worktree| {
+                worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+            });
+            let pending_wake = matched
+                .next()
+                .map(|worktree| Arc::clone(&worktree.pending_wake))?;
+            matched.next().is_none().then_some(pending_wake)
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn install_pending_wake_drop_gate(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) {
+        let mounted = self.mounted.lock().await;
+        let pending_wake = mounted
+            .values()
+            .find(|worktree| {
+                worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+            })
+            .map(|worktree| Arc::clone(&worktree.pending_wake))
+            .expect("mounted worktree");
+        let replaced = pending_wake
+            .drop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(Arc::new(PendingWakeDropGateTestV1::new()));
+        assert!(
+            replaced.is_none(),
+            "pending-wake drop gate already installed"
+        );
+    }
+
+    #[cfg(test)]
+    async fn pending_wake_drop_gate_for_test(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Arc<PendingWakeDropGateTestV1> {
+        let pending_wake = self
+            .pending_wake_for_scope_for_test(scope)
+            .await
+            .expect("mounted worktree");
+        pending_wake
+            .drop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("pending-wake drop gate")
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_pending_wake_claim_drop(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) {
+        let gate = self.pending_wake_drop_gate_for_test(scope).await;
+        let entered = gate.drop_entered.notified();
+        if !gate.drop_reached.load(Ordering::Acquire) {
+            entered.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_foreign_pending_wake_attempt(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) {
+        let gate = self.pending_wake_drop_gate_for_test(scope).await;
+        let entered = gate.foreign_entered.notified();
+        if !gate.foreign_attempted.load(Ordering::Acquire) {
+            entered.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn release_pending_wake_claim_drop(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) {
+        let gate = self.pending_wake_drop_gate_for_test(scope).await;
+        let mut released = gate
+            .drop_released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *released = true;
+        gate.drop_release.notify_all();
+    }
+
     /// The pending-wake slot for one exact scope's worktree, in unix micros;
     /// `0` means no wake is outstanding.
     #[cfg(test)]
@@ -853,7 +1139,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.repository_id == scope.repository_id
                     && worktree.worktree_id == scope.worktree_id
             })
-            .map(|worktree| worktree.pending_wake_micros.load(Ordering::Acquire))
+            .map(|worktree| {
+                worktree
+                    .pending_wake
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .micros
+            })
     }
 
     /// Clear the pending-wake slot so a test starts from a known due window.
@@ -867,9 +1160,14 @@ impl CodeIndexSchedulerRegistryV1 {
             if worktree.repository_id == scope.repository_id
                 && worktree.worktree_id == scope.worktree_id
             {
-                worktree.pending_wake_micros.store(0, Ordering::Release);
-                worktree.pending_wake_owner.store(0, Ordering::Release);
-                worktree.pending_wake_trigger.store(0, Ordering::Release);
+                let mut pending_wake = worktree
+                    .pending_wake
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                pending_wake.micros = 0;
+                pending_wake.owner = 0;
+                pending_wake.trigger = 0;
             }
         }
     }
@@ -917,25 +1215,23 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     fn note_wake(
-        pending_wake_micros: &AtomicU64,
-        pending_wake_trigger: &AtomicU64,
-        pending_wake_owner: &AtomicU64,
-        next_pending_wake_owner: &AtomicU64,
+        pending_wake: &PendingWakeV1,
         wake: &tokio::sync::Notify,
         trigger: CodeIndexCadenceTriggerV1,
     ) {
         let wake_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
-        pending_wake_owner.swap(
-            PendingWakeClaimV1::next_owner(next_pending_wake_owner),
-            Ordering::AcqRel,
-        );
-        let _ = pending_wake_micros.compare_exchange(
-            0,
-            wake_micros,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        pending_wake_trigger.store(Self::pack_trigger(trigger), Ordering::Release);
+        #[cfg(test)]
+        pending_wake.note_foreign_wake_attempt_for_test();
+        let mut state = pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.owner = state.next_owner();
+        if state.micros == 0 {
+            state.micros = wake_micros;
+        }
+        state.trigger = Self::pack_trigger(trigger);
+        drop(state);
         wake.notify_one();
     }
 
@@ -947,20 +1243,25 @@ impl CodeIndexSchedulerRegistryV1 {
     /// dequeue or terminal instant instead would publish a fabricated zero queue
     /// delay, so the absence stays typed.
     fn take_pending_arrival(
-        pending_wake_micros: &AtomicU64,
-        pending_wake_trigger: &AtomicU64,
-        pending_wake_owner: &AtomicU64,
+        pending_wake: &PendingWakeV1,
         default_trigger: CodeIndexCadenceTriggerV1,
     ) -> (CodeIndexArrivalV1, CodeIndexCadenceTriggerV1) {
-        // Release the observed owner before swapping the pending arrival. A
-        // concurrent producer either takes ownership before this swap and is
-        // carried by the retained Notify permit, or installs a later marker.
-        pending_wake_owner.store(0, Ordering::Release);
-        let wake_micros = pending_wake_micros.swap(0, Ordering::AcqRel);
+        let (wake_micros, packed_trigger) = {
+            let mut state = pending_wake
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let wake_micros = state.micros;
+            let packed_trigger = state.trigger;
+            state.micros = 0;
+            state.trigger = 0;
+            state.owner = 0;
+            (wake_micros, packed_trigger)
+        };
         if wake_micros == 0 {
             return (CodeIndexArrivalV1::Unavailable, default_trigger);
         }
-        let trigger = Self::unpack_trigger(pending_wake_trigger.load(Ordering::Acquire));
+        let trigger = Self::unpack_trigger(packed_trigger);
         match i64::try_from(wake_micros) {
             Ok(wake_micros) => (CodeIndexArrivalV1::Observed { wake_micros }, trigger),
             // An out-of-range clock reading is an unobserved arrival, not an
@@ -973,10 +1274,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// no receipt, keeping the earliest pending arrival so the wait a wake
     /// really took is never shortened by a failed attempt.
     fn restore_pending_arrival(
-        pending_wake_micros: &AtomicU64,
-        pending_wake_trigger: &AtomicU64,
-        pending_wake_owner: &AtomicU64,
-        next_pending_wake_owner: &AtomicU64,
+        pending_wake: &PendingWakeV1,
         arrival: CodeIndexArrivalV1,
         trigger: CodeIndexCadenceTriggerV1,
     ) {
@@ -986,28 +1284,18 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(wake_micros) = u64::try_from(wake_micros) else {
             return;
         };
-        pending_wake_owner.swap(
-            PendingWakeClaimV1::next_owner(next_pending_wake_owner),
-            Ordering::AcqRel,
-        );
-        let mut observed = pending_wake_micros.load(Ordering::Acquire);
-        loop {
-            // A wake that arrived while this pass ran is newer, so the restored
-            // arrival remains the earliest and stays authoritative.
-            if observed != 0 && observed <= wake_micros {
-                return;
-            }
-            match pending_wake_micros.compare_exchange_weak(
-                observed,
-                wake_micros,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(current) => observed = current,
-            }
+        let mut state = pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A wake that arrived while this pass ran is newer, so the restored
+        // arrival remains the earliest and stays authoritative.
+        if state.micros != 0 && state.micros <= wake_micros {
+            return;
         }
-        pending_wake_trigger.store(Self::pack_trigger(trigger), Ordering::Release);
+        state.owner = state.next_owner();
+        state.micros = wake_micros;
+        state.trigger = Self::pack_trigger(trigger);
     }
 
     fn record_reconcile_receipt(
@@ -1266,6 +1554,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     "code-index scheduler is shutting down".to_owned(),
                 ));
             }
+            #[cfg(test)]
+            Self::pause_cold_mount_after_outer_check_for_test(&project_root).await;
             // A retiring owner still holds the store: admitting a fresh mount
             // here would race the dying reconcile task over the same physical
             // shard.
@@ -1360,18 +1650,12 @@ impl CodeIndexSchedulerRegistryV1 {
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
         let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
-        let pending_wake_micros = Arc::new(AtomicU64::new(0));
-        let pending_wake_trigger = Arc::new(AtomicU64::new(0));
-        let pending_wake_owner = Arc::new(AtomicU64::new(0));
-        let next_pending_wake_owner = Arc::new(AtomicU64::new(1));
+        let pending_wake = Arc::new(PendingWakeV1::default());
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_wake = Arc::clone(&wake);
-        let worker_pending_wake_micros = Arc::clone(&pending_wake_micros);
-        let worker_pending_wake_trigger = Arc::clone(&pending_wake_trigger);
-        let worker_pending_wake_owner = Arc::clone(&pending_wake_owner);
-        let worker_next_pending_wake_owner = Arc::clone(&next_pending_wake_owner);
+        let worker_pending_wake = Arc::clone(&pending_wake);
         let worker_cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let worker_shutting_down = Arc::clone(&shutting_down);
         let worker_semantic_evaluation_publication_gate =
@@ -1428,9 +1712,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // Admission is held: queue wait ends and service time begins.
                 let started_micros = now_micros().0;
                 let (arrival, trigger) = Self::take_pending_arrival(
-                    &worker_pending_wake_micros,
-                    &worker_pending_wake_trigger,
-                    &worker_pending_wake_owner,
+                    &worker_pending_wake,
                     CodeIndexCadenceTriggerV1::Mount,
                 );
                 // Serve-during-refresh: seat the last complete compatible
@@ -1612,14 +1894,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         Ok((Ok(_), _, _)) => {}
                     }
                     // Restore arrival so the next pass measures this wake's full queue wait.
-                    Self::restore_pending_arrival(
-                        &worker_pending_wake_micros,
-                        &worker_pending_wake_trigger,
-                        &worker_pending_wake_owner,
-                        &worker_next_pending_wake_owner,
-                        arrival,
-                        trigger,
-                    );
+                    Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
                 }
                 if worker_shutting_down.load(Ordering::Acquire) {
                     return;
@@ -1648,10 +1923,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 hints,
                 wake: Arc::clone(&wake),
                 epoch,
-                pending_wake_micros: Arc::clone(&pending_wake_micros),
-                pending_wake_trigger: Arc::clone(&pending_wake_trigger),
-                pending_wake_owner: Arc::clone(&pending_wake_owner),
-                next_pending_wake_owner: Arc::clone(&next_pending_wake_owner),
+                pending_wake: Arc::clone(&pending_wake),
                 shutting_down,
                 reconcile_in_progress,
                 active_generation_encoded_bytes,
@@ -1661,14 +1933,7 @@ impl CodeIndexSchedulerRegistryV1 {
         );
         // Until retained decode/truth verification completes, reads see warming
         // instead of serving unproven bytes.
-        Self::note_wake(
-            &pending_wake_micros,
-            &pending_wake_trigger,
-            &pending_wake_owner,
-            &next_pending_wake_owner,
-            &wake,
-            CodeIndexCadenceTriggerV1::Mount,
-        );
+        Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Mount);
         Ok(true)
     }
 
@@ -2080,15 +2345,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let (
-            hints,
-            wake,
-            epoch,
-            pending_wake_micros,
-            pending_wake_trigger,
-            pending_wake_owner,
-            next_pending_wake_owner,
-        ) = {
+        let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
@@ -2097,10 +2354,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.epoch),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
-                Arc::clone(&worktree.pending_wake_owner),
-                Arc::clone(&worktree.next_pending_wake_owner),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         hints
@@ -2108,14 +2362,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .path(path);
         DaemonCodeIndexControlV1::advance(&epoch);
-        Self::note_wake(
-            &pending_wake_micros,
-            &pending_wake_trigger,
-            &pending_wake_owner,
-            &next_pending_wake_owner,
-            &wake,
-            CodeIndexCadenceTriggerV1::HookHint,
-        );
+        Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::HookHint);
         true
     }
 
@@ -2127,15 +2374,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let (
-            hints,
-            wake,
-            epoch,
-            pending_wake_micros,
-            pending_wake_trigger,
-            pending_wake_owner,
-            next_pending_wake_owner,
-        ) = {
+        let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
@@ -2144,10 +2383,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.epoch),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
-                Arc::clone(&worktree.pending_wake_owner),
-                Arc::clone(&worktree.next_pending_wake_owner),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         let absolute = rel_paths
@@ -2163,14 +2399,7 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         }
         DaemonCodeIndexControlV1::advance(&epoch);
-        Self::note_wake(
-            &pending_wake_micros,
-            &pending_wake_trigger,
-            &pending_wake_owner,
-            &next_pending_wake_owner,
-            &wake,
-            CodeIndexCadenceTriggerV1::HookHint,
-        );
+        Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::HookHint);
         true
     }
 
@@ -2181,15 +2410,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let (
-            hints,
-            wake,
-            epoch,
-            pending_wake_micros,
-            pending_wake_trigger,
-            pending_wake_owner,
-            next_pending_wake_owner,
-        ) = {
+        let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
@@ -2198,10 +2419,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.epoch),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
-                Arc::clone(&worktree.pending_wake_owner),
-                Arc::clone(&worktree.next_pending_wake_owner),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         hints
@@ -2209,14 +2427,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .overflow();
         DaemonCodeIndexControlV1::advance(&epoch);
-        Self::note_wake(
-            &pending_wake_micros,
-            &pending_wake_trigger,
-            &pending_wake_owner,
-            &next_pending_wake_owner,
-            &wake,
-            CodeIndexCadenceTriggerV1::Overflow,
-        );
+        Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Overflow);
         true
     }
 
@@ -2235,14 +2446,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let (
-            hints,
-            wake,
-            pending_wake_micros,
-            pending_wake_trigger,
-            pending_wake_owner,
-            next_pending_wake_owner,
-        ) = {
+        let (hints, wake, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
@@ -2250,24 +2454,14 @@ impl CodeIndexSchedulerRegistryV1 {
             (
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
-                Arc::clone(&worktree.pending_wake_owner),
-                Arc::clone(&worktree.next_pending_wake_owner),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         hints
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .overflow();
-        Self::note_wake(
-            &pending_wake_micros,
-            &pending_wake_trigger,
-            &pending_wake_owner,
-            &next_pending_wake_owner,
-            &wake,
-            CodeIndexCadenceTriggerV1::Overflow,
-        );
+        Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Overflow);
         true
     }
 
@@ -2549,25 +2743,14 @@ impl CodeIndexSchedulerRegistryV1 {
         let project_root = project_root.canonicalize().ok()?;
         // Clone the per-worktree handle under a short map lock, then drop the
         // registry guard before checking the mounted route.
-        let (
-            scheduler,
-            serving_generation,
-            wake,
-            pending_wake_micros,
-            pending_wake_trigger,
-            pending_wake_owner,
-            next_pending_wake_owner,
-        ) = {
+        let (scheduler, serving_generation, wake, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
                 Arc::clone(&worktree.wake),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
-                Arc::clone(&worktree.pending_wake_owner),
-                Arc::clone(&worktree.next_pending_wake_owner),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         // When the background worker already owns the scheduler, preserve the
@@ -2582,10 +2765,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     // follow-up verification so busy refresh cannot strand
                     // cadence indefinitely.
                     Self::note_wake(
-                        &pending_wake_micros,
-                        &pending_wake_trigger,
-                        &pending_wake_owner,
-                        &next_pending_wake_owner,
+                        &pending_wake,
                         &wake,
                         CodeIndexCadenceTriggerV1::BusyFollowUp,
                     );
@@ -2621,10 +2801,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // cadence sample for work that never ran.
                 if scheduler.request_fresh_for_query_background() {
                     Self::note_wake(
-                        &pending_wake_micros,
-                        &pending_wake_trigger,
-                        &pending_wake_owner,
-                        &next_pending_wake_owner,
+                        &pending_wake,
                         &wake,
                         CodeIndexCadenceTriggerV1::QueryAdmission,
                     );
@@ -2634,13 +2811,16 @@ impl CodeIndexSchedulerRegistryV1 {
             // Cold open has no servable generation. Verification and any
             // rebuild stay with the retained owner; reads only request the
             // wake and return typed unavailable/unverified.
-            if pending_wake_micros.load(Ordering::Acquire) == 0 {
+            if pending_wake
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .micros
+                == 0
+            {
                 scheduler.request_background_reconcile();
                 Self::note_wake(
-                    &pending_wake_micros,
-                    &pending_wake_trigger,
-                    &pending_wake_owner,
-                    &next_pending_wake_owner,
+                    &pending_wake,
                     &wake,
                     CodeIndexCadenceTriggerV1::QueryAdmission,
                 );
@@ -2938,7 +3118,13 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_none()
             && (worktree.reconcile_in_progress.load(Ordering::Acquire) != 0
-                || worktree.pending_wake_micros.load(Ordering::Acquire) != 0)
+                || worktree
+                    .pending_wake
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .micros
+                    != 0)
     }
 
     /// Ask the background worker for a reconcile on behalf of a query admission
@@ -2970,15 +3156,7 @@ impl CodeIndexSchedulerRegistryV1 {
         } else {
             None
         };
-        let (
-            scheduler,
-            serving_generation,
-            wake,
-            pending_wake_micros,
-            pending_wake_trigger,
-            pending_wake_owner,
-            next_pending_wake_owner,
-        ) = {
+        let (scheduler, serving_generation, wake, pending_wake) = {
             let Ok(mounted) = self.mounted.try_lock() else {
                 return false;
             };
@@ -2996,10 +3174,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     Arc::clone(&worktree.scheduler),
                     Arc::clone(&worktree.serving_generation),
                     Arc::clone(&worktree.wake),
-                    Arc::clone(&worktree.pending_wake_micros),
-                    Arc::clone(&worktree.pending_wake_trigger),
-                    Arc::clone(&worktree.pending_wake_owner),
-                    Arc::clone(&worktree.next_pending_wake_owner),
+                    Arc::clone(&worktree.pending_wake),
                 ));
             }
             let Some(matched) = matched else {
@@ -3016,12 +3191,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // Atomically reserve the existing pending-wake slot before scheduling
         // the blocking freshness probe. A pending or concurrently claimed wake
         // already supplies this query's remedy.
-        let Some(wake_claim) = PendingWakeClaimV1::claim(
-            Arc::clone(&pending_wake_micros),
-            Arc::clone(&pending_wake_trigger),
-            Arc::clone(&pending_wake_owner),
-            Arc::clone(&next_pending_wake_owner),
-        ) else {
+        let Some(wake_claim) = PendingWakeClaimV1::claim(Arc::clone(&pending_wake)) else {
             return false;
         };
         #[cfg(test)]
@@ -3042,10 +3212,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     // instead, exactly as the grep/context/callers ladder does,
                     // so a busy refresh cannot strand cadence.
                     Self::note_wake(
-                        &pending_wake_micros,
-                        &pending_wake_trigger,
-                        &pending_wake_owner,
-                        &next_pending_wake_owner,
+                        &pending_wake,
                         &wake,
                         CodeIndexCadenceTriggerV1::BusyFollowUp,
                     );
@@ -3066,10 +3233,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 return false;
             }
             Self::note_wake(
-                &pending_wake_micros,
-                &pending_wake_trigger,
-                &pending_wake_owner,
-                &next_pending_wake_owner,
+                &pending_wake,
                 &wake,
                 CodeIndexCadenceTriggerV1::QueryAdmission,
             );
