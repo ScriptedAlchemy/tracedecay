@@ -5,7 +5,7 @@ import {
   type ListTaskHandoffsResultV1,
 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
-import { callWork, type WorkResult, type WorkRoute } from '../work/workApi.ts';
+import type { WorkResult, WorkRoute } from '../work/workApi.ts';
 
 /**
  * The handoff-TOKEN frontier — a different measure from the handoff frontier
@@ -59,26 +59,6 @@ export type HandoffTokenReading =
       readonly observedAtMicros: number;
       readonly truncated: boolean;
     };
-
-/**
- * Ask the daemon for one session's token frontier.
- *
- * Reuses the application-envelope client the Work routes use rather than
- * restating that wrapper: the handoff family is mounted on the same application
- * router, so it answers with the same envelope, and a second walker for it
- * would be a second thing to keep in step with the daemon.
- */
-export async function fetchHandoffTokens(
-  sessionId: string,
-  init?: RequestInit,
-): Promise<WorkResult<ListTaskHandoffsResultV1>> {
-  return callWork(
-    HANDOFF_LIST_TASK_ROUTE,
-    { session_id: sessionId },
-    HANDOFF_LIST_TASK_ROUTE.path,
-    init,
-  );
-}
 
 /**
  * Split the frontier by what each token's state means for a reader.

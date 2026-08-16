@@ -46,11 +46,15 @@ export function useAgentHandoffTokens(sessionId: string | null) {
   return useQuery<WorkResult<ListTaskHandoffsResultV1>>({
     queryKey: ['agents', 'handoff-tokens', scopeKey(scope), sessionId],
     enabled: sessionId !== null,
-    queryFn: () =>
-      callWork(
+    queryFn: () => {
+      if (sessionId === null) {
+        throw new Error('handoff token frontier queried with no session named');
+      }
+      return callWork(
         HANDOFF_LIST_TASK_ROUTE,
-        { session_id: sessionId ?? '' },
+        { session_id: sessionId },
         scopedUrl(scope, HANDOFF_LIST_TASK_ROUTE.path),
-      ),
+      );
+    },
   });
 }
