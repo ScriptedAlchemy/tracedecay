@@ -1869,7 +1869,12 @@ mod tests {
         assert!(gateway.supports_document_diagnostics);
         assert!(gateway.supports_managed_diagnostics);
         assert!(gateway.supports_workspace_diagnostics);
-        assert!(gateway.semantic.is_empty());
+        assert_eq!(
+            gateway.semantic,
+            tracedecay_lsp::SemanticCapability::ALL
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]
@@ -1883,7 +1888,12 @@ mod tests {
             let (selected, gateway) = production_lsp_registration(&admitted);
 
             assert_eq!(selected, vec!["rust", language, "go"]);
-            assert!(gateway.semantic.is_empty());
+            assert_eq!(
+                gateway.semantic,
+                tracedecay_lsp::SemanticCapability::ALL
+                    .into_iter()
+                    .collect()
+            );
         }
     }
 }
