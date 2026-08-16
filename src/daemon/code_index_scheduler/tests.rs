@@ -1822,17 +1822,7 @@ async fn paused_cold_mount_rejects_a_root_retiring_before_final_commit() {
     wake.notify_one();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let reconciling = registry
-                .mounted
-                .lock()
-                .await
-                .get(&root)
-                .is_some_and(|worktree| {
-                    worktree
-                        .reconcile_in_progress
-                        .load(std::sync::atomic::Ordering::Acquire)
-                        != 0
-                });
+            let reconciling = registry.reconcile_in_progress_for_test(&root).await;
             if reconciling {
                 break;
             }
@@ -1942,17 +1932,7 @@ async fn retirement_parks_the_incumbent_while_a_same_root_remount_waits_on_its_s
     wake.notify_one();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let reconciling = registry
-                .mounted
-                .lock()
-                .await
-                .get(&root)
-                .is_some_and(|worktree| {
-                    worktree
-                        .reconcile_in_progress
-                        .load(std::sync::atomic::Ordering::Acquire)
-                        != 0
-                });
+            let reconciling = registry.reconcile_in_progress_for_test(&root).await;
             if reconciling {
                 break;
             }

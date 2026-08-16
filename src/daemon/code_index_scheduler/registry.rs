@@ -687,7 +687,7 @@ impl CodeIndexSchedulerRegistryV1 {
         tokio::sync::oneshot::Sender<()>,
     ) {
         let (entered, entered_observed) = tokio::sync::oneshot::channel();
-        let (release, released) = tokio::sync::oneshot::channel();
+        let (released, release) = tokio::sync::oneshot::channel();
         let mut gate = cold_mount_final_commit_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -772,6 +772,22 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
     pub(super) fn background_reconcile_admission(&self) -> Arc<tokio::sync::Semaphore> {
         Arc::clone(&self.background_reconcile_admission)
+    }
+
+    /// Test-only observation of an exact mounted worktree's active owner pass.
+    #[cfg(test)]
+    pub(super) async fn reconcile_in_progress_for_test(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let reconcile_in_progress = self
+            .mounted
+            .lock()
+            .await
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.reconcile_in_progress));
+        reconcile_in_progress
+            .is_some_and(|reconcile_in_progress| reconcile_in_progress.load(Ordering::Acquire) != 0)
     }
 
     #[cfg(test)]
@@ -1384,7 +1400,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Some(current) = serving.as_ref() else {
             return ServingGenerationInstallationOutcomeV1::NoMatch;
         };
-        if !Arc::ptr_eq(current.generation(), expected) {
+        if !Arc::ptr_eq(&current.generation, expected) {
             return ServingGenerationInstallationOutcomeV1::NoMatch;
         }
         let serving_epoch = serving_epoch.load(Ordering::Acquire);
