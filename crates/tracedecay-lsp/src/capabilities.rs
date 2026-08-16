@@ -333,14 +333,14 @@ impl UpstreamCapabilities {
         .filter_map(|(field, capability)| {
             capabilities
                 .and_then(|capabilities| capabilities.get(field))
-                .is_some_and(server_capability_enabled)
+                .is_some_and(capability_declared)
                 .then_some(capability)
         })
         .collect();
         Self {
             supports_diagnostics: capabilities
                 .and_then(|capabilities| capabilities.get("diagnosticProvider"))
-                .is_some_and(server_capability_enabled),
+                .is_some_and(capability_declared),
             semantic,
         }
     }
@@ -632,10 +632,6 @@ fn bool_at(object: Option<&serde_json::Map<String, Value>>, key: &str) -> bool {
 }
 
 fn capability_declared(value: &Value) -> bool {
-    value.as_bool().unwrap_or_else(|| value.is_object())
-}
-
-fn server_capability_enabled(value: &Value) -> bool {
     value.as_bool().unwrap_or_else(|| value.is_object())
 }
 
