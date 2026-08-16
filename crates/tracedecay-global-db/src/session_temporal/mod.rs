@@ -261,12 +261,12 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         let Some(first) = requests.first() else {
             return Ok(Vec::new());
         };
-        let Some(authorized_root) = first.snapshot().request().authorized_root() else {
+        let Some(authorized_root) = first.snapshot().request().authorized_root().cloned() else {
             return Err(SessionTemporalExecutionError::WrongScope);
         };
         if requests
             .iter()
-            .any(|request| request.snapshot().request().authorized_root() != Some(authorized_root))
+            .any(|request| request.snapshot().request().authorized_root() != Some(&authorized_root))
         {
             return Err(SessionTemporalExecutionError::WrongScope);
         }
