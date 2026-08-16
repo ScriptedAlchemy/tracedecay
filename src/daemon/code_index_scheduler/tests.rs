@@ -3777,6 +3777,100 @@ async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreign_wake_arriving_during_query_claim_drop_is_retained() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background worker at its dequeue point");
+    registry.clear_pending_wake_for_scope(&scope).await;
+    registry.install_query_claim_gate(&scope);
+    registry.install_pending_wake_drop_gate(&scope).await;
+
+    let request = {
+        let registry = registry.clone();
+        let scope = scope.clone();
+        tokio::spawn(async move { registry.request_query_background_reconcile(&scope).await })
+    };
+    registry.wait_for_query_claim(&scope).await;
+    registry.release_query_claim(&scope);
+    registry.wait_for_pending_wake_claim_drop(&scope).await;
+
+    let foreign_wake = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let changed_path = fixture.path().join("src/main.rs");
+        tokio::spawn(async move { registry.notify_path(&project_root, changed_path).await })
+    };
+    registry.wait_for_foreign_pending_wake_attempt(&scope).await;
+    registry.release_pending_wake_claim_drop(&scope).await;
+
+    assert!(
+        !request.await.expect("query admission task joins"),
+        "the rejected query releases its own claimed marker"
+    );
+    assert!(
+        foreign_wake.await.expect("foreign wake task joins"),
+        "foreign hint wake is accepted after the claim release"
+    );
+    let stamped = registry
+        .pending_wake_micros_for_scope(&scope)
+        .await
+        .expect("mounted worktree");
+
+    drop(admission);
+    registry.shutdown().await;
+
+    assert_ne!(
+        stamped, 0,
+        "a foreign wake that contended at the former owner/marker gap remains pending"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_after_outer_mount_check_refuses_reservation_before_open() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn shutdown_race() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+    registry.install_cold_mount_post_check_gate(fixture.path());
+    registry.install_cold_mount_open_observer(fixture.path());
+
+    let mount = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_post_check(fixture.path())
+        .await;
+    registry.shutdown().await;
+    registry.release_cold_mount_post_check(fixture.path());
+
+    let error = mount
+        .await
+        .expect("mount task joins")
+        .expect_err("shutdown closes cold-mount admission before reservation");
+    assert!(matches!(
+        error,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("shutting down")
+    ));
+    assert!(
+        registry.cold_mount_open_events(fixture.path()).is_empty(),
+        "a caller paused before reservation never starts an open after shutdown closes admission"
+    );
+    assert_eq!(registry.memory_stats().await.mounted_worktrees, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_waits_for_and_fences_a_cold_mount_open() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn shutdown() {}\n")]);
     let store = TempDir::new().expect("store root");
