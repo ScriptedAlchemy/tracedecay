@@ -57,7 +57,10 @@ use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::DaemonInvocationClient;
 use tracedecay::storage::PrivateStoreIo;
-use tracedecay_application::work_executable_binding_registry;
+use tracedecay_application::{
+    EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1, EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1,
+    work_executable_binding_registry,
+};
 use tracedecay_domain::ProjectId;
 use tracedecay_tool_catalog::RouteExposureV1;
 use tracedecay_usecases::operation_stream::OperationEventAuthority;
@@ -978,6 +981,29 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
 #[test]
 fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
     let mut fixture = ProductionDaemon::start();
+    let registry =
+        work_executable_binding_registry().expect("canonical application binding registry");
+    let topology_metrics = registry
+        .iter()
+        .filter_map(|availability| availability.binding())
+        .find(|binding| binding.operation_id().as_str() == "operation.work.topology_metrics")
+        .expect("canonical topology metrics executable binding");
+    let RouteExposureV1::Public {
+        binding_id,
+        route_path,
+    } = topology_metrics.exposure()
+    else {
+        panic!("topology metrics binding must have a public route exposure");
+    };
+    assert_eq!(
+        binding_id.as_str(),
+        "binding.http.work.topology_metrics",
+        "the topology metrics route must retain its canonical public binding ID"
+    );
+    assert_eq!(
+        route_path, "/application/work/topology-metrics",
+        "the canonical topology metrics binding must retain its route path"
+    );
     // This pre-project horizon is intentionally outside every observation the
     // daemon can create. A historical empty read must name absence for every
     // descriptor rather than turn it into an all-zero success.
@@ -990,7 +1016,41 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         .timeout_global(Some(Duration::from_secs(30)))
         .build()
         .into();
-    let route = fixture.external_url("/application/work/topology-metrics");
+    let route = fixture.external_url(route_path);
+    let expected_descriptor_identities = EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
+        .iter()
+        .map(|(metric, unit, denominator)| {
+            (
+                EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1,
+                *metric,
+                *unit,
+                *denominator,
+            )
+        })
+        .collect::<Vec<_>>();
+    let descriptor_identities = |metrics: &Value| {
+        metrics["measurements"]
+            .as_array()
+            .expect("topology metrics measurements array")
+            .iter()
+            .map(|measurement| {
+                (
+                    measurement["value"]["descriptor_revision"]
+                        .as_str()
+                        .expect("measurement descriptor revision"),
+                    measurement["value"]["metric"]
+                        .as_str()
+                        .expect("measurement descriptor name"),
+                    measurement["value"]["unit"]
+                        .as_str()
+                        .expect("measurement descriptor unit"),
+                    measurement["value"]["denominator"]
+                        .as_str()
+                        .expect("measurement descriptor denominator"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
 
     let anonymous = agent
         .post(&route)
@@ -1021,6 +1081,11 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         initial_metrics["horizon"], request["horizon"],
         "{initial_metrics}"
     );
+    let initial_descriptor_identities = descriptor_identities(initial_metrics);
+    assert_eq!(
+        initial_descriptor_identities, expected_descriptor_identities,
+        "an empty authorized horizon must retain the complete canonical topology metric descriptor identity: {initial_metrics}"
+    );
     assert!(
         initial_metrics["measurements"]
             .as_array()
@@ -1036,7 +1101,7 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
     );
 
     fixture.restart();
-    let restored_route = fixture.external_url("/application/work/topology-metrics");
+    let restored_route = fixture.external_url(route_path);
     let anonymous_after_restart = agent
         .post(&restored_route)
         .header("origin", &fixture.origin)
@@ -1065,6 +1130,15 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
     assert_eq!(
         restored_metrics["horizon"], request["horizon"],
         "{restored_metrics}"
+    );
+    let restored_descriptor_identities = descriptor_identities(restored_metrics);
+    assert_eq!(
+        restored_descriptor_identities, expected_descriptor_identities,
+        "a restarted topology metrics route must retain the complete canonical metric descriptor identity: {restored_metrics}"
+    );
+    assert_eq!(
+        restored_descriptor_identities, initial_descriptor_identities,
+        "a physical restart must preserve exact topology metric descriptor identity: {restored_metrics}"
     );
     assert!(
         restored_metrics["measurements"]

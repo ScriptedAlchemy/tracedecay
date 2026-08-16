@@ -169,7 +169,7 @@ pub(super) fn unavailable_model_with_state_at(
         source_state: state,
     };
     let mut measurements = Vec::new();
-    for (metric, unit, denominator) in ALL_DESCRIPTORS_V1 {
+    for (metric, unit, denominator) in EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1 {
         measurements.push(measurement(MeasurementInput {
             metric,
             unit,
@@ -218,7 +218,7 @@ pub(super) fn unavailable_model_with_state_at(
 /// Every Plan 26 execution-topology descriptor, with its unit and eligible
 /// population. An unreadable horizon still returns one typed-absent row per
 /// descriptor so a consumer never sees a shrinking descriptor set.
-const ALL_DESCRIPTORS_V1: [(&str, &str, &str); 19] = [
+pub const EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1: [(&str, &str, &str); 19] = [
     (
         "work_execution_concurrency_width",
         "microseconds",
@@ -312,7 +312,7 @@ mod descriptor_tests {
     fn unsupported_ready_to_integrated_metric_is_absent_from_catalog_and_projection() {
         let unsupported = "work_ready_to_integrated_seconds";
         assert!(
-            ALL_DESCRIPTORS_V1
+            EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
                 .iter()
                 .all(|(metric, _, _)| *metric != unsupported)
         );
