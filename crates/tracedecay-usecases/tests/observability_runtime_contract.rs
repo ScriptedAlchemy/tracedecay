@@ -953,6 +953,7 @@ async fn real_work_owner_receipts_converge_to_rollup() {
     assert_eq!(report.fragment_count, 1, "{report:#?}");
     assert_eq!(report.coverage, CoverageStateV1::Known, "{report:#?}");
     assert_eq!(report.raw_coverage, CoverageStateV1::Known, "{report:#?}");
+    assert!(report.raw_rollup_equal, "{report:#?}");
 }
 
 pub mod work_rollup_harness {
@@ -1019,6 +1020,9 @@ pub mod work_rollup_harness {
         pub fragment_is_application_canonical: bool,
         pub raw_coverage: CoverageStateV1,
         pub coverage: CoverageStateV1,
+        pub raw_watermark: String,
+        pub rollup_watermark: String,
+        pub raw_rollup_equal: bool,
         pub setup_elapsed: Duration,
         pub offer_elapsed: Duration,
         pub fragment_ready_elapsed: Duration,
@@ -1453,6 +1457,32 @@ pub mod work_rollup_harness {
 
     fn serialized_semantic_identity(identity: &WorkRollupSemanticIdentityV1) -> Vec<u8> {
         serde_json::to_vec(identity).expect("serialize complete Work rollup semantic identity")
+    }
+
+    fn normalize_raw_boundary_metrics(
+        mut metrics: ExecutionTopologyMetricsV1,
+    ) -> ExecutionTopologyMetricsV1 {
+        let normalized_horizon = ObservabilityHorizonV1 {
+            since_micros: 0,
+            until_micros: DAY_MICROS,
+        };
+        metrics.horizon = normalized_horizon.clone();
+        metrics.observed_at_micros = 0;
+        metrics.watermark = "normalized-watermark".to_owned();
+        metrics.drill_anchors.clear();
+        for measurement in &mut metrics.measurements {
+            measurement.value.provenance.watermark = "normalized-watermark".to_owned();
+            measurement.value.temporal.horizon = normalized_horizon.clone();
+        }
+        metrics
+    }
+
+    fn raw_boundary_matches_retained_rollup(
+        raw: &ExecutionTopologyMetricsV1,
+        rollup: &ExecutionTopologyMetricsV1,
+    ) -> bool {
+        normalize_raw_boundary_metrics(raw.clone())
+            == normalize_raw_boundary_metrics(rollup.clone())
     }
 
     async fn prepare_work_rollup_case() -> PreparedWorkRollupCase {
@@ -1899,6 +1929,9 @@ pub mod work_rollup_harness {
             fragment_is_application_canonical,
             raw_coverage: raw.coverage.state,
             coverage: rollup.coverage.state,
+            raw_watermark: raw.watermark.clone(),
+            rollup_watermark: rollup.watermark.clone(),
+            raw_rollup_equal: raw_boundary_matches_retained_rollup(&raw, &rollup),
             setup_elapsed,
             offer_elapsed,
             fragment_ready_elapsed,
