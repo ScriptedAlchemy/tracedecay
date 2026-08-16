@@ -35,9 +35,15 @@ pub struct ProductionSemanticAuthorities {
 ///
 /// Each installed analyzer remains bound to its declared document extensions.
 /// No analyzer (or an ambiguous extension) resolves through the typed
-/// unavailable fallback. Analyzer availability alone does not prove support
-/// for any semantic method, so capabilities remain empty until negotiation or
-/// a current application query port supplies exact evidence.
+/// unavailable fallback, and that fallback serves nothing, so the no-analyzer
+/// route reports no semantic capability at all.
+///
+/// A routed analyzer accepts every request in the closed `SemanticRequest`
+/// protocol. Capability negotiation intersects that protocol contract with
+/// the client and gateway sets; reporting no upstream methods for a routed
+/// analyzer would make every client-negotiated semantic request unavailable.
+/// Per-request analyzer readiness remains a provider outcome (pending,
+/// partial, or unavailable), rather than an advertised capability.
 pub async fn production_semantic_authorities(
     runtime: Handle,
     diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,
@@ -92,8 +98,18 @@ pub async fn production_semantic_authorities(
         semantics: Arc::new(PolyglotSemanticProvider::new(routes, fallback)),
         cancellation: Arc::new(CompositeSemanticCancellation { cancellation }),
         analyzer_available: true,
-        semantic_capabilities: BTreeSet::new(),
+        semantic_capabilities: routed_analyzer_semantic_capabilities(),
     })
+}
+
+/// The semantic methods the routed analyzer protocol accepts.
+///
+/// `SemanticRequest` is a closed set and `DaemonSemanticProviderAdapter`
+/// forwards every variant. `RenameCandidate` is an internal read-only
+/// operation that negotiation admits only when the gateway also offers it;
+/// it is never advertised as a client rename provider.
+fn routed_analyzer_semantic_capabilities() -> BTreeSet<SemanticCapability> {
+    SemanticCapability::ALL.into_iter().collect()
 }
 
 struct UnavailableSemanticCancellation;
