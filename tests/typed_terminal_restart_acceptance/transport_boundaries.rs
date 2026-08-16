@@ -130,12 +130,29 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
     );
     let envelope: Value =
         serde_json::from_slice(&output.stdout).expect("storage status application envelope");
-    envelope["scope"]["project_id"]
+    assert!(
+        envelope["problem"].is_null() && !envelope["outcome"].is_null(),
+        "storage_status must complete before the typed-terminal journey starts: {envelope}"
+    );
+    assert_eq!(
+        envelope["outcome"]["outcome"], "evidence",
+        "storage_status must return retained storage evidence: {envelope}"
+    );
+    assert_eq!(
+        envelope["outcome"]["value"]["payload"]["status"], "ok",
+        "storage_status must report an admitted healthy store: {envelope}"
+    );
+    let project_id = envelope["scope"]["project_id"]
         .as_str()
         .unwrap_or_else(|| {
             panic!("storage status omitted the daemon-admitted project identity: {envelope}")
         })
-        .to_owned()
+        .to_owned();
+    assert_eq!(
+        envelope["outcome"]["value"]["payload"]["project_id"], project_id,
+        "storage evidence must belong to the daemon-admitted project: {envelope}"
+    );
+    project_id
 }
 
 fn now_micros() -> i64 {
