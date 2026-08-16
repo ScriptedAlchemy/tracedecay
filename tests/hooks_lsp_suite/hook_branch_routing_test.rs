@@ -117,8 +117,36 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         .expect("hook branch sync must seal a branch-graph generation");
     assert_eq!(source.reference, "refs/heads/feature/hook");
     assert_eq!(source.source_oid, head_oid);
+    let canonical_project = project.canonicalize().unwrap();
+    assert_eq!(
+        source.worktree_root,
+        canonical_project.to_string_lossy().into_owned(),
+        "sealed branch provenance must retain the exact mounted worktree root"
+    );
     let first_epoch = source.publication_epoch.get();
     assert!(first_epoch >= 1, "sealed generation must carry an epoch");
+
+    let replay_outcome = harness
+        .track_worktree_branch(&project, &project, "feature/hook")
+        .await
+        .unwrap();
+    assert_eq!(
+        replay_outcome,
+        tracedecay::branch::BranchAddOutcome::AlreadyTracked,
+        "replaying the exact branch/worktree route must preserve its sealed generation"
+    );
+    let replay_source = tracedecay::branch_meta::load_branch_meta(&shard_root)
+        .expect("replayed branch metadata must remain published")
+        .branches
+        .get("feature/hook")
+        .and_then(|entry| entry.graph_source.as_ref())
+        .cloned()
+        .expect("replayed branch must keep its sealed provenance");
+    assert_eq!(
+        replay_source,
+        source.clone(),
+        "the exact branch/worktree/store route must not publish a replacement generation"
+    );
 
     // A write on a second branch rolls the store to a newer generation under
     // the new ref; the first branch keeps its sealed provenance record.
