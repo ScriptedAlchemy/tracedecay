@@ -840,6 +840,7 @@ impl MaintenanceCoordinator {
                     }
                     gc_succeeded &= super::store_maintenance::run_gc(
                         administration,
+                        code_index_schedulers,
                         branch_gc.branch_gc_days,
                         branch_gc.orphan_db_gc_days,
                         graph,

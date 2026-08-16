@@ -139,24 +139,55 @@ async fn activate_and_track_manual_branch(
     schedulers: &CodeIndexSchedulerRegistryV1,
     branch: &str,
 ) -> Result<BranchAddOutcome, TraceDecayError> {
-    let activation = super::pr_autotrack::activate_manual_branch_head(
+    let data_root = graph.store_layout().data_root.clone();
+    let lifecycle = super::pr_autotrack::try_acquire_manual_branch_lifecycle(&data_root, branch)
+        .map_err(|error| {
+            TraceDecayError::project_route(error.reason_code(), error.retryable(), error.detail())
+        })?;
+    let activation = super::pr_autotrack::activate_manual_branch_head_with_lifecycle(
         project_root,
         graph,
         Some(schedulers),
         branch,
+        &lifecycle,
     )
     .await
     .map_err(|error| {
         TraceDecayError::project_route(error.reason_code(), error.retryable(), error.detail())
     })?;
-    track_exact_worktree_branch(
+    let tracked = track_exact_worktree_branch_with_lifecycle(
         graph,
         schedulers,
         project_root,
         &activation.worktree,
         branch,
+        &lifecycle,
     )
-    .await
+    .await;
+    match tracked {
+        Ok(outcome) => Ok(outcome),
+        Err(error) if activation.outcome == BranchAddOutcome::Added => {
+            super::pr_autotrack::cleanup_manual_branch_activation(
+                project_root,
+                &data_root,
+                schedulers,
+                &activation,
+                &lifecycle,
+            )
+            .await
+            .map_err(|cleanup| {
+                TraceDecayError::project_route(
+                    cleanup.reason_code(),
+                    cleanup.retryable(),
+                    format!(
+                        "branch sealing failed: {error}; exact activation cleanup failed: {cleanup}"
+                    ),
+                )
+            })?;
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Seals the current, exact Git snapshot for one mounted branch worktree.
@@ -172,6 +203,39 @@ pub(crate) async fn track_exact_worktree_branch(
     worktree_root: &Path,
     branch: &str,
 ) -> Result<BranchAddOutcome, TraceDecayError> {
+    let lifecycle = super::pr_autotrack::try_acquire_manual_branch_lifecycle(
+        &graph.store_layout().data_root,
+        branch,
+    )
+    .map_err(|error| {
+        TraceDecayError::project_route(error.reason_code(), error.retryable(), error.detail())
+    })?;
+    track_exact_worktree_branch_with_lifecycle(
+        graph,
+        schedulers,
+        project_root,
+        worktree_root,
+        branch,
+        &lifecycle,
+    )
+    .await
+}
+
+async fn track_exact_worktree_branch_with_lifecycle(
+    graph: &Arc<crate::tracedecay::TraceDecay>,
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    worktree_root: &Path,
+    branch: &str,
+    lifecycle: &super::pr_autotrack::ManualBranchLifecycleLeaseV1,
+) -> Result<BranchAddOutcome, TraceDecayError> {
+    if !lifecycle.matches_branch(branch) {
+        return Err(TraceDecayError::project_route(
+            BRANCH_TRACKING_FAILED,
+            true,
+            "manual branch lifecycle lease does not match branch sealing request",
+        ));
+    }
     let canonical_project_root = project_root.canonicalize().map_err(|error| {
         TraceDecayError::project_route(
             CODE_INDEX_IDENTITY_MISMATCH,
@@ -250,16 +314,8 @@ pub(crate) async fn track_exact_worktree_branch(
         match await_exact_branch_generation(schedulers, &canonical_worktree_root, &source).await {
             Ok(generation) => generation,
             Err(error) => {
-                rollback_failed_branch_tracking(
-                    schedulers,
-                    &data_root,
-                    &canonical_worktree_root,
-                    prepared.as_ref(),
-                    None,
-                    None,
-                    &error,
-                )
-                .await?;
+                rollback_failed_branch_tracking(&data_root, prepared.as_ref(), None, &error)
+                    .await?;
                 return Err(error);
             }
         };
@@ -275,16 +331,7 @@ pub(crate) async fn track_exact_worktree_branch(
                 canonical_worktree_root.display()
             ),
         );
-        rollback_failed_branch_tracking(
-            schedulers,
-            &data_root,
-            &canonical_worktree_root,
-            prepared.as_ref(),
-            None,
-            None,
-            &error,
-        )
-        .await?;
+        rollback_failed_branch_tracking(&data_root, prepared.as_ref(), None, &error).await?;
         return Err(error);
     };
     let publication = crate::branch_meta::publish_graph_source(
@@ -303,7 +350,7 @@ pub(crate) async fn track_exact_worktree_branch(
     match publication {
         Ok(crate::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(publication)) => {
             match schedulers
-                .commit_serving_generation_installation(&canonical_worktree_root, &installation)
+                .commit_serving_generation_installation(&canonical_worktree_root, installation)
                 .await
             {
                 ServingGenerationRollbackOutcomeV1::Cleared => Ok(BranchAddOutcome::Added),
@@ -317,12 +364,9 @@ pub(crate) async fn track_exact_worktree_branch(
                         ),
                     );
                     rollback_failed_branch_tracking(
-                        schedulers,
                         &data_root,
-                        &canonical_worktree_root,
                         prepared.as_ref(),
                         Some(&publication),
-                        Some(&installation),
                         &error,
                     )
                     .await?;
@@ -332,7 +376,7 @@ pub(crate) async fn track_exact_worktree_branch(
         }
         Ok(crate::branch_meta::BranchGraphSourcePublishOutcomeV1::AlreadyPublished(_)) => {
             match schedulers
-                .commit_serving_generation_installation(&canonical_worktree_root, &installation)
+                .commit_serving_generation_installation(&canonical_worktree_root, installation)
                 .await
             {
                 ServingGenerationRollbackOutcomeV1::Cleared => Ok(BranchAddOutcome::AlreadyTracked),
@@ -349,7 +393,7 @@ pub(crate) async fn track_exact_worktree_branch(
         Ok(crate::branch_meta::BranchGraphSourcePublishOutcomeV1::CompareAndSwapMiss {
             observed: Some(observed),
         }) if observed.matches_draft(&source) => match schedulers
-            .commit_serving_generation_installation(&canonical_worktree_root, &installation)
+            .commit_serving_generation_installation(&canonical_worktree_root, installation)
             .await
         {
             ServingGenerationRollbackOutcomeV1::Cleared => Ok(BranchAddOutcome::AlreadyTracked),
@@ -371,34 +415,16 @@ pub(crate) async fn track_exact_worktree_branch(
                 ),
             );
             let _ = schedulers
-                .commit_serving_generation_installation(&canonical_worktree_root, &installation)
+                .commit_serving_generation_installation(&canonical_worktree_root, installation)
                 .await;
-            rollback_failed_branch_tracking(
-                schedulers,
-                &data_root,
-                &canonical_worktree_root,
-                prepared.as_ref(),
-                None,
-                None,
-                &error,
-            )
-            .await?;
+            rollback_failed_branch_tracking(&data_root, prepared.as_ref(), None, &error).await?;
             Err(error)
         }
         Err(error) => {
             let _ = schedulers
-                .commit_serving_generation_installation(&canonical_worktree_root, &installation)
+                .commit_serving_generation_installation(&canonical_worktree_root, installation)
                 .await;
-            rollback_failed_branch_tracking(
-                schedulers,
-                &data_root,
-                &canonical_worktree_root,
-                prepared.as_ref(),
-                None,
-                None,
-                &error,
-            )
-            .await?;
+            rollback_failed_branch_tracking(&data_root, prepared.as_ref(), None, &error).await?;
             Err(error)
         }
     }
@@ -633,12 +659,9 @@ fn generation_matches_branch_source(
 }
 
 async fn rollback_failed_branch_tracking(
-    schedulers: &CodeIndexSchedulerRegistryV1,
     data_root: &Path,
-    canonical_worktree_root: &Path,
     prepared: Option<&crate::branch::PreparedBranchTracking>,
     publication: Option<&crate::branch_meta::BranchGraphSourcePublicationV1>,
-    installation: Option<&super::code_index_scheduler::ServingGenerationInstallationV1>,
     cause: &TraceDecayError,
 ) -> Result<(), TraceDecayError> {
     let publication_rolled_back = match publication {
@@ -678,13 +701,7 @@ async fn rollback_failed_branch_tracking(
         },
         None => true,
     };
-    if publication.is_some() && prepared_rolled_back {
-        if let Some(installation) = installation {
-            let _ = schedulers
-                .retire_owned_serving_generation(canonical_worktree_root, installation)
-                .await;
-        }
-    }
+    let _ = (publication, prepared_rolled_back);
     Ok(())
 }
 

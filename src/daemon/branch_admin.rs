@@ -1310,6 +1310,7 @@ impl StoreAdministration {
     /// branch administration against that exact profile-owned store.
     pub(super) async fn execute_branch_admin_for_handshake(
         &self,
+        schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         handshake: &DaemonHandshake,
         action: crate::branch::BranchAdminAction,
     ) -> Result<crate::branch::BranchAdminReport> {
@@ -1354,6 +1355,7 @@ impl StoreAdministration {
         .config
         .sync;
         self.execute_branch_admin_in_layout(
+            schedulers,
             project_root,
             &layout.data_root,
             action,
@@ -1367,6 +1369,7 @@ impl StoreAdministration {
     /// the physical runtime registry's exact path reservation.
     pub(super) async fn execute_branch_admin_in_layout(
         &self,
+        schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         project_root: &Path,
         data_root: &Path,
         action: crate::branch::BranchAdminAction,
@@ -1380,9 +1383,31 @@ impl StoreAdministration {
             branch_gc_days,
             orphan_db_gc_days,
         )?;
+        let retirements = prepared
+            .single_store_retirements()
+            .iter()
+            .filter(|retirement| {
+                super::pr_autotrack::manual_branch_source_owns_artifacts(
+                    data_root,
+                    &retirement.branch,
+                    &retirement.source,
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let lifecycle_leases = acquire_manual_branch_retirement_leases(data_root, &retirements)?;
         let database_paths = canonical_branch_database_paths(prepared.database_paths())?;
         if database_paths.is_empty() {
-            return prepared.finish_without_database_deletion();
+            let report = prepared.finish_without_database_deletion()?;
+            cleanup_manual_branch_retirements(
+                project_root,
+                data_root,
+                schedulers,
+                &retirements,
+                &lifecycle_leases,
+            )
+            .await?;
+            return Ok(report);
         }
 
         {
@@ -1420,8 +1445,67 @@ impl StoreAdministration {
         reservation
             .finish_deleted()
             .map_err(destructive_reservation_error)?;
+        cleanup_manual_branch_retirements(
+            project_root,
+            data_root,
+            schedulers,
+            &retirements,
+            &lifecycle_leases,
+        )
+        .await?;
         Ok(report)
     }
+}
+
+fn acquire_manual_branch_retirement_leases(
+    data_root: &Path,
+    retirements: &[crate::branch::SingleStoreBranchRetirementV1],
+) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
+    retirements
+        .iter()
+        .map(|retirement| {
+            super::pr_autotrack::try_acquire_manual_branch_lifecycle(data_root, &retirement.branch)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "branch removal for '{}' is contended or unavailable: {error}",
+                        retirement.branch
+                    ),
+                })
+        })
+        .collect()
+}
+
+async fn cleanup_manual_branch_retirements(
+    project_root: &Path,
+    data_root: &Path,
+    schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    retirements: &[crate::branch::SingleStoreBranchRetirementV1],
+    lifecycle_leases: &[super::pr_autotrack::ManualBranchLifecycleLeaseV1],
+) -> Result<()> {
+    if retirements.len() != lifecycle_leases.len() {
+        return Err(TraceDecayError::Config {
+            message: "branch retirement lifecycle ownership did not match metadata selection"
+                .to_owned(),
+        });
+    }
+    for (retirement, lifecycle) in retirements.iter().zip(lifecycle_leases) {
+        super::pr_autotrack::cleanup_manual_branch_retirement(
+            project_root,
+            data_root,
+            schedulers,
+            &retirement.branch,
+            &retirement.source,
+            lifecycle,
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "branch metadata removed '{}' but exact artifact retirement failed: {error}",
+                retirement.branch
+            ),
+        })?;
+    }
+    Ok(())
 }
 
 pub(super) struct BranchAdminRequest {

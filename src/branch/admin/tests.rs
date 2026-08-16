@@ -52,6 +52,26 @@ fn failpoint(message: &str) -> crate::errors::Result<()> {
     })
 }
 
+fn add_sealed_single_store_branch(tracedecay_dir: &Path, branch: &str) {
+    let mut meta = crate::branch_meta::load_branch_meta(tracedecay_dir).unwrap();
+    meta.add_branch(branch, crate::config::DB_FILENAME, "main");
+    crate::branch_meta::save_branch_meta(tracedecay_dir, &meta).unwrap();
+    let source = crate::branch_meta::BranchGraphSourceDraftV1 {
+        project_id: "project".to_owned(),
+        repository_id: "repository".to_owned(),
+        worktree_id: format!("worktree-{branch}"),
+        worktree_root: format!("/manual/{branch}"),
+        reference: format!("refs/heads/tracedecay/track/{branch}"),
+        source_oid: format!("oid-{branch}"),
+    };
+    let outcome =
+        crate::branch_meta::publish_graph_source(tracedecay_dir, branch, None, source).unwrap();
+    assert!(matches!(
+        outcome,
+        crate::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
+    ));
+}
+
 #[test]
 fn selection_is_read_only_and_commit_unlinks_exact_family() {
     let (_temp, project_root, tracedecay_dir) = fixture();
@@ -304,6 +324,32 @@ fn removing_a_single_store_branch_never_deletes_the_project_store() {
     );
 }
 
+#[test]
+fn remove_all_carries_exact_single_store_provenance_for_daemon_retirement() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    add_sealed_single_store_branch(&tracedecay_dir, "feature/one");
+    add_sealed_single_store_branch(&tracedecay_dir, "feature/two");
+
+    let prepared = prepare_branch_admin_mutation(
+        &project_root,
+        &tracedecay_dir,
+        BranchAdminAction::RemoveAll,
+        14,
+        7,
+    )
+    .unwrap();
+
+    assert_eq!(
+        prepared
+            .single_store_retirements()
+            .iter()
+            .map(|retirement| retirement.branch.as_str())
+            .collect::<Vec<_>>(),
+        vec!["feature/one", "feature/two"],
+        "remove-all must retain exact source provenance until cleanup commits"
+    );
+}
+
 /// GC of a dead single-store branch collects its metadata while the shared
 /// main database survives; a dead legacy private copy is still physically
 /// collected in the same pass (Plan 38 keep-list).
@@ -343,4 +389,35 @@ fn gc_collects_single_store_metadata_and_legacy_stores_but_keeps_the_project_sto
     let persisted = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     assert!(!persisted.is_tracked("topic"));
     assert!(!persisted.is_tracked("feature"));
+}
+
+#[test]
+fn gc_carries_only_exact_sealed_single_store_provenance_for_retirement() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    add_sealed_single_store_branch(&tracedecay_dir, "feature/stale");
+    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    meta.branches
+        .get_mut("feature/stale")
+        .unwrap()
+        .last_synced_at = "0".to_owned();
+    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+
+    let prepared = prepare_branch_admin_mutation(
+        &project_root,
+        &tracedecay_dir,
+        BranchAdminAction::Gc,
+        0,
+        u64::MAX,
+    )
+    .unwrap();
+
+    assert_eq!(
+        prepared
+            .single_store_retirements()
+            .iter()
+            .map(|retirement| retirement.branch.as_str())
+            .collect::<Vec<_>>(),
+        vec!["feature/stale"],
+        "GC must carry sealed manual provenance instead of deleting metadata alone"
+    );
 }

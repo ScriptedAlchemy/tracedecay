@@ -7,6 +7,7 @@ use crate::branch_meta::BranchMeta;
 mod admin;
 mod snapshots;
 
+pub(crate) use admin::SingleStoreBranchRetirementV1;
 pub use admin::{
     BranchAdminAction, BranchAdminOutcome, BranchAdminReport, PreparedBranchAdminMutation,
     prepare_branch_admin_mutation, remove_tracked_branch_store_checked,
