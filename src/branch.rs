@@ -249,7 +249,14 @@ pub enum BranchTrackingPreparation {
 
 pub struct PreparedBranchTracking {
     branch_name: String,
-    db_file: String,
+    entry: crate::branch_meta::BranchEntry,
+}
+
+/// Typed result of retiring an unpublished branch-tracking entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparedBranchRollbackOutcome {
+    RolledBack,
+    NoMatch,
 }
 
 /// Publishes branch-tracking metadata for `branch_name` on the single project
@@ -341,11 +348,18 @@ pub async fn prepare_branch_tracking_in_layout(
     // before the caller syncs so the fenced publication finds the entry.
     let db_file = crate::config::db_filename(tracedecay_dir).to_owned();
     meta.add_branch(branch_name, &db_file, &parent);
+    let entry = meta.branches.get(branch_name).cloned().ok_or_else(|| {
+        crate::errors::TraceDecayError::Config {
+            message: format!(
+                "branch tracking prepared '{branch_name}' without a matching metadata entry"
+            ),
+        }
+    })?;
     branch_meta::save_branch_meta(tracedecay_dir, &meta)?;
 
     Ok(BranchTrackingPreparation::Added(PreparedBranchTracking {
         branch_name: branch_name.to_string(),
-        db_file,
+        entry,
     }))
 }
 
@@ -494,8 +508,19 @@ pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &Prepa
 pub fn rollback_prepared_branch_tracking(
     tracedecay_dir: &Path,
     prepared: &PreparedBranchTracking,
-) -> crate::errors::Result<()> {
-    rollback_branch_tracking(tracedecay_dir, &prepared.branch_name, &prepared.db_file)
+) -> crate::errors::Result<PreparedBranchRollbackOutcome> {
+    let _branch_lock = acquire_branch_lock_blocking(tracedecay_dir)?;
+    let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) else {
+        return Ok(PreparedBranchRollbackOutcome::NoMatch);
+    };
+    if meta.branches.get(&prepared.branch_name) != Some(&prepared.entry) {
+        return Ok(PreparedBranchRollbackOutcome::NoMatch);
+    }
+    if meta.remove_branch(&prepared.branch_name).is_none() {
+        return Ok(PreparedBranchRollbackOutcome::NoMatch);
+    }
+    crate::branch_meta::save_branch_meta(tracedecay_dir, &meta)?;
+    Ok(PreparedBranchRollbackOutcome::RolledBack)
 }
 
 fn rollback_branch_tracking(

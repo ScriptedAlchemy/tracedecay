@@ -49,12 +49,50 @@ async fn tracking_a_new_branch_publishes_metadata_without_creating_a_database() 
         "tracking must not create a per-branch database"
     );
 
-    rollback_prepared_branch_tracking(&td, &prepared).unwrap();
+    assert_eq!(
+        rollback_prepared_branch_tracking(&td, &prepared).unwrap(),
+        PreparedBranchRollbackOutcome::RolledBack
+    );
     let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
     assert!(!meta.is_tracked("feature/topic"));
     assert!(
         td.join("tracedecay.db").exists(),
         "rollback must never touch the project store"
+    );
+}
+
+#[tokio::test]
+async fn rollback_prepared_tracking_preserves_a_newer_metadata_entry() {
+    let (_base, project_root, td) = setup_repo_with_meta();
+    run_git(&project_root, &["branch", "feature/topic"]);
+
+    let prepared = prepare_branch_tracking_in_layout(&project_root, "feature/topic", &td)
+        .await
+        .unwrap();
+    let BranchTrackingPreparation::Added(prepared) = prepared else {
+        panic!("new branch must prepare as Added");
+    };
+    let mut advanced = crate::branch_meta::load_branch_meta(&td).unwrap();
+    advanced
+        .branches
+        .get_mut("feature/topic")
+        .unwrap()
+        .last_synced_at = "999".to_owned();
+    crate::branch_meta::save_branch_meta(&td, &advanced).unwrap();
+
+    assert_eq!(
+        rollback_prepared_branch_tracking(&td, &prepared).unwrap(),
+        PreparedBranchRollbackOutcome::NoMatch,
+        "a failed older attempt must not retire newer branch metadata"
+    );
+    assert_eq!(
+        crate::branch_meta::load_branch_meta(&td)
+            .unwrap()
+            .branches
+            .get("feature/topic")
+            .unwrap(),
+        advanced.branches.get("feature/topic").unwrap(),
+        "the exact newer entry must survive the stale rollback"
     );
 }
 
