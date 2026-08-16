@@ -939,11 +939,12 @@ async fn wait_for_initialize(
         let message = decode_message(&frame)?;
         if message.id == Some(json!(1)) {
             if let Some(error) = message.error {
+                let error = LspSemanticRequestError::Remote {
+                    code: error.code,
+                    message: error.message,
+                };
                 return Err(TraceDecayError::Config {
-                    message: format!(
-                        "LSP server '{command}' rejected initialize with {}: {}",
-                        error.code, error.message
-                    ),
+                    message: format!("LSP server '{command}' rejected initialize: {error}"),
                 });
             }
             return message.result.ok_or_else(|| TraceDecayError::Config {
@@ -1234,6 +1235,26 @@ mod tests {
                 "analyzer-invalid-response"
             );
         }
+    }
+
+    #[test]
+    fn remote_errors_render_present_and_missing_codes_unambiguously() {
+        assert_eq!(
+            LspSemanticRequestError::Remote {
+                code: Some(-32603),
+                message: "server failed".to_owned(),
+            }
+            .to_string(),
+            "analyzer returned error -32603: server failed"
+        );
+        assert_eq!(
+            LspSemanticRequestError::Remote {
+                code: None,
+                message: "server failed".to_owned(),
+            }
+            .to_string(),
+            "analyzer returned an error: server failed"
+        );
     }
 
     #[test]
