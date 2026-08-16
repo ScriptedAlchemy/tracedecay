@@ -327,6 +327,34 @@ fn fact_add_body(content: &str) -> Value {
     json!({ "content": content, "category": "general" })
 }
 
+/// Longest whitespace-separated token a fact this journey stores may carry.
+///
+/// Production memory hygiene refuses secret-like content *before* it reaches
+/// the store (`detect_secret_like` ->
+/// `crates/tracedecay-runtime-core/src/privacy/detector_kernel.rs::looks_high_entropy_token`),
+/// and one of its rules is a Shannon-entropy test over any single token of at
+/// least 36 bytes. A long hyphenated marker ending in hex is exactly the shape
+/// that rule exists to catch: the first cut of this journey used 50-byte
+/// markers and the daemon answered the Rust SDK leg with a truthful
+/// `secret_rejected` — a *completed* effect that never commits, so the parked
+/// request settled without ever reaching the commit boundary the barrier
+/// guards. Tokens below this bound cannot reach that rule at all, so the
+/// journey induces the partial effect it is actually about.
+const MAX_MARKER_TOKEN_BYTES: usize = 36;
+
+/// Fails loudly if a marker could be refused by memory hygiene instead of
+/// committing, so a future marker edit cannot silently re-open the same hole.
+fn assert_marker_is_storable(marker: &str) {
+    for token in marker.split_whitespace() {
+        assert!(
+            token.len() < MAX_MARKER_TOKEN_BYTES,
+            "marker token '{token}' is {} bytes; memory hygiene may refuse it as \
+             a high-entropy secret instead of committing the fact this journey parks",
+            token.len()
+        );
+    }
+}
+
 /// Asserts the SDK surfaced a typed terminal rather than a success or a
 /// transport failure, and returns its canonical envelope.
 fn sdk_problem(error: ClientError, context: &str) -> (String, Value) {
