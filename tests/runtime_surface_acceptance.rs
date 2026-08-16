@@ -1957,6 +1957,10 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         initialized["result"]["capabilities"]["hoverProvider"], true,
         "a routed analyzer must negotiate the declared hover capability: {initialized}"
     );
+    assert!(
+        initialized["result"]["capabilities"]["definitionProvider"].is_null(),
+        "an undeclared standard method must remain absent from the negotiated surface: {initialized}"
+    );
     let negotiated = &initialized["result"]["capabilities"]["experimental"]["tracedecay"];
     assert_eq!(negotiated["revision"], TRACEDECAY_CONTEXT_REVISION);
     assert_eq!(negotiated["opaqueExpansion"], true);

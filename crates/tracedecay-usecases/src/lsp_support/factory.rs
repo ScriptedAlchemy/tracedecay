@@ -13,12 +13,37 @@ use tracedecay_lsp::{
     DaemonLspRuntimeSession, DiagnosticRefreshAdmission, DiagnosticSnapshotAdapter,
     DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, FeedbackCycleAdapter, FeedbackCyclePort,
     FeedbackCycleRequest, FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayCapabilities,
-    LspAnalyzerCancellationAuthority, LspRequestId, OverlaySnapshot, SemanticProviderOutcome,
-    SemanticProviderPort, SemanticRequest, SemanticResponse, UpstreamCapabilities,
-    WorkspaceDiagnosticSnapshotOutcome,
+    LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
+    OverlaySnapshot, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
+    SemanticResponse, UpstreamCapabilities, WorkspaceDiagnosticSnapshotOutcome,
 };
 
 use super::runtime_adapters::runtime_spawner;
+
+/// Supplies exact upstream semantic capabilities when an LSP session is
+/// actually opened.
+///
+/// Production implementations retain one analyzer client per route and obtain
+/// these facts from that client's standard initialize response. The factory
+/// does not cache a second copy of that response.
+pub trait UpstreamCapabilityInitializationAuthority: Send + Sync {
+    fn initialize_upstream_capabilities(
+        &self,
+    ) -> LspRuntimeFuture<std::result::Result<UpstreamCapabilities, LspRuntimeFailure>>;
+}
+
+struct StaticUpstreamCapabilities {
+    capabilities: UpstreamCapabilities,
+}
+
+impl UpstreamCapabilityInitializationAuthority for StaticUpstreamCapabilities {
+    fn initialize_upstream_capabilities(
+        &self,
+    ) -> LspRuntimeFuture<std::result::Result<UpstreamCapabilities, LspRuntimeFailure>> {
+        let capabilities = self.capabilities.clone();
+        Box::pin(async move { Ok(capabilities) })
+    }
+}
 
 /// Cloneable daemon registration for one admitted project.
 #[derive(Clone)]
@@ -31,6 +56,7 @@ pub struct DaemonLspSessionFactory {
     context: Arc<dyn CanonicalContextProjectionAuthority>,
     gateway_capabilities: GatewayCapabilities,
     upstream_capabilities: UpstreamCapabilities,
+    upstream_capability_initializer: Arc<dyn UpstreamCapabilityInitializationAuthority>,
 }
 
 impl DaemonLspSessionFactory {
@@ -57,13 +83,33 @@ impl DaemonLspSessionFactory {
             cancellation,
             context,
             gateway_capabilities,
+            upstream_capability_initializer: Arc::new(StaticUpstreamCapabilities {
+                capabilities: upstream_capabilities.clone(),
+            }),
             upstream_capabilities,
         }
+    }
+
+    /// Replaces the static test capability source with the production
+    /// initializer backed by the shared analyzer client.
+    pub fn with_upstream_capability_initializer(
+        mut self,
+        upstream_capability_initializer: Arc<dyn UpstreamCapabilityInitializationAuthority>,
+    ) -> Self {
+        self.upstream_capability_initializer = upstream_capability_initializer;
+        self
     }
 
     /// Creates isolated per-client correlation adapters around shared daemon
     /// authorities.
     pub fn provider_bundle(&self) -> DaemonLspProviderBundle {
+        self.provider_bundle_with_upstream_capabilities(self.upstream_capabilities.clone())
+    }
+
+    fn provider_bundle_with_upstream_capabilities(
+        &self,
+        upstream_capabilities: UpstreamCapabilities,
+    ) -> DaemonLspProviderBundle {
         let gateway_capabilities = self.current_gateway_capabilities();
         DaemonLspProviderBundle::from_shared(
             self.feedback.clone() as Arc<dyn FeedbackCyclePort + Send + Sync>,
@@ -79,8 +125,16 @@ impl DaemonLspSessionFactory {
                 self.context.clone(),
             )) as Arc<dyn ContextProjectionPort + Send + Sync>,
             gateway_capabilities,
-            self.upstream_capabilities.clone(),
+            upstream_capabilities,
         )
+    }
+
+    pub async fn initialize_upstream_capabilities(
+        &self,
+    ) -> std::result::Result<UpstreamCapabilities, LspRuntimeFailure> {
+        self.upstream_capability_initializer
+            .initialize_upstream_capabilities()
+            .await
     }
 
     fn current_gateway_capabilities(&self) -> GatewayCapabilities {
@@ -91,16 +145,36 @@ impl DaemonLspSessionFactory {
         self.provider_bundle().into_session(root)
     }
 
-    pub fn open_workspace_session(
+    pub async fn open_workspace_session(
         &self,
         workspace: AuthorizedLspWorkspace,
-    ) -> DaemonLspRuntimeSession {
-        self.provider_bundle().into_workspace_session(workspace)
+    ) -> std::result::Result<DaemonLspRuntimeSession, LspRuntimeFailure> {
+        let upstream_capabilities = self.initialize_upstream_capabilities().await?;
+        Ok(self
+            .provider_bundle_with_upstream_capabilities(upstream_capabilities)
+            .into_workspace_session(workspace))
     }
 
-    pub fn open_federated_workspace_session(
+    pub async fn open_federated_workspace_session(
         workspace: AuthorizedLspWorkspace,
         factories: Vec<(AdmittedRoot, Arc<Self>)>,
+    ) -> std::result::Result<Option<DaemonLspRuntimeSession>, LspRuntimeFailure> {
+        let mut initialized = Vec::with_capacity(factories.len());
+        for (root, factory) in factories {
+            let upstream_capabilities = factory.initialize_upstream_capabilities().await?;
+            initialized.push((root, factory, upstream_capabilities));
+        }
+        Ok(
+            Self::open_federated_workspace_session_with_upstream_capabilities(
+                workspace,
+                initialized,
+            ),
+        )
+    }
+
+    fn open_federated_workspace_session_with_upstream_capabilities(
+        workspace: AuthorizedLspWorkspace,
+        factories: Vec<(AdmittedRoot, Arc<Self>, UpstreamCapabilities)>,
     ) -> Option<DaemonLspRuntimeSession> {
         if factories.len() != workspace.roots().len() {
             return None;
@@ -112,7 +186,7 @@ impl DaemonLspSessionFactory {
         let mut context = BTreeMap::new();
         let mut gateway_capabilities: Option<GatewayCapabilities> = None;
         let mut upstream_capabilities: Option<UpstreamCapabilities> = None;
-        for (root, factory) in factories {
+        for (root, factory, factory_upstream_capabilities) in factories {
             if !workspace.roots().contains(&root) || feedback.contains_key(root.uri()) {
                 return None;
             }
@@ -167,12 +241,12 @@ impl DaemonLspSessionFactory {
             }
             if let Some(capabilities) = upstream_capabilities.as_mut() {
                 capabilities.supports_diagnostics &=
-                    factory.upstream_capabilities.supports_diagnostics;
+                    factory_upstream_capabilities.supports_diagnostics;
                 capabilities.semantic.retain(|capability| {
-                    factory.upstream_capabilities.semantic.contains(capability)
+                    factory_upstream_capabilities.semantic.contains(capability)
                 });
             } else {
-                upstream_capabilities = Some(factory.upstream_capabilities.clone());
+                upstream_capabilities = Some(factory_upstream_capabilities);
             }
         }
         let bundle = DaemonLspProviderBundle::from_shared(
@@ -449,6 +523,45 @@ mod tests {
         }
     }
 
+    struct ExactUpstreamCapabilities(UpstreamCapabilities);
+
+    impl UpstreamCapabilityInitializationAuthority for ExactUpstreamCapabilities {
+        fn initialize_upstream_capabilities(
+            &self,
+        ) -> LspRuntimeFuture<std::result::Result<UpstreamCapabilities, LspRuntimeFailure>>
+        {
+            let capabilities = self.0.clone();
+            Box::pin(async move { Ok(capabilities) })
+        }
+    }
+
+    struct FailingUpstreamCapabilities;
+
+    impl UpstreamCapabilityInitializationAuthority for FailingUpstreamCapabilities {
+        fn initialize_upstream_capabilities(
+            &self,
+        ) -> LspRuntimeFuture<std::result::Result<UpstreamCapabilities, LspRuntimeFailure>>
+        {
+            Box::pin(async { Err(LspRuntimeFailure::new("upstream-initialize-failed")) })
+        }
+    }
+
+    fn factory_with_upstream_initializer(
+        upstream_capability_initializer: Arc<dyn UpstreamCapabilityInitializationAuthority>,
+    ) -> DaemonLspSessionFactory {
+        DaemonLspSessionFactory::new(
+            Handle::current(),
+            Arc::new(RuntimeFeedback),
+            Arc::new(UnavailableSemanticProvider),
+            Arc::new(ToggleWorkspaceDiagnostics(Arc::new(AtomicBool::new(false)))),
+            Arc::new(RuntimeCancellation),
+            Arc::new(RuntimeContext),
+            GatewayCapabilities::default(),
+            UpstreamCapabilities::default(),
+        )
+        .with_upstream_capability_initializer(upstream_capability_initializer)
+    }
+
     struct ToggleWorkspaceDiagnostics(Arc<AtomicBool>);
 
     impl CanonicalDiagnosticSnapshotAuthority for ToggleWorkspaceDiagnostics {
@@ -605,6 +718,61 @@ mod tests {
             ),
             SemanticProviderOutcome::Complete(SemanticResponse::Hover(None))
         ));
+    }
+
+    #[tokio::test]
+    async fn initialized_workspace_session_uses_exact_upstream_capabilities() {
+        let factory = factory_with_upstream_initializer(Arc::new(ExactUpstreamCapabilities(
+            UpstreamCapabilities {
+                supports_diagnostics: false,
+                semantic: [tracedecay_lsp::SemanticCapability::DocumentSymbol]
+                    .into_iter()
+                    .collect(),
+            },
+        )));
+        let workspace = AuthorizedLspWorkspace::single(AdmittedRoot::new("file:///workspace"));
+        let mut session = factory
+            .open_workspace_session(workspace)
+            .await
+            .expect("exact upstream capability initialization");
+        let initialize = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "rootUri": "file:///workspace",
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] },
+                    "textDocument": {
+                        "documentSymbol": { "dynamicRegistration": false },
+                        "hover": { "dynamicRegistration": false },
+                    },
+                },
+            },
+        }))
+        .expect("serialize initialize");
+        session.handle_payload(&initialize, 0);
+        let response: Value =
+            serde_json::from_slice(&session.drain_outbound()[0]).expect("initialize response");
+
+        assert_eq!(
+            response["result"]["capabilities"]["documentSymbolProvider"],
+            true
+        );
+        assert!(response["result"]["capabilities"]["hoverProvider"].is_null());
+    }
+
+    #[tokio::test]
+    async fn initialized_workspace_session_fails_closed_when_upstream_initialization_fails() {
+        let factory = factory_with_upstream_initializer(Arc::new(FailingUpstreamCapabilities));
+        let workspace = AuthorizedLspWorkspace::single(AdmittedRoot::new("file:///workspace"));
+
+        let error = match factory.open_workspace_session(workspace).await {
+            Ok(_) => panic!("failed upstream initialization must not mint a session actor"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.class(), "upstream-initialize-failed");
     }
 
     #[tokio::test]

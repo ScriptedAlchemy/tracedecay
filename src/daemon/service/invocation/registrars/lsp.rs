@@ -1,4 +1,5 @@
 use super::*;
+use crate::diagnostics::lsp::semantic::ProductionSemanticAuthorities;
 
 #[derive(Clone)]
 pub(crate) struct DaemonLspOwnerRegistrar {
@@ -110,10 +111,11 @@ impl DaemonLspOwnerRegistrar {
             timeouts,
         )
         .await?;
-        let upstream_capabilities = UpstreamCapabilities {
-            supports_diagnostics: semantics.analyzer_available,
-            semantic: semantics.semantic_capabilities.clone(),
-        };
+        let ProductionSemanticAuthorities {
+            semantics,
+            cancellation,
+            upstream_capability_initializer,
+        } = semantics;
         let workspace_index = Arc::new(PublishedCodeIndexWorkspaceDocuments::new(
             code_index.as_ref().clone(),
             scope_grant.scope.clone(),
@@ -130,16 +132,17 @@ impl DaemonLspOwnerRegistrar {
                 workspace_index,
                 diagnostic_records,
                 move |_| Arc::clone(&feedback_cycle_input),
-                semantics.semantics,
+                semantics,
                 diagnostic_broker,
                 diagnostics_quiet_window,
-                semantics.cancellation,
+                cancellation,
                 gateway_capabilities,
-                upstream_capabilities,
+                UpstreamCapabilities::default(),
             )
             .map_err(|error| TraceDecayError::Config {
                 message: format!("could not construct LSP session factory: {error:?}"),
-            })?,
+            })?
+            .with_upstream_capability_initializer(upstream_capability_initializer),
         );
         self.register_lsp_owner(
             project_root,
