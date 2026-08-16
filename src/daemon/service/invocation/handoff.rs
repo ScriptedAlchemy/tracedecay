@@ -455,29 +455,13 @@ fn handoff_evidence(
     ApplicationOutcome<tracedecay_application::ListTaskHandoffsResultV1>,
     ApplicationContractError,
 > {
-    let policy_digest = canonical_sha256(&(
-        "tracedecay.daemon.handoff-policy.v1",
-        &registered.policy_digest,
-        &registered.grant.digest,
+    let (authority, execution) = handoff_authority(
+        registered,
+        context,
         operation_key,
         &use_case,
-    ))?;
-    let policy = PolicyDecisionRef::new(
-        format!("policy.daemon.handoff.{operation_key}.v1"),
-        1,
-        policy_digest,
-        ComponentVersion::new("tracedecay.daemon.handoff-policy.v1").map_err(|_| {
-            ApplicationContractError::Inconsistent {
-                field: "handoff policy evaluator",
-            }
-        })?,
-    )?;
-    let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
-    let execution = OperationReceipt::completed(
         observed_at,
-        current_micros(),
         deadline,
-        OperationBudgetUsage::default(),
     )?;
     let returned = result.handoffs.len() as u64;
     // A truncated read has no eligible denominator: the store holds an unknown
@@ -527,6 +511,43 @@ fn handoff_evidence(
     }))
 }
 
+/// Policy-bound authority receipt and completed operation receipt shared by
+/// the handoff effect and evidence outcomes.
+fn handoff_authority(
+    registered: &RegisteredWorkRuntime,
+    context: &RequestContext,
+    operation_key: &str,
+    use_case: &UseCaseId,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+) -> Result<(AuthorityReceipt, OperationReceipt), ApplicationContractError> {
+    let policy_digest = canonical_sha256(&(
+        "tracedecay.daemon.handoff-policy.v1",
+        &registered.policy_digest,
+        &registered.grant.digest,
+        operation_key,
+        use_case,
+    ))?;
+    let policy = PolicyDecisionRef::new(
+        format!("policy.daemon.handoff.{operation_key}.v1"),
+        1,
+        policy_digest,
+        ComponentVersion::new("tracedecay.daemon.handoff-policy.v1").map_err(|_| {
+            ApplicationContractError::Inconsistent {
+                field: "handoff policy evaluator",
+            }
+        })?,
+    )?;
+    let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
+    let execution = OperationReceipt::completed(
+        observed_at,
+        current_micros(),
+        deadline,
+        OperationBudgetUsage::default(),
+    )?;
+    Ok((authority, execution))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handoff_effect<T>(
     registered: &RegisteredWorkRuntime,
@@ -542,24 +563,14 @@ fn handoff_effect<T>(
 where
     T: Serialize,
 {
-    let policy_digest = canonical_sha256(&(
-        "tracedecay.daemon.handoff-policy.v1",
-        &registered.policy_digest,
-        &registered.grant.digest,
+    let (authority, execution) = handoff_authority(
+        registered,
+        context,
         operation_key,
         &use_case,
-    ))?;
-    let policy = PolicyDecisionRef::new(
-        format!("policy.daemon.handoff.{operation_key}.v1"),
-        1,
-        policy_digest,
-        ComponentVersion::new("tracedecay.daemon.handoff-policy.v1").map_err(|_| {
-            ApplicationContractError::Inconsistent {
-                field: "handoff policy evaluator",
-            }
-        })?,
+        observed_at,
+        deadline,
     )?;
-    let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
     let suffix = input_digest
         .as_str()
         .strip_prefix("sha256:")
@@ -578,12 +589,6 @@ where
         operation_key,
         &result,
     ))?;
-    let execution = OperationReceipt::completed(
-        observed_at,
-        current_micros(),
-        deadline,
-        OperationBudgetUsage::default(),
-    )?;
     let receipt = EffectReceipt {
         operation: use_case,
         request_id,

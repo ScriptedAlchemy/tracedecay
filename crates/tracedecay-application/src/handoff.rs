@@ -71,39 +71,6 @@ impl HandoffOpenToken {
     }
 }
 
-pub fn issue_task_handoff_input_digest(
-    request: &IssueTaskHandoffRequestV1,
-) -> Result<ManifestDigest, ApplicationContractError> {
-    canonical_sha256(&(
-        "tracedecay.handoff.application-input.v1",
-        "issue_task_handoff",
-        request,
-    ))
-    .map_err(Into::into)
-}
-
-pub fn open_task_handoff_input_digest(
-    request: &OpenTaskHandoffRequestV1,
-) -> Result<ManifestDigest, ApplicationContractError> {
-    canonical_sha256(&(
-        "tracedecay.handoff.application-input.v1",
-        "open_task_handoff",
-        request,
-    ))
-    .map_err(Into::into)
-}
-
-pub fn list_task_handoffs_input_digest(
-    request: &ListTaskHandoffsRequestV1,
-) -> Result<ManifestDigest, ApplicationContractError> {
-    canonical_sha256(&(
-        "tracedecay.handoff.application-input.v1",
-        "list_task_handoffs",
-        request,
-    ))
-    .map_err(Into::into)
-}
-
 impl fmt::Debug for HandoffOpenToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("HandoffOpenToken([REDACTED])")
