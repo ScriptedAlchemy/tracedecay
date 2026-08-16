@@ -1243,6 +1243,9 @@ static GLOBAL_RETENTION_CADENCE: std::sync::Mutex<GlobalRetentionCadence> =
     });
 
 #[cfg(test)]
+static GLOBAL_RETENTION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
 mod global_retention_cadence_tests {
     use super::{GlobalRetentionCadence, RETENTION_MIN_INTERVAL_SECS};
     use std::time::{Duration, Instant};
@@ -1253,8 +1256,9 @@ mod global_retention_cadence_tests {
     /// falsely finishes a pass the caller never owned. Runs on a helper
     /// thread with a bounded wait so a regression fails fast instead of
     /// hanging the suite.
-    #[test]
-    fn denied_reservation_returns_without_relocking_the_cadence() {
+    #[tokio::test]
+    async fn denied_reservation_returns_without_relocking_the_cadence() {
+        let _test_lock = super::GLOBAL_RETENTION_TEST_LOCK.lock().await;
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let now = Instant::now();
@@ -1439,8 +1443,6 @@ mod global_retention_tests {
     use crate::global_db::RegisteredGlobalDb;
     use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
 
-    static RETENTION_JOURNEY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     struct ResetGlobalRetentionCadence;
 
     impl ResetGlobalRetentionCadence {
@@ -1521,20 +1523,25 @@ mod global_retention_tests {
             .expect("decode retention deletion receipt count")
     }
 
+    fn global_retention_config() -> crate::config::RetentionConfig {
+        let mut config = crate::config::RetentionConfig::default();
+        config.session_lcm.enabled = true;
+        config.session_lcm.dedupe_projected_after_days = Some(1);
+        config.session_lcm.drop_after_days = None;
+        config.session_lcm.offload_after_days = None;
+        config
+    }
+
     #[tokio::test]
     async fn retention_defers_while_daemon_writer_is_held_and_prunes_once_after_release() {
-        let _test_lock = RETENTION_JOURNEY_TEST_LOCK.lock().await;
+        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
         let _cadence_reset = ResetGlobalRetentionCadence::new();
         let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-writer-admission").await;
         let database = Arc::clone(&harness.registered);
         seed_eligible_projected_message(database.as_ref()).await;
 
-        let mut config = crate::config::RetentionConfig::default();
-        config.session_lcm.enabled = true;
-        config.session_lcm.dedupe_projected_after_days = Some(1);
-        config.session_lcm.drop_after_days = None;
-        config.session_lcm.offload_after_days = None;
+        let config = global_retention_config();
 
         let administration = StoreAdministration::default();
         let writer_held = Arc::new(Notify::new());
@@ -1592,6 +1599,130 @@ mod global_retention_tests {
             deletion_receipt_count(database.as_ref()).await,
             1,
             "concurrent post-release wakes must remain one retention pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_admitted_retention_releases_writer_and_cadence_for_retry() {
+        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
+        let _cadence_reset = ResetGlobalRetentionCadence::new();
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let harness = RegisteredGlobalDbHarness::open("global-retention-cancelled-admission").await;
+        let database = Arc::clone(&harness.registered);
+        seed_eligible_projected_message(database.as_ref()).await;
+        let administration = StoreAdministration::default();
+        let config = global_retention_config();
+        let database_writer = database
+            .begin_write_transaction()
+            .await
+            .expect("hold the registered database writer");
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task_administration = administration.clone();
+        let task_database = Arc::clone(&database);
+        let task_config = config.clone();
+        let retention = tokio::spawn(async move {
+            started_tx.send(()).expect("report retention start");
+            maybe_run_global_retention(&task_administration, task_database.as_ref(), &task_config)
+                .await;
+        });
+        started_rx.await.expect("retention task started");
+        tokio::task::yield_now().await;
+        assert!(
+            administration.try_with_writer(|| async {}).await.is_none(),
+            "the admitted retention pass must hold the daemon writer while the database writer is busy"
+        );
+
+        retention.abort();
+        assert!(
+            retention
+                .await
+                .expect_err("retention task must be cancelled")
+                .is_cancelled(),
+            "retention cancellation must be terminal"
+        );
+        assert!(
+            administration.try_with_writer(|| async {}).await.is_some(),
+            "cancelling retention must release the daemon writer"
+        );
+        database_writer
+            .rollback()
+            .await
+            .expect("release registered database writer");
+
+        maybe_run_global_retention(&administration, database.as_ref(), &config).await;
+        assert_eq!(
+            database
+                .session_message_count()
+                .await
+                .expect("count retention candidate after cancellation retry"),
+            0,
+            "an immediate retry after cancellation must prune the candidate"
+        );
+        assert_eq!(
+            deletion_receipt_count(database.as_ref()).await,
+            1,
+            "the cancellation retry must run one retention prune"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_retention_releases_writer_and_cadence_for_retry() {
+        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
+        let _cadence_reset = ResetGlobalRetentionCadence::new();
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let harness = RegisteredGlobalDbHarness::open("global-retention-prune-failure").await;
+        let database = Arc::clone(&harness.registered);
+        seed_eligible_projected_message(database.as_ref()).await;
+        database
+            .writer_connection()
+            .expect("open registered writer for retention fault")
+            .execute_batch(
+                "CREATE TRIGGER fail_global_retention_prune
+                 BEFORE DELETE ON session_messages
+                 WHEN OLD.message_id = 'retention-message'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'forced global retention prune failure');
+                 END;",
+            )
+            .await
+            .expect("install global retention prune fault");
+
+        let administration = StoreAdministration::default();
+        let config = global_retention_config();
+        maybe_run_global_retention(&administration, database.as_ref(), &config).await;
+        assert_eq!(
+            database
+                .session_message_count()
+                .await
+                .expect("count retention candidate after failure"),
+            1,
+            "a failed prune must roll back its candidate deletion"
+        );
+        assert!(
+            administration.try_with_writer(|| async {}).await.is_some(),
+            "a failed prune must release the daemon writer"
+        );
+
+        database
+            .writer_connection()
+            .expect("open registered writer to remove retention fault")
+            .execute("DROP TRIGGER fail_global_retention_prune", ())
+            .await
+            .expect("remove global retention prune fault");
+        maybe_run_global_retention(&administration, database.as_ref(), &config).await;
+        assert_eq!(
+            database
+                .session_message_count()
+                .await
+                .expect("count retention candidate after failure retry"),
+            0,
+            "a failed prune must leave cadence eligible for immediate retry"
+        );
+        assert_eq!(
+            deletion_receipt_count(database.as_ref()).await,
+            1,
+            "the retry after a durable prune error must run one retention prune"
         );
     }
 }
