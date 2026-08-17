@@ -8,6 +8,7 @@ use tracedecay_store::runtime::{
     GraphPublicationStoreErrorV1, GraphVerifiedHeadV1, RuntimeInterruptionV1,
 };
 
+use super::path::canonical_graph_database_file;
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::lease::{GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot};
 use crate::{
@@ -20,6 +21,7 @@ impl GraphDbRegistry {
         &self,
         registration: &GraphDbRegistration,
     ) -> Result<Arc<GraphDb>, GraphDbError> {
+        let canonical_path = canonical_graph_database_file(registration.canonical_path())?;
         let mut state = self.state_lock()?;
         let entry = state
             .entries
@@ -44,7 +46,7 @@ impl GraphDbRegistry {
             (
                 registration.binding(),
                 registration.verified_locator(),
-                registration.canonical_path(),
+                &canonical_path,
                 crate::GraphFormatVersion::current(),
             ),
         )?;

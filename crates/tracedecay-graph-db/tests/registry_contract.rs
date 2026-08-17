@@ -8,9 +8,9 @@ use tempfile::TempDir;
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry,
     GraphDbRegistryConfig, GraphDbRegistryStatus, GraphEntity, GraphEntityId, GraphMutation,
-    GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
-    TraversalRequest,
+    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphRelation, GraphRelationId,
+    GraphRelationKind, GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled,
+    SourceGeneration, TraversalRequest,
 };
 use tracedecay_runtime_core::storage;
 use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeKey;
@@ -291,6 +291,41 @@ fn exact_project_profile_identity_reuses_one_persistent_handle() {
         Some(GraphDbRegistryStatus::Ready)
     );
     assert!(graph_path(temp.path()).is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn aliased_ancestor_spelling_reuses_the_canonical_registered_path() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let real_parent = temp.path().join("real");
+    let store = real_parent.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let alias_parent = temp.path().join("alias");
+    symlink(&real_parent, &alias_parent).unwrap();
+    let aliased_store = alias_parent.join("store");
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let binding = identity("profile-a", "project-a");
+
+    registry
+        .resolve(registration(binding.clone(), &aliased_store))
+        .unwrap();
+
+    assert_eq!(
+        registry
+            .status(&registration(binding.clone(), &aliased_store))
+            .unwrap(),
+        Some(GraphDbRegistryStatus::Ready)
+    );
+    let missing_projection = GraphProjectionIdentity::new(
+        GraphNamespace::new("project").unwrap(),
+        GraphProjectionId::new("missing").unwrap(),
+    );
+    assert!(matches!(
+        registry.verified_snapshot(registration(binding, &aliased_store), &missing_projection,),
+        Err(GraphDbError::Unavailable { .. })
+    ));
 }
 
 #[test]
