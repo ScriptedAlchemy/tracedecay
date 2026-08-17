@@ -7,7 +7,6 @@ import { cn } from '../../ui/cn';
 import { useProjectRegistry, projectRegistryPayload } from '../../data/query/projectRegistry.ts';
 import { activationFor, useScope } from '../../data/scope/store.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
-import { useInspectorStack } from './inspectorStack.ts';
 import { usePaletteRegistry, type PaletteEntry } from './paletteRegistry.ts';
 
 interface CommandPaletteRow {
@@ -51,7 +50,6 @@ export function CommandPalette({
 }) {
   const navigate = useNavigate();
   const selectProject = useScope((s) => s.selectProject);
-  const openInspector = useInspectorStack((state) => state.open);
   const providers = usePaletteRegistry((state) => state.providers);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
@@ -116,10 +114,6 @@ export function CommandPalette({
             case 'navigate':
               navigate(entry.to);
               break;
-            case 'inspect':
-              openInspector(entry.inspector);
-              if (entry.to !== undefined) navigate(entry.to);
-              break;
             case 'legal_action':
               entry.invoke(entry.reference);
               break;
@@ -133,7 +127,7 @@ export function CommandPalette({
       })),
     );
     return [...workspaceEntries, ...projectEntries, ...providerEntries];
-  }, [navigate, onOpenChange, openInspector, projects.data, providers, selectProject]);
+  }, [navigate, onOpenChange, projects.data, providers, selectProject]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

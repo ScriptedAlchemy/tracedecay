@@ -8,6 +8,7 @@ import {
   CloudOff,
   EyeOff,
   FileQuestion,
+  Gauge,
   HelpCircle,
   Loader2,
   Lock,
@@ -19,13 +20,18 @@ import {
 } from 'lucide-react';
 import { cn } from './cn';
 
-/** The eighteen-state domain taxonomy (plan 11). Token + icon + label —
+/** The nineteen-state domain taxonomy (plan 11). Token + icon + label —
  * never color alone. */
 export type DomainStateKind =
   | 'loading'
   | 'complete_zero_findings'
   | 'ready'
   | 'partial'
+  /** A provider quota bounded this read. The near neighbour of `partial` —
+   * both mean what is shown is real and less than what exists — sharing its
+   * hue the way `unavailable` shares `offline`'s: told apart by icon and
+   * label, so a quota pause never reads as a source that answered short. */
+  | 'rate_limited'
   | 'stale'
   | 'locked'
   | 'denied'
@@ -58,6 +64,7 @@ const STATE: Record<
   },
   ready: { label: 'Ready', icon: CheckCircle2, tokenClass: 'text-state-ready' },
   partial: { label: 'Partial', icon: AlertTriangle, tokenClass: 'text-state-partial' },
+  rate_limited: { label: 'Rate limited', icon: Gauge, tokenClass: 'text-state-partial' },
   stale: { label: 'Stale', icon: Clock, tokenClass: 'text-state-stale' },
   locked: { label: 'Locked', icon: Lock, tokenClass: 'text-state-locked' },
   denied: { label: 'Denied', icon: ShieldX, tokenClass: 'text-state-denied' },
@@ -94,6 +101,7 @@ const LAMP: Record<DomainStateKind, string> = {
   complete_zero_findings: 'bg-state-complete-zero',
   ready: 'bg-state-ready',
   partial: 'bg-state-partial',
+  rate_limited: 'bg-state-partial',
   stale: 'bg-state-stale',
   locked: 'bg-state-locked',
   denied: 'bg-state-denied',

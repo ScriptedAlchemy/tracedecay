@@ -314,6 +314,10 @@ export function EnvelopeSection<T>({
  * chip plus reported reason and nothing is added. */
 const STATE_GUIDANCE: Partial<Record<DomainStateKind, { sentence: string; action: string }>> = {
   loading: { sentence: 'Reading from the daemon.', action: 'This resolves on its own.' },
+  stale: {
+    sentence: 'What is shown was read earlier and the source has moved past it.',
+    action: 'Refresh to request a current read.',
+  },
   offline: {
     sentence: 'The daemon is not reachable from this browser.',
     action: 'Start it with `tracedecay daemon run`, then refresh.',
@@ -321,6 +325,22 @@ const STATE_GUIDANCE: Partial<Record<DomainStateKind, { sentence: string; action
   error: {
     sentence: 'The read failed and nothing is being invented in its place.',
     action: 'Retry, or check the daemon log if it persists.',
+  },
+  cancelled: {
+    sentence: 'This read was cancelled before it finished, so no result is claimed.',
+    action: 'Run it again to populate this surface.',
+  },
+  timed_out: {
+    sentence: 'The source did not answer within its deadline, so no result is claimed.',
+    action: 'Retry; if it keeps timing out, check the daemon log for what is slow.',
+  },
+  conflicting: {
+    sentence: 'Sources answered this read with claims that disagree, and neither is promoted over the other.',
+    action: 'The detail names the disagreement; resolve it at the source before trusting either answer.',
+  },
+  redacted: {
+    sentence: 'Privacy rules removed this content before it reached the browser; the record itself is retained.',
+    action: 'Adjust the privacy rules for this scope if it should be readable here.',
   },
   // Split from `error` because the two refusals need opposite next actions,
   // and neither of them is "retry": no identity was accepted at all, versus an

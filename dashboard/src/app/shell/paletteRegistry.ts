@@ -2,7 +2,6 @@ import { useEffect } from 'react';
 import { create } from 'zustand';
 
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
-import type { InspectorEntry } from './inspectorStack.ts';
 
 interface PaletteEntryBase {
   readonly id: string;
@@ -17,11 +16,6 @@ export type PaletteEntry =
   | (PaletteEntryBase & {
       readonly kind: 'navigate';
       readonly to: string;
-    })
-  | (PaletteEntryBase & {
-      readonly kind: 'inspect';
-      readonly inspector: InspectorEntry;
-      readonly to?: string;
     })
   | (PaletteEntryBase & {
       readonly kind: 'legal_action';

@@ -1,3 +1,5 @@
+import { useCallback, useEffect, useRef } from 'react';
+
 import { ExplorerSplit } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { FacetGroup } from '../../ui/search/Facets.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
@@ -33,6 +35,30 @@ import { Reveal } from './Reveal.tsx';
  */
 export function ExplorerPage() {
   const explorer = useExplorerController();
+  const { select, selected } = explorer;
+
+  // Escape closes the inspector and hands focus back to the row that opened
+  // it (plan 11 keyboard model). Bound on the document, as in TraceView,
+  // because focus while reading the inspector usually sits on its scroll
+  // region, not on a control the page owns. A `defaultPrevented` Escape is
+  // the search field clearing itself, which must not also close the panel.
+  const invokerRef = useRef<HTMLElement | null>(null);
+  const closeInspector = useCallback(() => {
+    select(null);
+    invokerRef.current?.focus();
+    invokerRef.current = null;
+  }, [select]);
+  useEffect(() => {
+    if (selected === null) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.stopPropagation();
+      closeInspector();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [closeInspector, selected]);
+
   return (
     <ExplorerSplit
       stackOnNarrow
@@ -155,7 +181,13 @@ export function ExplorerPage() {
           laneCount={explorer.lanes.length}
           absence={explorer.absence}
           selectedKey={explorer.selected?.key}
-          onSelect={explorer.select}
+          onSelect={(hit) => {
+            // The row activating the inspector is the element focus returns
+            // to when the inspector closes.
+            invokerRef.current =
+              document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            select(hit);
+          }}
           onClearFacet={() => explorer.setFacet(null)}
           onClearQuery={explorer.reset}
         />
@@ -165,7 +197,7 @@ export function ExplorerPage() {
           <HitInspector
             hit={explorer.selected}
             terms={explorer.terms}
-            onClose={() => explorer.select(null)}
+            onClose={closeInspector}
           />
         ) : undefined
       }

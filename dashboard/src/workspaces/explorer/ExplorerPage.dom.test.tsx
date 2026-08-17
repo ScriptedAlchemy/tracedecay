@@ -870,6 +870,52 @@ describe('ExplorerPage', () => {
     expect(screen.queryByText('Session read context returned by the daemon')).toBeNull();
   });
 
+  it('closes the inspector on Escape and returns focus to the invoking row', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'graph');
+    await user.keyboard('{Enter}');
+
+    // Open with the keyboard: the row is a native button, Enter activates it.
+    const row = await screen.findByRole('button', { name: /graph_search/ });
+    row.focus();
+    await user.keyboard('{Enter}');
+    expect(await screen.findByText('Payload provenance')).toBeTruthy();
+
+    // Focus moves into the inspector, as a reader tabbing into the panel
+    // does. Escape must close it AND return focus to the row that opened it —
+    // otherwise focus dies on a removed node and the reader is dropped at the
+    // top of the document.
+    screen.getByRole('button', { name: 'Close inspector' }).focus();
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByText('Payload provenance')).toBeNull();
+    expect(document.activeElement).toBe(row);
+  });
+
+  it('leaves focus in a dirty search field when its Escape clears the search', async () => {
+    renderExplorer(SEARCH_ROUTES);
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'graph');
+    await user.keyboard('{Enter}');
+
+    const row = await screen.findByRole('button', { name: /graph_search/ });
+    row.focus();
+    await user.keyboard('{Enter}');
+    expect(await screen.findByText('Payload provenance')).toBeTruthy();
+
+    // Escape inside the dirty search field is the field's own action: it
+    // clears back to the browse state (which withdraws the selection with the
+    // search it belonged to). The inspector's document-level Escape must not
+    // also fire, or focus would be yanked out of the field to the row.
+    const searchbox = screen.getByRole('searchbox');
+    searchbox.focus();
+    await user.keyboard('{Escape}');
+    expect(searchbox).toHaveProperty('value', '');
+    expect(screen.queryByText('Payload provenance')).toBeNull();
+    expect(document.activeElement).toBe(searchbox);
+  });
+
   it('shows the exact payload fields behind an inspected row', async () => {
     renderExplorer(SEARCH_ROUTES);
     const user = userEvent.setup();

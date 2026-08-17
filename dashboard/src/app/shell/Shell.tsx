@@ -4,7 +4,6 @@ import { NavRail } from './NavRail';
 import { ScopeBar } from './ScopeBar';
 import { ScopeUrlSync } from '../../data/scope/UrlSync.tsx';
 import { QueryActivityStatus, StatusStrip } from './StatusStrip';
-import { InspectorStack, InspectorUrlSync } from './InspectorStack.tsx';
 
 const CommandPalette = lazy(() =>
   import('./CommandPalette').then((m) => ({ default: m.CommandPalette })),
@@ -52,22 +51,18 @@ export function Shell() {
       ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
         <ScopeUrlSync />
-        <InspectorUrlSync />
         <ScopeBar onOpenPalette={() => openPalette(true)} />
         {/* Named because it is also the page's scroll container: a workspace
           * whose content outruns the viewport scrolls HERE rather than losing
           * the overflow, and Plan 11 licenses internal scrolling for labelled
           * regions only. */}
-        <div className="relative flex min-h-0 flex-1">
-          <main
-            id="td-main"
-            aria-label="Active workspace"
-            className="min-h-0 min-w-0 flex-1 overflow-auto"
-          >
-            <Outlet />
-          </main>
-          <InspectorStack />
-        </div>
+        <main
+          id="td-main"
+          aria-label="Active workspace"
+          className="min-h-0 min-w-0 flex-1 overflow-auto"
+        >
+          <Outlet />
+        </main>
         <StatusStrip queryActivity={<QueryActivityStatus />} />
       </div>
     </div>

@@ -14,6 +14,7 @@ const EXPECTED_LABELS: Record<DomainStateKind, string> = {
   complete_zero_findings: 'Complete · zero findings',
   ready: 'Ready',
   partial: 'Partial',
+  rate_limited: 'Rate limited',
   stale: 'Stale',
   locked: 'Locked',
   denied: 'Denied',
@@ -33,8 +34,8 @@ const EXPECTED_LABELS: Record<DomainStateKind, string> = {
 const ENTRIES = Object.entries(EXPECTED_LABELS) as [DomainStateKind, string][];
 
 describe('StateChip', () => {
-  it('covers exactly 18 domain states', () => {
-    expect(ENTRIES).toHaveLength(18);
+  it('covers exactly 19 domain states', () => {
+    expect(ENTRIES).toHaveLength(19);
   });
 
   it.each(ENTRIES)('renders icon + label for "%s"', (kind, label) => {
@@ -81,6 +82,35 @@ describe('StateChip', () => {
     expect(offline.label).toBe('Offline');
     expect(unavailable.glyph).not.toBe(offline.glyph);
     expect(unavailable.lamp).toBe(offline.lamp);
+  });
+
+  /**
+   * The other deliberate near-neighbour pair: a source that answered with
+   * less than everything, and a provider quota that paused the read. Both
+   * mean the shown evidence is real and incomplete, so they share a hue —
+   * but a rate limit has its own remedy (wait for the reset), so it must be
+   * tellable from `partial` by label and glyph, never only by detail text.
+   */
+  it('tells a rate-limited read apart from an ordinary partial answer', () => {
+    const chipFor = (kind: DomainStateKind) => {
+      const { container } = render(<StateChip kind={kind} />);
+      const chip = container.querySelector(`[data-state="${kind}"]`);
+      expect(chip, `chip for ${kind}`).not.toBeNull();
+      const glyph = chip!.querySelector('svg');
+      const lamp = chip!.querySelector('span[aria-hidden]');
+      expect(glyph, `icon for ${kind}`).not.toBeNull();
+      expect(lamp, `lamp for ${kind}`).not.toBeNull();
+      return { label: chip!.textContent, glyph: glyph!.innerHTML, lamp: lamp!.className };
+    };
+
+    const rateLimited = chipFor('rate_limited');
+    const partial = chipFor('partial');
+    cleanup();
+
+    expect(rateLimited.label).toBe('Rate limited');
+    expect(partial.label).toBe('Partial');
+    expect(rateLimited.glyph).not.toBe(partial.glyph);
+    expect(rateLimited.lamp).toBe(partial.lamp);
   });
 
   it('renders an optional detail suffix alongside the label', () => {

@@ -473,10 +473,11 @@ function ProjectionState({ projection }: { projection: DeliveryProjection }) {
       const retry = projection.retry_at_micros == null
         ? null
         : `retry ${projection.retry_at_micros} µs`;
+      const parts = [checkpoint, retry].filter((part): part is string => part !== null);
       return (
         <StateChip
-          kind="partial"
-          detail={['rate limited', checkpoint, retry].filter(Boolean).join(' · ')}
+          kind="rate_limited"
+          detail={parts.length > 0 ? parts.join(' · ') : undefined}
         />
       );
     }

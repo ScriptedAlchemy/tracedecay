@@ -617,6 +617,30 @@ describe('DeliveryPage', () => {
     },
   );
 
+  it('draws rate-limited ingress as its own chip, never as an ordinary partial', async () => {
+    renderDelivery(PROJECTS, 200, overviewWith({
+      releases: {
+        state: 'rate_limited',
+        checkpoint: { limit: 60, remaining: 0, reset_at_micros: 111 },
+        retry_at_micros: 112,
+        value: { items: [RELEASE], truncated: false },
+      },
+    }));
+
+    const projection = await screen.findByRole('region', { name: 'Release history' });
+    // The condition is carried by the chip itself — label, glyph, data-state —
+    // not only by detail text a reader would have to parse out of a clause.
+    const chip = projection.querySelector('[data-state]');
+    expect(chip?.getAttribute('data-state')).toBe('rate_limited');
+    expect(within(projection).getByText('Rate limited')).toBeTruthy();
+    expect(within(projection).queryByText('Partial')).toBeNull();
+    // The quota evidence stays in the detail: what remains, when it resets,
+    // and when to retry.
+    expect(within(projection).getByText(/0\/60 remaining · reset 111 µs · retry 112 µs/)).toBeTruthy();
+    // Retained evidence still renders under the chip.
+    expect(within(projection).getByText('v2.0.0')).toBeTruthy();
+  });
+
   it('renders release assets as inert evidence and suppresses null fields and URLs', async () => {
     renderDelivery(PROJECTS, 200, overviewWith({
       releases: { state: 'ready', value: { items: [RELEASE], truncated: true } },

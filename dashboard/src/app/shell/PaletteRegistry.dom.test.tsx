@@ -1,10 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useState } from 'react';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { useInspectorStack } from './inspectorStack.ts';
 import { CommandPalette } from './CommandPalette.tsx';
 import {
   usePaletteEntries,
@@ -12,15 +11,15 @@ import {
   type PaletteEntry,
 } from './paletteRegistry.ts';
 
-const taskInspector = {
-  scope: { kind: 'project', project_id: 'project-alpha' },
-  entity: { kind: 'task', id: 'task-42' },
-  evidence: { kind: 'attempt', id: 'attempt-9' },
-} as const;
-
 function Contributor({ entries }: { entries: readonly PaletteEntry[] }) {
   usePaletteEntries('work-product', entries);
   return null;
+}
+
+/** Where the router currently is — the observable a navigate entry changes. */
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="pathname">{location.pathname}</output>;
 }
 
 function Harness({ entries }: { entries: readonly PaletteEntry[] }) {
@@ -28,6 +27,7 @@ function Harness({ entries }: { entries: readonly PaletteEntry[] }) {
   return (
     <>
       <Contributor entries={entries} />
+      <LocationProbe />
       <CommandPalette open={open} onOpenChange={setOpen} />
     </>
   );
@@ -48,22 +48,21 @@ function mount(entries: readonly PaletteEntry[]) {
 
 afterEach(() => {
   usePaletteRegistry.getState().clear();
-  useInspectorStack.getState().replace([]);
   vi.unstubAllGlobals();
 });
 
 describe('command palette providers', () => {
-  it('opens an exact entity identity supplied by a workspace provider', async () => {
+  it('routes an entity entry to the workspace surface that owns it', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
     mount([
       {
-        kind: 'inspect',
+        kind: 'navigate',
         id: 'work:task-42',
         label: 'Repair task 42',
         hint: 'task · partial',
         state: 'partial',
         scopeLabel: 'Alpha',
-        inspector: taskInspector,
+        to: '/work/task-42',
       },
     ]);
 
@@ -74,8 +73,7 @@ describe('command palette providers', () => {
     expect(result.textContent).toContain('Alpha');
 
     fireEvent.click(result);
-    expect(useInspectorStack.getState().entries).toEqual([taskInspector]);
-    expect(useInspectorStack.getState().activeKey).toContain('task-42');
+    expect(screen.getByTestId('pathname').textContent).toBe('/work/task-42');
   });
 
   it('invokes only the opaque legal-action reference the provider supplied', async () => {
