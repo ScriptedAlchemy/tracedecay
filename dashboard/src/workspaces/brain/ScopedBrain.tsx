@@ -14,7 +14,7 @@ import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
 import { PROJECT_NOT_FOUND, useProjectEntry } from '../../data/query/projectRegistry.ts';
 import { type EnvelopeResult } from '../../data/query/envelope.ts';
 import { useScope } from '../../data/scope/store.ts';
-import { useEnvelope } from '../../data/query/useEnvelope.ts';
+import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { relativeTime } from './BrainPage.tsx';
 import {
   AnalyticsOverviewPayloadV1Schema,
@@ -24,10 +24,6 @@ import {
   type GraphSubgraphPayloadV1,
   type ProjectContextPayloadV1,
 } from '../../contracts/generated.ts';
-
-function envelopePayload<T>(result: EnvelopeResult<T> | undefined): T | null {
-  return result?.outcome === 'envelope' ? result.envelope.payload : null;
-}
 
 /**
  * The Brain, scoped to one project: "what does TraceDecay actually know about
@@ -143,10 +139,10 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
     readAbsence('Graph totals', overview),
     readAbsence('Memory', memoryStatus),
     readAbsence('Analytics', analytics),
-    memoryStatusRead !== null && memoryStatusRead.exists === false
+    memoryStatusRead?.exists === false
       ? `Memory: ${memoryStatusRead.error || 'this project has no memory store.'}`
       : null,
-    analyticsRead !== null && analyticsRead.available !== true
+    analyticsRead !== undefined && analyticsRead.available !== true
       ? 'Analytics: no session or event source is available, so activity could not be counted.'
       : null,
     analyticsRead?.available === true && !analyticsRead.usage.available

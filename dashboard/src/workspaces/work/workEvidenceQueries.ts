@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { skipToken, useQuery } from '@tanstack/react-query';
 import type {
   TemporalModeV1,
   WorkEvidenceContinuationV1,
@@ -72,19 +72,13 @@ export function workEvidenceAuthorityKey(
   taskId: string | null,
   temporal: TemporalModeV1 | null,
 ): string | null {
-  if (
-    taskId === null ||
-    temporal === null ||
-    graph?.outcome !== 'value' ||
-    graph.value.mode !== 'current'
-  ) {
-    return null;
-  }
+  const request = workEvidenceRequest(graph, taskId, temporal);
+  if (request === undefined) return null;
   return JSON.stringify({
-    selection: graph.value.authorized_scope.selection,
-    task_id: taskId,
-    temporal,
-    verified_version: graph.value.snapshot.verified_version,
+    selection: request.selection,
+    task_id: request.task_id,
+    temporal: request.temporal,
+    verified_version: request.verified_version,
   });
 }
 
@@ -153,12 +147,14 @@ export function useWorkEvidence(
       authorityKey,
       continuation === null ? null : JSON.stringify(continuation),
     ),
-    enabled: request !== undefined,
-    queryFn: () =>
-      callWork(
-        WORK_RETRIEVE_EVIDENCE_ROUTE,
-        request as WorkEvidenceRetrieveRequestV1,
-        scopedUrl(scope, WORK_RETRIEVE_EVIDENCE_ROUTE.path),
-      ),
+    queryFn:
+      request === undefined
+        ? skipToken
+        : () =>
+            callWork(
+              WORK_RETRIEVE_EVIDENCE_ROUTE,
+              request,
+              scopedUrl(scope, WORK_RETRIEVE_EVIDENCE_ROUTE.path),
+            ),
   });
 }
