@@ -396,4 +396,3 @@ fn unsupported_compatibility_cursor<T>() -> PrimitiveOutcomeV1<T> {
 fn count(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
-

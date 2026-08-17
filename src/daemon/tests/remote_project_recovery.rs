@@ -77,19 +77,30 @@ async fn recovery_quiesces_only_a_and_remounts_its_retry_route() {
         .mounted_project_sessions(&project_a)
         .await
         .expect("mounted ProjectSessions A");
-    let retired_a = Arc::downgrade(&old_a);
+    let old_a_binding = old_a.binding().clone();
+    let old_a_locator = old_a.verified_locator().clone();
     let database_b = runtime_registry
         .mounted_project_sessions(&project_b)
         .await
         .expect("mounted ProjectSessions B");
-    assert!(Arc::ptr_eq(
-        &server_a.project_session_db().expect("server A database"),
-        &old_a
-    ));
-    assert!(Arc::ptr_eq(
-        &server_b.project_session_db().expect("server B database"),
-        &database_b
-    ));
+    let database_b_binding = database_b.binding().clone();
+    let database_b_locator = database_b.verified_locator().clone();
+    let server_a_database = server_a.project_session_db().expect("server A database");
+    assert_eq!(server_a_database.binding(), &old_a_binding);
+    assert_eq!(server_a_database.verified_locator(), &old_a_locator);
+    assert!(
+        !server_a_database.shares_client_with(&old_a),
+        "server and map reads issue independently counted leases"
+    );
+    let server_b_database = server_b.project_session_db().expect("server B database");
+    assert_eq!(server_b_database.binding(), &database_b_binding);
+    assert_eq!(server_b_database.verified_locator(), &database_b_locator);
+    assert!(
+        !server_b_database.shares_client_with(&database_b),
+        "server and map reads issue independently counted leases"
+    );
+    drop(server_a_database);
+    drop(server_b_database);
 
     let profile_id = old_a.binding().shard_id.profile_id.clone();
     let session_sync = engine.store_administration.session_sync_service();
@@ -125,10 +136,6 @@ async fn recovery_quiesces_only_a_and_remounts_its_retry_route() {
         .await
         .expect("retire exact A replay and relation graph");
     assert!(
-        retired_a.upgrade().is_none(),
-        "all ordinary ProjectSessions owners for A must be drained before replacement"
-    );
-    assert!(
         runtime_registry
             .remote_replay_transaction()
             .target_descriptor(&project_a)
@@ -141,13 +148,16 @@ async fn recovery_quiesces_only_a_and_remounts_its_retry_route() {
             .await
             .is_none()
     );
-    assert!(Arc::ptr_eq(
-        &runtime_registry
-            .mounted_project_sessions(&project_b)
-            .await
-            .expect("B remains mounted"),
-        &database_b
-    ));
+    let still_mounted_b = runtime_registry
+        .mounted_project_sessions(&project_b)
+        .await
+        .expect("B remains mounted");
+    assert_eq!(still_mounted_b.binding(), &database_b_binding);
+    assert_eq!(still_mounted_b.verified_locator(), &database_b_locator);
+    assert!(
+        !still_mounted_b.shares_client_with(&database_b),
+        "a fresh B map read must not reuse a client from before A retirement"
+    );
 
     let replacement_a = runtime_registry
         .project_sessions(project_a.clone(), [project_a_root.clone()])
@@ -172,23 +182,39 @@ async fn recovery_quiesces_only_a_and_remounts_its_retry_route() {
         .project_server(&handshake_a)
         .await
         .expect("reopen project A after recovery");
-    assert!(Arc::ptr_eq(
-        &reopened_a
-            .project_session_db()
-            .expect("reopened server A database"),
-        &replacement_a
-    ));
+    let reopened_a_database = reopened_a
+        .project_session_db()
+        .expect("reopened server A database");
+    assert_eq!(reopened_a_database.binding(), replacement_a.binding());
+    assert_eq!(
+        reopened_a_database.verified_locator(),
+        replacement_a.verified_locator()
+    );
+    assert!(
+        !reopened_a_database.shares_client_with(&replacement_a),
+        "reopening A issues a new counted client from its replacement owner"
+    );
     let still_live_b = engine
         .project_server(&handshake_b)
         .await
         .expect("project B stays live");
     assert!(Arc::ptr_eq(&still_live_b, &server_b));
-    assert!(Arc::ptr_eq(
-        &still_live_b
-            .project_session_db()
-            .expect("server B database after A recovery"),
-        &database_b
-    ));
+    let still_live_b_database = still_live_b
+        .project_session_db()
+        .expect("server B database after A recovery");
+    assert_eq!(still_live_b_database.binding(), &database_b_binding);
+    assert_eq!(
+        still_live_b_database.verified_locator(),
+        &database_b_locator
+    );
+    assert!(
+        !still_live_b_database.shares_client_with(&database_b),
+        "B's server lease remains a separate counted client through A recovery"
+    );
+    drop(still_live_b_database);
+    drop(reopened_a_database);
+    drop(still_mounted_b);
+    drop(replacement_a);
 
     engine.shutdown_all().await;
 }

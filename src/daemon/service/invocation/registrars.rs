@@ -814,7 +814,7 @@ impl DaemonWorkRuntimeRegistrar {
     pub(in crate::daemon) async fn register(
         &self,
         project_root: PathBuf,
-        database: Arc<crate::global_db::RegisteredGlobalDb>,
+        database: crate::global_db::RegisteredGlobalDbLeaseV1,
         authority: WorkAuthority,
         actor: ActorId,
         grant: CapabilityGrantSnapshot,
@@ -885,7 +885,7 @@ impl DaemonWorkRuntimeRegistrar {
                 },
                 || {
                     let mut registered = RegisteredWorkRuntime {
-                        database: Arc::clone(&database),
+                        database: database.clone(),
                         actor: actor.clone(),
                         grant: grant.clone(),
                         authority_digest: authority_digest.clone(),
@@ -896,7 +896,7 @@ impl DaemonWorkRuntimeRegistrar {
                         evidence_retrieval: evidence_retrieval.clone(),
                         blocked_interval_observation_recovery:
                             super::work_blocked_interval_recovery::WorkBlockedIntervalObservationRecoveryOwnerV1::mount(
-                                Arc::clone(&database),
+                                database.clone(),
                                 actor.clone(),
                                 grant.clone(),
                                 Arc::clone(&observability_producer),
@@ -908,7 +908,7 @@ impl DaemonWorkRuntimeRegistrar {
                             })?,
                         workflow_census_observation_recovery:
                             super::work::workflow_census::WorkflowFanOutCensusObservationRecoveryOwnerV1::mount(
-                                Arc::clone(&database),
+                                database.clone(),
                                 grant.scope.project_id.clone(),
                                 Arc::clone(&observability_producer),
                             )

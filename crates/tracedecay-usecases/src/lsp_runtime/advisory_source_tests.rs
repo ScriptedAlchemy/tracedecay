@@ -563,16 +563,10 @@ async fn database(root: &std::path::Path) -> Database {
             .await
             .expect("database")
             .0;
-    {
-        let writer = database
-            .writer_connection("install LSP advisory diagnostics schema")
-            .await
-            .expect("diagnostics schema writer");
-        DiagnosticsStore::new(writer.engine_connection())
-            .ensure_schema()
-            .await
-            .expect("diagnostics schema");
-    }
+    DiagnosticsStore::new(database.clone())
+        .ensure_schema()
+        .await
+        .expect("diagnostics schema");
     database
 }
 
@@ -614,12 +608,9 @@ async fn seed_github_diagnostic(database: &Database, observed_at: UtcMicros) {
             },
         )
         .expect("contribution");
-    let writer = database
-        .writer_connection("seed LSP advisory source diagnostic")
-        .await
-        .expect("diagnostic writer");
+    let store = DiagnosticsStore::new(database.clone());
     snapshot
-        .publish(&DiagnosticsStore::new(writer.engine_connection()))
+        .publish(&store)
         .await
         .expect("published diagnostic");
 }

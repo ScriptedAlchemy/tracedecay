@@ -23,7 +23,7 @@ impl WorkAttemptEffectStoragePortV1 for WorkSqliteStorage {
     ) -> Result<WorkAttemptEffectDispatchOutcomeV1, StorageError> {
         holder.validate().map_err(|_| StorageError::Conflict)?;
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| StorageError::Unavailable)?;
         require_open_attempt(&transaction, authority, holder)?;
@@ -50,7 +50,7 @@ impl WorkAttemptEffectStoragePortV1 for WorkSqliteStorage {
         resolved_at: UtcMicros,
     ) -> Result<WorkAttemptEffectHolderV1, StorageError> {
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| StorageError::Unavailable)?;
         let existing = load_holder(&transaction, authority, attempt)?
@@ -90,7 +90,7 @@ impl WorkAttemptEffectStoragePortV1 for WorkSqliteStorage {
         attempt: &WorkAttemptIdentityV1,
     ) -> Result<Option<WorkAttemptEffectHolderV1>, StorageError> {
         let transaction = self
-            .handle
+            .handle()
             .begin_deferred()
             .map_err(|_| StorageError::Unavailable)?;
         let holder = load_holder(&transaction, authority, attempt)?;

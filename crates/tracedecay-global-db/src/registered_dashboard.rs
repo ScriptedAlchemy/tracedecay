@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use tracedecay_domain::canonical_sha256;
-use tracedecay_runtime_core::db::engine::{ReadSnapshot, Row, Value};
+use tracedecay_runtime_core::db::{
+    DatabaseEngineReadSnapshot,
+    engine::{Row, Value},
+};
 use tracedecay_runtime_core::errors::TraceDecayError;
 
 use super::{
@@ -602,7 +605,10 @@ impl RegisteredGlobalDb {
         Ok(true)
     }
 
-    async fn dashboard_snapshot(&self, operation: &'static str) -> Result<ReadSnapshot> {
+    async fn dashboard_snapshot(
+        &self,
+        operation: &'static str,
+    ) -> Result<DatabaseEngineReadSnapshot> {
         self.read_snapshot()
             .await
             .map_err(|error| dashboard_error(operation, error))
@@ -741,7 +747,7 @@ async fn load_store_artifacts(
 }
 
 async fn contexts_for_projects(
-    snapshot: &ReadSnapshot,
+    snapshot: &DatabaseEngineReadSnapshot,
     projects: &[CodeProjectRecord],
 ) -> Result<Vec<ProjectRegistryContext>> {
     if projects.is_empty() {
@@ -884,7 +890,7 @@ async fn contexts_for_projects(
 }
 
 async fn query_ids(
-    snapshot: &ReadSnapshot,
+    snapshot: &DatabaseEngineReadSnapshot,
     sql_template: &str,
     ids: &[String],
     operation: &'static str,

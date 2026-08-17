@@ -429,16 +429,9 @@ mod tests {
         ] {
             let (deadline, cancellation) = test_application_control();
             assert!(
-                handle_admin_project(
-                    &cg,
-                    action,
-                    None,
-                    None,
-                    deadline,
-                    cancellation,
-                )
-                .await
-                .is_err(),
+                handle_admin_project(&cg, action, None, None, deadline, cancellation,)
+                    .await
+                    .is_err(),
                 "manual fact mutations must not be accepted"
             );
         }

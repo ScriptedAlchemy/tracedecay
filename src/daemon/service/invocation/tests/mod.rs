@@ -72,7 +72,7 @@ pub(in crate::daemon) fn empty_work_proposal_routing(
 pub(in crate::daemon) async fn mount_test_work_observability(
     service: &DaemonInvocationService,
     project_root: &std::path::Path,
-    database: Arc<crate::global_db::RegisteredGlobalDb>,
+    database: crate::global_db::RegisteredGlobalDbLeaseV1,
     scope: &ResolvedScope,
     configuration_digest: &ManifestDigest,
 ) -> ManifestDigest {

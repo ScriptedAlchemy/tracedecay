@@ -1,11 +1,15 @@
 use std::collections::BTreeSet;
 
-use tracedecay_runtime_core::db::engine::{Value, params};
+use tracedecay_runtime_core::db::{
+    DatabaseEngineReadSnapshot,
+    engine::{Value, params},
+};
 
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
     CanonicalWorkflowSemanticKindV1, DurableObservationV1, RetrievalAnchorId, SessionId,
 };
+#[cfg(test)]
 use tracedecay_runtime_core::db::engine;
 use tracedecay_temporal_query::candidates::{CandidateChannel, CandidatePlan};
 use tracedecay_temporal_query::ports::{
@@ -207,7 +211,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     }
 
     #[cfg(test)]
-    pub const fn new_registered(read: &'a engine::ReadSnapshot) -> Self {
+    pub const fn new_registered(read: &'a DatabaseEngineReadSnapshot) -> Self {
         Self {
             read: TemporalSqlRead::registered(read),
             relation_authority: None,
@@ -229,7 +233,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     }
 
     pub const fn new_registered_with_relations(
-        read: &'a engine::ReadSnapshot,
+        read: &'a DatabaseEngineReadSnapshot,
         scope: &'a SessionRelationScope,
         store: SessionRelationGraphStore,
     ) -> Self {

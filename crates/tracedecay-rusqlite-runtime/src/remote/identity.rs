@@ -87,7 +87,7 @@ pub(super) fn provision_node_identity(
 impl RemoteSqliteStorageV1 {
     /// Reads the typed singleton used by daemon startup to remount only stores
     /// owned by the active profile. Exact final schema admission still occurs
-    /// through [`Self::from_registered`] before the store is published.
+    /// through [`Self::from_retained_exact_sql`] before the store is published.
     pub fn discover_registered_node(
         path: &Path,
         expected_brain: &BrainId,

@@ -926,7 +926,7 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 );
                 return unavailable(finished_at, domains);
             }
-            let diagnostics = DiagnosticsStore::new(self.database.conn());
+            let diagnostics = DiagnosticsStore::new(self.database.clone());
             let Ok(Some(_)) = diagnostics
                 .diagnostic_by_anchor(&request.expansion.anchor)
                 .await

@@ -176,7 +176,7 @@ async fn retained_history_worker_wakes_again_after_idle() {
     let first = registry
         .ensure_profile_with_history(
             authority.database().db_path().to_path_buf(),
-            Arc::clone(&authority.database),
+            authority.database.clone(),
             ingestor.clone(),
         )
         .await;
@@ -190,7 +190,7 @@ async fn retained_history_worker_wakes_again_after_idle() {
     let second = registry
         .ensure_profile_with_history(
             authority.database().db_path().to_path_buf(),
-            Arc::clone(&authority.database),
+            authority.database.clone(),
             ingestor.clone(),
         )
         .await;
@@ -224,14 +224,14 @@ async fn profile_history_has_one_retained_owner() {
     let first = registry
         .ensure_profile_with_history(
             authority.database().db_path().to_path_buf(),
-            Arc::clone(&authority.database),
+            authority.database.clone(),
             ingestor.clone(),
         )
         .await;
     let second = registry
         .ensure_profile_with_history(
             authority.database().db_path().to_path_buf(),
-            Arc::clone(&authority.database),
+            authority.database.clone(),
             ingestor,
         )
         .await;
@@ -253,7 +253,7 @@ async fn worker_restart_retains_historical_ingest_owner() {
     registry
         .ensure_profile_with_history(
             authority.database().db_path().to_path_buf(),
-            Arc::clone(&authority.database),
+            authority.database.clone(),
             ingestor.clone(),
         )
         .await;
@@ -284,7 +284,7 @@ async fn shutdown_cancels_and_joins_in_flight_history_pass() {
     registry
         .ensure_profile_with_history(
             authority.database().db_path().to_path_buf(),
-            Arc::clone(&authority.database),
+            authority.database.clone(),
             ingestor.clone(),
         )
         .await;
@@ -313,7 +313,7 @@ async fn retrying_history_is_typed_stale() {
     let wake = registry
         .ensure_profile_with_history(
             authority.database().db_path().to_path_buf(),
-            Arc::clone(&authority.database),
+            authority.database.clone(),
             ingestor.clone(),
         )
         .await;

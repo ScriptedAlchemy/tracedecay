@@ -158,23 +158,17 @@ async fn clean_shutdown_persists_zero_drop_terminal_without_relabeling_cancel() 
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.shutdown";
 
-    let idle = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
-        identity(scope, "boot:clean-idle"),
-        4,
-    )
-    .expect("idle producer");
+    let idle =
+        BoundedObservabilityProducerV1::start(db.clone(), identity(scope, "boot:clean-idle"), 4)
+            .expect("idle producer");
     let idle_summary = idle.shutdown().await.expect("idle clean shutdown");
     assert_eq!(idle_summary.persisted, 1);
     assert_eq!(idle_summary.dropped, 0);
     assert!(!idle_summary.cancelled);
 
-    let active = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
-        identity(scope, "boot:clean-active"),
-        4,
-    )
-    .expect("active producer");
+    let active =
+        BoundedObservabilityProducerV1::start(db.clone(), identity(scope, "boot:clean-active"), 4)
+            .expect("active producer");
     assert_eq!(
         active
             .try_emit(envelope(scope))
@@ -186,12 +180,9 @@ async fn clean_shutdown_persists_zero_drop_terminal_without_relabeling_cancel() 
     assert_eq!(active_summary.dropped, 0);
     assert!(!active_summary.cancelled);
 
-    let cancelled = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
-        identity(scope, "boot:cancelled"),
-        4,
-    )
-    .expect("cancelled producer");
+    let cancelled =
+        BoundedObservabilityProducerV1::start(db.clone(), identity(scope, "boot:cancelled"), 4)
+            .expect("cancelled producer");
     let cancelled_summary = cancelled.cancel().await.expect("cancel producer");
     assert_eq!(cancelled_summary.persisted, 0);
     assert_eq!(cancelled_summary.dropped, 0);
@@ -312,7 +303,7 @@ async fn persistence_failure_cannot_be_rewritten_as_a_clean_terminal() {
         .await
         .expect("hold registered writer");
     let producer = BoundedObservabilityProducerV1::start_with_deadlines(
-        Arc::clone(&db),
+        db.clone(),
         identity(scope, "boot:persistence-failed"),
         1,
         ObservabilityProducerDeadlinesV1 {
@@ -536,7 +527,7 @@ async fn shutdown_waits_for_durable_owner_admission_before_terminal() {
         .expect("hold registered writer");
     let producer = Arc::new(
         BoundedObservabilityProducerV1::start(
-            Arc::clone(&db),
+            db.clone(),
             identity(scope, "boot:durable-owner-stop"),
             4,
         )
@@ -605,12 +596,9 @@ async fn clean_shutdown_with_pending_drop_remains_partial() {
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    let producer = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
-        identity(scope, "boot:pending-drop"),
-        1,
-    )
-    .expect("producer");
+    let producer =
+        BoundedObservabilityProducerV1::start(db.clone(), identity(scope, "boot:pending-drop"), 1)
+            .expect("producer");
     let mut dropped = 0_u64;
     for index in 0..256_u64 {
         let mut event = envelope(scope);
@@ -663,7 +651,7 @@ async fn shutdown_terminal_linearizes_after_concurrent_admission() {
     let scope = "project.observability.shutdown";
     let producer = Arc::new(
         BoundedObservabilityProducerV1::start(
-            Arc::clone(&db),
+            db.clone(),
             identity(scope, "boot:concurrent-stop"),
             4,
         )

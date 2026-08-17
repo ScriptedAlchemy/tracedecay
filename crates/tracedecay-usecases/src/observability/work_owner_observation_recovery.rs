@@ -383,7 +383,7 @@ mod tests {
     }
 
     fn producer(
-        db: Arc<tracedecay_global_db::RegisteredGlobalDb>,
+        db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Arc<BoundedObservabilityProducerV1> {
         Arc::new(
             BoundedObservabilityProducerV1::start(
@@ -432,7 +432,7 @@ mod tests {
         .await;
         insert_pending_duplicate(&harness.registered, 1).await;
         let storage = harness.registered.work_storage().unwrap();
-        let producer = producer(Arc::clone(&harness.registered));
+        let producer = producer(harness.registered.clone());
         let recovery =
             WorkOwnerObservationRecoveryV1::start(storage.clone(), Arc::clone(&producer)).unwrap();
 
@@ -472,7 +472,7 @@ mod tests {
             .unwrap()
             .pop()
             .unwrap();
-        let producer = producer(Arc::clone(&harness.registered));
+        let producer = producer(harness.registered.clone());
         let mut summary = WorkOwnerObservationRecoverySummaryV1::default();
 
         recover_one(
@@ -516,7 +516,7 @@ mod tests {
             insert_pending_duplicate(&harness.registered, ordinal).await;
         }
         let storage = harness.registered.work_storage().unwrap();
-        let producer = producer(Arc::clone(&harness.registered));
+        let producer = producer(harness.registered.clone());
         let mut summary = WorkOwnerObservationRecoverySummaryV1::default();
         let mut cursor = None;
 

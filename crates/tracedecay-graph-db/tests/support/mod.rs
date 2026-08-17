@@ -5,12 +5,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-use tracedecay_graph_db::GraphDb;
+use tracedecay_graph_db::GraphDbLeaseV1;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
+    GraphCancellation, GraphDbError, GraphDbOwnerRegistrationV1, GraphDbRegistration,
+    GraphDbRegistry, GraphDbRegistryConfig,
 };
 use tracedecay_store::{
-    BrainId, ProjectId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
+    BrainId, ProjectId, RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
+    RetainedGraphStoreOwnerOperationLeaseErrorV1, StoreAuthorityEpochV1, StoreIncarnationV1,
     StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
     canonical_store_locator_digest,
 };
@@ -33,6 +35,31 @@ impl RetainedGraphStoreLeaseV1 for TestGraphLease {
 
     fn canonical_path(&self) -> &Path {
         &self.canonical_path
+    }
+}
+
+impl RetainedGraphStoreOwnerAttachmentV1 for TestGraphLease {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    fn issue_operation_lease(
+        &self,
+    ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>
+    {
+        Ok(Arc::new(Self {
+            binding: self.binding.clone(),
+            verified_locator: self.verified_locator.clone(),
+            canonical_path: self.canonical_path.clone(),
+        }))
     }
 }
 
@@ -63,11 +90,14 @@ impl RegisteredGraph {
     }
 
     #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-    pub fn open_raw(root: &Path) -> Result<(Self, Arc<GraphDb>), GraphDbError> {
+    pub fn open_lease(root: &Path) -> Result<(Self, GraphDbLeaseV1), GraphDbError> {
         let registered = Self::new(root)?;
-        let database = registered
+        let registration = registration(registered.binding.clone(), root);
+        let owner_attachment = registered
             .registry
-            .resolve(registration(registered.binding.clone(), root))?;
+            .resolve_owner_attachment(owner_registration(registration.clone()))?;
+        let database = registered.registry.resolve(registration)?;
+        drop(owner_attachment);
         Ok((registered, database))
     }
 
@@ -77,9 +107,14 @@ impl RegisteredGraph {
     }
 
     #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-    pub fn reopen_raw(&self) -> Result<Arc<GraphDb>, GraphDbError> {
-        self.registry
-            .reopen_raw_for_harness(registration(self.binding.clone(), &self.root))
+    pub fn reopen_lease(&self) -> Result<GraphDbLeaseV1, GraphDbError> {
+        let registration = registration(self.binding.clone(), &self.root);
+        let owner_attachment = self
+            .registry
+            .resolve_owner_attachment(owner_registration(registration.clone()))?;
+        let lease = self.registry.resolve(registration)?;
+        drop(owner_attachment);
+        Ok(lease)
     }
 }
 
@@ -103,6 +138,18 @@ pub fn registration(binding: StoreRuntimeBindingV1, root: &Path) -> GraphDbRegis
         cancellation: Arc::new(TestCancellation),
         lifecycle_cancellation: Arc::new(TestCancellation),
         deadline: Instant::now() + Duration::from_secs(30),
+    }
+}
+
+pub fn owner_registration(registration: GraphDbRegistration) -> GraphDbOwnerRegistrationV1 {
+    let authority_attachment = Box::new(TestGraphLease {
+        binding: registration.authority_lease.binding().clone(),
+        verified_locator: registration.authority_lease.verified_locator().clone(),
+        canonical_path: registration.authority_lease.canonical_path().to_path_buf(),
+    });
+    GraphDbOwnerRegistrationV1 {
+        operation: registration,
+        authority_attachment,
     }
 }
 

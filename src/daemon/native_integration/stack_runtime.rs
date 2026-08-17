@@ -36,7 +36,7 @@ use tracedecay_usecases::stack_coordinator::{
 use crate::global_db::{
     GitHubStackDeliveryKeyV1, GitHubStackDeliveryRecordV1, GitHubStackDeliveryStateV1,
     GitHubStackSignalAppendOutcomeV1, GitHubStackSignalRecordV1,
-    MAX_GITHUB_STACK_DELIVERY_BATCH_V1, RegisteredGlobalDb,
+    MAX_GITHUB_STACK_DELIVERY_BATCH_V1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
 };
 
 use super::registry::DaemonProjectNativeIntegrationService;
@@ -78,7 +78,7 @@ struct DaemonStackDeliveryStoreV1 {
 }
 
 impl DaemonStackDeliveryStoreV1 {
-    fn open(database: Arc<RegisteredGlobalDb>, project_id: &ProjectId) -> Result<Self, String> {
+    fn open(database: RegisteredGlobalDbLeaseV1, project_id: &ProjectId) -> Result<Self, String> {
         let project_id = project_id.as_str().to_owned();
         let (commands, receiver) = sync_channel(STACK_DELIVERY_STORE_ACTOR_CAPACITY);
         let (ready, started) = sync_channel::<Result<(), String>>(1);
@@ -756,7 +756,7 @@ impl DaemonGitHubStackRuntimeV1 {
         project_id: ProjectId,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
         native_service: Arc<DaemonProjectNativeIntegrationService>,
     ) -> Result<Arc<Self>, StackCoordinatorErrorV1> {

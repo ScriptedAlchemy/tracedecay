@@ -138,7 +138,7 @@ pub(crate) struct DaemonQueryActivationRegistrarV1 {
     provider: DaemonQueryAuthorityProviderV1,
     registry: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: std::path::PathBuf,
-    session_db: Arc<crate::global_db::RegisteredGlobalDb>,
+    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
 }
 
 impl DaemonQueryActivationRegistrarV1 {
@@ -146,7 +146,7 @@ impl DaemonQueryActivationRegistrarV1 {
         provider: DaemonQueryAuthorityProviderV1,
         registry: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         project_root: std::path::PathBuf,
-        session_db: Arc<crate::global_db::RegisteredGlobalDb>,
+        session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
     ) -> Self {
         Self {
             provider,
@@ -165,7 +165,7 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
         let provider = self.provider.clone();
         let registry = self.registry.clone();
         let project_root = self.project_root.clone();
-        let session_db = Arc::clone(&self.session_db);
+        let session_db = self.session_db.clone();
         Box::pin(async move {
             let scope = committed.scope.clone();
             let semantic_enabled = committed.state.active().compatibility().semantic.is_some();

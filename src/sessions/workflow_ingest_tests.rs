@@ -1,11 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracedecay_domain::ProjectId;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::store::GlobalDbWorkflowStore;
@@ -17,7 +14,7 @@ use tracedecay_sessions::runtime::workflow_ingest::WorkflowIngestStats;
 static WORKFLOW_TEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
 struct WorkflowTestStore {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     project_id: ProjectId,
     _registry: DaemonSessionRuntimeRegistryV1,
     _scope: tracedecay_runtime_core::db::DaemonDatabaseScope,

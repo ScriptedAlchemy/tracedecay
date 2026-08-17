@@ -1,7 +1,5 @@
 //! Mounted V2 Git-topology anchor authority over the canonical anchor table.
 
-use std::sync::Arc;
-
 use tracedecay_application::retrieval::{
     GitTopologyAnchorAuthorityErrorV2, GitTopologyAnchorAuthorityV2, GitTopologyAnchorFutureV2,
     GitTopologyAnchorPublicationOutcomeV2, GitTopologyAnchorPublicationV2,
@@ -11,15 +9,15 @@ use tracedecay_domain::{ObservationScopeV1, RetrievalAnchorRecordV2, RetrievalAn
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::RegisteredGlobalDb;
+use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 #[derive(Clone)]
 pub struct RegisteredGitTopologyAnchorAuthorityV2 {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 }
 
 impl RegisteredGitTopologyAnchorAuthorityV2 {
-    pub fn new(database: Arc<RegisteredGlobalDb>) -> Self {
+    pub fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self { database }
     }
 
@@ -88,7 +86,7 @@ impl RegisteredGitTopologyAnchorAuthorityV2 {
             .database
             .read_snapshot()
             .await
-            .map_err(map_engine_error)?;
+            .map_err(map_database_error)?;
         let Some(record) = read_record(&snapshot, resolution.anchor_id.as_str()).await? else {
             return Ok(GitTopologyAnchorResolutionOutcomeV2::Unavailable);
         };

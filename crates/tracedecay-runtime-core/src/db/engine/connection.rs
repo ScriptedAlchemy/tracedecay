@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use tracedecay_store::OperationPriorityV1;
+use tracedecay_store::{OperationPriorityV1, StoreRuntimeBindingV1};
 
 use tracedecay_rusqlite_runtime::exact_sql::{
     ExactSqlBatchResult, ExactSqlExecuteResult, ExactSqlHandle, ExactSqlReadSnapshot, ExactSqlRows,
@@ -105,6 +105,7 @@ impl Runtime for ExactSqlHandle {
 #[derive(Clone)]
 pub struct Connection {
     runtime: Arc<dyn Runtime>,
+    binding: StoreRuntimeBindingV1,
     /// Priority every read issued through this handle is admitted under.
     ///
     /// Reads default to `Foreground`; a caller that knows it is bulk or
@@ -153,9 +154,19 @@ impl ReadConnection {
 impl Connection {
     pub fn attach(runtime: ExactSqlHandle) -> Self {
         Self {
+            binding: runtime.binding().clone(),
             runtime: Arc::new(runtime),
             read_priority: OperationPriorityV1::Foreground,
         }
+    }
+
+    /// The exact store identity carried by this attached engine connection.
+    ///
+    /// This stays within the runtime core: typed capabilities may project the
+    /// identity needed to validate a purpose, but callers never receive the
+    /// underlying exact-SQL runtime or handle.
+    pub(crate) fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
     }
 
     pub fn read_only(&self) -> ReadConnection {
@@ -182,6 +193,7 @@ impl Connection {
     pub fn background_reads(&self) -> Self {
         Self {
             runtime: Arc::clone(&self.runtime),
+            binding: self.binding.clone(),
             read_priority: OperationPriorityV1::Background,
         }
     }

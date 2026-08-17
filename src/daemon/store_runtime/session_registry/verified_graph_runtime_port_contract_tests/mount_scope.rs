@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay_domain::{ActorId, BrainId, Confidence, FactCategoryV1, FactOwnerV1, UserProfileId};
@@ -16,21 +17,39 @@ use crate::daemon::profile_identity;
 use crate::errors::TraceDecayError;
 use crate::store::DatabaseFactStore;
 
+async fn publish_foreign_memory_owner(path: &Path, label: &str) -> crate::db::DatabaseOwnerV1 {
+    let authority = crate::db::DatabaseAuthority::acquire_test(path, label)
+        .expect("foreign memory-owner fixture authority");
+    let fixture = crate::db::Database::publish_registered_test_runtime_with_retirement_control(
+        path,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::Initialize,
+        crate::db::TestDatabaseRuntimeScope::Project {
+            project_id: project_id(label),
+        },
+    )
+    .await
+    .expect("foreign memory-owner fixture publication");
+    let (owner, runtime, _retirement) = fixture.into_parts();
+    drop(runtime);
+    owner
+}
+
 #[tokio::test]
 async fn writable_project_and_profile_mounts_bind_exact_relational_authority() {
     let fixture = ContractFixture::new("exact-mount-identity").await;
     let project_id = project_id("exact-mount-identity");
     let (project_database, _) = fixture.mount_unbound(&project_id).await;
-    let project_runtime = project_database
-        .memory_graph_runtime()
-        .expect("project memory graph runtime");
+    let project_operation = project_database
+        .issue_memory_graph_runtime_operation()
+        .expect("project memory graph operation");
     assert_eq!(
-        project_runtime.relational_binding(),
-        project_database.retained_runtime().binding()
+        project_operation.runtime().relational_binding(),
+        project_database.registered_binding()
     );
     assert_eq!(
-        project_runtime.relational_verified_locator(),
-        project_database.retained_runtime().locator().verified()
+        project_operation.runtime().relational_verified_locator(),
+        project_database.registered_verified_locator()
     );
 
     let profile_database = fixture
@@ -38,34 +57,33 @@ async fn writable_project_and_profile_mounts_bind_exact_relational_authority() {
         .profile_memory()
         .await
         .expect("profile memory database");
-    let profile_runtime = profile_database
-        .memory_graph_runtime()
-        .expect("profile memory graph runtime");
+    let profile_operation = profile_database
+        .issue_memory_graph_runtime_operation()
+        .expect("profile memory graph operation");
     assert_eq!(
-        profile_runtime.relational_binding(),
-        profile_database.retained_runtime().binding()
+        profile_operation.runtime().relational_binding(),
+        profile_database.registered_binding()
     );
     assert_eq!(
-        profile_runtime.relational_verified_locator(),
-        profile_database.retained_runtime().locator().verified()
+        profile_operation.runtime().relational_verified_locator(),
+        profile_database.registered_verified_locator()
     );
 
-    assert!(Arc::ptr_eq(
-        &profile_database
-            .memory_graph_runtime()
-            .expect("profile runtime remains bound"),
-        &profile_runtime
-    ));
+    drop((project_operation, profile_operation));
+    let profile_operation = profile_database
+        .issue_memory_graph_runtime_operation()
+        .expect("profile graph operation remains available after the prior operation ends");
+    assert_eq!(
+        profile_operation.runtime().relational_binding(),
+        profile_database.registered_binding()
+    );
 }
 
 #[tokio::test]
-async fn unbound_profile_memory_rejects_a_project_runtime_by_exact_scope() {
+async fn unbound_profile_memory_denies_graph_operations() {
     let fixture = ContractFixture::new("reverse-scope-binding").await;
     let project_id = project_id("reverse-scope-binding");
-    let (project_database, _) = fixture.mount_unbound(&project_id).await;
-    let project_runtime = project_database
-        .memory_graph_runtime()
-        .expect("project memory graph runtime");
+    let (_project_database, _) = fixture.mount_unbound(&project_id).await;
     let profile_shard = StoreShardIdV1::profile_memory(
         fixture.registry.identity.brain_id().clone(),
         fixture.registry.identity.profile_id().clone(),
@@ -75,7 +93,13 @@ async fn unbound_profile_memory_rejects_a_project_runtime_by_exact_scope() {
         fixture.registry.resolver.as_ref(),
         profile_shard,
         fixture.registry.incarnation,
-        Some(fixture.registry.profile_pin.clone()),
+        Some(
+            fixture
+                .registry
+                .profile_authority_pin("open unbound profile-memory binding fixture")
+                .await
+                .expect("profile authority pin"),
+        ),
         None,
         true,
         "open unbound profile-memory binding fixture",
@@ -87,25 +111,17 @@ async fn unbound_profile_memory_rejects_a_project_runtime_by_exact_scope() {
         crate::db::DatabaseAccessMode::ReadWrite,
     )
     .await
-    .expect("unbound profile-memory database");
+    .expect("unbound profile-memory database")
+    .issue_lease()
+    .expect("unbound profile-memory database client");
     crate::db::migrations::ensure_schema_current(&profile_database)
         .await
         .expect("profile-memory schema");
 
-    let error = profile_database
-        .bind_memory_graph_runtime(project_runtime)
-        .expect_err("Project runtime must not bind to ProfileMemory");
-    match error {
-        TraceDecayError::Database { operation, message } => {
-            assert_eq!(operation, "bind verified memory graph runtime");
-            assert_eq!(
-                message,
-                "verified memory graph runtime does not match the retained database"
-            );
-        }
-        other => panic!("unexpected reverse-scope rejection: {other:?}"),
-    }
-    assert!(profile_database.memory_graph_runtime().is_none());
+    assert!(matches!(
+        profile_database.issue_memory_graph_runtime_operation(),
+        Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
+    ));
 }
 
 #[tokio::test]
@@ -113,7 +129,7 @@ async fn retained_memory_runtime_rejects_foreign_brain_and_profile_scopes() {
     let fixture = ContractFixture::new("foreign-profile-scope").await;
     let project_id = project_id("foreign-profile-scope");
     let (database, _) = fixture.mount_unbound(&project_id).await;
-    let shard = &database.retained_runtime().binding().shard_id;
+    let shard = &database.registered_binding().shard_id;
     let foreign_brain = StoreShardIdV1::project(
         BrainId::new("brain.foreign-graph-scope").expect("foreign brain"),
         shard.profile_id.clone(),
@@ -124,15 +140,25 @@ async fn retained_memory_runtime_rejects_foreign_brain_and_profile_scopes() {
         UserProfileId::new("profile.foreign-graph-scope").expect("foreign profile"),
         project_id,
     );
+    let foreign_brain_owner = publish_foreign_memory_owner(
+        &fixture.root.join("foreign-brain-memory.db"),
+        "foreign-brain-memory-owner",
+    )
+    .await;
+    let foreign_profile_owner = publish_foreign_memory_owner(
+        &fixture.root.join("foreign-profile-memory.db"),
+        "foreign-profile-memory-owner",
+    )
+    .await;
 
     for result in [
         fixture
             .registry
-            .retain_memory_graph_runtime(foreign_brain, Arc::clone(&database))
+            .retain_memory_graph_runtime(foreign_brain, foreign_brain_owner)
             .await,
         fixture
             .registry
-            .retain_memory_graph_runtime(foreign_profile, Arc::clone(&database))
+            .retain_memory_graph_runtime(foreign_profile, foreign_profile_owner)
             .await,
     ] {
         match result {
@@ -222,7 +248,10 @@ async fn cold_read_only_mount_denies_publication_and_degrades_graph_assist_truth
         .await
         .expect("cold read-only project memory");
     assert!(!read_only.is_writable());
-    assert!(read_only.memory_graph_runtime().is_none());
+    assert!(matches!(
+        read_only.issue_memory_graph_runtime_operation(),
+        Err(crate::db::MemoryGraphRuntimeOperationErrorV1::Unbound)
+    ));
     assert!(read_only.graph_publication_storage().is_err());
 
     let owner = FactOwnerV1::Project { project_id };

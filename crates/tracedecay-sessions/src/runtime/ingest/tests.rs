@@ -329,6 +329,7 @@ struct GraphBackedTestStore {
 }
 
 impl git_correlation::GitCorrelationSessionStore for GraphBackedTestStore {
+    type ReadSnapshot = tracedecay_runtime_core::db::engine::ReadSnapshot;
     type WriteTxn<'txn> = tracedecay_runtime_core::db::engine::Transaction;
 
     fn require_project_sessions_authority(

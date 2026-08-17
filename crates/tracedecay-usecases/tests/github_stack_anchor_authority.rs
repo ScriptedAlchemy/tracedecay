@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tracedecay_application::retrieval::{
     GitTopologyAnchorAuthorityV2, GitTopologyAnchorPublicationOutcomeV2,
     GitTopologyAnchorPublicationV2, GitTopologyAnchorResolutionOutcomeV2,
@@ -113,7 +111,7 @@ async fn degraded_capability_persists_through_the_v2_git_topology_authority() {
             .await
             .unwrap();
     let database = runtime.project_database_arc().unwrap();
-    let authority = RegisteredGitTopologyAnchorAuthorityV2::new(Arc::clone(&database));
+    let authority = RegisteredGitTopologyAnchorAuthorityV2::new(database.clone());
     assert_eq!(
         authority
             .publish(

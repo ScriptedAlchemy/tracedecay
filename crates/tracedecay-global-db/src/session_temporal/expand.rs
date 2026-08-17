@@ -10,7 +10,10 @@ use tracedecay_domain::{
     SummarySourceHorizonV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1, TemporalModeV1,
     UtcMicros,
 };
-use tracedecay_runtime_core::db::engine::{Row, params};
+use tracedecay_runtime_core::db::{
+    DatabaseEngineReadSnapshot,
+    engine::{Row, params},
+};
 use tracedecay_store::{
     MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionFrozenWatermarksV1, SessionRetrievalPageV1,
     SessionStoreError, SessionStoreResult, SessionTemporalCapabilitiesV1,
@@ -450,7 +453,7 @@ fn relation_summary_relations(
 }
 
 async fn summary_anchor_for(
-    read: &tracedecay_runtime_core::db::engine::ReadSnapshot,
+    read: &DatabaseEngineReadSnapshot,
     session_id: &SessionId,
     summary_id: &str,
 ) -> SessionStoreResult<RetrievalAnchorId> {
@@ -486,7 +489,7 @@ async fn summary_anchor_for(
 
 async fn retrieve_summary_page(
     db: &RegisteredGlobalDb,
-    read: &tracedecay_runtime_core::db::engine::ReadSnapshot,
+    read: &DatabaseEngineReadSnapshot,
     request: &SessionTemporalRetrievalRequestV1,
     generation: i64,
 ) -> SessionStoreResult<SessionRetrievalPageV1> {
@@ -626,7 +629,7 @@ async fn retrieve_summary_page(
 }
 
 async fn validate_frozen_snapshot(
-    read: &tracedecay_runtime_core::db::engine::ReadSnapshot,
+    read: &DatabaseEngineReadSnapshot,
     snapshot: &SessionTemporalSnapshotV1,
 ) -> SessionStoreResult<()> {
     let generation = i64::try_from(snapshot.watermarks().active_generation().value())

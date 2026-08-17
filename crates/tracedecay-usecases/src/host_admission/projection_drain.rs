@@ -20,13 +20,8 @@ impl HostAdmissionFacade<'_> {
             .registered_database(host_scope(scope))?
             .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
         let external_source = crate::external_source_store::RuntimeExternalSourceStore::new(
-            database.runtime().clone(),
-            database.authority().clone(),
-        )
-        .map_err(|error| {
-            tracing::warn!(%error, "registered external-source adapter is unavailable");
-            HostAdmissionOutcome::registered_authority_unavailable()
-        })?;
+            database.runtime_client(),
+        );
         let external_replay = external_source
             .drain_host_projection_replay(max, cancellation)
             .await

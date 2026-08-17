@@ -7,7 +7,7 @@ use tracedecay_domain::HydrationStateV1;
 use super::relations::{SummaryRelationRead, SummarySourceRef as GraphSummarySourceRef};
 use super::render::apply_canonical_content;
 use tracedecay_runtime_core::db::build_qmark_placeholders;
-use tracedecay_runtime_core::db::engine::{ReadSnapshot, Row, Value, params, params_from_iter};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, Value, params, params_from_iter};
 use tracedecay_sessions::lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
@@ -28,7 +28,7 @@ macro_rules! field {
 }
 
 pub(super) async fn describe_relation_summary_ids(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     request: &LcmDescribeRequest,
 ) -> Result<Vec<String>, LcmError> {
     match &request.target {
@@ -48,7 +48,7 @@ pub(super) fn expand_relation_summary_ids(request: &LcmExpandRequest) -> Vec<Str
 }
 
 async fn session_summary_ids(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
 ) -> Result<Vec<String>, LcmError> {
@@ -70,7 +70,7 @@ async fn session_summary_ids(
 }
 
 pub(super) async fn describe(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     request: LcmDescribeRequest,
     relations: &[SummaryRelationRead],
 ) -> Result<LcmDescribeResponse, LcmError> {
@@ -134,7 +134,7 @@ pub(super) async fn describe(
 }
 
 pub(super) async fn expand(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     request: LcmExpandRequest,
     canonical_content: &str,
     relations: &[SummaryRelationRead],
@@ -244,7 +244,7 @@ struct DescribeCounts {
 }
 
 async fn describe_counts(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
 ) -> Result<DescribeCounts, LcmError> {
@@ -277,7 +277,7 @@ async fn describe_counts(
 }
 
 async fn raw_message_overviews(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
 ) -> Result<Vec<LcmRawMessageOverview>, LcmError> {
@@ -316,7 +316,7 @@ async fn raw_message_overviews(
 }
 
 async fn summary_overviews(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     relations: &[SummaryRelationRead],
@@ -348,7 +348,7 @@ async fn summary_overviews(
 }
 
 async fn describe_summary_node(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     node_id: &str,
@@ -386,7 +386,7 @@ async fn describe_summary_node(
 }
 
 async fn describe_summary_sources(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     node_id: &str,
@@ -456,7 +456,7 @@ async fn describe_summary_sources(
 }
 
 async fn describe_external_payload(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     payload_ref: &str,
@@ -485,7 +485,7 @@ async fn describe_external_payload(
 /// gone. Summary *lineage* reads must use [`find_raw_message`] instead: an
 /// absent row there is retention, not a missing target.
 async fn load_raw_message(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     store_id: i64,
 ) -> Result<LcmRawMessageMetadata, LcmError> {
     find_raw_message(snapshot, store_id)
@@ -497,7 +497,7 @@ async fn load_raw_message(
 /// is *present* (and rejected by the caller's ownership check) rather than
 /// indistinguishable from a row retention already removed.
 async fn find_raw_message(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     store_id: i64,
 ) -> Result<Option<LcmRawMessageMetadata>, LcmError> {
     let mut rows = query(
@@ -537,7 +537,7 @@ fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata, Lcm
 }
 
 async fn load_summary_node(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     node_id: &str,
@@ -589,7 +589,7 @@ async fn load_summary_node(
 }
 
 async fn relation_source_refs(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     relation: &SummaryRelationRead,
@@ -629,7 +629,7 @@ async fn relation_source_refs(
 /// projected lineage, which retains the locator; see
 /// [`retention_dropped_store_id`].
 async fn anchor_store_id(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     summary_id: &str,
@@ -682,7 +682,7 @@ async fn anchor_store_id(
 /// to reach is an identity or ownership problem, not retention, and must keep
 /// failing closed.
 async fn retention_dropped_store_id(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     summary_id: &str,
     ordinal: usize,
 ) -> Result<i64, LcmError> {
@@ -718,7 +718,7 @@ fn relation<'a>(
 }
 
 async fn load_summary_sources(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     source_refs: &[LcmSourceRef],
@@ -809,7 +809,7 @@ async fn load_summary_sources(
 }
 
 async fn load_raw_messages(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     store_ids: &BTreeSet<i64>,
 ) -> Result<BTreeMap<i64, LcmRawMessageMetadata>, LcmError> {
     if store_ids.is_empty() {
@@ -838,7 +838,7 @@ async fn load_raw_messages(
 }
 
 async fn load_summary_nodes(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     node_ids: &BTreeSet<String>,
@@ -904,7 +904,7 @@ async fn load_summary_nodes(
 }
 
 async fn validate_expand_payload(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
     payload_ref: &str,
@@ -939,7 +939,7 @@ async fn validate_expand_payload(
 }
 
 async fn load_payload(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     payload_ref: &str,
 ) -> Result<LcmPayloadRef, LcmError> {
     let mut rows = query(
@@ -1009,7 +1009,7 @@ fn storage_kind(value: &str) -> Result<LcmStorageKind, LcmError> {
 }
 
 async fn query<P>(
-    snapshot: &ReadSnapshot,
+    snapshot: &(impl QueryExecutor + ?Sized),
     sql: &str,
     params: P,
 ) -> Result<tracedecay_runtime_core::db::engine::Rows, LcmError>

@@ -32,8 +32,7 @@ use super::{
     CanonicalProximityEvidenceV1,
 };
 use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
-use crate::store::GlobalDbObservationStore;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
 use tracedecay_sessions::runtime::git_correlation::{
     GitEvidenceProjectionStore, GitRefFilter, SessionsForQuery, git_evidence_projection_identity,
     normalize_worktree,
@@ -66,7 +65,7 @@ struct ProximityCandidate {
 
 /// Owned production authority mounted by the advisory registrar.
 pub struct ProductionProximityEvidenceAuthorityV1 {
-    sessions: Arc<RegisteredGlobalDb>,
+    sessions: RegisteredGlobalDbLeaseV1,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     scope: FeedbackScopeV1,
     worktree_root: PathBuf,
@@ -80,7 +79,7 @@ pub type SharedCanonicalProximityEvidenceAuthorityV1 =
 
 impl ProductionProximityEvidenceAuthorityV1 {
     pub(crate) fn new(
-        sessions: Arc<RegisteredGlobalDb>,
+        sessions: RegisteredGlobalDbLeaseV1,
         code_graph: Arc<dyn CodeGraphProjectionReadPort>,
         scope: FeedbackScopeV1,
         worktree_root: PathBuf,
@@ -241,10 +240,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
             }
         }
 
-        let observation_store = GlobalDbObservationStore::with_runtime(
-            self.sessions.runtime(),
-            self.sessions.authority(),
-        );
+        let observation_store = self.sessions.observation_store();
         let checkpoint = observation_store.projection_checkpoint().await.ok()?;
         let after_sequence = checkpoint
             .last_sequence()
@@ -590,7 +586,7 @@ impl CanonicalProximityEvidenceAuthorityV1 for ProductionProximityEvidenceAuthor
 /// Constructor used by the advisory registrar. Returning an owned trait-object
 /// keeps the already-open project authorities alive without a new store.
 pub(crate) fn production_proximity_evidence_authority_v1(
-    sessions: Arc<RegisteredGlobalDb>,
+    sessions: RegisteredGlobalDbLeaseV1,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     scope: FeedbackScopeV1,
     worktree_root: PathBuf,

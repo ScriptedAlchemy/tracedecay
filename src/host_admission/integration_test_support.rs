@@ -1,7 +1,6 @@
 //! Integration, workflow, observation, and temporal fixture adapters.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{
@@ -13,7 +12,7 @@ use tracedecay_domain::{
 use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, RepositoryReadOperationV1,
     RepositoryReadResultV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeRequestProbeV1,
-    StorageRuntimeReadPort as _, StoreShardScopeV1,
+    StoreShardScopeV1,
 };
 
 use super::{
@@ -32,7 +31,7 @@ impl HostAdmissionTestRuntimeV1 {
         scope_prefix: Option<&str>,
     ) -> Result<crate::mcp::ToolResult> {
         let project_registry_reads = crate::mcp::server::DaemonProjectRegistryReadService::new(
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
         );
         crate::mcp::tools::handle_tool_call_with_registry_options(
             cg,
@@ -45,7 +44,7 @@ impl HostAdmissionTestRuntimeV1 {
                 project_registry_reads: Some(&project_registry_reads),
                 accounting_db: Some(self.profile_database.as_ref()),
                 registered_project_session_db: self.project_registered.clone(),
-                registered_savings_db: Some(Arc::clone(&self.profile_database)),
+                registered_savings_db: Some(self.profile_database.clone()),
                 profile_root: Some(&self.profile_root),
                 session_authorities: self.mcp_session_authorities(),
                 ..Default::default()
@@ -312,8 +311,8 @@ impl HostAdmissionTestRuntimeV1 {
         let database = self.registered_database(scope).ok_or_else(|| {
             HostAdmissionOutcome::retained_unavailable("registered_authority_unavailable")
         })?;
-        let binding =
-            host_observation_source_binding_for_test(observation, database.runtime().binding())?;
+        let runtime = database.runtime_client();
+        let binding = host_observation_source_binding_for_test(observation, runtime.binding())?;
         let binding_identity = binding
             .immutable_identity()
             .map_err(external_source_read_failed)?;
@@ -323,18 +322,16 @@ impl HostAdmissionTestRuntimeV1 {
         )
         .map_err(external_source_read_failed)?;
         let request = external_source_runtime_read_request(
-            database.runtime().binding(),
+            runtime.binding(),
             ExternalSourceReadOperationV1::CommitReceipt {
                 binding: binding_identity,
                 idempotency_key,
             },
         )?;
         let probe = ExternalSourceRuntimeReadProbe::from_control(request.control());
-        let outcome = database
-            .runtime()
-            .read(request, &probe)
-            .await
-            .map_err(external_source_read_failed)?;
+        let outcome = runtime
+            .dispatch_read(request, &probe)
+            .map_err(|_| external_source_read_failed("runtime read dispatch failed"))?;
         if !matches!(
             outcome.coverage(),
             RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }

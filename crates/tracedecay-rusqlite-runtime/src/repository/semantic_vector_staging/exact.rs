@@ -41,9 +41,20 @@ impl SemanticVectorStagingExactSqlStorage {
     pub fn from_authorized_handle(
         handle: ExactSqlHandle,
     ) -> SemanticVectorStagingStoreResult<Self> {
+        Self::from_authorized_handle_with_guard(handle, ())
+    }
+
+    pub fn from_authorized_handle_with_guard<Guard>(
+        handle: ExactSqlHandle,
+        guard: Guard,
+    ) -> SemanticVectorStagingStoreResult<Self>
+    where
+        Guard: Send + Sync + 'static,
+    {
         Ok(Self {
-            graph_publication: GraphPublicationExactSqlStorage::from_authorized_handle(
+            graph_publication: GraphPublicationExactSqlStorage::from_authorized_handle_with_guard(
                 handle.clone(),
+                guard,
             )
             .map_err(map_graph)?,
             handle,

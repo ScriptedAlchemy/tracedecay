@@ -9,6 +9,7 @@ mod memory_connection;
 mod memory_v2;
 mod metadata;
 pub mod migrations;
+mod purpose;
 mod retrieval_anchor_authority;
 pub mod retrieval_anchor_schema;
 mod semantic_vector_staging;
@@ -32,14 +33,28 @@ pub use connection::Database;
 pub use connection::MemoryGraphReconciliationTaskOwnerV1;
 pub(crate) use connection::MemoryGraphReconciliationTaskScheduleV1;
 pub use connection::{
-    DatabaseAccessMode, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
-    DatabaseMemoryTransaction, DatabaseWriteTransaction,
+    DatabaseAccessMode, DatabaseClientGuardV1, DatabaseEngineReadConnection,
+    DatabaseEngineReadSnapshot, DatabaseMemoryTransaction, DatabaseRuntimeClientV1,
+    DatabaseStorageTelemetryHandle, DatabaseWriteTransaction,
+};
+pub use connection::{
+    DatabaseGraphOwnerRetirementCompositionRefusalV1, DatabaseOwnerErrorV1,
+    DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1, DatabaseOwnerWeakLeaseIssuerErrorV1,
+    DatabaseOwnerWeakLeaseIssuerV1,
+};
+pub use connection::{
+    MemoryGraphReconciliationCancelErrorV1, MemoryGraphReconciliationRetirementReservationV1,
+    MemoryGraphReconciliationRetirementStartErrorV1, MemoryGraphReconciliationRetirementTerminalV1,
+    MemoryGraphRuntimeOperationErrorV1, MemoryGraphRuntimeOperationV1,
 };
 pub use connection::{
     ProjectMemoryReconciliationTelemetryObserverV1, ProjectMemoryReconciliationTelemetrySnapshotV1,
 };
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-pub use connection::{TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
+pub use connection::{
+    RegisteredTestRuntimeFixtureV1, RegisteredTestRuntimeRetirementControlV1,
+    TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+};
 pub use external_source::install_external_source_schema;
 pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
 pub use memory_connection::MemoryConnection;

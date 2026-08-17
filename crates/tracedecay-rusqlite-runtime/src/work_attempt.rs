@@ -36,7 +36,7 @@ fn insert_attempt(
     concurrency: Option<&TopologyConcurrencyPolicyV1>,
 ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
     let transaction = storage
-        .handle
+        .handle()
         .begin_immediate()
         .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     let outcome = insert_attempt_in_transaction(&transaction, authority, attempt, concurrency);
@@ -125,7 +125,7 @@ pub(crate) fn insert_attempt_in_transaction(
 impl WorkAttemptStoragePort for WorkSqliteStorage {
     fn next_fence_epoch(&self, authority: &WorkAuthority) -> Result<u64, WorkAttemptStorageError> {
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         transaction
@@ -185,7 +185,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         concurrency: &TopologyConcurrencyPolicyV1,
     ) -> Result<std::collections::BTreeMap<TaskId, WorkAttemptCapacityV1>, WorkAttemptStorageError>
     {
-        crate::work::capacity::capacities(&self.handle, authority, task_ids, concurrency)
+        crate::work::capacity::capacities(self.handle(), authority, task_ids, concurrency)
     }
 
     fn load(
@@ -194,7 +194,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkAttemptV1, WorkAttemptStorageError> {
         let rows = registered_work_query(
-            &self.handle,
+            self.handle(),
             "SELECT attempt_payload FROM work_attempts_v1
              WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
                AND actor_id = ?4 AND policy_digest = ?5
@@ -220,7 +220,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkAttemptAdmissionKind, WorkAttemptStorageError> {
-        let payload = load_payload_from_handle(&self.handle, authority, identity)?
+        let payload = load_payload_from_handle(self.handle(), authority, identity)?
             .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
         let record: StoredWorkAttemptV1 =
             serde_json::from_str(&payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
@@ -244,7 +244,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
             .transpose()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         let existing = load_payload(&transaction, authority, next.identity())?
@@ -312,7 +312,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
     ) -> Result<Vec<WorkAttemptV1>, WorkAttemptStorageError> {
         let rows = registered_work_query(
-            &self.handle,
+            self.handle(),
             "SELECT attempt_payload FROM work_attempts_v1
              WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
                AND actor_id = ?4 AND policy_digest = ?5 AND terminal = 0
@@ -339,7 +339,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         worktree_id: &WorktreeId,
     ) -> Result<bool, WorkAttemptStorageError> {
         let rows = registered_work_query(
-            &self.handle,
+            self.handle(),
             "SELECT task_id FROM work_attempts_v1
              WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
                AND terminal = 0
@@ -374,7 +374,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         // One deferred transaction keeps the remaining count and the page on
         // the same consistent view of the attempt rows.
         let transaction = self
-            .handle
+            .handle()
             .begin_deferred()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         let counted = registered_work_query(
@@ -432,7 +432,7 @@ fn insert_synthesis_record(
     concurrency: Option<&TopologyConcurrencyPolicyV1>,
 ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
     let transaction = storage
-        .handle
+        .handle()
         .begin_immediate()
         .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     let outcome = insert_synthesis_in_transaction(&transaction, authority, record, concurrency);
@@ -543,7 +543,7 @@ impl WorkSynthesisAdmissionStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkSynthesisAdmissionRecordV1, WorkAttemptStorageError> {
-        let payload = load_payload_from_handle(&self.handle, authority, identity)?
+        let payload = load_payload_from_handle(self.handle(), authority, identity)?
             .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
         serde_json::from_str::<StoredWorkAttemptV1>(&payload)
             .map_err(|_| WorkAttemptStorageError::Unavailable)?
@@ -573,7 +573,7 @@ impl WorkAttemptEvidenceReadPort for WorkSqliteStorage {
         // One deferred transaction keeps the remaining count and the page on
         // the same consistent view of the attempt rows.
         let transaction = self
-            .handle
+            .handle()
             .begin_deferred()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         let counted = registered_work_query(

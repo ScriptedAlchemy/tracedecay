@@ -123,8 +123,10 @@ async fn automation_scheduler_tick_secs_reads_pinned_project_configuration() {
     .await;
     let cg = server.cg().await;
 
-    let tick_secs =
-        Box::pin(super::super::automation_scheduler_tick_secs_for_project(&cg)).await;
+    let tick_secs = Box::pin(super::super::automation_scheduler_tick_secs_for_project(
+        &cg,
+    ))
+    .await;
 
     assert_eq!(tick_secs, 17);
 }

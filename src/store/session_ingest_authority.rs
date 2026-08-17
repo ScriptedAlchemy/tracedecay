@@ -14,7 +14,8 @@ use tracedecay_usecases::host_admission::{HostAdmissionAuthorities, HostAdmissio
 /// Session-ingest authority over one registered database.
 ///
 /// The holder `D` is generic so a caller that owns an
-/// `Arc<RegisteredGlobalDb>` can build a `'static` authority. That matters
+/// [`crate::global_db::RegisteredGlobalDbLeaseV1`] can build a `'static`
+/// authority. That matters
 /// beyond ergonomics: when the authority type carries a free lifetime, the
 /// `SessionIngestAuthority` GATs plus the `admission` method's
 /// `Box<dyn HostAdmission + 'a>` return push the auto-trait leak check into a

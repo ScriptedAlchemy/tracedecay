@@ -12,7 +12,7 @@ use crate::config::{
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::DatabaseAccessMode;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::storage::StoreLayout;
 use tracedecay_usecases::config::open_runtime_configuration_for_registered_database_read_only;
 use tracedecay_usecases::configuration::ProjectConfigurationRuntime;
@@ -170,8 +170,8 @@ impl TraceDecay {
         branch_name: &str,
         open_options: TraceDecayOpenOptions,
         store_layout: StoreLayout,
-        configuration_database: Arc<RegisteredGlobalDb>,
-        profile_database: Arc<RegisteredGlobalDb>,
+        configuration_database: RegisteredGlobalDbLeaseV1,
+        profile_database: RegisteredGlobalDbLeaseV1,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
         Self::open_branch_with_registered_configuration_access(
@@ -194,8 +194,8 @@ impl TraceDecay {
         branch_name: &str,
         open_options: TraceDecayOpenOptions,
         store_layout: StoreLayout,
-        configuration_database: Arc<RegisteredGlobalDb>,
-        profile_database: Arc<RegisteredGlobalDb>,
+        configuration_database: RegisteredGlobalDbLeaseV1,
+        profile_database: RegisteredGlobalDbLeaseV1,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
         access_mode: DatabaseAccessMode,
         operation: &'static str,

@@ -1,9 +1,7 @@
 use std::path::Path;
-use std::sync::Arc;
-
 use tracedecay_store::{
-    StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1,
-    canonical_store_locator_digest,
+    RetainedGraphStoreOwnerAttachmentV1, StoreRuntimeBindingV1, StoreShardScopeV1,
+    VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
 use super::{Eviction, GraphDbRegistration, RegistryEntry};
@@ -33,6 +31,13 @@ pub(super) fn binding(entry: &RegistryEntry) -> IdentityRef<'_> {
             ..
         }
         | RegistryEntry::Closing {
+            binding,
+            verified_locator,
+            path,
+            expected_format,
+            ..
+        }
+        | RegistryEntry::Retiring {
             binding,
             verified_locator,
             path,
@@ -75,12 +80,13 @@ pub(super) fn require_closing(
     reservation: &Eviction,
 ) -> Result<(), GraphDbError> {
     let RegistryEntry::Closing {
-        authority_lease,
         binding,
         verified_locator,
         path,
         expected_format,
-        owner,
+        owner_id,
+        owner_attachment_id,
+        reservation_id,
     } = entry
     else {
         return Err(GraphDbError::unavailable(
@@ -91,11 +97,48 @@ pub(super) fn require_closing(
         || verified_locator != &reservation.verified_locator
         || path.as_path() != reservation.path
         || expected_format != &reservation.expected_format
-        || !Arc::ptr_eq(owner, &reservation.owner)
-        || !Arc::ptr_eq(authority_lease, &reservation.authority_lease)
+        || owner_id != &reservation.owner_id()
+        || owner_attachment_id != &reservation.owner_attachment_id()
+        || reservation_id != &reservation.reservation_id()
     {
         return Err(GraphDbError::unavailable(
             "graph close reservation identity changed",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn require_retiring(
+    entry: &RegistryEntry,
+    reservation: &Eviction,
+) -> Result<(), GraphDbError> {
+    let RegistryEntry::Retiring {
+        binding,
+        verified_locator,
+        path,
+        expected_format,
+        owner_id,
+        owner_attachment_id,
+        reservation_id,
+    } = entry
+    else {
+        return Err(GraphDbError::unavailable(
+            "graph retirement reservation was replaced",
+        ));
+    };
+    if binding != &reservation.binding
+        || verified_locator != &reservation.verified_locator
+        || path.as_path() != reservation.path
+        || expected_format != &reservation.expected_format
+        || owner_id != &reservation.owner_id()
+        || owner_attachment_id
+            != &reservation.owner_attachment_id().ok_or_else(|| {
+                GraphDbError::unavailable("graph retirement reservation lacks an owner attachment")
+            })?
+        || reservation_id != &reservation.reservation_id()
+    {
+        return Err(GraphDbError::unavailable(
+            "graph retirement reservation identity changed",
         ));
     }
     Ok(())
@@ -132,6 +175,19 @@ pub(super) fn validate_registration(
         return Err(GraphDbError::invalid(
             "verified graph locator digest does not bind the canonical graph path",
         ));
+    }
+    Ok(())
+}
+
+pub(super) fn require_owner_attachment(
+    registration: &GraphDbRegistration,
+    attachment: &dyn RetainedGraphStoreOwnerAttachmentV1,
+) -> Result<(), GraphDbError> {
+    if registration.binding() != attachment.binding()
+        || registration.verified_locator() != attachment.verified_locator()
+        || registration.canonical_path() != attachment.canonical_path()
+    {
+        return Err(GraphDbError::Conflict);
     }
     Ok(())
 }

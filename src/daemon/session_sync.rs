@@ -16,7 +16,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::store::{GlobalDbGitCorrelationStore, GlobalDbSessionIngestAuthority};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
@@ -49,9 +49,9 @@ pub(crate) struct DaemonSessionSyncConfig {
     pub profile_root: std::path::PathBuf,
     pub project_root: std::path::PathBuf,
     pub transcript_source_home: Option<std::path::PathBuf>,
-    pub project_sessions: Arc<RegisteredGlobalDb>,
-    pub user_sessions: Arc<RegisteredGlobalDb>,
-    pub registry: Arc<RegisteredGlobalDb>,
+    pub project_sessions: RegisteredGlobalDbLeaseV1,
+    pub user_sessions: RegisteredGlobalDbLeaseV1,
+    pub registry: RegisteredGlobalDbLeaseV1,
     pub startup_import: bool,
     pub project_refresh:
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
@@ -90,7 +90,7 @@ impl DaemonSessionSyncService {
         &self,
         request: SessionSyncRequestV1,
         context: Arc<SessionSyncProjectContext>,
-        project_sessions: Arc<RegisteredGlobalDb>,
+        project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncOutcomeV1 {
         let observed_at = now_micros();
         let key = journal_key(request.scope(), request.idempotency_key());
@@ -138,7 +138,7 @@ impl DaemonSessionSyncService {
                             if !self.active_contains(&key) {
                                 self.coalesce_import(
                                     Arc::clone(&context),
-                                    Arc::clone(&project_sessions),
+                                    project_sessions.clone(),
                                     key,
                                     journal.clone(),
                                     primary_key,
@@ -165,7 +165,7 @@ impl DaemonSessionSyncService {
                         } else if journal.status != SessionSyncJournalStatusV1::Complete
                             && !self.enqueue(
                                 context,
-                                Arc::clone(&project_sessions),
+                                project_sessions.clone(),
                                 key,
                                 request,
                                 admission,
@@ -337,7 +337,7 @@ impl DaemonSessionSyncService {
     fn enqueue(
         &self,
         context: Arc<SessionSyncProjectContext>,
-        project_sessions: Arc<RegisteredGlobalDb>,
+        project_sessions: RegisteredGlobalDbLeaseV1,
         key: String,
         request: SessionSyncRequestV1,
         admission: tracedecay_application::session_sync::SessionSyncAdmissionReceiptV1,
@@ -403,7 +403,7 @@ impl DaemonSessionSyncService {
     async fn run_operation(
         &self,
         context: Arc<SessionSyncProjectContext>,
-        project_sessions: Arc<RegisteredGlobalDb>,
+        project_sessions: RegisteredGlobalDbLeaseV1,
         key: String,
         request: SessionSyncRequestV1,
     ) {
@@ -488,18 +488,13 @@ impl DaemonSessionSyncService {
                         running.admission.accepted_at,
                         &request,
                         &self.shutdown,
-                        Arc::clone(&project_sessions),
+                        project_sessions.clone(),
                     )
                     .await
             }
             SessionSyncCommandV1::SynchronizeGit(options) => {
                 context
-                    .synchronize_git(
-                        &request,
-                        options,
-                        &self.shutdown,
-                        Arc::clone(&project_sessions),
-                    )
+                    .synchronize_git(&request, options, &self.shutdown, project_sessions.clone())
                     .await
             }
         };
@@ -574,7 +569,7 @@ impl DaemonSessionSyncService {
     async fn persist_interruption_with_project_sessions(
         &self,
         context: &SessionSyncProjectContext,
-        project_sessions: &Arc<RegisteredGlobalDb>,
+        project_sessions: &RegisteredGlobalDbLeaseV1,
         key: &str,
         termination: OperationTermination,
     ) -> crate::errors::Result<SessionSyncJournalV1> {
@@ -661,7 +656,7 @@ impl DaemonSessionSyncService {
     async fn persist_progress(
         &self,
         context: &SessionSyncProjectContext,
-        project_sessions: &Arc<RegisteredGlobalDb>,
+        project_sessions: &RegisteredGlobalDbLeaseV1,
         key: &str,
         stats: SessionSyncStatsV1,
         coverage: Vec<SessionSyncSourceCoverageV1>,
@@ -682,7 +677,7 @@ impl DaemonSessionSyncService {
     async fn refresh_source_frontiers_with_project_sessions(
         &self,
         context: &SessionSyncProjectContext,
-        project_sessions: &Arc<RegisteredGlobalDb>,
+        project_sessions: &RegisteredGlobalDbLeaseV1,
         key: &str,
     ) -> crate::errors::Result<SessionSyncJournalV1> {
         let current = context
@@ -712,7 +707,7 @@ impl DaemonSessionSyncService {
     async fn status_request_admitted(
         &self,
         context: &SessionSyncProjectContext,
-        project_sessions: Option<&Arc<RegisteredGlobalDb>>,
+        project_sessions: Option<&RegisteredGlobalDbLeaseV1>,
         control: SessionSyncControlV1,
     ) -> SessionSyncOutcomeV1 {
         let key = journal_key(control.scope(), control.idempotency_key());

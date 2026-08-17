@@ -26,7 +26,7 @@ use super::scheduler::{
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_store::{
     FactReadControl, FactWriteControl, ProjectMemoryAutomaticFactApplyResultV1,
     ProjectMemoryFactCurationReceiptV1,
@@ -300,7 +300,7 @@ pub(crate) struct AgentTaskRunContext<'a> {
     pub(crate) dashboard_root: PathBuf,
     /// Exact registered LCM session shard whose newest message timestamp is
     /// the scheduler activity signal.
-    sessions_db: Arc<RegisteredGlobalDb>,
+    sessions_db: RegisteredGlobalDbLeaseV1,
     config: &'a AutomationConfig,
     task: AgentTaskKind,
     started_at: String,
@@ -315,7 +315,7 @@ pub(crate) struct AgentTaskRunContext<'a> {
 impl<'a> AgentTaskRunContext<'a> {
     pub(crate) fn new(
         dashboard_root: PathBuf,
-        sessions_db: Arc<RegisteredGlobalDb>,
+        sessions_db: RegisteredGlobalDbLeaseV1,
         run_id: Option<String>,
         run_id_prefix: &'static str,
         trigger: AutomationTrigger,

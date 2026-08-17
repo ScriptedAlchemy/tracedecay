@@ -274,7 +274,7 @@ fn admission() -> WorkflowAdmissionSnapshot {
 }
 
 fn attach(store: &RegisteredWorkflowStore) -> WorkflowSqliteAuthority {
-    WorkflowSqliteAuthority::from_registered(store.storage().clone())
+    WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql())
         .expect("attach workflow authority")
 }
 

@@ -12,7 +12,7 @@ impl HostAdmissionTestRuntimeV1 {
         crate::daemon::lcm_effects::DaemonLcmEffectService::new(
             self.project_registered
                 .clone()
-                .unwrap_or_else(|| Arc::clone(&self.profile_registered)),
+                .unwrap_or_else(|| self.profile_registered.clone()),
             None,
             None,
         )
@@ -216,7 +216,7 @@ impl HostAdmissionTestRuntimeV1 {
         crate::daemon::lcm_effects::DaemonLcmEffectService::new(
             self.project_registered
                 .clone()
-                .unwrap_or_else(|| Arc::clone(&self.profile_registered)),
+                .unwrap_or_else(|| self.profile_registered.clone()),
             None,
             None,
         )

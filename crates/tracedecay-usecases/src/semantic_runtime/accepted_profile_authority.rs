@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -13,7 +12,7 @@ use super::SemanticRuntimeFuture;
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalRuntimeCompatibilityV1,
 };
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_search_eval::semantic_native::SemanticNativeStageResultV1;
 use tracedecay_search_eval::{
@@ -66,14 +65,14 @@ pub trait SemanticAcceptedProfileAuthorityPortV1 {
 
 #[derive(Clone)]
 pub struct RegisteredSemanticAcceptedProfileAuthorityV1 {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 }
 
 impl RegisteredSemanticAcceptedProfileAuthorityV1 {
     /// The accepted-profile tables are part of the canonical configuration
     /// schema, provisioned and shape-validated at registered database
     /// admission, so construction performs no schema work.
-    pub fn new(database: Arc<RegisteredGlobalDb>) -> Self {
+    pub fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self { database }
     }
 
@@ -789,7 +788,7 @@ mod tests {
             .await
             .unwrap();
         let database = runtime.profile_database_arc();
-        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::new(Arc::clone(&database));
+        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::new(database.clone());
 
         let transaction = database.begin_write_transaction().await.unwrap();
         let original_key = ensure_validation_receipt_key(&transaction).await.unwrap();
@@ -834,7 +833,7 @@ mod tests {
         assert_eq!(remounted_key.as_slice(), original_key.as_slice());
         drop(snapshot);
 
-        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::new(Arc::clone(&remounted));
+        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::new(remounted.clone());
         assert_eq!(
             authority.resolve_record(&profile_digest).await,
             Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)

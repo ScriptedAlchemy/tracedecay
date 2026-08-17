@@ -2,7 +2,7 @@ use crate::tests::harness::RegisteredGlobalDbHarness;
 
 async fn pinned_wal_reader() -> (
     RegisteredGlobalDbHarness,
-    tracedecay_runtime_core::db::engine::ReadSnapshot,
+    tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
 ) {
     let harness = RegisteredGlobalDbHarness::open("pinned-wal-reader").await;
     harness

@@ -520,4 +520,3 @@ fn handoff_evidence(
         payload: Some(result),
     }))
 }
-

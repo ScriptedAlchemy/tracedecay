@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
@@ -255,20 +255,20 @@ pub struct McpServer {
     /// User-level database tracking all projects (best-effort). Wrapped in
     /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
     /// the handle instead of opening a new connection per call.
-    global_db: Option<Arc<RegisteredGlobalDb>>,
+    global_db: Option<RegisteredGlobalDbLeaseV1>,
     profile_root: Option<PathBuf>,
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     profile_retained_authority:
         Option<crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
-    accounting_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    accounting_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
     /// Authoritative project session store retained for startup recovery.
     /// Recovery borrows this handle and never discovers or opens another DB.
-    session_db: Option<Arc<RegisteredGlobalDb>>,
+    session_db: Option<RegisteredGlobalDbLeaseV1>,
     /// Daemon-owned user-scope session store. All project servers borrow this
     /// shared authority instead of reopening `user-sessions.db` per tool call.
-    user_session_db: Option<Arc<RegisteredGlobalDb>>,
-    registered_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
-    registered_user_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    user_session_db: Option<RegisteredGlobalDbLeaseV1>,
+    registered_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
+    registered_user_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
     /// Daemon-retained admission queue for non-replayable project host events.
     /// Direct servers do not create an independent spool authority.
     host_admission_broker: Option<tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
@@ -294,7 +294,7 @@ pub struct McpServer {
     /// Registry used for project-selector reads. This remains available even
     /// when global accounting is disabled so daemon clients do not fall back
     /// to the daemon process profile for selector resolution.
-    registry_db: Option<Arc<RegisteredGlobalDb>>,
+    registry_db: Option<RegisteredGlobalDbLeaseV1>,
     /// Registry-read service handed to MCP handlers so they read registered
     /// projects through a port instead of holding [`Self::registry_db`].
     project_registry_reads: Option<Arc<dyn ProjectRegistryReadPort>>,
@@ -532,8 +532,8 @@ impl McpServer {
     pub(crate) async fn new_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        global_db: Option<Arc<RegisteredGlobalDb>>,
-        registry_db: Option<Arc<RegisteredGlobalDb>>,
+        global_db: Option<RegisteredGlobalDbLeaseV1>,
+        registry_db: Option<RegisteredGlobalDbLeaseV1>,
         use_default_profile_root: bool,
     ) -> Arc<Self> {
         let profile_root = use_default_profile_root
@@ -708,8 +708,8 @@ impl McpServer {
         cg: TraceDecay,
         scope_prefix: Option<String>,
         profile_root: Option<PathBuf>,
-        global_db: Option<Arc<RegisteredGlobalDb>>,
-        registry_db: Option<Arc<RegisteredGlobalDb>>,
+        global_db: Option<RegisteredGlobalDbLeaseV1>,
+        registry_db: Option<RegisteredGlobalDbLeaseV1>,
     ) -> McpServerConstructionContext {
         let user_session_db = None;
         let session_db = None;
@@ -853,13 +853,13 @@ impl McpServer {
             .zip(active_project_id.clone())
             .map(|((database, wake), project_id)| {
                 Arc::new(DaemonSessionRefreshService::new(
-                    Arc::clone(database),
+                    database.clone(),
                     wake.clone(),
                     Some(project_id),
                 )) as Arc<dyn SessionRefreshServicePort>
             });
         let project_registry_reads = registry_db.as_ref().map(|registry| {
-            Arc::new(DaemonProjectRegistryReadService::new(Arc::clone(registry)))
+            Arc::new(DaemonProjectRegistryReadService::new(registry.clone()))
                 as Arc<dyn ProjectRegistryReadPort>
         });
         let project_application_retrieval = session_db
@@ -870,14 +870,14 @@ impl McpServer {
                 let service = match registered_session_db.as_ref() {
                     Some(registered) => {
                     crate::daemon::session_retrieval::DaemonSessionRetrievalService::new_registered(
-                        Arc::clone(database),
-                        Arc::clone(registered),
+                        database.clone(),
+                        registered.clone(),
                         root,
                         project_session_refresh_wake.clone(),
                     )
                     }
                     None => crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
-                        Arc::clone(database),
+                        database.clone(),
                         root,
                         project_session_refresh_wake.clone(),
                     ),
@@ -895,7 +895,7 @@ impl McpServer {
             .zip(registered_session_db.as_ref())
             .and_then(|(root, database)| {
                 crate::daemon::lcm_authority::mount_registered_lcm_authority(
-                    Arc::clone(database),
+                    database.clone(),
                     root.identity().clone(),
                     root.expected_runtime_shard()?,
                 )
@@ -905,7 +905,7 @@ impl McpServer {
             .zip(registered_user_session_db.as_ref())
             .and_then(|(root, database)| {
                 crate::daemon::lcm_authority::mount_registered_lcm_authority(
-                    Arc::clone(database),
+                    database.clone(),
                     root.identity().clone(),
                     root.expected_runtime_shard()?,
                 )
@@ -1154,7 +1154,7 @@ impl McpServer {
             .await
     }
 
-    pub(crate) fn project_session_db(&self) -> Option<Arc<RegisteredGlobalDb>> {
+    pub(crate) fn project_session_db(&self) -> Option<RegisteredGlobalDbLeaseV1> {
         self.session_db.clone()
     }
 
@@ -1210,7 +1210,7 @@ impl McpServer {
         configuration_digest: tracedecay_domain::ManifestDigest,
     ) -> Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>> {
         let project_workflow_index = self.registered_session_db.as_ref().map(|database| {
-            Arc::new(DaemonWorkflowIndexReadService::new(Arc::clone(database)))
+            Arc::new(DaemonWorkflowIndexReadService::new(database.clone()))
                 as Arc<dyn tracedecay_sessions::WorkflowIndexReadPort>
         });
         crate::daemon::retained_owner::retained_surface_ports(

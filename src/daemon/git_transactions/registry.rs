@@ -11,9 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use tracedecay_store::{GitIndexTransactionStoreError, GitIndexTransactionStoreResult};
 
-#[cfg(test)]
-use crate::db::engine::TestConnection;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 
 use super::DaemonGitIndexTransactionStore;
 use super::SharedDaemonGitIndexTransactionStore;
@@ -31,7 +29,7 @@ impl GitIndexTransactionStoreRegistry {
     /// Returns the existing actor for `database`, or opens exactly one.
     pub(crate) fn ensure(
         &self,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> GitIndexTransactionStoreResult<SharedDaemonGitIndexTransactionStore> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(GitIndexTransactionStoreError::Unavailable);
@@ -66,34 +64,6 @@ impl GitIndexTransactionStoreRegistry {
             .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
         stores.remove(path);
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn ensure_engine_test(
-        &self,
-        path: PathBuf,
-    ) -> GitIndexTransactionStoreResult<SharedDaemonGitIndexTransactionStore> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(GitIndexTransactionStoreError::Unavailable);
-        }
-        let path = path
-            .canonicalize()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-        let mut stores = self
-            .stores
-            .lock()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(GitIndexTransactionStoreError::Unavailable);
-        }
-        if let Some(existing) = stores.get(&path) {
-            return Ok(existing.clone());
-        }
-        let store = SharedDaemonGitIndexTransactionStore::from_arc(Arc::new(
-            DaemonGitIndexTransactionStore::open_engine_test(TestConnection::open(&path))?,
-        ));
-        stores.insert(path, store.clone());
-        Ok(store)
     }
 
     pub(crate) async fn shutdown_all(&self) -> GitIndexTransactionStoreResult<usize> {

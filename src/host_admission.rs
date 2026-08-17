@@ -15,11 +15,13 @@ use tracedecay_usecases::host_admission::{
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::support::weak_registry::WeakRegistry;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
+#[cfg(test)]
+use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_store::StoreShardScopeV1;
 
@@ -82,9 +84,9 @@ pub struct HostAdmissionTestRuntimeV1 {
     profile_id: UserProfileId,
     profile_root: PathBuf,
     project_id: Option<ProjectId>,
-    profile_database: Arc<RegisteredGlobalDb>,
-    profile_registered: Arc<RegisteredGlobalDb>,
-    project_registered: Option<Arc<RegisteredGlobalDb>>,
+    profile_database: RegisteredGlobalDbLeaseV1,
+    profile_registered: RegisteredGlobalDbLeaseV1,
+    project_registered: Option<RegisteredGlobalDbLeaseV1>,
     session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     _database_scope: DaemonDatabaseScope,
 }
@@ -140,19 +142,19 @@ impl HostAdmissionTestRuntimeV1 {
             .await?;
         // The shared registry caches project mounts, so a project that was
         // mounted before (opened, dropped, reopened while a sibling keeps the
-        // registry alive) already carries its graph runtime; only a first
+        // registry alive) already carries its weak graph proxy; only a first
         // mount binds one.
         if registered.project_graph_runtime().is_none() {
             let project_database = self
                 .session_registry
                 .project_memory(project_id.clone(), [project_root.to_path_buf()])
                 .await?;
-            let graph_runtime = verified_graph_test_support::bound_graph_runtime(
+            let graph_proxy = verified_graph_test_support::bound_graph_runtime(
                 &project_database,
                 "bind sibling test runtime project graph",
             )?;
             registered
-                .bind_project_graph_runtime(graph_runtime)
+                .bind_project_graph_runtime(graph_proxy)
                 .map_err(|_| TraceDecayError::Database {
                     operation: "bind sibling test runtime project graph".to_owned(),
                     message: "project graph runtime was already mounted for project sessions"
@@ -177,8 +179,8 @@ impl HostAdmissionTestRuntimeV1 {
             profile_id: self.profile_id.clone(),
             profile_root: self.profile_root.clone(),
             project_id: Some(project_id),
-            profile_database: Arc::clone(&self.profile_database),
-            profile_registered: Arc::clone(&self.profile_registered),
+            profile_database: self.profile_database.clone(),
+            profile_registered: self.profile_registered.clone(),
             project_registered: Some(registered),
             session_registry: Arc::clone(&self.session_registry),
             _database_scope: database_scope,
@@ -220,24 +222,24 @@ impl HostAdmissionTestRuntimeV1 {
             let registered = session_registry
                 .project_sessions(project_id.clone(), [project_root.clone()])
                 .await?;
-            // Production project open binds the retained project graph
-            // runtime to the registered project-sessions authority before
+            // Production project open binds a weak project graph proxy to
+            // the registered project-sessions authority before
             // any ingest runs; persist-time git-evidence publication
             // requires that mount, so the canonical test runtime provides
             // the same composition. The shared registry caches project
             // mounts, so a project reopened while its profile registry stays
-            // live already carries its graph runtime; only a first mount
+            // live already carries its weak graph proxy; only a first mount
             // binds one.
             if registered.project_graph_runtime().is_none() {
                 let project_database = session_registry
                     .project_memory(project_id.clone(), [project_root])
                     .await?;
-                let graph_runtime = verified_graph_test_support::bound_graph_runtime(
+                let graph_proxy = verified_graph_test_support::bound_graph_runtime(
                     &project_database,
                     "bind test runtime project graph",
                 )?;
                 registered
-                    .bind_project_graph_runtime(graph_runtime)
+                    .bind_project_graph_runtime(graph_proxy)
                     .map_err(|_| TraceDecayError::Database {
                         operation: "bind test runtime project graph".to_owned(),
                         message: "project graph runtime was already mounted for project sessions"
@@ -297,10 +299,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub(crate) fn registered_database_arc(
         &self,
         scope: HostAdmissionScope,
-    ) -> Option<Arc<RegisteredGlobalDb>> {
+    ) -> Option<RegisteredGlobalDbLeaseV1> {
         match scope {
             HostAdmissionScope::Project => self.project_registered.clone(),
-            HostAdmissionScope::Profile => Some(Arc::clone(&self.profile_registered)),
+            HostAdmissionScope::Profile => Some(self.profile_registered.clone()),
         }
     }
 
@@ -308,14 +310,11 @@ impl HostAdmissionTestRuntimeV1 {
     pub(crate) async fn read_snapshot(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::db::engine::Result<
-        tracedecay_runtime_core::db::engine::ReadSnapshot,
-    > {
+    ) -> Result<DatabaseEngineReadSnapshot> {
         self.registered_database(scope)
-            .ok_or_else(|| {
-                tracedecay_runtime_core::db::engine::Error::invalid_operation(
-                    "registered session test runtime unavailable",
-                )
+            .ok_or_else(|| TraceDecayError::Database {
+                operation: "open registered session test snapshot".to_owned(),
+                message: "registered session test runtime unavailable".to_owned(),
             })?
             .read_snapshot()
             .await
@@ -367,14 +366,11 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn observation_store(
         &self,
         scope: HostAdmissionScope,
-    ) -> std::result::Result<crate::store::GlobalDbObservationStore<'_>, HostAdmissionOutcome> {
+    ) -> std::result::Result<crate::store::GlobalDbObservationStore, HostAdmissionOutcome> {
         let database = self
             .registered_database(scope)
             .ok_or_else(registered_authority_unavailable_outcome)?;
-        Ok(crate::store::GlobalDbObservationStore::with_runtime(
-            database.runtime(),
-            database.authority(),
-        ))
+        Ok(database.observation_store())
     }
 
     #[doc(hidden)]
@@ -834,13 +830,13 @@ impl HostAdmissionTestRuntimeV1 {
                     operation: "bind MCP test project sessions".to_owned(),
                     message: "registered ProjectSessions mount is unavailable".to_owned(),
                 })?;
-        let profile_database = Arc::clone(&self.profile_database);
-        let profile_sessions = Arc::clone(&self.profile_registered);
+        let profile_database = self.profile_database.clone();
+        let profile_sessions = self.profile_registered.clone();
         let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
         let mut context =
             crate::mcp::server::McpServerConstructionContext::direct(cg, scope_prefix)
                 .with_direct_databases(
-                    Some(Arc::clone(&profile_database)),
+                    Some(profile_database.clone()),
                     Some(profile_database),
                     Some(project_sessions),
                     Some(profile_sessions),
@@ -894,7 +890,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[cfg(test)]
-    fn project_configuration_database_for_test(&self) -> Result<Arc<RegisteredGlobalDb>> {
+    fn project_configuration_database_for_test(&self) -> Result<RegisteredGlobalDbLeaseV1> {
         self.project_registered
             .clone()
             .ok_or_else(|| TraceDecayError::Database {
@@ -975,7 +971,7 @@ impl HostAdmissionTestRuntimeV1 {
             open_options,
             store_layout,
             project_database,
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             Arc::clone(&self.session_registry),
         )
         .await
@@ -996,7 +992,7 @@ impl HostAdmissionTestRuntimeV1 {
             open_options,
             store_layout,
             project_database,
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             Arc::clone(&self.session_registry),
         )
         .await
@@ -1040,7 +1036,7 @@ impl HostAdmissionTestRuntimeV1 {
             open_options,
             store_layout,
             project_database,
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             Arc::clone(&self.session_registry),
         )
         .await
@@ -1061,7 +1057,7 @@ impl HostAdmissionTestRuntimeV1 {
             open_options,
             store_layout,
             project_database,
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             Arc::clone(&self.session_registry),
         )
         .await
@@ -1073,7 +1069,7 @@ impl HostAdmissionTestRuntimeV1 {
         open_options: &TraceDecayOpenOptions,
     ) -> Result<(
         tracedecay_runtime_core::storage::StoreLayout,
-        Arc<RegisteredGlobalDb>,
+        RegisteredGlobalDbLeaseV1,
     )> {
         let project_id = self
             .project_id

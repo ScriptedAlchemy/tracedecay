@@ -10,11 +10,11 @@ use tracedecay_store::{
 };
 
 use crate::RegisteredGlobalDb;
-#[cfg(any(test, feature = "test-helpers"))]
-use tracedecay_runtime_core::db::engine::Connection;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
-use crate::git_index_transactions::database::{GitMutationDatabase, GitMutationWriteTransaction};
+use crate::git_index_transactions::database::{
+    GitMutationDatabase, GitMutationReadSnapshot, GitMutationWriteTransaction,
+};
 
 /// Async canonical-store adapter for native integration transaction state.
 ///
@@ -31,13 +31,6 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
         Self {
             db: GitMutationDatabase::Registered(db),
-        }
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub const fn for_engine_test(db: &'db Connection) -> Self {
-        Self {
-            db: GitMutationDatabase::Engine(db),
         }
     }
 
@@ -371,7 +364,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
 
     pub(super) async fn read_snapshot(
         &self,
-    ) -> NativeIntegrationStoreResult<tracedecay_runtime_core::db::engine::ReadSnapshot> {
+    ) -> NativeIntegrationStoreResult<GitMutationReadSnapshot> {
         self.db.read_snapshot().await.map_err(unavailable)
     }
 }

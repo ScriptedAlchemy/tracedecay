@@ -831,13 +831,8 @@ impl<'a> HostAdmissionFacade<'a> {
         } = &outcome
         {
             let projection = crate::external_source_store::RuntimeExternalSourceStore::new(
-                database.runtime().clone(),
-                database.authority().clone(),
+                database.runtime_client(),
             )
-            .map_err(|error| {
-                tracing::warn!(%error, "registered external-source adapter is unavailable");
-                HostAdmissionOutcome::registered_authority_unavailable()
-            })?
             .capture_host_observation(persisted.receipt())
             .await
             .map_err(|error| {
@@ -890,7 +885,7 @@ impl<'a> HostAdmissionFacade<'a> {
         &self,
         provider: &str,
         scope: &ObservationScopeV1,
-    ) -> Result<ObservationApplication<GlobalDbObservationStore<'a>>, HostAdmissionOutcome> {
+    ) -> Result<ObservationApplication<GlobalDbObservationStore>, HostAdmissionOutcome> {
         let store = self.store(provider, scope)?;
         let sanitizer = RecordSanitizerV1::observation_v1().map_err(|_| {
             HostAdmissionOutcome::new(
@@ -906,7 +901,7 @@ impl<'a> HostAdmissionFacade<'a> {
         &self,
         provider: &str,
         scope: &ObservationScopeV1,
-    ) -> Result<GlobalDbObservationStore<'a>, HostAdmissionOutcome> {
+    ) -> Result<GlobalDbObservationStore, HostAdmissionOutcome> {
         self.authorities.validate_scope(scope)?;
         let scope = host_scope(scope);
         let probe = self.probe(provider, scope);
@@ -914,10 +909,7 @@ impl<'a> HostAdmissionFacade<'a> {
             return Err(probe);
         }
         match self.authorities.registered_database(scope)? {
-            Some(database) => Ok(GlobalDbObservationStore::with_runtime(
-                database.runtime(),
-                database.authority(),
-            )),
+            Some(database) => Ok(database.observation_store()),
             None => Err(HostAdmissionOutcome::registered_authority_unavailable()),
         }
     }

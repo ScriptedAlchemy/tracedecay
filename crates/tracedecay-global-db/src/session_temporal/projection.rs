@@ -27,8 +27,8 @@ pub(super) use persist::{
     persist_session_temporal_projection_batch_in_transaction,
     seed_active_projection_in_transaction, session_temporal_projection_record_count,
 };
-pub use receipts::record_canonical_observation_effect;
 pub(in crate::session_temporal) use receipts::digest_bytes;
+pub use receipts::record_canonical_observation_effect;
 pub(super) use receipts::validate_final_projection_receipt;
 
 const DISCOVER_REFRESH: &str = "discover session temporal refresh";

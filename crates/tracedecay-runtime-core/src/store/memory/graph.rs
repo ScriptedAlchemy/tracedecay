@@ -96,9 +96,7 @@ pub(super) async fn project_memory_graph(
     let fact_runtime =
         super::runtime::retained_fact_runtime(db)?.ok_or(FactStoreError::GraphUnavailable)?;
     super::runtime::validate_owner_binding(fact_runtime.binding(), &owner, OPERATION)?;
-    let runtime = db
-        .memory_graph_runtime()
-        .ok_or(FactStoreError::GraphUnavailable)?;
+    let runtime = issue_memory_graph_operation(db)?;
     let namespace = namespace(&owner)?;
     let projection =
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?;
@@ -115,11 +113,12 @@ pub(super) async fn project_memory_graph(
     )?;
     let expected_generation = expected_manifest.generation;
     ensure_source_read_active(Some(read_control))?;
-    let runtime_for_read = Arc::clone(&runtime);
     let control_for_snapshot = read_control.clone();
     let projection_for_snapshot = projection_identity.clone();
     let verified_snapshot = tokio::task::spawn_blocking(move || {
-        runtime_for_read.verified_snapshot(&projection_for_snapshot, control_for_snapshot)
+        runtime
+            .runtime()
+            .verified_snapshot(&projection_for_snapshot, control_for_snapshot)
     })
     .await
     .map_err(|error| storage_error(OPERATION, error))?
@@ -261,7 +260,7 @@ pub(super) async fn project_memory_graph(
 pub(super) fn schedule_project_memory_graph_reconciliation(
     db: Database,
 ) -> super::ProjectMemoryGraphReconciliationScheduleV1 {
-    if db.memory_graph_runtime().is_none() {
+    if db.issue_memory_graph_runtime_operation().is_err() {
         return super::ProjectMemoryGraphReconciliationScheduleV1::NotMounted;
     }
     match db.schedule_memory_graph_reconciliation(|weak_db| async move {
@@ -285,6 +284,9 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
         crate::db::MemoryGraphReconciliationTaskScheduleV1::AlreadyScheduled => {
             super::ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled
         }
+        crate::db::MemoryGraphReconciliationTaskScheduleV1::Retiring => {
+            super::ProjectMemoryGraphReconciliationScheduleV1::Retiring
+        }
         crate::db::MemoryGraphReconciliationTaskScheduleV1::Closed => {
             super::ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
         }
@@ -301,9 +303,6 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
             )
         })?;
     let owner = bound_owner(db)?;
-    let runtime = db
-        .memory_graph_runtime()
-        .ok_or(FactStoreError::GraphUnavailable)?;
     let fact_runtime =
         super::runtime::retained_fact_runtime(db)?.ok_or(FactStoreError::GraphUnavailable)?;
     super::runtime::validate_owner_binding(fact_runtime.binding(), &owner, OPERATION)?;
@@ -326,9 +325,11 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
                 format!("project memory reconciliation telemetry overflowed: {counter}"),
             )
         })?;
-    let runtime_for_reconciliation = Arc::clone(&runtime);
+    let runtime = issue_memory_graph_operation(db)?;
     let snapshot = match tokio::task::spawn_blocking(move || {
-        runtime_for_reconciliation.reconcile_verified_manifest(&manifest, idempotency_key)
+        runtime
+            .runtime()
+            .reconcile_verified_manifest(&manifest, idempotency_key)
     })
     .await
     .map_err(|error| storage_error(OPERATION, error))?
@@ -337,13 +338,8 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
         Err(error) => {
             let mapped = graph_error(&owner, error);
             if matches!(mapped, FactStoreError::GraphConflict)
-                && verified_head_matches_expected(
-                    &runtime,
-                    &projection,
-                    &expected_generation,
-                    &owner,
-                )
-                .await?
+                && verified_head_matches_expected(db, &projection, &expected_generation, &owner)
+                    .await?
             {
                 return finish_reconciliation_watermark(db, &owner, watermark).await;
             }
@@ -351,9 +347,7 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
         }
     };
     if snapshot.projection() != &projection || snapshot.generation() != &expected_generation {
-        if verified_head_matches_expected(&runtime, &projection, &expected_generation, &owner)
-            .await?
-        {
+        if verified_head_matches_expected(db, &projection, &expected_generation, &owner).await? {
             return finish_reconciliation_watermark(db, &owner, watermark).await;
         }
         return Err(FactStoreError::GraphConflict);
@@ -375,15 +369,15 @@ async fn finish_reconciliation_watermark(
 }
 
 async fn verified_head_matches_expected(
-    runtime: &Arc<dyn crate::store_runtime::VerifiedGraphRuntimePortV1>,
+    db: &Database,
     projection: &GraphProjectionIdentity,
     expected_generation: &tracedecay_graph_db::GraphGenerationId,
     owner: &FactOwnerV1,
 ) -> FactStoreResult<bool> {
-    let runtime = Arc::clone(runtime);
+    let runtime = issue_memory_graph_operation(db)?;
     let projection_for_read = projection.clone();
     let snapshot = tokio::task::spawn_blocking(move || {
-        runtime.verified_snapshot(
+        runtime.runtime().verified_snapshot(
             &projection_for_read,
             FactReadControl::new(Arc::new(|| false)),
         )
@@ -394,6 +388,13 @@ async fn verified_head_matches_expected(
     Ok(snapshot.is_some_and(|snapshot| {
         snapshot.projection() == projection && snapshot.generation() == expected_generation
     }))
+}
+
+fn issue_memory_graph_operation(
+    db: &Database,
+) -> FactStoreResult<crate::db::MemoryGraphRuntimeOperationV1> {
+    db.issue_memory_graph_runtime_operation()
+        .map_err(|_| FactStoreError::GraphUnavailable)
 }
 
 pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
@@ -410,7 +411,7 @@ pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
 }
 
 fn bound_owner(db: &Database) -> FactStoreResult<FactOwnerV1> {
-    match &db.retained_runtime().binding().shard_id.scope {
+    match &db.registered_binding().shard_id.scope {
         StoreShardScopeV1::ProfileMemory => Ok(FactOwnerV1::Profile),
         StoreShardScopeV1::Project { project_id } => Ok(FactOwnerV1::Project {
             project_id: project_id.clone(),

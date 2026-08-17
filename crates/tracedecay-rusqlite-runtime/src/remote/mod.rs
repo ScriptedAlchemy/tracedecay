@@ -36,6 +36,7 @@ use tracedecay_store::StoreRuntimeBindingV1;
 use crate::exact_sql::{
     ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlValue,
 };
+use crate::repository::RetainedExactSqlCapability;
 use tracedecay_application::{
     OperationBudgetUsage,
     remote::replay::{
@@ -142,39 +143,40 @@ impl Default for RemoteSpoolLimitsV1 {
 
 #[derive(Clone)]
 pub struct RemoteSqliteStorageV1 {
-    handle: ExactSqlHandle,
+    retained: RetainedExactSqlCapability,
     binding: StoreRuntimeBindingV1,
     keyring: Arc<dyn RemoteSpoolKeyringV1>,
     limits: RemoteSpoolLimitsV1,
 }
 
 impl RemoteSqliteStorageV1 {
-    pub fn from_registered(
-        handle: ExactSqlHandle,
-        binding: StoreRuntimeBindingV1,
+    /// Attaches remote-node storage to one retained, write-authorized runtime.
+    ///
+    /// The sealed capability keeps the issuing client token alive and never
+    /// exposes its exact SQL handle to a remote-storage caller.
+    pub fn from_retained_exact_sql(
+        retained: RetainedExactSqlCapability,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
     ) -> Result<Self, RemoteSqliteStorageErrorV1> {
-        Self::from_registered_with_limits(handle, binding, keyring, RemoteSpoolLimitsV1::default())
+        Self::from_retained_exact_sql_with_limits(retained, keyring, RemoteSpoolLimitsV1::default())
     }
 
-    pub fn from_registered_with_limits(
-        handle: ExactSqlHandle,
-        binding: StoreRuntimeBindingV1,
+    pub fn from_retained_exact_sql_with_limits(
+        retained: RetainedExactSqlCapability,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
         limits: RemoteSpoolLimitsV1,
     ) -> Result<Self, RemoteSqliteStorageErrorV1> {
-        if handle.binding() != &binding
-            || !matches!(
-                binding.shard_id.scope,
-                tracedecay_store::StoreShardScopeV1::RemoteNode { .. }
-            )
-        {
+        let binding = retained.handle().binding().clone();
+        if !matches!(
+            binding.shard_id.scope,
+            tracedecay_store::StoreShardScopeV1::RemoteNode { .. }
+        ) {
             return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
         }
-        validate_final_schema(&handle)?;
-        bind_node_identity(&handle, &binding)?;
+        validate_final_schema(retained.handle())?;
+        bind_node_identity(retained.handle(), &binding)?;
         Ok(Self {
-            handle,
+            retained,
             binding,
             keyring,
             limits,
@@ -186,30 +188,30 @@ impl RemoteSqliteStorageV1 {
     #[must_use]
     pub fn with_keyring(&self, keyring: Arc<dyn RemoteSpoolKeyringV1>) -> Self {
         Self {
-            handle: self.handle.clone(),
+            retained: self.retained.clone(),
             binding: self.binding.clone(),
             keyring,
             limits: self.limits,
         }
     }
 
-    pub fn provision_registered(
-        handle: ExactSqlHandle,
-        binding: StoreRuntimeBindingV1,
+    /// Attaches a newly mounted remote-node runtime and seeds its singleton
+    /// node identity after final-schema admission.
+    pub fn provision_retained_exact_sql(
+        retained: RetainedExactSqlCapability,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
     ) -> Result<Self, RemoteSqliteStorageErrorV1> {
-        if handle.binding() != &binding
-            || !matches!(
-                binding.shard_id.scope,
-                tracedecay_store::StoreShardScopeV1::RemoteNode { .. }
-            )
-        {
+        let binding = retained.handle().binding().clone();
+        if !matches!(
+            binding.shard_id.scope,
+            tracedecay_store::StoreShardScopeV1::RemoteNode { .. }
+        ) {
             return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
         }
-        validate_final_schema(&handle)?;
-        provision_node_identity(&handle, &binding)?;
+        validate_final_schema(retained.handle())?;
+        provision_node_identity(retained.handle(), &binding)?;
         Ok(Self {
-            handle,
+            retained,
             binding,
             keyring,
             limits: RemoteSpoolLimitsV1::default(),
@@ -218,6 +220,10 @@ impl RemoteSqliteStorageV1 {
 
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
+    }
+
+    fn handle(&self) -> &ExactSqlHandle {
+        self.retained.handle()
     }
 
     pub fn publish_authority(
@@ -246,7 +252,7 @@ impl RemoteSqliteStorageV1 {
             serde_json::to_string(state).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let writer_json =
             serde_json::to_string(writer).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        self.handle.execute(ExactSqlStatement::new(
+        self.handle().execute(ExactSqlStatement::new(
             "INSERT INTO remote_authorities (
                     brain_id, runtime_binding_json, authority_state_json, writer_json, updated_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -280,7 +286,7 @@ impl RemoteSqliteStorageV1 {
             serde_json::to_string(grant).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let admission_json =
             serde_json::to_string(admission).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        let result = self.handle.execute(ExactSqlStatement::new(
+        let result = self.handle().execute(ExactSqlStatement::new(
             "INSERT INTO remote_enrollment_grants (
                 grant_id, credential_fingerprint, grant_json, admission_json, consumed_at
              ) VALUES (?1, ?2, ?3, ?4, NULL)
@@ -364,7 +370,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
         grant_id: &EntityId,
     ) -> Result<EnrollmentGrantV1, RemoteEnrollmentAuthorityErrorV1> {
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT grant_json, consumed_at
              FROM remote_enrollment_grants WHERE grant_id = ?1",
             vec![text(grant_id.as_str())],
@@ -383,7 +389,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
         grant_id: &EntityId,
     ) -> Result<RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentAuthorityErrorV1> {
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT admission_json, consumed_at
              FROM remote_enrollment_grants WHERE grant_id = ?1",
             vec![text(grant_id.as_str())],
@@ -405,7 +411,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
         consumed_at: UtcMicros,
     ) -> Result<RemoteEnrollmentCommitReceiptV1, RemoteEnrollmentAuthorityErrorV1> {
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::Unavailable)?;
         let rows = transaction
@@ -512,7 +518,7 @@ impl RemoteEnrollmentCredentialLookupPortV1 for RemoteSqliteStorageV1 {
         enrollment_id: &EntityId,
     ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1> {
         load_enrollment(
-            &self.handle,
+            self.handle(),
             "SELECT enrollment_json FROM remote_enrollments WHERE enrollment_id = ?1",
             vec![text(enrollment_id.as_str())],
         )
@@ -527,7 +533,7 @@ impl RemoteEnrollmentCredentialLookupPortV1 for RemoteSqliteStorageV1 {
         let revision = i64::try_from(revision)
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
         load_enrollment(
-            &self.handle,
+            self.handle(),
             "SELECT enrollment_json FROM remote_enrollments
              WHERE brain_id = ?1 AND node_id = ?2 AND revision = ?3",
             vec![
@@ -543,7 +549,7 @@ impl RemoteEnrollmentCredentialLookupPortV1 for RemoteSqliteStorageV1 {
         enrollment_id: &EntityId,
     ) -> Result<RemoteEnrollmentCommitReceiptV1, RemoteEnrollmentAuthorityErrorV1> {
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT commit_receipt_json FROM remote_enrollments WHERE enrollment_id = ?1",
             vec![text(enrollment_id.as_str())],
         )
@@ -559,13 +565,13 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
         &self,
         writer: &RemoteWriterAuthorityV1,
     ) -> Result<CurrentRemoteAuthorityStateV1, RemoteCapturePersistenceErrorV1> {
-        if promotion_pending(&self.handle, &writer.authority.fence)
+        if promotion_pending(self.handle(), &writer.authority.fence)
             .map_err(map_persistence_error)?
         {
             return Err(RemoteCapturePersistenceErrorV1::Unavailable);
         }
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT authority_state_json, runtime_binding_json
              FROM remote_authorities WHERE brain_id = ?1",
             vec![text(writer.authority.fence.brain_id.as_str())],
@@ -595,7 +601,7 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
         let sequence = i64::try_from(command.sequence.sequence)
             .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?;
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(map_persistence_error)?;
         if promotion_pending_in(&transaction, &command.writer.authority.fence)
@@ -670,7 +676,7 @@ impl RemoteSqliteStorageV1 {
             .load_replay_frame(event_id)
             .map_err(RemoteSqliteStorageErrorV1::from)?;
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT key_revision, nonce, ciphertext, frame_digest, state
              FROM remote_spool_frames WHERE event_id = ?1",
             vec![text(event_id)],
@@ -739,7 +745,7 @@ impl RemoteSqliteStorageV1 {
             return Err(RemoteFrameTransferErrorV1::InvalidFrame);
         }
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
         let existing = transaction
@@ -917,7 +923,7 @@ impl RemoteReplayFrameLookupPortV1 for RemoteSqliteStorageV1 {
         event_id: &str,
     ) -> Result<RemoteReplayFrameV1, RemoteCapturePersistenceErrorV1> {
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT key_revision, nonce, ciphertext, frame_digest
              FROM remote_spool_frames WHERE event_id = ?1",
             vec![text(event_id)],
@@ -952,7 +958,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
         event_id: &str,
     ) -> Result<RemoteReplaySpoolStateV1, RemoteCapturePersistenceErrorV1> {
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT state, receipt_json, last_attempt
              FROM remote_spool_frames WHERE event_id = ?1",
             vec![text(event_id)],
@@ -969,7 +975,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
             .validate()
             .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(map_persistence_error)?;
         let rows = transaction
@@ -1066,7 +1072,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Result<u64, RemoteCapturePersistenceErrorV1> {
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(map_persistence_error)?;
         let rows = transaction
@@ -1116,7 +1122,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
         replay_attempt: u64,
     ) -> Result<(), RemoteCapturePersistenceErrorV1> {
         let result = self
-            .handle
+            .handle()
             .execute(statement(
                 "UPDATE remote_spool_frames SET attempt_started_at = NULL
                  WHERE event_id = ?1 AND last_attempt = ?2 AND attempt_started_at IS NOT NULL",

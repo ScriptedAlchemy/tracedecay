@@ -148,7 +148,8 @@ impl ErlangExtractor {
     fn visit_fun_decl(state: &mut ExtractionState, node: TsNode<'_>) {
         // fun_decl contains one or more function_clause nodes.
         // The function name is in the first function_clause's `name` child.
-        let Some(first_clause) = crate::traversal::find_direct_child_by_kind(node, "function_clause")
+        let Some(first_clause) =
+            crate::traversal::find_direct_child_by_kind(node, "function_clause")
         else {
             return;
         };

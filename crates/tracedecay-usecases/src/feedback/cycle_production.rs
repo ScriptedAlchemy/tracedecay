@@ -63,7 +63,7 @@ use crate::config::analyzer::{configured_language_selection, resolved_analyzer_s
 use crate::configuration::ConfigurationCurrentStateV1;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::source_authorization::ProjectSourceAccessSnapshot;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_lsp::analyzer::broker::MountedLspProvider;
 
@@ -78,7 +78,7 @@ pub struct ProductionFeedbackCycleOpenV1 {
     pub requester: ActorId,
     pub authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort>,
     pub code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
-    pub project_runtime_db: Arc<RegisteredGlobalDb>,
+    pub project_runtime_db: RegisteredGlobalDbLeaseV1,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     pub document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
     pub code_index_identity:
@@ -347,7 +347,7 @@ pub async fn resolve_production_feedback_cycle_parts(
     })?;
     let proximity_evidence =
         crate::advisory::proximity_runtime::production_proximity_evidence_authority_v1(
-            Arc::clone(&input.project_runtime_db),
+            input.project_runtime_db.clone(),
             Arc::clone(&input.code_graph),
             feedback_scope.clone(),
             input.project_root.clone(),
@@ -359,9 +359,9 @@ pub async fn resolve_production_feedback_cycle_parts(
     let proximity_owner = open_proximity_runtime(
         feedback_scope.clone(),
         proximity_evidence,
-        OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(Arc::clone(
-            &input.project_runtime_db,
-        )),
+        OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
+            input.project_runtime_db.clone(),
+        ),
     )
     .ok_or(ApplicationContractError::Inconsistent {
         field: "project-open proximity runtime",

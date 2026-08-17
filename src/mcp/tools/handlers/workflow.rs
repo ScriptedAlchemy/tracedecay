@@ -392,7 +392,7 @@ async fn publish_parsed_compiler_diagnostics(
         return json!({ "status": "skipped", "reason": "configuration-identity-unavailable" });
     };
     let database = cg.dashboard_database_guard();
-    let store = DiagnosticsStore::new(database.conn());
+    let store = DiagnosticsStore::new(database.as_ref().clone());
     let outcome =
         crate::diagnostics_publication::publish_compiler_diagnostics_through_code_index_v1(
             &root,
@@ -750,7 +750,7 @@ async fn begin_test_run(
             .await
             .map(|identity| identity.generation_id().clone()),
         None => {
-            DiagnosticsQuery::new(database.conn())
+            DiagnosticsQuery::new(database.as_ref().clone())
                 .current_generation()
                 .await
                 .generation

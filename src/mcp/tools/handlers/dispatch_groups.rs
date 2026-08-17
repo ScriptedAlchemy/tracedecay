@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use serde_json::Value;
 use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, ResultContractRef, SafeDiagnostic,
@@ -9,7 +7,7 @@ use tracedecay_tool_catalog::BindingSurface;
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::daemon_client::InvocationCancellationPolicy;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -339,7 +337,7 @@ pub(super) async fn dispatch_info_tools(
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
     selected_scope_prefix: Option<&str>,
-    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    active_project_session_db: Option<&RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match tool_name {
@@ -349,7 +347,7 @@ pub(super) async fn dispatch_info_tools(
                 args,
                 server_stats,
                 scope_prefix,
-                active_project_session_db.map(Arc::as_ref),
+                active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                 options.code_index_freshness_reader.as_ref(),
             )
             .await
@@ -432,7 +430,7 @@ pub(super) async fn dispatch_admin_tools(
             hook_runtime::handle_hook_runtime(
                 cg,
                 args,
-                options.global_db.map(std::sync::Arc::as_ref),
+                options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                 options.accounting_db,
                 options.session_authorities,
             )
@@ -469,7 +467,7 @@ pub(super) async fn dispatch_admin_tools(
             admin_project::handle_admin_project(
                 cg,
                 args,
-                options.global_db.map(std::sync::Arc::as_ref),
+                options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                 options.automation_scheduler_reconciler,
                 deadline,
                 cancellation,
@@ -519,7 +517,7 @@ pub(super) async fn dispatch_analysis_tools(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
-    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    active_project_session_db: Option<&RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match tool_name {
@@ -602,7 +600,7 @@ pub(super) async fn dispatch_analysis_tools(
                 args,
                 options.diagnostics_cache,
                 options.diagnostics_lsp.as_deref(),
-                active_project_session_db.map(Arc::as_ref),
+                active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
             )
             .await
         }
@@ -757,7 +755,7 @@ pub(super) async fn dispatch_retained_application_tools(
     cg: &TraceDecay,
     mut args: Value,
     _scope_prefix: Option<&str>,
-    _active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    _active_project_session_db: Option<&RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     let retained_operation = super::retained_catalog::retained_mcp_operation(tool_name, &args)

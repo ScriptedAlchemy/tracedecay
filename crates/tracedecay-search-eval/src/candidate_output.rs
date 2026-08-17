@@ -490,7 +490,9 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
                 "candidate-output publication lock is poisoned".to_owned(),
             )
         })?;
-        Ok(active.get(scope).map(|generation| generation.as_ref().clone()))
+        Ok(active
+            .get(scope)
+            .map(|generation| generation.as_ref().clone()))
     }
 
     fn publish_atomically(

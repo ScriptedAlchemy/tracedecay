@@ -117,7 +117,7 @@ async fn try_mount(
         invocation,
         project_root,
         scope_grant,
-        Arc::clone(&state.session_db),
+        state.session_db.clone(),
         state.database.clone(),
         Arc::clone(&state.diagnostic_broker),
         &admitted_providers,

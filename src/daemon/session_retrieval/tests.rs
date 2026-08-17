@@ -203,10 +203,7 @@ async fn seed_real_page_fixture(
         payload,
     )
     .expect("durable observation");
-    let store = crate::global_db::GlobalDbObservationStore::with_runtime(
-        database.runtime(),
-        database.authority(),
-    );
+    let store = database.observation_store();
     let previous_cursor = store
         .get_source_cursor(observation.source(), observation.scope())
         .await

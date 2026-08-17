@@ -5,14 +5,13 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::PoisonError;
 
 use sha2::{Digest, Sha256};
 use tracedecay_application::RequestContext;
 use tracedecay_domain::ProjectId;
 
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::mcp::tools::{
     SessionRefreshCommand, SessionRefreshCoverageView, SessionRefreshFrontierView,
     SessionRefreshProgressView, SessionRefreshReceiptView, SessionRefreshServiceOutcome,
@@ -69,7 +68,7 @@ impl SessionRefreshSchedulerPort for DaemonSessionRefreshWake {
 }
 
 pub(crate) struct DaemonSessionRefreshService {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     wake: DaemonSessionRefreshWake,
     expected_project_id: Option<String>,
     handles: std::sync::Mutex<HashMap<String, SessionRefreshHandle>>,
@@ -83,7 +82,7 @@ enum SessionRefreshHandleLookup {
 
 impl DaemonSessionRefreshService {
     pub(crate) fn new(
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         wake: crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
         expected_project_id: Option<String>,
     ) -> Self {

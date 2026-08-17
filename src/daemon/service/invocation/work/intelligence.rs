@@ -136,7 +136,7 @@ pub(super) async fn experience(
         Err(_) => return unavailable(request_id),
     };
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
-        Arc::clone(&registered.database),
+        registered.database.clone(),
     );
     let current = match configuration.current().await {
         Ok(current) => current,

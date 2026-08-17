@@ -38,7 +38,7 @@ impl RemoteSqliteStorageV1 {
             .strip_prefix("sha256:")
             .ok_or(RemoteSqliteStorageErrorV1::Corruption)?
         );
-        let transaction = self.handle.begin_immediate()?;
+        let transaction = self.handle().begin_immediate()?;
         let lease = transaction.execute(ExactSqlStatement::new(
             "INSERT INTO remote_replay_recovery_lease (
                 singleton, lease_id, acquired_at, expires_at

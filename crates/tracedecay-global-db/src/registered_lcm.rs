@@ -70,6 +70,14 @@ impl Executor for RegisteredGlobalDbWriterConnection<'_> {
 }
 
 impl RegisteredGlobalDb {
+    async fn lcm_read_snapshot(
+        &self,
+    ) -> Result<tracedecay_runtime_core::db::DatabaseEngineReadSnapshot, LcmError> {
+        self.read_snapshot()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))
+    }
+
     fn lcm_storage_root(&self) -> Result<&Path, LcmError> {
         self.db_path()
             .parent()
@@ -89,7 +97,7 @@ impl RegisteredGlobalDb {
         &self,
         request: LcmDescribeRequest,
     ) -> Result<LcmDescribeResponse, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         query::describe(&snapshot, request).await
     }
 
@@ -97,7 +105,7 @@ impl RegisteredGlobalDb {
         &self,
         request: LcmExpandRequest,
     ) -> Result<LcmExpandResponse, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         query::expand(&snapshot, self.lcm_storage_root()?, request).await
     }
 
@@ -107,7 +115,7 @@ impl RegisteredGlobalDb {
         session_id: &str,
         node_id: &str,
     ) -> Result<LcmSummaryExpansion, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         dag::expand_summary_node(&snapshot, provider, session_id, node_id).await
     }
 
@@ -115,7 +123,7 @@ impl RegisteredGlobalDb {
         &self,
         request: LcmExpandQueryRequest,
     ) -> Result<LcmExpandQueryResponse, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         query::expand_query(&snapshot, request).await
     }
 
@@ -123,7 +131,7 @@ impl RegisteredGlobalDb {
         let git_scope_session_ids = self
             .git_scope_session_ids(&request.git_filter)
             .map_err(|error| LcmError::Db(error.to_string()))?;
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         query::grep(
             &snapshot,
             request,
@@ -137,7 +145,7 @@ impl RegisteredGlobalDb {
         &self,
         request: LcmLoadSessionRequest,
     ) -> Result<LcmLoadSessionPage, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         query::load_session(&snapshot, request).await
     }
 
@@ -146,12 +154,12 @@ impl RegisteredGlobalDb {
         provider: Option<&str>,
         limit: usize,
     ) -> Result<Vec<LcmRecentSession>, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         query::recent_sessions(&snapshot, provider, limit).await
     }
 
     pub async fn lcm_session_providers(&self, session_id: &str) -> Result<Vec<String>, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         query::session_providers(&snapshot, session_id).await
     }
 
@@ -159,7 +167,7 @@ impl RegisteredGlobalDb {
         &self,
         request: &LcmSessionReplayRequest,
     ) -> Result<LcmSessionReplaySlice, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         query::session_replay_slice(&snapshot, request).await
     }
 
@@ -172,7 +180,7 @@ impl RegisteredGlobalDb {
         provider: &str,
         message_id: &str,
     ) -> Result<Option<i64>, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         let mut rows = snapshot
             .query(
                 "SELECT store_id
@@ -195,7 +203,7 @@ impl RegisteredGlobalDb {
         deep: bool,
         gc_config: &LcmGcConfig,
     ) -> Result<LcmStatus, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         query::status(
             &snapshot,
             self.lcm_storage_root()?,
@@ -287,7 +295,7 @@ impl RegisteredGlobalDb {
         &self,
         request: LcmPreflightRequest,
     ) -> Result<LcmPreflightResponse, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         compression::preflight(&snapshot, request).await
     }
 
@@ -363,7 +371,7 @@ impl RegisteredGlobalDb {
         sample_limit: usize,
         cfg: &LcmGcConfig,
     ) -> Result<query::PayloadHealthDetail, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         query::payload_health_detail(
             &snapshot,
             storage_root,
@@ -384,7 +392,7 @@ impl RegisteredGlobalDb {
         cfg: &LcmGcConfig,
         now: i64,
     ) -> Result<LcmGcReport, LcmError> {
-        let snapshot = self.read_snapshot().await?;
+        let snapshot = self.lcm_read_snapshot().await?;
         gc::run_payload_gc(&snapshot, storage_root, provider, session_id, cfg, now).await
     }
 

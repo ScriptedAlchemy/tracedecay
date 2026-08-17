@@ -871,5 +871,4 @@ impl RegisteredGlobalDb {
             })
             .transpose()
     }
-
 }

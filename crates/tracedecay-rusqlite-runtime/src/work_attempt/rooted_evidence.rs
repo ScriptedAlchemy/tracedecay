@@ -18,7 +18,7 @@ impl WorkAttemptReceiptReadPortV1 for WorkSqliteStorage {
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkAttemptReceiptV1, WorkAttemptReceiptReadErrorV1> {
         let rows = registered_work_query(
-            &self.handle,
+            self.handle(),
             "SELECT attempt_payload, evidence_payload
              FROM work_attempts_v1
              WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3

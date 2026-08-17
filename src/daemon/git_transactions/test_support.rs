@@ -2,7 +2,6 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tempfile::TempDir;
 use tracedecay_application::{
     AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
@@ -31,7 +30,7 @@ use super::service::{
     NativeGitIndexApplyOutcomeV1, NativeGitIndexApplyResult,
 };
 use super::store::DaemonGitIndexTransactionStore;
-use crate::db::engine::TestConnection;
+use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
 
 pub(super) type TestPort = DaemonGitIndexTransactionPort<
     DaemonGitIndexTransactionStore,
@@ -41,7 +40,7 @@ pub(super) type TestPort = DaemonGitIndexTransactionPort<
 >;
 
 pub(super) struct TestHarness {
-    pub(super) _directory: TempDir,
+    pub(super) _database: RegisteredGlobalDbHarness,
     pub(super) port: TestPort,
     pub(super) preview: GitIndexPreviewV1,
     pub(super) request: GitIndexApplyRequestV1,
@@ -570,28 +569,15 @@ pub(super) fn execution_for(
     }
 }
 
-fn transaction_store(directory: &TempDir) -> DaemonGitIndexTransactionStore {
-    let path = directory.path().join("canonical-project.db");
-    let connection = TestConnection::open(&path);
+pub(super) fn test_store() -> (RegisteredGlobalDbHarness, DaemonGitIndexTransactionStore) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("schema runtime");
-    runtime.block_on(async {
-        let transaction = connection
-            .transaction_with_behavior(crate::db::engine::TransactionBehavior::Immediate)
-            .await
-            .expect("schema transaction");
-        crate::global_db::ensure_git_index_transaction_schema(&transaction)
-            .await
-            .expect("install final Git transaction schema");
-        transaction.commit().await.expect("commit final Git schema");
-    });
-    DaemonGitIndexTransactionStore::open_engine_test(connection).expect("canonical store actor")
-}
-
-pub(super) fn test_store(directory: &TempDir) -> DaemonGitIndexTransactionStore {
-    transaction_store(directory)
+        .expect("registered fixture runtime");
+    let database = runtime.block_on(RegisteredGlobalDbHarness::open("git-index-transaction"));
+    let store = DaemonGitIndexTransactionStore::open(database.registered.clone())
+        .expect("canonical registered store actor");
+    (database, store)
 }
 
 pub(super) fn test_port_from_preview(
@@ -599,8 +585,7 @@ pub(super) fn test_port_from_preview(
     native_modes: impl IntoIterator<Item = NativeMode>,
     recovery_modes: impl IntoIterator<Item = RecoveryMode>,
 ) -> TestHarness {
-    let directory = tempfile::tempdir().expect("store directory");
-    let store = transaction_store(&directory);
+    let (database, store) = test_store();
     let preview_template = preview_for_operation(operation, fixture_time(100));
     let authority_request = apply_request(&preview_template, "idempotency.transport");
     let preview_request = preview_request(&preview_template, &authority_request);
@@ -629,7 +614,7 @@ pub(super) fn test_port_from_preview(
         .preview;
     let request = apply_request(&preview, "idempotency.transport");
     TestHarness {
-        _directory: directory,
+        _database: database,
         port,
         preview,
         request,

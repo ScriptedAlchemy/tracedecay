@@ -6599,11 +6599,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     assert_eq!(parsed.len(), 1, "fixture cargo output must parse");
 
     let outcome = {
-        let writer = database
-            .writer_connection("publish compiler diagnostic fixture")
-            .await
-            .expect("diagnostics writer");
-        let store = DiagnosticsStore::new(writer.engine_connection());
+        let store = DiagnosticsStore::new(database.clone());
         publish_compiler_diagnostics_through_code_index_v1(
             fixture.path(),
             Some(&registry as &dyn CodeIndexPublicationIdentityPortV1),
@@ -6633,7 +6629,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     );
 
     let record = {
-        let store = DiagnosticsStore::new(database.conn());
+        let store = DiagnosticsStore::new(database.clone());
         store
             .current_records(&generation)
             .await
@@ -6861,7 +6857,7 @@ async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
     )
     .await
     .expect("open diagnostics database");
-    let store = DiagnosticsStore::new(database.conn());
+    let store = DiagnosticsStore::new(database.clone());
 
     let parsed = crate::diagnose::parse_cargo_output(
         "error[E0308]: mismatched types\n  --> src/lib.rs:1:1\n",

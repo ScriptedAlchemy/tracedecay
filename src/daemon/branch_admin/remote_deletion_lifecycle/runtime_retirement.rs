@@ -1,14 +1,12 @@
-use std::path::Path;
-use std::sync::Arc;
-
 use crate::errors::Result;
+use std::path::Path;
 
 use super::super::{StoreAdministration, remote_recovery_lifecycle};
 
 impl StoreAdministration {
     pub(super) async fn remote_deleted_project_roots(
         &self,
-        database: &Arc<crate::global_db::RegisteredGlobalDb>,
+        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
         profile_root: &Path,
         project_id: &str,
     ) -> Result<std::collections::BTreeSet<std::path::PathBuf>> {

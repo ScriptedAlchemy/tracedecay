@@ -202,7 +202,8 @@ async fn wait_for_reconciliation(database: &crate::db::Database) {
         .memory_graph_reconciliation_task_owner()
         .expect("mounted graph reconciliation owner");
     for _ in 0..4_096 {
-        if !owner.pending() && !owner.running() {
+        if let Ok(reservation) = owner.reserve_retirement() {
+            drop(reservation);
             return;
         }
         tokio::task::yield_now().await;

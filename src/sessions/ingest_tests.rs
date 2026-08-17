@@ -1,11 +1,8 @@
 use std::path::Path;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracedecay_domain::ProjectId;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::store::GlobalDbSessionIngestAuthority;
@@ -36,15 +33,15 @@ const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
 };
 
 struct IngestTestRuntime {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     _registry: DaemonSessionRuntimeRegistryV1,
     _scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
     _profile: tempfile::TempDir,
 }
 
 impl IngestTestRuntime {
-    fn authority(&self) -> GlobalDbSessionIngestAuthority<Arc<RegisteredGlobalDb>> {
-        GlobalDbSessionIngestAuthority::new(Arc::clone(&self.database))
+    fn authority(&self) -> GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1> {
+        GlobalDbSessionIngestAuthority::new(self.database.clone())
     }
 }
 

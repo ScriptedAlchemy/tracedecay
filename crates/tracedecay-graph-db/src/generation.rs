@@ -34,12 +34,12 @@ pub use identity::{
 };
 pub(crate) use recovered::recovered_generation_digest_from_database;
 pub(crate) use replay::InlineOnlyGraphGenerationManifestProvider;
+use replay::validate_sealed_replay;
 pub use replay::{
     GraphGenerationManifestProvider, GraphGenerationReplayMetadata, GraphGenerationReplaySource,
     GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
     SemanticVectorGenerationReplay,
 };
-use replay::validate_sealed_replay;
 pub(crate) use replay::{
     checked_decode_replay_source, metadata_manifest_from_replay, validate_metadata_binding,
     validate_supplied_manifest_binding,

@@ -46,6 +46,8 @@ use tracedecay_application::{
     Deadline, DisclosureClass, RequestContext, now_micros,
 };
 
+use super::maintenance::GuardedStoreTelemetryPort;
+
 const DOCTOR_REPORT_CAPABILITY: &str = "capability.application.doctor.report";
 const DOCTOR_REPORT_USE_CASE: &str = "use-case.application.doctor.report";
 const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
@@ -780,7 +782,7 @@ async fn collect_over_budget_store_findings(
     context: &RequestContext,
     telemetry_ports: &[(
         tracedecay_application::storage::StoreKeyV1,
-        tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
+        GuardedStoreTelemetryPort,
     )],
     retention: &crate::config::RetentionConfig,
 ) -> CollectedStoreTelemetryV1 {
@@ -1231,9 +1233,9 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     project_id: tracedecay_domain::ProjectId,
     layout: crate::storage::StoreLayout,
     graph: crate::db::Database,
-    registry: Arc<crate::global_db::RegisteredGlobalDb>,
-    profile_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
-    project_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
+    registry: crate::global_db::RegisteredGlobalDbLeaseV1,
+    profile_sessions: crate::global_db::RegisteredGlobalDbLeaseV1,
+    project_sessions: crate::global_db::RegisteredGlobalDbLeaseV1,
     profile_root: PathBuf,
     host_home: Option<PathBuf>,
     remote_operational: RemoteOperationalReadV1,
@@ -1249,9 +1251,9 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let project_id = project_id.clone();
         let layout = layout.clone();
         let graph = graph.clone();
-        let registry = Arc::clone(&registry);
-        let profile_sessions = Arc::clone(&profile_sessions);
-        let project_sessions = Arc::clone(&project_sessions);
+        let registry = registry.clone();
+        let profile_sessions = profile_sessions.clone();
+        let project_sessions = project_sessions.clone();
         let profile_root = profile_root.clone();
         let host_home = host_home.clone();
         let remote_operational = remote_operational.clone();

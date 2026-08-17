@@ -16,6 +16,7 @@ use tracedecay_store::runtime::{
 use crate::exact_sql::{
     ExactSqlError, ExactSqlHandle, ExactSqlRow, ExactSqlStatement, ExactSqlValue,
 };
+use crate::repository::RetainedExactSqlCapability;
 
 pub const AUTHORIZED_SCOPE_SET_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS authorized_scope_sets_v1 (
@@ -143,19 +144,24 @@ impl AuthorizedScopeSetExecutor {
 /// Scope-set persistence over the exact registered and fenced project store.
 #[derive(Clone)]
 pub struct AuthorizedScopeSetSqliteStorage {
-    handle: ExactSqlHandle,
+    retained: RetainedExactSqlCapability,
 }
 
 impl AuthorizedScopeSetSqliteStorage {
-    pub fn from_registered(handle: ExactSqlHandle) -> Self {
-        Self { handle }
+    #[must_use]
+    pub fn from_retained_exact_sql(retained: RetainedExactSqlCapability) -> Self {
+        Self { retained }
+    }
+
+    fn handle(&self) -> &ExactSqlHandle {
+        self.retained.handle()
     }
 
     pub fn read(
         &self,
         scope_set_id: &ScopeSetId,
     ) -> Result<Option<AuthorizedScopeSet>, AuthorizedScopeSetStoreError> {
-        let rows = self.handle.query(
+        let rows = self.handle().query(
             registered_read_statement(scope_set_id)?,
             std::time::Duration::from_secs(5),
         )?;
@@ -167,7 +173,7 @@ impl AuthorizedScopeSetSqliteStorage {
         expected_revision: Option<ScopeSetRevision>,
         next: &AuthorizedScopeSet,
     ) -> Result<ScopeSetCasOutcomeV1, AuthorizedScopeSetStoreError> {
-        let transaction = self.handle.begin_immediate()?;
+        let transaction = self.handle().begin_immediate()?;
         let current = decode_registered_rows(
             transaction
                 .query(registered_read_statement(next.scope_set_id())?)?

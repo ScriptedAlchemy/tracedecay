@@ -15,19 +15,24 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
 };
 
-use crate::ensure_registered_schema;
-use tracedecay_runtime_core::db::engine::{Executor, TestConnection, params};
+use crate::tests::harness::{RegisteredGlobalDbTestFixture, open_registered_test_fixture};
+use tracedecay_runtime_core::db::{
+    TestDatabaseRuntimeScope,
+    engine::{Executor, params},
+};
 
 pub(super) const GENERATION: u64 = 7;
 
 /// An empty registered global database on a real file, with the full authority
 /// schema installed.
-pub(super) async fn open_registered() -> (TempDir, TestConnection) {
+pub(super) async fn open_registered() -> (TempDir, RegisteredGlobalDbTestFixture) {
     let directory = TempDir::new().expect("temporary invariant database");
-    let connection = TestConnection::open(&directory.path().join("sessions.db"));
-    ensure_registered_schema(&connection)
-        .await
-        .expect("registered schema");
+    let connection = open_registered_test_fixture(
+        &directory.path().join("sessions.db"),
+        TestDatabaseRuntimeScope::ProfileSessions,
+    )
+    .await
+    .expect("registered schema");
     (directory, connection)
 }
 

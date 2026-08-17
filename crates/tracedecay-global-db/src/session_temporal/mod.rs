@@ -47,6 +47,7 @@ use tracedecay_query::retrieval::evidence_lanes::{
     CanonicalTaskSessionCandidateExportPortV1, TaskSessionLaneRequestV1,
     TaskSessionLaneRetrieverV1, TaskSessionPlan23BindingV1,
 };
+use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_sessions::lcm::contracts::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
     LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
@@ -107,11 +108,8 @@ impl RegisteredGlobalDb {
         // Absence is not an authoritative empty projection. Until Git
         // evidence has been published, callers cannot prove that no durable
         // session holds a matching worktree.
-        let Some(projection) = recover_git_evidence_projection(
-            runtime.as_ref(),
-            &identity,
-            Arc::new(AtomicBool::new(false)),
-        )?
+        let Some(projection) =
+            recover_git_evidence_projection(runtime, &identity, Arc::new(AtomicBool::new(false)))?
         else {
             return Err(GitCorrelationError::Unavailable(
                 "verified Git-evidence projection has not been published".to_owned(),
@@ -152,7 +150,7 @@ impl RegisteredGlobalDb {
         let read = self.read_snapshot().await.map_err(|source| {
             cursor_keys::GlobalDbCursorKeyProviderError::Storage {
                 operation: "load registered session cursor authentication key",
-                source,
+                source: EngineError::invalid_operation(source.to_string()),
             }
         })?;
         GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key).await
@@ -164,7 +162,7 @@ impl RegisteredGlobalDb {
         let read = self.read_snapshot().await.map_err(|source| {
             cursor_keys::GlobalDbCursorKeyProviderError::Storage {
                 operation: "load pre-provisioned session cursor authentication key",
-                source,
+                source: EngineError::invalid_operation(source.to_string()),
             }
         })?;
         GlobalDbCursorKeyProvider::from_registered_active(&read).await
@@ -775,7 +773,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         request: &AuthorizedTemporalExecutionRequest,
     ) -> Result<
         (
-            tracedecay_runtime_core::db::engine::ReadSnapshot,
+            tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
             TemporalExecutionSnapshot,
         ),
         SessionTemporalExecutionError,

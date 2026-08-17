@@ -8,7 +8,7 @@ use tracedecay_domain::{
     RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
-use tracedecay_runtime_core::db::engine::{TestConnection, TransactionBehavior, params};
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     CodeReadOperationV1, CodeReadResultV1, CodeRecoveryCandidatesQueryV1,
     CodeRecoveryRepositoriesQueryV1, GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
@@ -18,6 +18,7 @@ use tracedecay_store::{
 
 use super::read::GitIndexReadExecutor;
 use super::store::GlobalDbGitIndexTransactionStore;
+use crate::{RegisteredGlobalDb, tests::harness::RegisteredGlobalDbHarness};
 
 fn key(value: &str) -> GitIndexIdempotencyKey {
     GitIndexIdempotencyKey::new(value.to_owned()).expect("idempotency key")
@@ -232,29 +233,18 @@ fn terminal_write(
     }
 }
 
-async fn open_database() -> (tempfile::TempDir, std::path::PathBuf, TestConnection) {
-    let directory = tempfile::tempdir().expect("temporary database directory");
-    let path = directory.path().join("project-sessions.db");
-    let database = TestConnection::open(&path);
-    let transaction = database
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .expect("begin schema transaction");
-    super::ensure_git_index_transaction_schema(&transaction)
-        .await
-        .expect("ensure Git index schema");
-    transaction.commit().await.expect("commit Git index schema");
-    (directory, path, database)
+async fn open_database() -> RegisteredGlobalDbHarness {
+    RegisteredGlobalDbHarness::open("git-index-transaction-store").await
 }
 
-fn test_store(database: &TestConnection) -> GlobalDbGitIndexTransactionStore<'_> {
-    GlobalDbGitIndexTransactionStore::for_engine_test(database)
+fn test_store(database: &RegisteredGlobalDb) -> GlobalDbGitIndexTransactionStore<'_> {
+    GlobalDbGitIndexTransactionStore::new(database)
 }
 
 #[tokio::test]
 async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
-    let (_directory, _path, database) = open_database().await;
-    let store = test_store(&database);
+    let database = open_database().await;
+    let store = test_store(database.registered.as_ref());
     let original = preview();
     store
         .save_preview(original.clone())
@@ -292,8 +282,8 @@ async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
 
 #[tokio::test]
 async fn journal_compare_and_swap_rejects_stale_phase_epochs() {
-    let (_directory, _path, database) = open_database().await;
-    let store = test_store(&database);
+    let database = open_database().await;
+    let store = test_store(database.registered.as_ref());
     let request = begin_request(&preview(), "idempotency.journal-cas.fixture");
     store
         .begin_or_replay(request.clone())
@@ -328,15 +318,19 @@ async fn journal_compare_and_swap_rejects_stale_phase_epochs() {
 
 #[tokio::test]
 async fn canonical_schema_persists_only_commit_intent_digest() {
-    let (_directory, _path, database) = open_database().await;
+    let database = open_database().await;
     let preview = preview();
-    let store = test_store(&database);
+    let store = test_store(database.registered.as_ref());
     store
         .save_preview(preview.clone())
         .await
         .expect("save immutable preview");
 
-    let snapshot = database.read_snapshot().await.expect("schema snapshot");
+    let snapshot = database
+        .registered
+        .read_snapshot()
+        .await
+        .expect("schema snapshot");
     let mut rows = snapshot
         .query(
             "SELECT name FROM sqlite_master
@@ -399,11 +393,11 @@ async fn canonical_schema_persists_only_commit_intent_digest() {
 
 #[tokio::test]
 async fn preview_input_survives_restart_then_gc_retains_typed_expiry_without_private_payload() {
-    let (_directory, path, database) = open_database().await;
+    let database = open_database().await;
     let input = preview_input();
     let preview_id = input.preview_id.clone();
     {
-        let store = test_store(&database);
+        let store = test_store(database.registered.as_ref());
         store
             .save_preview_input(input.clone())
             .await
@@ -423,10 +417,8 @@ async fn preview_input_survives_restart_then_gc_retains_typed_expiry_without_pri
             GitIndexPreviewInputReadV1::Available(Box::new(input.clone()))
         );
     }
-    drop(database);
-
-    let reopened = TestConnection::open(&path);
-    let store = test_store(&reopened);
+    let reopened = database.restart().await;
+    let store = test_store(reopened.registered.as_ref());
     assert_eq!(
         store
             .read_preview_input(&preview_id, UtcMicros(30_000_009))
@@ -451,7 +443,11 @@ async fn preview_input_survives_restart_then_gc_retains_typed_expiry_without_pri
         }
     ));
 
-    let snapshot = reopened.read_snapshot().await.expect("schema snapshot");
+    let snapshot = reopened
+        .registered
+        .read_snapshot()
+        .await
+        .expect("schema snapshot");
     let mut rows = snapshot
         .query(
             "SELECT input_json, purged_at
@@ -474,11 +470,11 @@ async fn preview_input_survives_restart_then_gc_retains_typed_expiry_without_pri
 
 #[tokio::test]
 async fn restart_replays_terminal_receipt_and_rejects_conflicting_input() {
-    let (_directory, path, database) = open_database().await;
+    let database = open_database().await;
     let preview = preview();
     let request = begin_request(&preview, "idempotency.restart.fixture");
     let receipt = {
-        let store = test_store(&database);
+        let store = test_store(database.registered.as_ref());
         assert!(matches!(
             store.begin_or_replay(request.clone()).await,
             Ok(GitIndexTransactionBeginResultV1::Started(_))
@@ -492,10 +488,8 @@ async fn restart_replays_terminal_receipt_and_rejects_conflicting_input() {
             .await
             .expect("atomic terminal receipt")
     };
-    drop(database);
-
-    let reopened = TestConnection::open(&path);
-    let store = test_store(&reopened);
+    let reopened = database.restart().await;
+    let store = test_store(reopened.registered.as_ref());
     assert!(matches!(
         store.begin_or_replay(request.clone()).await,
         Ok(GitIndexTransactionBeginResultV1::Replay(stored)) if *stored == receipt
@@ -507,19 +501,23 @@ async fn restart_replays_terminal_receipt_and_rejects_conflicting_input() {
         Err(GitIndexTransactionStoreError::IdempotencyConflict)
     );
     assert!(
-        !path.with_file_name("git-index-transactions.json").exists(),
+        !reopened
+            .registered
+            .db_path()
+            .with_file_name("git-index-transactions.json")
+            .exists(),
         "the canonical store must not create a JSON side-file"
     );
 }
 
 #[tokio::test]
 async fn terminal_failure_receipts_persist_and_only_inspection_requires_recovery() {
-    let (_directory, path, database) = open_database().await;
+    let database = open_database().await;
     let preview = preview();
     let aborted = begin_request(&preview, "idempotency.failure.aborted");
     let inspection = begin_request(&preview, "idempotency.failure.inspection");
     let (aborted_receipt, inspection_receipt) = {
-        let store = test_store(&database);
+        let store = test_store(database.registered.as_ref());
         store
             .begin_or_replay(aborted.clone())
             .await
@@ -547,10 +545,8 @@ async fn terminal_failure_receipts_persist_and_only_inspection_requires_recovery
             .expect("persist inspection receipt");
         (aborted_receipt, inspection_receipt)
     };
-    drop(database);
-
-    let reopened = TestConnection::open(&path);
-    let store = test_store(&reopened);
+    let reopened = database.restart().await;
+    let store = test_store(reopened.registered.as_ref());
     assert!(matches!(
         store.begin_or_replay(aborted).await,
         Ok(GitIndexTransactionBeginResultV1::Replay(stored))
@@ -574,11 +570,11 @@ async fn terminal_failure_receipts_persist_and_only_inspection_requires_recovery
 
 #[tokio::test]
 async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() {
-    let (_directory, path, database) = open_database().await;
+    let database = open_database().await;
     let preview = preview();
     let request = begin_request(&preview, "idempotency.quarantine.fixture");
     {
-        let store = test_store(&database);
+        let store = test_store(database.registered.as_ref());
         store
             .begin_or_replay(request.clone())
             .await
@@ -599,10 +595,8 @@ async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() 
             .await
             .expect("write inspection receipt");
     }
-    drop(database);
-
-    let reopened = TestConnection::open(&path);
-    let store = test_store(&reopened);
+    let reopened = database.restart().await;
+    let store = test_store(reopened.registered.as_ref());
     let mut blocked = begin_request(&preview, "idempotency.quarantine.blocked");
     blocked.journal.transaction_id =
         GitIndexTransactionId::new("transaction.idempotency.quarantine.blocked")
@@ -677,10 +671,9 @@ async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() 
         Err(GitIndexTransactionStoreError::ReceiptConflict),
         "a proven clear must retain its resolution evidence rather than reactivate"
     );
-    drop(reopened);
-
-    let reopened = TestConnection::open(&path);
-    let store = test_store(&reopened);
+    drop(store);
+    let reopened = reopened.restart().await;
+    let store = test_store(reopened.registered.as_ref());
     assert!(
         store
             .recovery_repositories()
@@ -696,10 +689,10 @@ async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() 
 
 #[tokio::test]
 async fn proven_terminal_receipt_atomically_resolves_an_admission_quarantine() {
-    let (_directory, _path, database) = open_database().await;
+    let database = open_database().await;
     let preview = preview();
     let request = begin_request(&preview, "idempotency.quarantine.terminal-proof");
-    let store = test_store(&database);
+    let store = test_store(database.registered.as_ref());
     store
         .begin_or_replay(request.clone())
         .await
@@ -728,7 +721,11 @@ async fn proven_terminal_receipt_atomically_resolves_an_admission_quarantine() {
             .expect("recovery repositories")
             .is_empty()
     );
-    let snapshot = database.read_snapshot().await.expect("quarantine snapshot");
+    let snapshot = database
+        .registered
+        .read_snapshot()
+        .await
+        .expect("quarantine snapshot");
     let mut rows = snapshot
         .query(
             "SELECT active, resolution_receipt_json IS NOT NULL
@@ -752,7 +749,7 @@ async fn proven_terminal_receipt_atomically_resolves_an_admission_quarantine() {
 
 #[tokio::test]
 async fn recovery_indexes_include_only_repositories_with_recoverable_records() {
-    let (_directory, _path, database) = open_database().await;
+    let database = open_database().await;
     let first_preview = preview();
     let second_preview = preview_for(
         "repository.git-transaction.second",
@@ -761,7 +758,7 @@ async fn recovery_indexes_include_only_repositories_with_recoverable_records() {
     );
     let first = begin_request(&first_preview, "idempotency.recovery.first");
     let second = begin_request(&second_preview, "idempotency.recovery.second");
-    let store = test_store(&database);
+    let store = test_store(database.registered.as_ref());
     store
         .begin_or_replay(first.clone())
         .await
@@ -811,10 +808,10 @@ async fn recovery_indexes_include_only_repositories_with_recoverable_records() {
 
 #[tokio::test]
 async fn failed_inspection_terminal_insert_rolls_back_journal_and_quarantine() {
-    let (_directory, _path, database) = open_database().await;
+    let database = open_database().await;
     let preview = preview();
     let request = begin_request(&preview, "idempotency.atomic.fixture");
-    let store = test_store(&database);
+    let store = test_store(database.registered.as_ref());
     store
         .begin_or_replay(request.clone())
         .await
@@ -854,10 +851,10 @@ async fn failed_inspection_terminal_insert_rolls_back_journal_and_quarantine() {
 
 #[tokio::test]
 async fn read_executor_round_trips_preview_and_transaction_record() {
-    let (_directory, _path, database) = open_database().await;
+    let database = open_database().await;
     let preview = preview();
     let request = begin_request(&preview, "idempotency.read-executor.round-trip");
-    let store = test_store(&database);
+    let store = test_store(database.registered.as_ref());
     store
         .save_preview(preview.clone())
         .await
@@ -913,10 +910,10 @@ async fn read_executor_round_trips_preview_and_transaction_record() {
 
 #[tokio::test]
 async fn read_executor_keyset_walks_recovery_candidates() {
-    let (_directory, _path, database) = open_database().await;
+    let database = open_database().await;
     let preview = preview();
     let repository_id = preview.repository_snapshot.repository_id.clone();
-    let store = test_store(&database);
+    let store = test_store(database.registered.as_ref());
     // Three non-terminal (Prepared) transactions on one repository are all
     // recovery candidates; keys are ordered so the keyset walk is deterministic.
     let keys = [
@@ -969,7 +966,7 @@ async fn read_executor_keyset_walks_recovery_candidates() {
 
 #[tokio::test]
 async fn read_executor_keyset_walks_recovery_repositories() {
-    let (_directory, _path, database) = open_database().await;
+    let database = open_database().await;
     let first_preview = preview();
     let second_preview = preview_for(
         "repository.git-transaction.second",
@@ -978,7 +975,7 @@ async fn read_executor_keyset_walks_recovery_repositories() {
     );
     let first_repository = first_preview.repository_snapshot.repository_id.clone();
     let second_repository = second_preview.repository_snapshot.repository_id.clone();
-    let store = test_store(&database);
+    let store = test_store(database.registered.as_ref());
     store
         .begin_or_replay(begin_request(&first_preview, "idempotency.repo-walk.first"))
         .await

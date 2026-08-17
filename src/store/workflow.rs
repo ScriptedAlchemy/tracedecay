@@ -21,7 +21,8 @@ use tracedecay_sessions::runtime::workflow_ingest::{
 use tracedecay_sessions::runtime::workflow_state::{WorkflowStateItem, list_unfinished};
 
 /// Borrowed adapter over an already-open project-sessions database.
-/// The holder `D` is generic so callers that own an `Arc<RegisteredGlobalDb>`
+/// The holder `D` is generic so callers that own a
+/// [`crate::global_db::RegisteredGlobalDbLeaseV1`]
 /// can build a lifetime-free (`'static`) adapter. A borrowed adapter makes the
 /// trait impls below apply only "for some specific lifetime", which turns any
 /// `Send` proof over a future holding one across an await into a higher-ranked
@@ -112,7 +113,11 @@ where
                 "workflow index requires ProjectSessions authority".to_string(),
             ));
         }
-        let snapshot = self.db().read_snapshot().await?;
+        let snapshot = self
+            .db()
+            .read_snapshot()
+            .await
+            .map_err(|error| WorkflowIndexError::Db(error.to_string()))?;
         Ok(RegisteredWorkflowIndexSnapshot::from_snapshot(snapshot))
     }
 

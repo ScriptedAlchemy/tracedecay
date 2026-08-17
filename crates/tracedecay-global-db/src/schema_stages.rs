@@ -10,8 +10,12 @@ use super::{
     git_index_transactions, global_db_operation_error, observability_rollup, observation,
     observation_projection, project_registry, session_temporal, stack_delivery,
 };
-use tracedecay_runtime_core::db::engine::{
-    Connection, Executor, QueryExecutor, TransactionBehavior,
+use tracedecay_runtime_core::{
+    db::{
+        Database,
+        engine::{Executor, QueryExecutor},
+    },
+    ports::registered_schema::RegisteredSchemaInstallationV1,
 };
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::work::{
@@ -388,10 +392,10 @@ const DELIVERY_SETTLEMENT_SCHEMA: &str = "
 /// carries it. No database path is resolved or reopened, and no store is
 /// stepped forward from an older shape.
 pub async fn ensure_registered_schema(
-    conn: &Connection,
+    installation: &RegisteredSchemaInstallationV1,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    let convergence = ensure_registered_schema_for_admission(conn).await?;
-    converge_registered_schema(conn, convergence).await
+    let convergence = ensure_registered_schema_for_admission(installation).await?;
+    converge_registered_schema_on(installation, convergence).await
 }
 
 #[derive(Clone, Copy)]
@@ -400,19 +404,36 @@ pub struct RegisteredSchemaConvergence {
     is_fresh: bool,
 }
 
+impl RegisteredSchemaConvergence {
+    /// A client attaches only after the sealed installer has completed. Its
+    /// convergence therefore treats the store as existing and conservatively
+    /// requires an exhaustive audit rather than recreating admission evidence.
+    pub(crate) const fn for_existing_client() -> Self {
+        Self {
+            force_exhaustive: true,
+            is_fresh: false,
+        }
+    }
+}
+
 /// Installs the minimum schema and write guards required before a registered
 /// runtime may be published. Historical convergence remains separately
 /// resumable so daemon admission never waits for whole-store scans.
 pub async fn ensure_registered_schema_for_admission(
-    conn: &Connection,
+    installation: &RegisteredSchemaInstallationV1,
 ) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
     const OPERATION: &str = "initialize registered global database schema";
+    crate::registered_legacy_relations::reject_legacy_session_relation_shape(
+        installation,
+        installation.binding(),
+    )
+    .await?;
     // The LCM authority classifies profile content first: a legacy or
     // version-skewed session store must surface its own ProfileResetRequired
     // state instead of being masked by the coarser workflow/configuration
     // schema resets, which would also flag a store those features were simply
     // never installed in.
-    tracedecay_sessions::runtime::lcm::schema::require_admissible_lcm_schema(conn)
+    tracedecay_sessions::runtime::lcm::schema::require_admissible_lcm_schema(installation)
         .await
         .map_err(|error| match error {
             tracedecay_sessions::runtime::lcm::LcmError::ProfileResetRequired {
@@ -425,7 +446,7 @@ pub async fn ensure_registered_schema_for_admission(
             },
             error => global_db_operation_error("classify LCM schema admission", error),
         })?;
-    let configuration_fresh = configuration::fresh_configuration_store_evidence(conn)
+    let configuration_fresh = configuration::fresh_configuration_store_evidence(installation)
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
@@ -439,12 +460,12 @@ pub async fn ensure_registered_schema_for_admission(
             }
         })?;
     let temporal_admission = session_temporal::require_admissible_session_temporal_schema(
-        conn,
+        installation,
         configuration_fresh.as_ref(),
     )
     .await?;
-    let workflow_admission = inspect_workflow_schema_for_admission(conn).await?;
-    configuration::admit_configuration_schema(conn, configuration_fresh.as_ref())
+    let workflow_admission = inspect_workflow_schema_for_admission(installation).await?;
+    configuration::admit_configuration_schema(installation, configuration_fresh.as_ref())
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
@@ -462,7 +483,7 @@ pub async fn ensure_registered_schema_for_admission(
     // contract cannot be trusted to gate replay or admission, so admission fails
     // closed with the tip's typed reset authority rather than silently
     // continuing on a shape that no longer proves deletion state.
-    if !is_fresh && let Err(error) = validate_remote_deletion_schema_contract(conn).await {
+    if !is_fresh && let Err(error) = validate_remote_deletion_schema_contract(installation).await {
         return Err(
             tracedecay_runtime_core::errors::TraceDecayError::reset_required(
                 "remote deletion tombstones",
@@ -470,9 +491,9 @@ pub async fn ensure_registered_schema_for_admission(
             ),
         );
     }
-    let force_exhaustive = !authority_invariant_triggers_intact(conn).await?;
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+    let force_exhaustive = !authority_invariant_triggers_intact(installation).await?;
+    let transaction = installation
+        .begin_immediate()
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
@@ -642,12 +663,12 @@ pub async fn ensure_registered_schema_for_admission(
         }
     }
 
-    observation_projection::ensure_observation_projection_performance_indexes(conn)
+    observation_projection::ensure_observation_projection_performance_indexes(installation)
         .await
         .map_err(|error| {
             global_db_operation_error("initialize observation projection indexes", error)
         })?;
-    validate_authority_schema_contract(conn).await?;
+    validate_authority_schema_contract(installation).await?;
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
         is_fresh,
@@ -665,7 +686,7 @@ pub async fn ensure_registered_schema_for_admission(
 /// Only the authority invariant audit remains, and it stays out of line because
 /// it pages real authority rows on a large store.
 pub async fn converge_registered_schema(
-    conn: &Connection,
+    database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_runtime_core::errors::Result<()> {
     // The invariant pass pages historical authority rows and can legitimately
@@ -674,7 +695,23 @@ pub async fn converge_registered_schema(
     // guarded writes may proceed while these idempotent repairs advance.
     // Completed repairs survive interruption, while the trusted checkpoint is
     // still written only after every audit succeeds.
-    ensure_authority_invariants(conn, convergence.force_exhaustive, convergence.is_fresh).await
+    let transaction = database
+        .begin_bulk_write_transaction("converge registered global database authority schema")
+        .await?;
+    converge_registered_schema_on(&transaction, convergence).await?;
+    transaction.commit().await
+}
+
+async fn converge_registered_schema_on(
+    connection: &impl Executor,
+    convergence: RegisteredSchemaConvergence,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    ensure_authority_invariants(
+        connection,
+        convergence.force_exhaustive,
+        convergence.is_fresh,
+    )
+    .await
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -853,19 +890,40 @@ pub async fn finish_observation_authority_canonical_repair(
 mod tests {
     use tempfile::TempDir;
 
-    use super::ensure_registered_schema;
+    use crate::tests::harness::open_registered_test_database_fixture;
+    use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{QueryExecutor, TestConnection};
+
+    async fn install_registered_schema(database_path: &std::path::Path) {
+        drop(
+            open_registered_test_database_fixture(
+                database_path,
+                TestDatabaseRuntimeScope::ProfileSessions,
+            )
+            .await
+            .expect("initialize final registered authority schema"),
+        );
+    }
+
+    async fn registered_admission_error(
+        database_path: &std::path::Path,
+    ) -> tracedecay_runtime_core::errors::TraceDecayError {
+        match open_registered_test_database_fixture(
+            database_path,
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        {
+            Ok(_) => panic!("incompatible registered schema must not be admitted"),
+            Err(error) => error,
+        }
+    }
 
     #[tokio::test]
     async fn existing_registry_without_remote_deletion_catalog_requires_typed_reset() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
-        {
-            let connection = TestConnection::open(&database_path);
-            ensure_registered_schema(&connection)
-                .await
-                .expect("initialize final V2 authority schema");
-        }
+        install_registered_schema(&database_path).await;
         {
             let connection = rusqlite::Connection::open(&database_path).unwrap();
             connection
@@ -873,10 +931,8 @@ mod tests {
                 .expect("remove required final V2 catalog");
         }
 
+        let error = registered_admission_error(&database_path).await;
         let connection = TestConnection::open(&database_path);
-        let error = ensure_registered_schema(&connection)
-            .await
-            .expect_err("an existing catalog must not migrate in remote deletion state");
         let Some((authority, reason)) = error.reset_required_context() else {
             panic!("missing final V2 catalog returned the wrong typed problem: {error}");
         };
@@ -903,12 +959,7 @@ mod tests {
     async fn existing_registry_with_mismatched_remote_deletion_catalog_requires_typed_reset() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
-        {
-            let connection = TestConnection::open(&database_path);
-            ensure_registered_schema(&connection)
-                .await
-                .expect("initialize final V2 authority schema");
-        }
+        install_registered_schema(&database_path).await;
         {
             let connection = rusqlite::Connection::open(&database_path).unwrap();
             connection
@@ -919,10 +970,8 @@ mod tests {
                 .expect("make the required final V2 catalog incompatible");
         }
 
+        let error = registered_admission_error(&database_path).await;
         let connection = TestConnection::open(&database_path);
-        let error = ensure_registered_schema(&connection)
-            .await
-            .expect_err("an incompatible catalog must not be converged");
         assert!(
             matches!(
                 error,
@@ -948,12 +997,7 @@ mod tests {
     async fn existing_registry_without_final_code_project_columns_requires_typed_reset() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
-        {
-            let connection = TestConnection::open(&database_path);
-            ensure_registered_schema(&connection)
-                .await
-                .expect("initialize final V2 authority schema");
-        }
+        install_registered_schema(&database_path).await;
         {
             let connection = rusqlite::Connection::open(&database_path).unwrap();
             connection
@@ -961,10 +1005,8 @@ mod tests {
                 .expect("remove required final code-project column");
         }
 
+        let error = registered_admission_error(&database_path).await;
         let connection = TestConnection::open(&database_path);
-        let error = ensure_registered_schema(&connection)
-            .await
-            .expect_err("an old code-project shape must not be upgraded");
         let Some((authority, reason)) = error.reset_required_context() else {
             panic!("old code-project shape returned the wrong typed problem: {error}");
         };
@@ -994,12 +1036,7 @@ mod tests {
     async fn missing_trigger_is_refused_before_row_audit_without_repair() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
-        {
-            let connection = TestConnection::open(&database_path);
-            ensure_registered_schema(&connection)
-                .await
-                .expect("initialize authority schema");
-        }
+        install_registered_schema(&database_path).await;
         {
             let connection = rusqlite::Connection::open(&database_path).unwrap();
             connection
@@ -1021,10 +1058,8 @@ mod tests {
                 .expect("seed a repair followed by a late audit failure");
         }
 
+        let error = registered_admission_error(&database_path).await;
         let connection = TestConnection::open(&database_path);
-        let error = ensure_registered_schema(&connection)
-            .await
-            .expect_err("a missing final trigger must fail schema admission");
         assert!(
             error
                 .to_string()
@@ -1060,12 +1095,7 @@ mod tests {
     async fn missing_trigger_refusal_precedes_foreign_key_audit_without_repair() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
-        {
-            let connection = TestConnection::open(&database_path);
-            ensure_registered_schema(&connection)
-                .await
-                .expect("initialize authority schema");
-        }
+        install_registered_schema(&database_path).await;
         {
             let connection = rusqlite::Connection::open(&database_path).unwrap();
             connection
@@ -1083,10 +1113,7 @@ mod tests {
         }
 
         for attempt in 1..=2 {
-            let connection = TestConnection::open(&database_path);
-            let error = ensure_registered_schema(&connection)
-                .await
-                .expect_err("a missing final trigger must keep admission closed");
+            let error = registered_admission_error(&database_path).await;
             assert!(
                 error
                     .to_string()

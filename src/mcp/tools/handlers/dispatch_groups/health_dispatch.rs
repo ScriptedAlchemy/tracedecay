@@ -1,11 +1,9 @@
 //! Code-health MCP dispatch family.
 
-use std::sync::Arc;
-
 use serde_json::Value;
 
 use crate::errors::Result;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolCallRegistryOptions;
@@ -20,7 +18,7 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
-    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    active_project_session_db: Option<&RegisteredGlobalDbLeaseV1>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match tool_name {
@@ -48,8 +46,8 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
             health::handle_runtime(
                 cg,
                 args,
-                options.global_db.map(std::sync::Arc::as_ref),
-                active_project_session_db.map(Arc::as_ref),
+                options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
+                active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                 options.doctor_report_reader.as_ref(),
                 options.generation_census_reader.as_ref(),
             )

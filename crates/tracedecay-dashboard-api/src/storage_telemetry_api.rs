@@ -38,13 +38,14 @@ use serde::Serialize;
 use tracedecay_application::storage::identity::StoreKeyV1;
 use tracedecay_application::storage::telemetry::{
     StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1, StoreSizeSampleV1,
-    StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
+    TableGrowthTelemetryReadV1,
 };
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext,
+    RequestAdmission, RequestContext,
 };
 use tracedecay_domain::{ActorId, UtcMicros, canonical_sha256};
+use tracedecay_runtime_core::db::DatabaseStorageTelemetryHandle;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use self::table_growth::{
@@ -370,22 +371,54 @@ fn storage_telemetry_context(state: &DashboardState) -> Option<RequestContext> {
     .ok()
 }
 
-fn storage_telemetry_port(
+fn storage_telemetry_handle(
     path: &str,
-    handle: Option<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle>,
-    context: &RequestContext,
-) -> Option<(
-    StoreKeyV1,
-    tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
-)> {
+    handle: Option<DatabaseStorageTelemetryHandle>,
+) -> Option<(StoreKeyV1, DatabaseStorageTelemetryHandle)> {
     let store = StoreKeyV1::new(store_file_name(path)).ok()?;
-    let port = tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort::new(
-        handle?,
-        store.clone(),
-        context.scope().clone(),
-        std::time::Duration::from_secs(5),
-    );
-    Some((store, port))
+    Some((store, handle?))
+}
+
+/// Read one store through the database-owned telemetry capability. The typed
+/// handle retains the exact database client for the whole read, so dashboard
+/// telemetry cannot outlive database retirement or reconstruct a raw handle.
+fn read_store_size(
+    context: &RequestContext,
+    store: StoreKeyV1,
+    handle: DatabaseStorageTelemetryHandle,
+) -> StorageTelemetryReadV1 {
+    if context.validate().is_err()
+        || !matches!(
+            context.admission_at(UtcMicros(now_micros())),
+            RequestAdmission::Admitted
+        )
+    {
+        return StorageTelemetryReadV1::Denied { store };
+    }
+
+    let sample = handle.store_size_telemetry(std::time::Duration::from_secs(5), || {
+        match context.admission_at(UtcMicros(now_micros())) {
+            RequestAdmission::Admitted => None,
+            RequestAdmission::Cancelled => Some(tracedecay_store::UnavailableReasonV1::Cancelled),
+            RequestAdmission::TimedOut => {
+                Some(tracedecay_store::UnavailableReasonV1::DeadlineExceeded)
+            }
+        }
+    });
+    let Ok(sample) = sample else {
+        return StorageTelemetryReadV1::Unknown { store };
+    };
+    let sample = StoreSizeSampleV1 {
+        store: store.clone(),
+        page_size_bytes: sample.page_size_bytes,
+        page_count: sample.page_count,
+        freelist_pages: sample.freelist_pages,
+        observed_at: UtcMicros(now_micros()),
+    };
+    if sample.validate().is_err() {
+        return StorageTelemetryReadV1::Unknown { store };
+    }
+    StorageTelemetryReadV1::Observed { sample }
 }
 
 /// Sample a role's store, or merge the role into the existing entry when the
@@ -395,7 +428,7 @@ async fn push_or_merge_role(
     seen: &mut HashMap<String, usize>,
     role: &str,
     path: &str,
-    handle: Option<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle>,
+    handle: Option<DatabaseStorageTelemetryHandle>,
     context: &RequestContext,
 ) {
     let identity = store_identity(path);
@@ -481,13 +514,13 @@ fn store_identity(path: &str) -> String {
 async fn sample_store(
     role: &str,
     path: &str,
-    handle: Option<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle>,
+    handle: Option<DatabaseStorageTelemetryHandle>,
     context: &RequestContext,
 ) -> SampledStoreV1 {
     let store_name = store_file_name(path);
-    let (read, omission_reason) = match storage_telemetry_port(path, handle, context) {
-        Some((store, port)) => {
-            let read = port.store_size(context, &store).await;
+    let (read, omission_reason) = match storage_telemetry_handle(path, handle) {
+        Some((store, handle)) => {
+            let read = read_store_size(context, store, handle);
             let omission = (!matches!(read, StorageTelemetryReadV1::Observed { .. }))
                 .then(|| format!("store telemetry read failed for {role} role"));
             (read, omission)

@@ -7,8 +7,7 @@ use super::super::envelope::{
 };
 use super::super::primitives::{
     OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, project_memory_category_label,
-    project_memory_event_time, project_memory_now, row_exists, storage_error,
-    storage_message,
+    project_memory_event_time, project_memory_now, row_exists, storage_error, storage_message,
 };
 use super::super::projection::load_project_memory_projection_tx;
 use super::add::{ProjectMemoryAddClassification, classify_project_memory_add_tx};

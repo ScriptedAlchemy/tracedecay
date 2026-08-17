@@ -68,7 +68,7 @@ fn verified_graph(
     // Bounded to the slice the selection covers, exactly as the graph read is:
     // a version folded across an event outside the selection never existed
     // under it, while a version inside the covered prefix stays readable.
-    let covered = load_covered_journal(&storage.handle, scope)
+    let covered = load_covered_journal(storage.handle(), scope)
         .ok_or(WorkEvidenceRootReadErrorV1::Unavailable)?;
     let (journal, published) = (covered.journal, covered.published);
     let Some(version) = published

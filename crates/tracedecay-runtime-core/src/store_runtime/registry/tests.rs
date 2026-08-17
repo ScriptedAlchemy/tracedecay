@@ -76,14 +76,46 @@ async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
         assert!(
             handles[1..]
                 .iter()
-                .all(|handle| Arc::ptr_eq(handles[0].runtime(), handle.runtime()))
+                .all(|handle| handles[0].shares_runtime_with(handle))
         );
         assert_eq!(
-            handles[0].runtime().maintenance_state(),
+            handles[0].health_snapshot().state,
             RuntimeMaintenanceStateV1::Ready
         );
         eprintln!("store_runtime_open clients={clients} runtimes=1 locators=1 busy=0 locked=0");
     }
+}
+
+#[tokio::test]
+async fn each_open_waiter_receives_an_independent_client_token_while_clones_share_one() {
+    let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    publisher.block.store(true, Ordering::SeqCst);
+    let request = project_request("project.client-tokens", &pin);
+    let first = registry.begin_or_join_open(&request);
+    wait_for_calls(&publisher.calls, 2).await;
+    let second = registry.begin_or_join_open(&request);
+    publisher.release.notify_one();
+
+    let first = match first.wait().await {
+        StoreRuntimeOpenResult::Published(lease) => lease,
+        StoreRuntimeOpenResult::Failed(failure) => panic!("first open failed: {failure:?}"),
+    };
+    let second = match second.wait().await {
+        StoreRuntimeOpenResult::Published(lease) => lease,
+        StoreRuntimeOpenResult::Failed(failure) => panic!("second open failed: {failure:?}"),
+    };
+    let first_clone = first.clone();
+
+    assert!(first.shares_runtime_with(&first_clone));
+    assert!(first.shares_runtime_with(&second));
+    assert_eq!(first.runtime_identity(), second.runtime_identity());
+    assert_eq!(first.health_snapshot().client_leases, 2);
+    drop(first);
+    assert_eq!(second.health_snapshot().client_leases, 2);
+    drop(first_clone);
+    assert_eq!(second.health_snapshot().client_leases, 1);
+    drop(second);
 }
 
 #[tokio::test]
@@ -131,7 +163,7 @@ async fn identity_bound_open_refusal_preserves_an_existing_matching_runtime() {
     assert!(matches!(
         registry.lookup(retained.binding()),
         StoreRuntimeLookup::Ready(handle)
-            if Arc::ptr_eq(handle.runtime(), retained.runtime())
+            if handle.shares_runtime_with(&retained)
     ));
 }
 
@@ -236,7 +268,7 @@ fn cancelled_open_task_wakes_every_joiner_and_allows_retry() {
 #[tokio::test]
 async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
     let config = StoreRuntimeRegistryConfig::new(2).unwrap();
-    let (registry, _, publisher) = registry(config);
+    let (registry, _, _publisher) = registry(config);
     let pin = profile_pin(&registry).await;
     let held = open_published(&registry, code_request("worktree.held", &pin)).await;
     let leased = open_published(&registry, code_request("worktree.leased", &pin)).await;
@@ -258,21 +290,21 @@ async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
         registry.lookup(pin.binding()),
         StoreRuntimeLookup::Ready(_)
     ));
-    assert_eq!(publisher.runtime(2).health_snapshot().client_leases, 1);
+    assert!(matches!(
+        registry.lookup(&leased_binding),
+        StoreRuntimeLookup::Ready(handle) if handle.health_snapshot().client_leases == 1
+    ));
 
-    let held_runtime = Arc::downgrade(held.runtime());
+    let held_binding = held.binding().clone();
     drop(held);
     open_published(&registry, code_request("worktree.overflow", &pin)).await;
-    assert!(
-        held_runtime.upgrade().is_none(),
-        "eviction must release the canonical runtime after closing it"
-    );
+    assert!(matches!(
+        registry.lookup(&held_binding),
+        StoreRuntimeLookup::Missing { .. }
+    ));
     assert!(registry.release_lease(&leased_binding, &lease.lease_id));
 
-    publisher
-        .runtime(0)
-        .transition(RuntimeMaintenanceStateV1::Faulted)
-        .unwrap();
+    force_ready_runtime_state(&registry, pin.binding(), RuntimeMaintenanceStateV1::Faulted);
     assert!(matches!(
         registry.profile_authority_pin(&profile_shard()),
         ProfileAuthorityPinResult::Rejected(
@@ -376,7 +408,7 @@ async fn epochs_are_monotonic_across_registries_and_respect_a_retained_floor() {
     .await;
     assert!(first.binding().authority_epoch > floor);
     assert!(second.binding().authority_epoch > first.binding().authority_epoch);
-    assert!(!Arc::ptr_eq(first.runtime(), second.runtime()));
+    assert!(!first.shares_runtime_with(&second));
 }
 
 #[test]

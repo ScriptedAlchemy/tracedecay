@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_application::{
@@ -133,7 +132,7 @@ async fn idle_producer_converges_dirty_days_into_application_readable_fragments(
     }
 
     let producer = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
+        db.clone(),
         ObservabilityProducerIdentityV1 {
             authorized_scope_ref: scope.to_owned(),
             process_boot_id: "boot:rollup-idle-drain".to_owned(),

@@ -8,7 +8,7 @@
 //! The store-runtime registry is no longer one of them. `StoreRuntimeSource`
 //! existed only because `daemon::store_runtime` had stayed in the root; that
 //! tree now lives in `crate::store_runtime`, so `db::connection` retains the
-//! concrete `store_runtime::registry::StoreRuntimeHandle` directly and the port
+//! concrete `store_runtime::registry::StoreRuntimeClientLease` directly and the port
 //! was deleted.
 //!
 //! Every port fails closed (or degrades to a documented no-op) when the root
@@ -30,13 +30,188 @@ pub mod registered_schema {
     use std::pin::Pin;
     use std::sync::OnceLock;
 
-    use crate::db::engine::Connection;
+    use crate::db::engine::{
+        Connection, Executor, QueryExecutor, Transaction, TransactionBehavior,
+    };
     use crate::errors::{Result, TraceDecayError};
+    use tracedecay_store::StoreRuntimeBindingV1;
+
+    /// A sealed, initialization-only capability over the exact connection
+    /// authorized while a registered Store runtime is being opened.
+    ///
+    /// It has no public constructor and never exposes its engine connection,
+    /// authority, runtime, or exact SQL handle. The Store-open path creates it
+    /// only after binding, locator, file identity, and write authority have
+    /// been validated for a final-schema installation.
+    pub struct RegisteredSchemaInstallationV1 {
+        connection: Connection,
+    }
+
+    /// An immediate schema-installation transaction tied to its initializing
+    /// capability. The lifetime keeps the authorized installation connection
+    /// alive through commit, rollback, or drop.
+    pub struct RegisteredSchemaInstallationTransactionV1<'a> {
+        transaction: Transaction,
+        _installation: &'a RegisteredSchemaInstallationV1,
+    }
+
+    impl RegisteredSchemaInstallationV1 {
+        fn from_authorized_connection(connection: Connection) -> Self {
+            Self { connection }
+        }
+
+        /// The exact Store scope being initialized.
+        ///
+        /// Installers may use this typed identity for pre-write schema-shape
+        /// validation. It is not a path, runtime, authority, or SQL handle.
+        pub fn binding(&self) -> &StoreRuntimeBindingV1 {
+            self.connection.binding()
+        }
+
+        pub async fn query<P>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> crate::db::engine::Result<crate::db::engine::Rows>
+        where
+            P: crate::db::engine::IntoParams,
+        {
+            self.connection.query(sql, params).await
+        }
+
+        pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+        where
+            P: crate::db::engine::IntoParams,
+        {
+            self.connection.execute(sql, params).await
+        }
+
+        pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+            self.connection.execute_batch(sql).await
+        }
+
+        /// Begins the only ordinary write transaction available to a
+        /// registered-schema installer.
+        pub async fn begin_immediate(
+            &self,
+        ) -> crate::db::engine::Result<RegisteredSchemaInstallationTransactionV1<'_>> {
+            self.connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map(|transaction| RegisteredSchemaInstallationTransactionV1 {
+                    transaction,
+                    _installation: self,
+                })
+        }
+
+        /// Runs one independently committed long schema batch while the
+        /// underlying runtime continuously revalidates initializing authority.
+        pub async fn execute_authority_revalidated_batch(
+            &self,
+            sql: &str,
+        ) -> crate::db::engine::Result<()> {
+            let transaction = self.connection.authorized_long_lease_transaction().await?;
+            match transaction.execute_authority_revalidated_batch(sql).await {
+                Ok(()) => transaction.commit().await,
+                Err(error) => match transaction.rollback().await {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(crate::db::engine::Error::Runtime(format!(
+                        "authority-revalidated schema batch failed: {error}; rollback also failed: {rollback_error}"
+                    ))),
+                },
+            }
+        }
+    }
+
+    impl QueryExecutor for RegisteredSchemaInstallationV1 {
+        async fn query<P>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> crate::db::engine::Result<crate::db::engine::Rows>
+        where
+            P: crate::db::engine::IntoParams,
+        {
+            RegisteredSchemaInstallationV1::query(self, sql, params).await
+        }
+    }
+
+    impl Executor for RegisteredSchemaInstallationV1 {
+        async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+        where
+            P: crate::db::engine::IntoParams,
+        {
+            RegisteredSchemaInstallationV1::execute(self, sql, params).await
+        }
+
+        async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+            RegisteredSchemaInstallationV1::execute_batch(self, sql).await
+        }
+    }
+
+    impl RegisteredSchemaInstallationTransactionV1<'_> {
+        pub async fn query<P>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> crate::db::engine::Result<crate::db::engine::Rows>
+        where
+            P: crate::db::engine::IntoParams,
+        {
+            self.transaction.query(sql, params).await
+        }
+
+        pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+        where
+            P: crate::db::engine::IntoParams,
+        {
+            self.transaction.execute(sql, params).await
+        }
+
+        pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+            self.transaction.execute_batch(sql).await
+        }
+
+        pub async fn commit(self) -> crate::db::engine::Result<()> {
+            self.transaction.commit().await
+        }
+
+        pub async fn rollback(self) -> crate::db::engine::Result<()> {
+            self.transaction.rollback().await
+        }
+    }
+
+    impl QueryExecutor for RegisteredSchemaInstallationTransactionV1<'_> {
+        async fn query<P>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> crate::db::engine::Result<crate::db::engine::Rows>
+        where
+            P: crate::db::engine::IntoParams,
+        {
+            RegisteredSchemaInstallationTransactionV1::query(self, sql, params).await
+        }
+    }
+
+    impl Executor for RegisteredSchemaInstallationTransactionV1<'_> {
+        async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+        where
+            P: crate::db::engine::IntoParams,
+        {
+            RegisteredSchemaInstallationTransactionV1::execute(self, sql, params).await
+        }
+
+        async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+            RegisteredSchemaInstallationTransactionV1::execute_batch(self, sql).await
+        }
+    }
 
     /// Signature of the schema installer, boxed because it is stored as a
     /// plain function pointer rather than a generic.
-    pub type Installer =
-        for<'a> fn(&'a Connection) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    pub type Installer = for<'a> fn(
+        &'a RegisteredSchemaInstallationV1,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
     static INSTALLER: OnceLock<Installer> = OnceLock::new();
 
@@ -95,14 +270,27 @@ pub mod registered_schema {
         Ok(())
     }
 
-    /// Installs the registered global/session schema through `connection`.
+    /// Adapts the Store-open path's already-authorized final-schema connection
+    /// into the sealed schema-installation capability.
+    ///
+    /// This is crate-private so no dependent crate can fabricate an
+    /// installation capability before Store publication.
+    pub(crate) async fn install_from_authorized_connection(connection: Connection) -> Result<()> {
+        let installation = RegisteredSchemaInstallationV1::from_authorized_connection(connection);
+        ensure_registered_schema(&installation).await
+    }
+
+    /// Installs the registered global/session schema through the sealed
+    /// initialization capability.
     ///
     /// # Errors
     /// Returns [`TraceDecayError::Database`] when no installer is registered,
     /// or whatever the registered installer reports.
-    pub async fn ensure_registered_schema(connection: &Connection) -> Result<()> {
+    pub async fn ensure_registered_schema(
+        installation: &RegisteredSchemaInstallationV1,
+    ) -> Result<()> {
         match INSTALLER.get() {
-            Some(installer) => installer(connection).await,
+            Some(installer) => installer(installation).await,
             None => unregistered_outcome(),
         }
     }
@@ -110,6 +298,17 @@ pub mod registered_schema {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn installer_signature_borrows_only_the_sealed_installation_capability() {
+            fn installer<'a>(
+                _: &'a RegisteredSchemaInstallationV1,
+            ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+                Box::pin(async { Ok(()) })
+            }
+
+            let _: Installer = installer;
+        }
 
         /// The port stays fail-closed: with no installer registered, the open
         /// path yields a `Database` error naming the missing registrar. This

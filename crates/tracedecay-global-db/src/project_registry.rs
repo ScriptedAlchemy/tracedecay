@@ -370,7 +370,7 @@ pub(super) async fn validate_project_rows_have_canonical_keys(
 #[derive(Clone, Copy)]
 struct ProjectRegistryDatabase<'db>(&'db RegisteredGlobalDb);
 
-struct ProjectRegistryReadSnapshot(tracedecay_runtime_core::db::engine::ReadSnapshot);
+struct ProjectRegistryReadSnapshot(tracedecay_runtime_core::db::DatabaseEngineReadSnapshot);
 
 impl<'db> ProjectRegistryDatabase<'db> {
     async fn read_snapshot(

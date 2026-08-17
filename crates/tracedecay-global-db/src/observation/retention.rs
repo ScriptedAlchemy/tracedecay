@@ -78,8 +78,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use tracedecay_runtime_core::db::engine::{
-    Connection, Executor, Params, QueryExecutor, Transaction, TransactionBehavior, Value, params,
+use tracedecay_runtime_core::db::{
+    Database, DatabaseEngineReadConnection, DatabaseWriteTransaction,
+    engine::{Executor, Params, QueryExecutor, Value, params},
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
@@ -167,8 +168,8 @@ fn opt_text(value: Option<&str>) -> Value {
 /// disposition ledgers remain durable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservationRetentionConfig {
-    /// Master switch. When `false`, [`run_observation_retention_authorized`] is a
-    /// no-op even in [`RetentionMode::Apply`].
+    /// Master switch. When `false`, [`run_observation_retention`] is a no-op
+    /// even in [`RetentionMode::Apply`].
     #[serde(default = "default_retention_enabled")]
     pub enabled: bool,
     /// Window (days since the governing disposition took effect) after which a
@@ -376,45 +377,24 @@ const OBSERVATION_PAYLOAD_COUNT_SQL: &str = "SELECT COUNT(*) FROM observations o
 
 const CURSOR_ADVANCE_COUNT_SQL: &str = "SELECT COUNT(*) FROM source_cursor_advances";
 
-/// Test-only unauthorized entry: dry-run may proceed, but apply must use the
-/// authority-bound [`run_observation_retention_authorized`] path.
-///
 /// `generation` scopes every pass to a single `projection_generation` (`None`
 /// spans all generations). In [`RetentionMode::DryRun`] nothing is mutated and
 /// each phase reports the candidate count and bytes that *would* be reclaimed.
-#[cfg(test)]
 pub async fn run_observation_retention(
-    conn: &Connection,
+    database: &Database,
     generation: Option<&str>,
     config: &ObservationRetentionConfig,
     mode: RetentionMode,
     now: i64,
 ) -> Result<ObservationRetentionReport> {
-    if mode.is_apply() {
-        return Err(TraceDecayError::Database {
-            operation: OPERATION.to_string(),
-            message: "apply requires the authority-bound observation retention entry point"
-                .to_string(),
-        });
-    }
-    run_observation_retention_authorized(conn, generation, config, mode, now, &|_| Ok(())).await
-}
-
-pub async fn run_observation_retention_authorized(
-    conn: &Connection,
-    generation: Option<&str>,
-    config: &ObservationRetentionConfig,
-    mode: RetentionMode,
-    now: i64,
-    authorize: &(dyn Fn(&str) -> Result<()> + Send + Sync),
-) -> Result<ObservationRetentionReport> {
+    let reader = database.read_connection();
     let anchor_payloads_before =
-        live_payload_count(conn, ANCHOR_PAYLOAD_COUNT_SQL, generation).await;
+        live_payload_count(&reader, ANCHOR_PAYLOAD_COUNT_SQL, generation).await;
     let observation_payloads_before =
-        live_payload_count(conn, OBSERVATION_PAYLOAD_COUNT_SQL, generation).await;
-    let cursor_advances_before = row_count(conn, CURSOR_ADVANCE_COUNT_SQL).await;
-    let freelist_before = pragma_u64(conn, "freelist_count").await;
-    let page_count_before = pragma_u64(conn, "page_count").await;
+        live_payload_count(&reader, OBSERVATION_PAYLOAD_COUNT_SQL, generation).await;
+    let cursor_advances_before = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await;
+    let freelist_before = pragma_u64(&reader, "freelist_count").await;
+    let page_count_before = pragma_u64(&reader, "page_count").await;
 
     let mut report = ObservationRetentionReport {
         generation: generation.map(str::to_string),
@@ -445,74 +425,32 @@ pub async fn run_observation_retention_authorized(
         return Ok(report);
     }
 
-    report.anchors_released = run_anchor_pass(
-        conn,
-        generation,
-        config,
-        mode,
-        now,
-        &mut report.errors,
-        authorize,
-    )
-    .await?;
-    report.observations_released = run_observation_pass(
-        conn,
-        generation,
-        config,
-        mode,
-        now,
-        &mut report.errors,
-        authorize,
-    )
-    .await?;
-    report.provenance_released = run_provenance_pass(
-        conn,
-        generation,
-        config,
-        mode,
-        now,
-        &mut report.errors,
-        authorize,
-    )
-    .await?;
+    report.anchors_released =
+        run_anchor_pass(database, generation, config, mode, now, &mut report.errors).await?;
+    report.observations_released =
+        run_observation_pass(database, generation, config, mode, now, &mut report.errors).await?;
+    report.provenance_released =
+        run_provenance_pass(database, generation, config, mode, now, &mut report.errors).await?;
     report.cursor_advances_reclaimed =
-        run_cursor_advance_pass(conn, config, mode, &mut report.errors, authorize).await?;
+        run_cursor_advance_pass(database, config, mode, &mut report.errors).await?;
 
     report.ended_at = now;
+    let reader = database.read_connection();
     report.anchor_payloads_after =
-        live_payload_count(conn, ANCHOR_PAYLOAD_COUNT_SQL, generation).await;
+        live_payload_count(&reader, ANCHOR_PAYLOAD_COUNT_SQL, generation).await;
     report.observation_payloads_after =
-        live_payload_count(conn, OBSERVATION_PAYLOAD_COUNT_SQL, generation).await;
-    report.cursor_advances_after = row_count(conn, CURSOR_ADVANCE_COUNT_SQL).await;
-    report.freelist_after = pragma_u64(conn, "freelist_count").await;
-    report.page_count_after = pragma_u64(conn, "page_count").await;
+        live_payload_count(&reader, OBSERVATION_PAYLOAD_COUNT_SQL, generation).await;
+    report.cursor_advances_after = row_count(&reader, CURSOR_ADVANCE_COUNT_SQL).await;
+    report.freelist_after = pragma_u64(&reader, "freelist_count").await;
+    report.page_count_after = pragma_u64(&reader, "page_count").await;
     Ok(report)
 }
 
-async fn commit_authorized(
-    transaction: Transaction,
-    authorize: &(dyn Fn(&str) -> Result<()> + Send + Sync),
-    intent: &str,
-) -> Result<()> {
-    if let Err(error) = authorize(intent) {
-        return match transaction.rollback().await {
-            Ok(()) => Err(error),
-            Err(rollback_error) => Err(TraceDecayError::Database {
-                operation: OPERATION.to_string(),
-                message: format!("{error}; rollback after authority loss failed: {rollback_error}"),
-            }),
-        };
-    }
+async fn commit_transaction(transaction: DatabaseWriteTransaction<'_>) -> Result<()> {
     transaction.commit().await.map_err(db_error)
 }
 
-async fn execute_authorized_required(
-    executor: &(impl Executor + ?Sized),
-    authorize: &(dyn Fn(&str) -> Result<()> + Send + Sync),
-    intent: &str,
-    sql: &str,
-) -> Result<()> {
-    authorize(intent)?;
+async fn execute_required(executor: &(impl Executor + ?Sized), sql: &str) -> Result<()> {
     executor
         .execute(sql, ())
         .await
@@ -520,12 +458,12 @@ async fn execute_authorized_required(
         .map_err(db_error)
 }
 
-enum RetentionQueryExecutor<'a> {
-    Connection(&'a Connection),
-    Transaction(&'a Transaction),
+enum RetentionQueryExecutor<'reader, 'database> {
+    Read(&'reader DatabaseEngineReadConnection),
+    Transaction(&'reader DatabaseWriteTransaction<'database>),
 }
 
-impl RetentionQueryExecutor<'_> {
+impl RetentionQueryExecutor<'_, '_> {
     async fn query(
         &self,
         sql: &str,
@@ -533,7 +471,7 @@ impl RetentionQueryExecutor<'_> {
     ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows>
     {
         match self {
-            Self::Connection(connection) => connection.query(sql, params).await,
+            Self::Read(connection) => connection.query(sql, params).await,
             Self::Transaction(transaction) => transaction.query(sql, params).await,
         }
     }
@@ -553,13 +491,12 @@ struct AnchorTarget {
 }
 
 async fn run_anchor_pass(
-    conn: &Connection,
+    database: &Database,
     generation: Option<&str>,
     config: &ObservationRetentionConfig,
     mode: RetentionMode,
     now: i64,
     errors: &mut Vec<String>,
-    authorize: &(dyn Fn(&str) -> Result<()> + Send + Sync),
 ) -> Result<ObservationRetentionPhaseReport> {
     let mut report = ObservationRetentionPhaseReport {
         window_days: config.anchor_release_after_days,
@@ -586,17 +523,18 @@ async fn run_anchor_pass(
          LIMIT ?3"
     );
     let transaction = if mode.is_apply() {
-        authorize("begin anchor retention pass")?;
         Some(
-            conn.transaction_with_behavior(TransactionBehavior::Immediate)
+            database
+                .begin_write_transaction("begin anchor retention pass")
                 .await
                 .map_err(db_error)?,
         )
     } else {
         None
     };
+    let reader = database.read_connection();
     let query_executor = transaction.as_ref().map_or(
-        RetentionQueryExecutor::Connection(conn),
+        RetentionQueryExecutor::Read(&reader),
         RetentionQueryExecutor::Transaction,
     );
     let mut rows = query_executor
@@ -631,15 +569,8 @@ async fn run_anchor_pass(
         transaction,
         "apply mode requires an open anchor retention transaction",
     )?;
-    execute_authorized_required(
-        &txn,
-        authorize,
-        "drop anchor immutability trigger for retention",
-        DROP_ANCHOR_UPDATE_TRIGGER,
-    )
-    .await?;
+    execute_required(&txn, DROP_ANCHOR_UPDATE_TRIGGER).await?;
     for chunk in targets.chunks(RETENTION_DML_CHUNK) {
-        authorize("release anchor retention payload")?;
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!(
             "UPDATE retrieval_anchors SET anchor_json = ? WHERE anchor_id IN ({placeholders})"
@@ -667,14 +598,8 @@ async fn run_anchor_pass(
             )),
         }
     }
-    execute_authorized_required(
-        &txn,
-        authorize,
-        "restore anchor immutability trigger after retention",
-        CREATE_ANCHOR_UPDATE_TRIGGER,
-    )
-    .await?;
-    commit_authorized(txn, authorize, "commit anchor retention pass").await?;
+    execute_required(&txn, CREATE_ANCHOR_UPDATE_TRIGGER).await?;
+    commit_transaction(txn).await?;
     Ok(report)
 }
 
@@ -685,13 +610,12 @@ struct ObservationTarget {
 }
 
 async fn run_observation_pass(
-    conn: &Connection,
+    database: &Database,
     generation: Option<&str>,
     config: &ObservationRetentionConfig,
     mode: RetentionMode,
     now: i64,
     errors: &mut Vec<String>,
-    authorize: &(dyn Fn(&str) -> Result<()> + Send + Sync),
 ) -> Result<ObservationRetentionPhaseReport> {
     let mut report = ObservationRetentionPhaseReport {
         window_days: config.observation_release_after_days,
@@ -755,17 +679,18 @@ async fn run_observation_pass(
          LIMIT ?3"
         .to_string();
     let transaction = if mode.is_apply() {
-        authorize("begin observation retention pass")?;
         Some(
-            conn.transaction_with_behavior(TransactionBehavior::Immediate)
+            database
+                .begin_write_transaction("begin observation retention pass")
                 .await
                 .map_err(db_error)?,
         )
     } else {
         None
     };
+    let reader = database.read_connection();
     let query_executor = transaction.as_ref().map_or(
-        RetentionQueryExecutor::Connection(conn),
+        RetentionQueryExecutor::Read(&reader),
         RetentionQueryExecutor::Transaction,
     );
     let mut rows = query_executor
@@ -797,15 +722,8 @@ async fn run_observation_pass(
         transaction,
         "apply mode requires an open observation retention transaction",
     )?;
-    execute_authorized_required(
-        &txn,
-        authorize,
-        "drop observation immutability trigger for retention",
-        DROP_OBSERVATION_UPDATE_TRIGGER,
-    )
-    .await?;
+    execute_required(&txn, DROP_OBSERVATION_UPDATE_TRIGGER).await?;
     for chunk in targets.chunks(RETENTION_DML_CHUNK) {
-        authorize("release observation retention payload")?;
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!(
             "UPDATE observations SET observation_json = ? WHERE observation_id IN ({placeholders})"
@@ -833,14 +751,8 @@ async fn run_observation_pass(
             )),
         }
     }
-    execute_authorized_required(
-        &txn,
-        authorize,
-        "restore observation immutability trigger after retention",
-        CREATE_OBSERVATION_UPDATE_TRIGGER,
-    )
-    .await?;
-    commit_authorized(txn, authorize, "commit observation retention pass").await?;
+    execute_required(&txn, CREATE_OBSERVATION_UPDATE_TRIGGER).await?;
+    commit_transaction(txn).await?;
     Ok(report)
 }
 
@@ -851,13 +763,12 @@ struct ProvenanceTarget {
 }
 
 async fn run_provenance_pass(
-    conn: &Connection,
+    database: &Database,
     generation: Option<&str>,
     config: &ObservationRetentionConfig,
     mode: RetentionMode,
     now: i64,
     errors: &mut Vec<String>,
-    authorize: &(dyn Fn(&str) -> Result<()> + Send + Sync),
 ) -> Result<ObservationRetentionPhaseReport> {
     let mut report = ObservationRetentionPhaseReport {
         window_days: config.provenance_release_after_days,
@@ -892,17 +803,18 @@ async fn run_provenance_pass(
          LIMIT ?3"
     );
     let transaction = if mode.is_apply() {
-        authorize("begin provenance retention pass")?;
         Some(
-            conn.transaction_with_behavior(TransactionBehavior::Immediate)
+            database
+                .begin_write_transaction("begin provenance retention pass")
                 .await
                 .map_err(db_error)?,
         )
     } else {
         None
     };
+    let reader = database.read_connection();
     let query_executor = transaction.as_ref().map_or(
-        RetentionQueryExecutor::Connection(conn),
+        RetentionQueryExecutor::Read(&reader),
         RetentionQueryExecutor::Transaction,
     );
     let mut rows = query_executor
@@ -934,15 +846,8 @@ async fn run_provenance_pass(
         transaction,
         "apply mode requires an open provenance retention transaction",
     )?;
-    execute_authorized_required(
-        &txn,
-        authorize,
-        "drop provenance immutability trigger for retention",
-        DROP_PROVENANCE_UPDATE_TRIGGER,
-    )
-    .await?;
+    execute_required(&txn, DROP_PROVENANCE_UPDATE_TRIGGER).await?;
     for chunk in targets.chunks(RETENTION_DML_CHUNK) {
-        authorize("release provenance retention payload")?;
         // ?1 is the shared marker (bound once, reused for both fat columns);
         // the `IN` list starts at ?2 so the marker index isn't reused for ids.
         let placeholders = (0..chunk.len())
@@ -977,14 +882,8 @@ async fn run_provenance_pass(
             )),
         }
     }
-    execute_authorized_required(
-        &txn,
-        authorize,
-        "restore provenance immutability trigger after retention",
-        CREATE_PROVENANCE_UPDATE_TRIGGER,
-    )
-    .await?;
-    commit_authorized(txn, authorize, "commit provenance retention pass").await?;
+    execute_required(&txn, CREATE_PROVENANCE_UPDATE_TRIGGER).await?;
+    commit_transaction(txn).await?;
     Ok(report)
 }
 
@@ -999,11 +898,10 @@ struct CursorAdvanceTarget {
 /// Older generations and lower positions in the current generation are no
 /// longer replayable frontiers and can be removed without weakening recovery.
 async fn run_cursor_advance_pass(
-    conn: &Connection,
+    database: &Database,
     config: &ObservationRetentionConfig,
     mode: RetentionMode,
     errors: &mut Vec<String>,
-    authorize: &(dyn Fn(&str) -> Result<()> + Send + Sync),
 ) -> Result<ObservationRetentionPhaseReport> {
     let mut report = ObservationRetentionPhaseReport::default();
     if !config.reclaim_superseded_cursor_advances {
@@ -1034,17 +932,18 @@ async fn run_cursor_advance_pass(
          ORDER BY advance.rowid
          LIMIT ?1";
     let transaction = if mode.is_apply() {
-        authorize("begin source cursor advance retention pass")?;
         Some(
-            conn.transaction_with_behavior(TransactionBehavior::Immediate)
+            database
+                .begin_write_transaction("begin source cursor advance retention pass")
                 .await
                 .map_err(db_error)?,
         )
     } else {
         None
     };
+    let reader = database.read_connection();
     let query_executor = transaction.as_ref().map_or(
-        RetentionQueryExecutor::Connection(conn),
+        RetentionQueryExecutor::Read(&reader),
         RetentionQueryExecutor::Transaction,
     );
     let mut rows = query_executor
@@ -1068,15 +967,8 @@ async fn run_cursor_advance_pass(
         transaction,
         "apply mode requires an open cursor advance retention transaction",
     )?;
-    execute_authorized_required(
-        &txn,
-        authorize,
-        "drop cursor advance delete trigger for retention",
-        DROP_CURSOR_ADVANCE_DELETE_TRIGGER,
-    )
-    .await?;
+    execute_required(&txn, DROP_CURSOR_ADVANCE_DELETE_TRIGGER).await?;
     for chunk in targets.chunks(RETENTION_DML_CHUNK) {
-        authorize("reclaim superseded source cursor advance")?;
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!("DELETE FROM source_cursor_advances WHERE rowid IN ({placeholders})");
         let values = chunk
@@ -1104,19 +996,8 @@ async fn run_cursor_advance_pass(
             )),
         }
     }
-    execute_authorized_required(
-        &txn,
-        authorize,
-        "restore cursor advance delete trigger after retention",
-        CREATE_CURSOR_ADVANCE_DELETE_TRIGGER,
-    )
-    .await?;
-    commit_authorized(
-        txn,
-        authorize,
-        "commit source cursor advance retention pass",
-    )
-    .await?;
+    execute_required(&txn, CREATE_CURSOR_ADVANCE_DELETE_TRIGGER).await?;
+    commit_transaction(txn).await?;
     Ok(report)
 }
 

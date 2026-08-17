@@ -4,7 +4,6 @@ mod runtime_retirement;
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::errors::{Result, TraceDecayError};
@@ -580,7 +579,7 @@ impl StoreAdministration {
 
     async fn remote_deletion_project_ids(
         &self,
-        database: &Arc<crate::global_db::RegisteredGlobalDb>,
+        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
         profile_root: &Path,
     ) -> Result<BTreeSet<String>> {
         let mut project_ids = database
@@ -648,7 +647,7 @@ impl StoreAdministration {
     async fn remove_remote_deleted_project(
         &self,
         owners: &super::super::remote_deletion::RemoteDeletionRuntimeOwners,
-        database: &Arc<crate::global_db::RegisteredGlobalDb>,
+        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
         profile_root: &Path,
         project_id: &str,
     ) -> std::result::Result<(), RemoteDeletionCleanupError> {

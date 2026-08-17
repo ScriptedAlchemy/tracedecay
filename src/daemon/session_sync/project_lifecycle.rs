@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, PoisonError, RwLock, Weak};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use tracedecay_application::session_sync::{
     SessionSyncCommandV1, SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1,
@@ -11,7 +11,7 @@ use tracedecay_application::{
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_store::{StoreShardScopeV1, VerifiedStoreLocatorV1};
 
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 
 use super::{
     ActiveSessionImport, DaemonSessionSyncConfig, DaemonSessionSyncService,
@@ -28,10 +28,10 @@ pub(super) struct SessionSyncProjectContext {
     pub(super) profile_root: PathBuf,
     pub(super) project_root: PathBuf,
     pub(super) transcript_source_home: Option<PathBuf>,
-    pub(super) project_sessions: RwLock<Weak<RegisteredGlobalDb>>,
+    pub(super) project_sessions: RwLock<Option<RegisteredGlobalDbLeaseV1>>,
     project_sessions_locator: VerifiedStoreLocatorV1,
-    pub(super) user_sessions: Arc<RegisteredGlobalDb>,
-    pub(super) registry: Arc<RegisteredGlobalDb>,
+    pub(super) user_sessions: RegisteredGlobalDbLeaseV1,
+    pub(super) registry: RegisteredGlobalDbLeaseV1,
     pub(super) project_refresh:
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(super) user_refresh:
@@ -46,11 +46,11 @@ pub(super) struct SessionSyncTaskV1 {
 }
 
 impl SessionSyncProjectContext {
-    pub(super) fn project_sessions(&self) -> Result<Arc<RegisteredGlobalDb>, String> {
+    pub(super) fn project_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1, String> {
         self.project_sessions
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .upgrade()
+            .clone()
             .ok_or_else(|| {
                 format!(
                     "session sync project '{}' is retired",
@@ -59,22 +59,20 @@ impl SessionSyncProjectContext {
             })
     }
 
-    fn retire_project_sessions(&self) -> Option<Arc<RegisteredGlobalDb>> {
+    fn retire_project_sessions(&self) -> Option<RegisteredGlobalDbLeaseV1> {
         let mut project_sessions = self
             .project_sessions
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        let database = project_sessions.upgrade();
-        *project_sessions = Weak::new();
-        database
+        project_sessions.take()
     }
 
     pub(super) fn rebind_project_sessions(
         &self,
-        database: &Arc<RegisteredGlobalDb>,
+        database: &RegisteredGlobalDbLeaseV1,
     ) -> Result<(), String> {
         let shard = &database.binding().shard_id;
-        let locator = database.runtime().locator().verified();
+        let locator = database.verified_locator();
         if shard.brain_id != self.brain_id
             || shard.profile_id != self.profile_id
             || locator != &self.project_sessions_locator
@@ -92,7 +90,7 @@ impl SessionSyncProjectContext {
         *self
             .project_sessions
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(database);
+            .unwrap_or_else(PoisonError::into_inner) = Some(database.clone());
         Ok(())
     }
 }
@@ -112,7 +110,7 @@ impl DaemonSessionSyncService {
     async fn recover_project(
         &self,
         context: &Arc<SessionSyncProjectContext>,
-        project_sessions: &Arc<RegisteredGlobalDb>,
+        project_sessions: &RegisteredGlobalDbLeaseV1,
     ) -> crate::errors::Result<bool> {
         let scope = SessionSyncScopeV1::new(context.project_id.clone(), context.profile_id.clone());
         let prefix = journal_prefix(&scope);
@@ -174,7 +172,7 @@ impl DaemonSessionSyncService {
                 recovered_import = true;
                 self.coalesce_import(
                     Arc::clone(context),
-                    Arc::clone(project_sessions),
+                    project_sessions.clone(),
                     key,
                     journal,
                     primary_key,
@@ -234,7 +232,7 @@ impl DaemonSessionSyncService {
                 .map_err(contract_error)?;
                 self.coalesce_import(
                     Arc::clone(context),
-                    Arc::clone(project_sessions),
+                    project_sessions.clone(),
                     key,
                     journal,
                     active_import.journal_key,
@@ -262,7 +260,7 @@ impl DaemonSessionSyncService {
             );
             let _ = self.enqueue(
                 Arc::clone(context),
-                Arc::clone(project_sessions),
+                project_sessions.clone(),
                 key,
                 request,
                 admission,
@@ -278,8 +276,8 @@ impl DaemonSessionSyncService {
         let scope = SessionSyncScopeV1::new(config.project_id.clone(), config.profile_id.clone());
         let project_gate = self.project_gate(&scope);
         let project = project_gate.lock().await;
-        let project_sessions = Arc::clone(&config.project_sessions);
-        let project_sessions_locator = project_sessions.runtime().locator().verified().clone();
+        let project_sessions = config.project_sessions.clone();
+        let project_sessions_locator = project_sessions.verified_locator().clone();
         let context = Arc::new(SessionSyncProjectContext {
             brain_id: config.brain_id,
             profile_id: config.profile_id,
@@ -287,7 +285,7 @@ impl DaemonSessionSyncService {
             profile_root: config.profile_root,
             project_root: config.project_root,
             transcript_source_home: config.transcript_source_home,
-            project_sessions: RwLock::new(Weak::new()),
+            project_sessions: RwLock::new(None),
             project_sessions_locator,
             user_sessions: config.user_sessions,
             registry: config.registry,
@@ -367,7 +365,7 @@ impl DaemonSessionSyncService {
     async fn schedule_startup_import(
         &self,
         context: &Arc<SessionSyncProjectContext>,
-        project_sessions: &Arc<RegisteredGlobalDb>,
+        project_sessions: &RegisteredGlobalDbLeaseV1,
         scope: SessionSyncScopeV1,
     ) -> crate::errors::Result<()> {
         let stable = format!(
@@ -394,7 +392,7 @@ impl DaemonSessionSyncService {
             SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
         );
         match self
-            .execute_request_admitted(request, Arc::clone(context), Arc::clone(project_sessions))
+            .execute_request_admitted(request, Arc::clone(context), project_sessions.clone())
             .await
         {
             SessionSyncOutcomeV1::Accepted(_)
@@ -466,7 +464,7 @@ impl DaemonSessionSyncService {
         &self,
         profile_id: &UserProfileId,
         project_id: &ProjectId,
-        database: &Arc<RegisteredGlobalDb>,
+        database: &RegisteredGlobalDbLeaseV1,
     ) -> Result<bool, String> {
         let scope = SessionSyncScopeV1::new(project_id.clone(), profile_id.clone());
         let project_gate = self.project_gate(&scope);
@@ -573,7 +571,7 @@ impl DaemonSessionSyncService {
         scope: &SessionSyncScopeV1,
         previous: Option<(
             Arc<SessionSyncProjectContext>,
-            Option<Arc<RegisteredGlobalDb>>,
+            Option<RegisteredGlobalDbLeaseV1>,
         )>,
     ) -> Result<(), String> {
         let Some((previous, database)) = previous else {

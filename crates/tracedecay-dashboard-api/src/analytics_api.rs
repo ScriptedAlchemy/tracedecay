@@ -501,8 +501,9 @@ async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Result<Value, S
         }));
     };
 
+    let connection = db.read_connection();
     let rows = query_rows(
-        db.read_connection(),
+        &connection,
         "SELECT COALESCE(agent_id, '') AS agent_id,
                 COALESCE(metadata_json, '') AS metadata_json
          FROM sessions
@@ -761,8 +762,9 @@ async fn subagent_tree_reading(
         });
     };
 
+    let connection = db.read_connection();
     let rows = query_rows(
-        db.read_connection(),
+        &connection,
         "SELECT provider,
                 session_id,
                 COALESCE(parent_session_id, '') AS parent_session_id,
@@ -1098,8 +1100,10 @@ async fn durable_analytics_rows(
         return Some(events.iter().map(durable_analytics_event_row).collect());
     }
 
+    let lcm_db = lcm_db?;
+    let connection = lcm_db.read_connection();
     let rows = query_rows(
-        lcm_db?.read_connection(),
+        &connection,
         "SELECT provider, timestamp, event_kind, hook_name, tool_name,
                 tool_category, skill_name, hint_category, outcome, metadata_json
          FROM (
@@ -1304,8 +1308,9 @@ async fn hint_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[
         });
     };
 
+    let connection = db.read_connection();
     let has_table = query_i64(
-        db.read_connection(),
+        &connection,
         "SELECT COUNT(*) FROM sqlite_master
          WHERE type IN ('table', 'view') AND name = 'dashboard_hint_events'",
         (),
@@ -1321,7 +1326,7 @@ async fn hint_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[
     }
 
     let rows = match query_rows(
-        db.read_connection(),
+        &connection,
         "SELECT category,
                 SUM(CASE WHEN event_type = 'emitted' THEN 1 ELSE 0 END) AS emitted,
                 SUM(CASE WHEN event_type = 'followed' THEN 1 ELSE 0 END) AS followed,
@@ -1376,8 +1381,9 @@ async fn session_message_rows(
     let Some(db) = db else {
         return Ok(None);
     };
+    let connection = db.read_connection();
     query_rows(
-        db.read_connection(),
+        &connection,
         "SELECT COALESCE(tool_names, '') AS tool_names,
                 COALESCE(text, '') AS text,
                 COALESCE(metadata_json, '') AS metadata_json

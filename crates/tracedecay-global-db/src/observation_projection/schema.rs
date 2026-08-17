@@ -1,4 +1,7 @@
-use tracedecay_runtime_core::db::engine::{Connection, Error, Executor, QueryExecutor, params};
+use tracedecay_runtime_core::{
+    db::engine::{Error, Executor, QueryExecutor, params},
+    ports::registered_schema::RegisteredSchemaInstallationV1,
+};
 
 /// Creates the observation projection schema at its final V4 shape, or
 /// verifies that an existing store already carries that shape.
@@ -302,7 +305,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
 }
 
 pub(in super::super) async fn ensure_observation_projection_performance_indexes(
-    conn: &Connection,
+    installation: &RegisteredSchemaInstallationV1,
 ) -> Result<(), Error> {
     // Install each historical-data index as its own durable authority-revalidated batch. These
     // cannot share the lease-bounded all-schema transaction: an interrupted
@@ -340,9 +343,9 @@ pub(in super::super) async fn ensure_observation_projection_performance_indexes(
         "CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
          ON observation_projection_dispositions (observation_id, receipt_id);",
     ] {
-        let transaction = conn.authorized_long_lease_transaction().await?;
-        transaction.execute_authority_revalidated_batch(sql).await?;
-        transaction.commit().await?;
+        installation
+            .execute_authority_revalidated_batch(sql)
+            .await?;
     }
     Ok(())
 }
@@ -537,15 +540,18 @@ fn unsupported_projection_schema(table: &str) -> Error {
 mod tests {
     use tempfile::TempDir;
 
-    use crate::ensure_registered_schema;
+    use crate::tests::harness::open_registered_test_database_fixture;
+    use crate::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
+    use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::TestConnection;
 
     async fn open_registered_schema(
         path: &std::path::Path,
-    ) -> tracedecay_runtime_core::errors::Result<TestConnection> {
-        let conn = TestConnection::open(path);
-        ensure_registered_schema(&conn).await?;
-        Ok(conn)
+    ) -> tracedecay_runtime_core::errors::Result<(
+        RegisteredGlobalDbLeaseV1,
+        RegisteredGlobalDbOwnerV1,
+    )> {
+        open_registered_test_database_fixture(path, TestDatabaseRuntimeScope::Profile).await
     }
 
     /// A store at a pre-final projection shape is refused with the
@@ -555,8 +561,8 @@ mod tests {
     async fn legacy_projection_shape_is_refused_with_a_fresh_start_remedy() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");
+        drop(open_registered_schema(&path).await.unwrap());
         let conn = TestConnection::open(&path);
-        ensure_registered_schema(&conn).await.unwrap();
         conn.execute_batch(
             "DROP TABLE observation_projection_rebuilds;
              CREATE TABLE observation_projection_rebuilds (
@@ -600,7 +606,8 @@ mod tests {
     async fn performance_indexes_install_outside_schema_transaction() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");
-        let conn = open_registered_schema(&path).await.unwrap();
+        drop(open_registered_schema(&path).await.unwrap());
+        let conn = TestConnection::open(&path);
         conn.execute_batch(
             "DROP INDEX idx_observation_projection_provenance_output;
              DROP INDEX idx_observation_projection_provenance_global_output;

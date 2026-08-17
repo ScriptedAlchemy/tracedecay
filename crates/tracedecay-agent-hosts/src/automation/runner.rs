@@ -30,7 +30,7 @@ use crate::ports::project_runtime::ProfileRuntime;
 use crate::ports::project_runtime::TraceDecay;
 use crate::ports::session_store::AutomationSessionStore;
 use crate::store::memory::DatabaseFactStore;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_policy::CurationApplyAuthorityV1;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_usecases::memory::MemoryApplication;
@@ -101,7 +101,7 @@ pub fn user_automation_root(profile_root: &std::path::Path) -> PathBuf {
 
 pub(super) async fn project_automation_sessions(
     cg: &TraceDecay,
-) -> Result<Arc<RegisteredGlobalDb>> {
+) -> Result<RegisteredGlobalDbLeaseV1> {
     let FactOwnerV1::Project { project_id } = cg.project_memory_owner()? else {
         return Err(TraceDecayError::Config {
             message: "project automation requires authoritative project session scope".to_string(),

@@ -178,10 +178,7 @@ pub async fn seed_session_message_observation_for_test(
         authorization,
     )
     .map_err(|error| fixture_error("retrieval anchor", error))?;
-    let store = crate::store::GlobalDbObservationStore::with_runtime(
-        project_database.runtime(),
-        project_database.authority(),
-    );
+    let store = project_database.observation_store();
     store
         .persist_observation(
             AnchoredObservationWrite::new(write, anchor, projection)

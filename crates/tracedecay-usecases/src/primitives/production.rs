@@ -81,7 +81,7 @@ use tracedecay_code_index::test_attribution::{
     GenerationTestJoinCoverageV1, GenerationTestJoinDispositionV1, GenerationTestJoinV1,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_temporal_query::cursor::{
@@ -1140,7 +1140,7 @@ pub struct TraceDecayExtendedPrimitivePortV1 {
     source_runtime: Arc<SourceReadRuntime>,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     database: Database,
-    observation_database: Arc<RegisteredGlobalDb>,
+    observation_database: RegisteredGlobalDbLeaseV1,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
     diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
@@ -1151,7 +1151,7 @@ impl TraceDecayExtendedPrimitivePortV1 {
         source_runtime: Arc<SourceReadRuntime>,
         code_graph: Arc<dyn CodeGraphProjectionReadPort>,
         database: Database,
-        observation_database: Arc<RegisteredGlobalDb>,
+        observation_database: RegisteredGlobalDbLeaseV1,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
         diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
         diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
@@ -1801,7 +1801,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
             if current_index.code_generation_id != *identity.generation_id() {
                 return diagnostics_unavailable(finished_at, OmissionReason::Stale);
             }
-            let query = DiagnosticsQuery::new(self.database.conn());
+            let query = DiagnosticsQuery::new(self.database.clone());
             let current = query.current_generation().await;
             let Some(current_generation) = current.generation else {
                 return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
@@ -2492,7 +2492,7 @@ pub struct ProductionPrimitiveOpenRequestV1 {
     source_runtime: Arc<SourceReadRuntime>,
     code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
-    session_db: Arc<RegisteredGlobalDb>,
+    session_db: RegisteredGlobalDbLeaseV1,
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
@@ -2506,7 +2506,7 @@ impl ProductionPrimitiveOpenRequestV1 {
         source_runtime: Arc<SourceReadRuntime>,
         code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
         ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
-        session_db: Arc<RegisteredGlobalDb>,
+        session_db: RegisteredGlobalDbLeaseV1,
         temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
         diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
@@ -2588,7 +2588,7 @@ pub async fn open_production_primitive_runtime(
         Arc::clone(&source_runtime),
         Arc::clone(&code_graph),
         database.clone(),
-        Arc::clone(&session_db),
+        session_db.clone(),
         code_index,
         diagnostic_identity,
         AuthenticatedDiagnosticCursorAuthorityV1 {

@@ -23,7 +23,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::ports::project_runtime::ProfileRuntime;
 use crate::ports::project_runtime::TraceDecay;
 use crate::store::memory::DatabaseFactStore;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_policy::{
     CurationApplyAuthorityV1, CurationApplyDecisionV1, CurationApplyPolicyInputV1,
     CurationApplySubjectV1, CurationValidationDispositionV1, evaluate_curation_apply,
@@ -162,12 +162,12 @@ pub(crate) async fn run_user_memory_curator_with_backend(
 enum MemoryCuratorStore<'a> {
     Project {
         cg: &'a TraceDecay,
-        sessions_db: Arc<RegisteredGlobalDb>,
+        sessions_db: RegisteredGlobalDbLeaseV1,
     },
     User {
         profile_root: &'a std::path::Path,
         runtime: &'a dyn ProfileRuntime,
-        sessions_db: Arc<RegisteredGlobalDb>,
+        sessions_db: RegisteredGlobalDbLeaseV1,
     },
 }
 
@@ -179,10 +179,10 @@ impl MemoryCuratorStore<'_> {
         }
     }
 
-    fn sessions_db(&self) -> Arc<RegisteredGlobalDb> {
+    fn sessions_db(&self) -> RegisteredGlobalDbLeaseV1 {
         match self {
             Self::Project { sessions_db, .. } | Self::User { sessions_db, .. } => {
-                Arc::clone(sessions_db)
+                sessions_db.clone()
             }
         }
     }

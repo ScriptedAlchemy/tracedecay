@@ -1,11 +1,10 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_store::RuntimeMaintenanceStateV1;
 
 use super::attachment::attachment_failure;
 use super::{
-    EvictingRuntime, RegistryEntry, RegistryState, StoreRuntimeHandle, StoreRuntimeKey,
+    EvictingRuntime, RegistryEntry, RegistryState, StoreRuntimeClientLease, StoreRuntimeKey,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
 };
 
@@ -105,7 +104,7 @@ pub(super) enum CapacityReservation {
 pub(super) struct EvictionReservation {
     key: StoreRuntimeKey,
     attempt: u64,
-    handle: StoreRuntimeHandle,
+    owner: std::sync::Arc<super::StoreRuntimeOwnerAttachment>,
 }
 
 impl StoreRuntimeRegistry {
@@ -126,10 +125,8 @@ impl StoreRuntimeRegistry {
                 return None;
             };
             (!key.is_project_code_capacity_exempt()
-                && ready.handle.is_exclusively_held_by_registry()
-                && Arc::strong_count(ready.handle.runtime()) == 1
                 && ready
-                    .handle
+                    .owner
                     .runtime()
                     .eviction_eligibility(self.inner.config.eviction_idle())
                     .is_eligible())
@@ -146,7 +143,7 @@ impl StoreRuntimeRegistry {
             return Ok(CapacityReservation::Exhausted);
         };
         if let Err(error) = ready
-            .handle
+            .owner
             .runtime()
             .transition(RuntimeMaintenanceStateV1::Draining)
         {
@@ -155,18 +152,18 @@ impl StoreRuntimeRegistry {
                 message: error.to_string(),
             });
         }
-        let handle = ready.handle;
+        let owner = ready.owner;
         state.entries.insert(
             candidate.clone(),
             RegistryEntry::Evicting(EvictingRuntime {
                 attempt,
-                handle: handle.clone(),
+                owner: owner.clone(),
             }),
         );
         Ok(CapacityReservation::Eviction(EvictionReservation {
             key: candidate,
             attempt,
-            handle,
+            owner,
         }))
     }
 
@@ -174,10 +171,10 @@ impl StoreRuntimeRegistry {
         &self,
         reservation: EvictionReservation,
     ) -> Result<(), StoreRuntimeRegistryFailure> {
-        let outcome = drain_and_close(&reservation.handle);
+        let outcome = drain_and_close(&reservation.owner);
         if outcome.is_err() {
             let _ = reservation
-                .handle
+                .owner
                 .runtime()
                 .transition(RuntimeMaintenanceStateV1::Faulted);
         }
@@ -209,7 +206,7 @@ impl StoreRuntimeRegistry {
                 reservation.key,
                 RegistryEntry::Evicting(EvictingRuntime {
                     attempt: evicting.attempt,
-                    handle: evicting.handle,
+                    owner: evicting.owner,
                 }),
             );
             return outcome;
@@ -221,22 +218,24 @@ impl StoreRuntimeRegistry {
 }
 
 pub(super) fn drain_and_close_physical(
-    handle: &StoreRuntimeHandle,
+    handle: &super::StoreRuntimeOwnerAttachment,
 ) -> Result<(), StoreRuntimeRegistryFailure> {
-    if let Err(message) = handle.inner.attachment.drain() {
+    if let Err(message) = handle.attachment.drain() {
         return Err(attachment_failure("drain", message));
     }
     let physical = handle.physical_snapshot();
     if !physical.is_drained() {
         return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeNotDrained { snapshot: physical });
     }
-    if let Err(message) = handle.inner.attachment.close_and_join() {
+    if let Err(message) = handle.attachment.close_and_join() {
         return Err(attachment_failure("close_and_join", message));
     }
     Ok(())
 }
 
-fn drain_and_close(handle: &StoreRuntimeHandle) -> Result<(), StoreRuntimeRegistryFailure> {
+fn drain_and_close(
+    handle: &super::StoreRuntimeOwnerAttachment,
+) -> Result<(), StoreRuntimeRegistryFailure> {
     drain_and_close_physical(handle)?;
     handle
         .runtime()

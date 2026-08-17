@@ -328,7 +328,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
             invocation,
             project_root,
             &state.graph,
-            Arc::clone(&state.session_db),
+            state.session_db.clone(),
             state.scope,
             &state.scout_configuration,
         )
@@ -361,7 +361,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
                 invocation,
                 project_root,
                 &state.graph,
-                Arc::clone(&state.session_db),
+                state.session_db.clone(),
                 state.scope.clone(),
                 &state.scout_configuration,
             )
@@ -380,7 +380,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
             invocation,
             project_root,
             &state.graph,
-            Arc::clone(&state.session_db),
+            state.session_db.clone(),
             state.scope.clone(),
             &state.scout_configuration,
         )
@@ -399,7 +399,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         invocation,
         project_root,
         &state.graph,
-        Arc::clone(&state.session_db),
+        state.session_db.clone(),
         state.scope.clone(),
         &state.scout_configuration,
     )
@@ -457,7 +457,7 @@ async fn register_production_feedback_cycle(
         requester: state.requester.clone(),
         authorization,
         code_graph: Arc::clone(&state.code_graph),
-        project_runtime_db: Arc::clone(&state.session_db),
+        project_runtime_db: state.session_db.clone(),
         runtime_state,
         document_identity: Arc::new(invocation.code_index_schedulers.clone()),
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
@@ -575,7 +575,7 @@ async fn register_production_advisory_owner(
         feedback_cycle: Arc::clone(&feedback_cycle),
     };
     let production = AdvisoryProductionOpenV1 {
-        project_runtime_db: Arc::clone(&state.session_db),
+        project_runtime_db: state.session_db.clone(),
         database: state.database.clone(),
         code_graph: Arc::clone(&state.code_graph),
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
@@ -663,7 +663,7 @@ async fn resolve_production_github_provider_config(
         }
     };
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
-        Arc::clone(&state.session_db),
+        state.session_db.clone(),
     );
     let configured_source_access = Arc::new(ConfiguredGitHubSourceAccessAuthorityV1::new(
         configuration,
@@ -740,7 +740,7 @@ async fn resolve_production_github_provider_config(
                     http: GitHubHttpReadConfigV1::default(),
                     identity,
                     stack_coordinator: invocation.github_stack_coordinator(),
-                    stack_anchor_db: Arc::clone(&state.session_db),
+                    stack_anchor_db: state.session_db.clone(),
                 },
             )
         }

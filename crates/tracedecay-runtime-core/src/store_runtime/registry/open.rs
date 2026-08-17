@@ -12,15 +12,16 @@ use super::capacity::CapacityReservation;
 use super::leases::validate_profile_authority;
 use super::{
     PublishedShardRuntime, ReadyRuntime, RegistryEntry, RegistryState, RuntimeLocatorRecord,
-    ShardRuntimeBuildRequest, StoreRuntimeAccessMode, StoreRuntimeHandle, StoreRuntimeHandleInner,
-    StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeRegistry,
-    StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture, utc_now,
+    ShardRuntimeBuildRequest, StoreRuntimeAccessMode, StoreRuntimeClientLease, StoreRuntimeKey,
+    StoreRuntimeLeaseSource, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
+    StoreRuntimeOwnerAttachment, StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
+    StoreRuntimeRegistryFuture, utc_now,
 };
 
 static PROCESS_AUTHORITY_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) enum StoreRuntimeOpenBegin {
-    Ready(StoreRuntimeHandle),
+    Ready(StoreRuntimeClientLease),
     Started(StoreRuntimeOpenJoin),
     Joined(StoreRuntimeOpenJoin),
     Rejected(StoreRuntimeRegistryFailure),
@@ -58,6 +59,7 @@ impl fmt::Debug for StoreRuntimeOpenBegin {
 
 pub(crate) struct StoreRuntimeOpenJoin {
     key: Box<StoreRuntimeKey>,
+    registry: StoreRuntimeRegistry,
     updates: watch::Receiver<OpenState>,
 }
 
@@ -75,7 +77,12 @@ impl StoreRuntimeOpenJoin {
                         );
                     }
                 }
-                OpenState::Published(handle) => return StoreRuntimeOpenResult::Published(handle),
+                OpenState::Published => {
+                    return match self.registry.issue_client_lease_for_open(&self.key) {
+                        Ok(lease) => StoreRuntimeOpenResult::Published(lease),
+                        Err(failure) => StoreRuntimeOpenResult::Failed(failure),
+                    };
+                }
                 OpenState::Failed(failure) => return StoreRuntimeOpenResult::Failed(failure),
             }
         }
@@ -93,14 +100,14 @@ impl fmt::Debug for StoreRuntimeOpenJoin {
 
 #[derive(Clone, Debug)]
 pub enum StoreRuntimeOpenResult {
-    Published(StoreRuntimeHandle),
+    Published(StoreRuntimeClientLease),
     Failed(StoreRuntimeRegistryFailure),
 }
 
 #[derive(Clone)]
 pub(super) enum OpenState {
     Opening,
-    Published(StoreRuntimeHandle),
+    Published,
     Failed(StoreRuntimeRegistryFailure),
 }
 
@@ -150,7 +157,7 @@ impl StoreRuntimeRegistry {
                     );
                 }
             }
-            if let Err(failure) = validate_profile_authority(&state, request) {
+            if let Err(failure) = validate_profile_authority(self, &state, request) {
                 return StoreRuntimeOpenBegin::Rejected(failure);
             }
             if let Some((_, graph)) = state
@@ -169,27 +176,30 @@ impl StoreRuntimeRegistry {
                 return match entry {
                     RegistryEntry::Ready(ready)
                         if request.access == StoreRuntimeAccessMode::ReadOnly
-                            || (ready.handle.writer_present()
+                            || (ready.owner.writer_present()
                                 && matching_database_authority(
                                     request.database_authority.as_ref(),
-                                    ready.handle.inner.database_authority.as_ref(),
+                                    ready.owner.database_authority.as_ref(),
                                 )) =>
                     {
                         match request.expected_opened_file_identity {
                             Some(expected)
-                                if ready.handle.opened_file_identity() != Some(expected) =>
+                                if ready.owner.opened_file_identity() != Some(expected) =>
                             {
                                 StoreRuntimeOpenBegin::Rejected(
                                     StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                                         operation: "join identity-bound registered runtime open",
                                         message: format!(
                                             "opened identity {:?} does not match expected identity {expected}",
-                                            ready.handle.opened_file_identity()
+                                            ready.owner.opened_file_identity()
                                         ),
                                     },
                                 )
                             }
-                            Some(_) | None => StoreRuntimeOpenBegin::Ready(ready.handle.clone()),
+                            Some(_) | None => match ready.owner.issue_client_lease() {
+                                Ok(lease) => StoreRuntimeOpenBegin::Ready(lease),
+                                Err(failure) => StoreRuntimeOpenBegin::Rejected(failure),
+                            },
                         }
                     }
                     RegistryEntry::Opening(opening)
@@ -198,6 +208,7 @@ impl StoreRuntimeRegistry {
                     {
                         StoreRuntimeOpenBegin::Joined(StoreRuntimeOpenJoin {
                             key: Box::new(key),
+                            registry: self.clone(),
                             updates: opening.updates.subscribe(),
                         })
                     }
@@ -213,6 +224,26 @@ impl StoreRuntimeRegistry {
                     }
                     RegistryEntry::Evicting(_) => StoreRuntimeOpenBegin::Rejected(
                         StoreRuntimeRegistryFailure::RuntimeEvictionInProgress {
+                            key: Box::new(key),
+                        },
+                    ),
+                    RegistryEntry::Retiring(_) => StoreRuntimeOpenBegin::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                            key: Box::new(key),
+                        },
+                    ),
+                    RegistryEntry::Committing(_) => StoreRuntimeOpenBegin::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementCommitting {
+                            key: Box::new(key),
+                        },
+                    ),
+                    RegistryEntry::Faulted(_) => StoreRuntimeOpenBegin::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementFaulted {
+                            key: Box::new(key),
+                        },
+                    ),
+                    RegistryEntry::DurabilityUncertain(_) => StoreRuntimeOpenBegin::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementDurabilityUncertain {
                             key: Box::new(key),
                         },
                     ),
@@ -264,6 +295,7 @@ impl StoreRuntimeRegistry {
             );
             let join = StoreRuntimeOpenJoin {
                 key: Box::new(key.clone()),
+                registry: self.clone(),
                 updates: receiver,
             };
             (binding, attempt, updates, join, eviction)
@@ -431,10 +463,10 @@ impl StoreRuntimeRegistry {
                     database_authority.clone(),
                 ))
                 .await?;
-            if published.logical().binding() != &binding {
+            if published.binding() != &binding {
                 return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
                     expected: Box::new(binding),
-                    actual: Box::new(published.logical().binding().clone()),
+                    actual: Box::new(published.binding().clone()),
                 });
             }
             Ok((published, locator, database_authority))
@@ -487,15 +519,30 @@ fn retained_database_key(state: &RegistryState, path: &std::path::Path) -> Optio
                     .as_ref()
                     .map(crate::db::DatabaseAuthority::canonical_database_path)
             }
-            RegistryEntry::Ready(ready) if ready.handle.writer_present() => {
-                Some(ready.handle.canonical_path())
+            RegistryEntry::Ready(ready) if ready.owner.writer_present() => {
+                Some(ready.owner.canonical_path())
             }
-            RegistryEntry::Evicting(evicting) if evicting.handle.writer_present() => {
-                Some(evicting.handle.canonical_path())
+            RegistryEntry::Evicting(evicting) if evicting.owner.writer_present() => {
+                Some(evicting.owner.canonical_path())
             }
-            RegistryEntry::Opening(_) | RegistryEntry::Ready(_) | RegistryEntry::Evicting(_) => {
-                None
+            RegistryEntry::Retiring(retiring) if retiring.owner.writer_present() => {
+                Some(retiring.owner.canonical_path())
             }
+            RegistryEntry::Committing(committing) if committing.owner.writer_present() => {
+                Some(committing.owner.canonical_path())
+            }
+            RegistryEntry::Faulted(faulted) | RegistryEntry::DurabilityUncertain(faulted)
+                if faulted.owner.writer_present() =>
+            {
+                Some(faulted.owner.canonical_path())
+            }
+            RegistryEntry::Opening(_)
+            | RegistryEntry::Ready(_)
+            | RegistryEntry::Retiring(_)
+            | RegistryEntry::Committing(_)
+            | RegistryEntry::Faulted(_)
+            | RegistryEntry::DurabilityUncertain(_)
+            | RegistryEntry::Evicting(_) => None,
         };
         candidate
             .is_some_and(|candidate| candidate == path)
@@ -564,31 +611,35 @@ impl OpenAttemptGuard {
                         return;
                     }
                 };
-                match allocate_publication(&mut state, published.logical().binding().clone()) {
+                match allocate_publication(&mut state, published.binding().clone()) {
                     Ok(publication) => {
                         let (runtime, attachment) = published.into_parts();
-                        let handle = StoreRuntimeHandle {
-                            inner: Arc::new(StoreRuntimeHandleInner {
-                                publication,
-                                runtime,
-                                attachment,
-                                locator,
-                                opened_file_identity,
-                                database_authority,
-                            }),
-                        };
+                        let source = Arc::new(StoreRuntimeLeaseSource {
+                            publication,
+                            runtime,
+                            attachment,
+                            locator,
+                            opened_file_identity,
+                            database_authority,
+                            database_attachments: std::sync::Mutex::new(
+                                std::collections::BTreeMap::new(),
+                            ),
+                            next_database_attachment_id: std::sync::atomic::AtomicU64::new(1),
+                            next_database_owner_id: std::sync::atomic::AtomicU64::new(1),
+                            next_database_attachment_reservation_id:
+                                std::sync::atomic::AtomicU64::new(1),
+                        });
+                        let owner = Arc::new(StoreRuntimeOwnerAttachment { source });
                         if self.key.is_profile() {
                             state
                                 .profile_authorities
-                                .insert(self.key.shard_id.clone(), handle.binding().clone());
+                                .insert(self.key.shard_id.clone(), owner.binding().clone());
                         }
                         state.entries.insert(
                             self.key.clone(),
-                            RegistryEntry::Ready(ReadyRuntime {
-                                handle: handle.clone(),
-                            }),
+                            RegistryEntry::Ready(ReadyRuntime { owner }),
                         );
-                        self.updates.send_replace(OpenState::Published(handle));
+                        self.updates.send_replace(OpenState::Published);
                     }
                     Err(failure) => self.fail(&mut state, failure),
                 }

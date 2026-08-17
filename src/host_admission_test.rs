@@ -48,8 +48,8 @@ fn enroll_project(path: &Path, project_id: &ProjectId) {
     .unwrap();
 }
 
-fn observation_store(database: &RegisteredGlobalDb) -> GlobalDbObservationStore<'_> {
-    GlobalDbObservationStore::with_runtime(database.runtime(), database.authority())
+fn observation_store(database: &RegisteredGlobalDb) -> GlobalDbObservationStore {
+    database.observation_store()
 }
 
 fn host_capture_request(scope: ObservationScopeV1, record_id: &str) -> CaptureObservationRequest {

@@ -17,7 +17,7 @@ pub mod shard;
 pub mod telemetry;
 mod verified_graph;
 
-pub use verified_graph::VerifiedGraphRuntimePortV1;
+pub use verified_graph::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1};
 
 /// Shared saturating wall clock for shard and registry stamps: a pre-epoch
 /// clock reads as zero and an overflowing one as `i64::MAX`.

@@ -57,10 +57,9 @@ use primitives::{
     COMMIT_OPERATION, QUERY_OPERATION, ensure_project_memory_read_active, storage_error,
 };
 use search::{
-    find_project_memory_contradictions_tx,
-    probe_project_memory_facts_tx, reason_project_memory_facts_tx,
-    record_project_memory_fact_retrieval_tx, related_project_memory_facts,
-    search_project_memory_facts,
+    find_project_memory_contradictions_tx, probe_project_memory_facts_tx,
+    reason_project_memory_facts_tx, record_project_memory_fact_retrieval_tx,
+    related_project_memory_facts, search_project_memory_facts,
 };
 use status::project_memory_status_tx;
 
@@ -107,6 +106,7 @@ pub enum ProjectMemoryGraphReconciliationScheduleV1 {
     NotMounted,
     Scheduled,
     AlreadyScheduled,
+    Retiring,
     LifecycleClosed,
 }
 
@@ -134,16 +134,14 @@ impl FactStore for DatabaseFactStore<'_> {
         write_control: &FactWriteControl,
     ) -> FactStoreResult<FactCommitOutcome> {
         match runtime::retained_fact_runtime(self.db)? {
-            Some(_) => {
+            Some(retained) => {
                 let db = (*self.db).clone();
                 let write_control = write_control.clone();
                 // The task owns the retained-dispatch receipt path so caller
                 // cancellation cannot strand a durable commit before its
                 // derived graph reconciliation trigger is recorded.
                 tokio::spawn(async move {
-                    let retained = db.retained_runtime();
-                    let outcome =
-                        runtime::commit_fact(&db, retained, batch, &write_control).await?;
+                    let outcome = runtime::commit_fact(&retained, batch, &write_control).await?;
                     if matches!(&outcome, FactCommitOutcome::Committed(_)) {
                         graph::publish_project_memory_graph_after_write(db.clone()).await;
                     }
@@ -174,7 +172,7 @@ impl FactStore for DatabaseFactStore<'_> {
         query: FactCurrentQuery,
     ) -> FactStoreResult<Option<StoredFactV1>> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
-            return runtime::query_fact_current(runtime, query);
+            return runtime::query_fact_current(&runtime, query);
         }
         let snapshot = self
             .db
@@ -192,10 +190,10 @@ impl FactStore for DatabaseFactStore<'_> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
             // The runtime read port answers the fact itself. It admits no
             // response-shaped operation, so coverage and contradiction are
-            // measured from the retained authority the runtime is mounted on —
-            // `validate_mount` proves it is the identical SQLite file — instead
-            // of being reported as constants that no read ever observed.
-            let fact = runtime::query_fact_current(runtime, query.clone())?;
+            // measured from the retained client with the database's exact
+            // binding and verified locator, rather than reported as constants
+            // that no read ever observed.
+            let fact = runtime::query_fact_current(&runtime, query.clone())?;
             let snapshot = self
                 .db
                 .begin_memory_read_transaction(QUERY_OPERATION)
@@ -247,7 +245,7 @@ impl FactStore for DatabaseFactStore<'_> {
         query: FactLineageQuery,
     ) -> FactStoreResult<Vec<FactLineageEventV1>> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
-            return runtime::query_fact_lineage(runtime, query);
+            return runtime::query_fact_lineage(&runtime, query);
         }
         let snapshot = self
             .db
@@ -266,7 +264,7 @@ impl FactStore for DatabaseFactStore<'_> {
             // As in `query_fact_current_response`: the runtime answers the
             // lineage page, and the accompanying coverage and contradiction are
             // measured from the retained authority rather than fabricated.
-            let events = runtime::query_fact_lineage(runtime, query.clone())?;
+            let events = runtime::query_fact_lineage(&runtime, query.clone())?;
             let snapshot = self
                 .db
                 .begin_memory_read_transaction(QUERY_OPERATION)

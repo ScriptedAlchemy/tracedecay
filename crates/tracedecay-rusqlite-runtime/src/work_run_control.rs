@@ -35,7 +35,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         run_id: &RunId,
     ) -> Result<Option<WorkRunControlFrontierV1>, WorkRunControlStorageError> {
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| WorkRunControlStorageError::Unavailable)?;
         let frontier = run_control_frontier_from(&transaction, authority, task_id, run_id);
@@ -49,7 +49,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError> {
-        run_admission_from(&self.handle, authority, task_id, run_id)
+        run_admission_from(self.handle(), authority, task_id, run_id)
     }
 
     fn workflow_bound_live_attempts(
@@ -59,7 +59,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         run_id: &RunId,
     ) -> Result<Vec<WorkRunLiveAttemptV1>, WorkRunControlStorageError> {
         let rows = registered_work_query(
-            &self.handle,
+            self.handle(),
             "SELECT attempt_payload FROM work_attempts_v1
              WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
                AND actor_id = ?4 AND policy_digest = ?5
@@ -81,7 +81,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
                 attempt_from_payload(payload)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let workflow = WorkflowSqliteAuthority::from_registered(self.handle.clone())
+        let workflow = WorkflowSqliteAuthority::from_retained_exact_sql(self.retained_exact_sql())
             .map_err(|_| WorkRunControlStorageError::Unavailable)?;
         let projection = match WorkflowRunStoragePort::projection(&workflow, run_id) {
             Ok(projection) if projection.run_id() == run_id => Some(projection),
@@ -130,7 +130,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError> {
-        load_run_control_from(&self.handle, authority, task_id, run_id)
+        load_run_control_from(self.handle(), authority, task_id, run_id)
     }
 
     fn publish_run_control(
@@ -141,7 +141,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         blocked_intervals: &[WorkBlockedIntervalReceiptV1],
     ) -> Result<(), WorkRunControlStorageError> {
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| WorkRunControlStorageError::Unavailable)?;
         if let Err(error) =
@@ -164,7 +164,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         blocked_intervals: &[WorkBlockedIntervalReceiptV1],
     ) -> Result<(), WorkRunControlStorageError> {
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| WorkRunControlStorageError::Unavailable)?;
         let current =
@@ -195,7 +195,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<Vec<WorkBlockedIntervalReceiptV1>, WorkRunControlStorageError> {
-        open_blocked_intervals_from(&self.handle, authority, task_id, run_id)
+        open_blocked_intervals_from(self.handle(), authority, task_id, run_id)
     }
 
     fn next_settled_blocked_intervals_for_observation(
@@ -204,7 +204,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         limit: u32,
     ) -> Result<Vec<WorkBlockedIntervalReceiptV1>, WorkRunControlStorageError> {
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| WorkRunControlStorageError::Unavailable)?;
         let cursor = load_blocked_interval_observation_cursor(&transaction, authority)?;
@@ -237,7 +237,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         let payload =
             serde_json::to_string(receipt).map_err(|_| WorkRunControlStorageError::Unavailable)?;
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| WorkRunControlStorageError::Unavailable)?;
         let changed = transaction

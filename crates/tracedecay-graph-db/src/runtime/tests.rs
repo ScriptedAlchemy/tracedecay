@@ -5,22 +5,24 @@ use std::time::Duration;
 
 use grafeo_common::types::Value;
 
-use super::{GraphDb, require_committed_vector_scalar};
+use super::require_committed_vector_scalar;
 use crate::{
-    GraphCommit, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
+    GraphCommit, GraphDbError, GraphDbLeaseV1, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
     GraphDbRuntimeState, GraphDurability, GraphEntity, GraphEntityId, GraphFormatVersion,
     GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
     GraphTraversalDirection, GraphVector, GraphWatermark, GraphWriteBatch, NeverCancelled,
     SourceGeneration, TraversalRequest, VectorMetric, mutation,
 };
 
-fn memory_db() -> Arc<GraphDb> {
-    GraphDb::open(GraphDbOpenOptions {
+fn memory_db() -> GraphDbLeaseV1 {
+    GraphDbOwner::open(GraphDbOpenOptions {
         location: GraphDbLocation::Memory,
         expected_format: GraphFormatVersion::new(2).unwrap(),
         durability: GraphDurability::Memory,
         cancellation: Arc::new(NeverCancelled),
     })
+    .unwrap()
+    .issue_lease()
     .unwrap()
 }
 
@@ -48,7 +50,7 @@ fn owner_close_releases_the_physical_database_after_durability_uncertainty() {
         cancellation: Arc::new(NeverCancelled),
     })
     .unwrap();
-    let handle = owner.handle();
+    let handle = owner.issue_lease().unwrap();
     handle.inner.poisoned.store(true, Ordering::Release);
 
     assert!(matches!(
@@ -64,6 +66,41 @@ fn owner_close_releases_the_physical_database_after_durability_uncertainty() {
             .is_none(),
         "owner close must release the physical Grafeo database even after poisoning"
     );
+}
+
+#[test]
+fn poisoned_database_lock_makes_close_terminally_uncertain() {
+    let owner = GraphDbOwner::open(GraphDbOpenOptions {
+        location: GraphDbLocation::Memory,
+        expected_format: GraphFormatVersion::new(2).unwrap(),
+        durability: GraphDurability::Memory,
+        cancellation: Arc::new(NeverCancelled),
+    })
+    .unwrap();
+    let lease = owner.issue_lease().unwrap();
+    let poison = lease.clone();
+
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = poison.inner.database.write().unwrap();
+            panic!("poison the graph database lock");
+        })
+        .join()
+        .is_err()
+    );
+
+    assert!(matches!(
+        owner.close(),
+        Err(GraphDbError::DurabilityUncertain { .. })
+    ));
+    assert_eq!(
+        owner.runtime_state(),
+        GraphDbRuntimeState::DurabilityUncertain
+    );
+    assert!(matches!(
+        owner.close(),
+        Err(GraphDbError::DurabilityUncertain { .. })
+    ));
 }
 
 fn scalar_batch(value: &str) -> GraphWriteBatch {
@@ -266,13 +303,15 @@ fn snapshots_can_cross_daemon_worker_boundaries() {
     assert_send_sync::<super::GraphSnapshot>();
 }
 
-fn walsync_db(dir: &tempfile::TempDir) -> Arc<GraphDb> {
-    GraphDb::open(GraphDbOpenOptions {
+fn walsync_db(dir: &tempfile::TempDir) -> GraphDbLeaseV1 {
+    GraphDbOwner::open(GraphDbOpenOptions {
         location: GraphDbLocation::Persistent(dir.path().join("graph.grafeo")),
         expected_format: GraphFormatVersion::new(2).unwrap(),
         durability: GraphDurability::WalSync,
         cancellation: Arc::new(NeverCancelled),
     })
+    .unwrap()
+    .issue_lease()
     .unwrap()
 }
 
@@ -301,7 +340,7 @@ fn vector_batch(value: &str) -> GraphWriteBatch {
 }
 
 fn apply_vector_batch_with_check(
-    db: &Arc<GraphDb>,
+    db: &GraphDbLeaseV1,
     value: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<GraphCommit, GraphDbError> {
@@ -321,7 +360,7 @@ fn apply_vector_batch_with_check(
     )
 }
 
-fn committed_entity_present(db: &Arc<GraphDb>) -> bool {
+fn committed_entity_present(db: &GraphDbLeaseV1) -> bool {
     db.snapshot()
         .unwrap()
         .entity(

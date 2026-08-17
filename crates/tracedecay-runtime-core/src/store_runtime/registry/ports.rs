@@ -128,7 +128,7 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
             let admission = AdmissionConfigV1::default();
             let pinned_profile =
                 matches!(request.binding.shard_id.scope, StoreShardScopeV1::Profile);
-            let runtime = Arc::new(ShardRuntime::new(request.binding.clone(), pinned_profile));
+            let runtime = ShardRuntime::new(request.binding.clone(), pinned_profile);
             runtime
                 .transition(RuntimeMaintenanceStateV1::Opening)
                 .map_err(runtime_lifecycle_failure)?;
@@ -142,7 +142,7 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
 
 async fn publish_lifecycle_runtime(
     request: ShardRuntimeBuildRequest,
-    runtime: Arc<ShardRuntime>,
+    runtime: ShardRuntime,
     attachment: LifecyclePhysicalAttachment,
 ) -> Result<PublishedShardRuntime, StoreRuntimeRegistryFailure> {
     if request.mode == StoreRuntimeOpenMode::Initialize
@@ -174,7 +174,7 @@ async fn publish_lifecycle_runtime(
             message: error,
         });
     }
-    Ok(PublishedShardRuntime::new(runtime, attachment.into_arc()))
+    Ok(PublishedShardRuntime::new(runtime, attachment.into_box()))
 }
 
 fn runtime_core_final_schema_applies(scope: &StoreShardScopeV1) -> bool {
@@ -289,8 +289,8 @@ impl LifecyclePhysicalAttachment {
         }
     }
 
-    fn into_arc(self) -> Arc<dyn PhysicalRuntimeAttachment> {
-        Arc::new(self.0)
+    fn into_box(self) -> Box<dyn PhysicalRuntimeAttachment> {
+        Box::new(self.0)
     }
 }
 
@@ -399,7 +399,7 @@ async fn install_final_schema_before_publication(
         StoreShardScopeV1::Profile
         | StoreShardScopeV1::ProfileSessions
         | StoreShardScopeV1::ProjectSessions { .. } => {
-            crate::ports::registered_schema::ensure_registered_schema(&connection)
+            crate::ports::registered_schema::install_from_authorized_connection(connection)
                 .await
                 .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "create initialized global/session schema",

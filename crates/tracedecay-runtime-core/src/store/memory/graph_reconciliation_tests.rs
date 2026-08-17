@@ -31,8 +31,8 @@ use tracedecay_store::{
 };
 
 use crate::db::{
-    Database, DatabaseAuthority, ProjectMemoryReconciliationTelemetryObserverV1,
-    TestDatabaseRuntimeMode,
+    Database, DatabaseAuthority, MemoryGraphReconciliationCancelErrorV1,
+    ProjectMemoryReconciliationTelemetryObserverV1, TestDatabaseRuntimeMode,
 };
 use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use crate::store::memory::automatic_facts::project_memory_record_automatic_fact_receipt_tx;
@@ -46,7 +46,6 @@ struct RecordingGraphRuntime {
     block_reconciliation: bool,
     snapshot_error: Option<GraphDbError>,
     reconciliation_cancelled: AtomicBool,
-    reconciliation_closed: AtomicBool,
     reconciliation_started: AtomicBool,
     reconciliation_finished: AtomicBool,
     reconciliation_observed: AtomicBool,
@@ -59,12 +58,11 @@ struct RecordingGraphRuntime {
 impl RecordingGraphRuntime {
     fn new(database: &Database) -> Self {
         Self {
-            binding: database.retained_runtime().binding().clone(),
-            locator: database.retained_runtime().locator().verified().clone(),
+            binding: database.registered_binding().clone(),
+            locator: database.registered_verified_locator().clone(),
             block_reconciliation: false,
             snapshot_error: None,
             reconciliation_cancelled: AtomicBool::new(false),
-            reconciliation_closed: AtomicBool::new(false),
             reconciliation_started: AtomicBool::new(false),
             reconciliation_finished: AtomicBool::new(false),
             reconciliation_observed: AtomicBool::new(false),
@@ -103,11 +101,6 @@ impl VerifiedGraphRuntimePortV1 for RecordingGraphRuntime {
 
     fn cancel_reconciliation(&self) {
         self.reconciliation_cancelled.store(true, Ordering::Release);
-    }
-
-    fn close_reconciliation(&self) -> Result<(), GraphDbError> {
-        self.reconciliation_closed.store(true, Ordering::Release);
-        Ok(())
     }
 
     fn publish_verified_manifest(
@@ -1265,12 +1258,63 @@ async fn retired_lifecycle_refuses_new_reconciliation_work() {
     database
         .memory_graph_reconciliation_task_owner()
         .expect("bound runtime has reconciliation owner")
-        .cancel();
+        .cancel()
+        .expect("cancel bound reconciler");
 
     assert_eq!(
         super::schedule_project_memory_graph_reconciliation(database),
         ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
     );
+}
+
+#[tokio::test]
+async fn reconciliation_owner_uses_a_weak_bound_runtime_after_database_drop() {
+    let (_directory, database) = database("weak-owner-runtime").await;
+    let runtime = bind_runtime(&database);
+    let runtime_weak = Arc::downgrade(&runtime);
+    let owner = database
+        .memory_graph_reconciliation_task_owner()
+        .expect("bound runtime has reconciliation owner");
+
+    drop(runtime);
+    assert!(
+        runtime_weak.upgrade().is_some(),
+        "the bound database owns its live graph runtime"
+    );
+    drop(database);
+    assert!(
+        runtime_weak.upgrade().is_none(),
+        "the reconciliation owner must not retain the bound graph runtime"
+    );
+    assert_eq!(
+        owner.cancel(),
+        Err(MemoryGraphReconciliationCancelErrorV1::RuntimeUnavailable)
+    );
+}
+
+#[tokio::test]
+async fn retirement_reservation_reports_a_distinct_schedule_outcome_and_drops_cleanly() {
+    let (_directory, database) = database("reserved-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let owner = database
+        .memory_graph_reconciliation_task_owner()
+        .expect("bound runtime has reconciliation owner");
+
+    let reservation = owner
+        .reserve_retirement()
+        .expect("idle reconciler retirement reservation");
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        ProjectMemoryGraphReconciliationScheduleV1::Retiring
+    );
+    drop(reservation);
+
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database),
+        ProjectMemoryGraphReconciliationScheduleV1::Scheduled
+    );
+    wait_for_reconciliation(&runtime).await;
+    owner.shutdown().await.expect("join reconciler worker");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1302,8 +1346,11 @@ async fn shutdown_waits_for_blocking_graph_publication_to_observe_cancellation()
         "shutdown returned before blocking publication exited"
     );
     assert!(
-        runtime.reconciliation_closed.load(Ordering::Acquire),
-        "shutdown returned before closing the exact graph attachment"
+        owner.reserve_retirement().is_err(),
+        "shutdown must leave reconciliation retirement closed"
     );
-    assert!(!owner.running());
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database),
+        ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
+    );
 }

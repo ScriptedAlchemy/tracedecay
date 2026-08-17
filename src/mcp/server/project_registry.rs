@@ -7,13 +7,11 @@
 //! registry never reaches here (the boundary reports that state), and an
 //! unreadable registry still fails.
 
-use std::path::Path;
-use std::sync::Arc;
-
 use serde_json::Value;
+use std::path::Path;
 
 use crate::errors::Result;
-use crate::global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDb};
+use crate::global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
 use crate::mcp::tools::{
     ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
     ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
@@ -24,11 +22,11 @@ use crate::project_registry::{PublicCodeProject, build_project_registry_view};
 
 #[derive(Clone)]
 pub(crate) struct DaemonProjectRegistryReadService {
-    registry: Arc<RegisteredGlobalDb>,
+    registry: RegisteredGlobalDbLeaseV1,
 }
 
 impl DaemonProjectRegistryReadService {
-    pub(crate) const fn new(registry: Arc<RegisteredGlobalDb>) -> Self {
+    pub(crate) const fn new(registry: RegisteredGlobalDbLeaseV1) -> Self {
         Self { registry }
     }
 

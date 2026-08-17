@@ -166,88 +166,116 @@ impl StoreRuntimeRegistry {
         &self,
         target: DestructiveMaintenanceTarget,
     ) -> Result<DestructiveMaintenanceReservation, StoreRuntimeRegistryFailure> {
-        let (attempt, closes) =
-            {
-                let mut state = self.lock_state();
-                if state.destructive_paths.values().any(|reservation| {
-                    paths_overlap(&target.root, &reservation.root)
-                        || target
-                            .database_paths
-                            .iter()
-                            .any(|path| reservation.database_paths.binary_search(path).is_ok())
-                }) {
-                    return Err(
-                        StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress {
-                            root: target.root.clone(),
-                        },
-                    );
-                }
-                if state.entries.values().any(|entry| match entry {
-                    RegistryEntry::Opening(opening) => opening
+        let (attempt, closes) = {
+            let mut state = self.lock_state();
+            if state.destructive_paths.values().any(|reservation| {
+                paths_overlap(&target.root, &reservation.root)
+                    || target
+                        .database_paths
+                        .iter()
+                        .any(|path| reservation.database_paths.binary_search(path).is_ok())
+            }) {
+                return Err(
+                    StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress {
+                        root: target.root.clone(),
+                    },
+                );
+            }
+            if state.entries.values().any(|entry| match entry {
+                RegistryEntry::Opening(opening) => {
+                    opening
                         .database_authority
                         .as_ref()
                         .is_some_and(|authority| {
                             target.includes_database_path(authority.canonical_database_path())
-                        }),
-                    RegistryEntry::Ready(_) | RegistryEntry::Evicting(_) => false,
-                }) {
-                    return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                        operation: "reserve destructive store maintenance",
-                        message: format!(
-                            "a runtime under '{}' is still opening",
-                            target.root.display()
-                        ),
-                    });
+                        })
                 }
-                if let Some(key) = state.entries.iter().find_map(|(key, entry)| match entry {
-                    RegistryEntry::Evicting(evicting)
-                        if target.includes_database_path(evicting.handle.locator().path()) =>
+                RegistryEntry::Ready(_)
+                | RegistryEntry::Retiring(_)
+                | RegistryEntry::Committing(_)
+                | RegistryEntry::Faulted(_)
+                | RegistryEntry::DurabilityUncertain(_)
+                | RegistryEntry::Evicting(_) => false,
+            }) {
+                return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "reserve destructive store maintenance",
+                    message: format!(
+                        "a runtime under '{}' is still opening",
+                        target.root.display()
+                    ),
+                });
+            }
+            if let Some(key) = state.entries.iter().find_map(|(key, entry)| match entry {
+                RegistryEntry::Evicting(evicting)
+                    if target.includes_database_path(evicting.owner.locator().path()) =>
+                {
+                    Some(key.clone())
+                }
+                RegistryEntry::Retiring(retiring)
+                    if target.includes_database_path(retiring.owner.locator().path()) =>
+                {
+                    Some(key.clone())
+                }
+                RegistryEntry::Committing(committing)
+                    if target.includes_database_path(committing.owner.locator().path()) =>
+                {
+                    Some(key.clone())
+                }
+                RegistryEntry::Faulted(faulted) | RegistryEntry::DurabilityUncertain(faulted)
+                    if target.includes_database_path(faulted.owner.locator().path()) =>
+                {
+                    Some(key.clone())
+                }
+                RegistryEntry::Opening(_)
+                | RegistryEntry::Ready(_)
+                | RegistryEntry::Retiring(_)
+                | RegistryEntry::Committing(_)
+                | RegistryEntry::Faulted(_)
+                | RegistryEntry::DurabilityUncertain(_)
+                | RegistryEntry::Evicting(_) => None,
+            }) {
+                return Err(StoreRuntimeRegistryFailure::RuntimeEvictionInProgress {
+                    key: Box::new(key),
+                });
+            }
+            let attempt = state
+                .next_destructive_attempt
+                .checked_add(1)
+                .ok_or(StoreRuntimeRegistryFailure::EvictionAttemptExhausted)?;
+            state.next_destructive_attempt = attempt;
+            let closes = state
+                .entries
+                .values()
+                .filter_map(|entry| match entry {
+                    RegistryEntry::Ready(ready)
+                        if target.includes_database_path(ready.owner.locator().path()) =>
                     {
-                        Some(key.clone())
+                        ready
+                            .owner
+                            .database_authority
+                            .clone()
+                            .map(|authority| (ready.owner.binding().clone(), authority))
                     }
                     RegistryEntry::Opening(_)
                     | RegistryEntry::Ready(_)
+                    | RegistryEntry::Retiring(_)
+                    | RegistryEntry::Committing(_)
+                    | RegistryEntry::Faulted(_)
+                    | RegistryEntry::DurabilityUncertain(_)
                     | RegistryEntry::Evicting(_) => None,
-                }) {
-                    return Err(StoreRuntimeRegistryFailure::RuntimeEvictionInProgress {
-                        key: Box::new(key),
-                    });
-                }
-                let attempt = state
-                    .next_destructive_attempt
-                    .checked_add(1)
-                    .ok_or(StoreRuntimeRegistryFailure::EvictionAttemptExhausted)?;
-                state.next_destructive_attempt = attempt;
-                let closes = state
-                    .entries
-                    .values()
-                    .filter_map(|entry| match entry {
-                        RegistryEntry::Ready(ready)
-                            if target.includes_database_path(ready.handle.locator().path()) =>
-                        {
-                            ready
-                                .handle
-                                .inner
-                                .database_authority
-                                .clone()
-                                .map(|authority| (ready.handle.binding().clone(), authority))
-                        }
-                        RegistryEntry::Opening(_)
-                        | RegistryEntry::Ready(_)
-                        | RegistryEntry::Evicting(_) => None,
-                    })
-                    .collect::<Vec<_>>();
-                let (released, _) = tokio::sync::watch::channel(false);
-                state.destructive_paths.insert(
-                    attempt,
-                    DestructivePathReservation {
-                        root: target.root.clone(),
-                        database_paths: target.database_paths.clone(),
-                        released,
-                    },
-                );
-                (attempt, closes)
-            };
+                })
+                .collect::<Vec<_>>();
+            let (released, _) = tokio::sync::watch::channel(false);
+            state.destructive_paths.insert(
+                attempt,
+                DestructivePathReservation {
+                    root: target.root.clone(),
+                    database_paths: target.database_paths.clone(),
+                    released,
+                },
+            );
+            (attempt, closes)
+        };
 
         let mut reservation_guard = DestructiveReservationGuard::new(self.clone(), attempt);
         let mut closed = Vec::with_capacity(closes.len());
@@ -432,6 +460,10 @@ mod tests {
     }
 
     struct BlockingCloseAttachment {
+        control: Arc<BlockingCloseControl>,
+    }
+
+    struct BlockingCloseControl {
         opened_file_identity: u64,
         drained: AtomicBool,
         close_started: tokio::sync::Notify,
@@ -440,7 +472,7 @@ mod tests {
         closed: AtomicBool,
     }
 
-    impl BlockingCloseAttachment {
+    impl BlockingCloseControl {
         fn release_close(&self) {
             *self.close_released.lock().unwrap() = true;
             self.close_wake.notify_all();
@@ -451,33 +483,33 @@ mod tests {
         fn snapshot(&self) -> PhysicalRuntimeSnapshot {
             PhysicalRuntimeSnapshot {
                 healthy: true,
-                writer_present: !self.drained.load(Ordering::SeqCst),
+                writer_present: !self.control.drained.load(Ordering::SeqCst),
                 ..PhysicalRuntimeSnapshot::default()
             }
         }
 
         fn opened_file_identity(&self) -> Result<u64, String> {
-            Ok(self.opened_file_identity)
+            Ok(self.control.opened_file_identity)
         }
 
         fn drain(&self) -> Result<(), String> {
-            self.drained.store(true, Ordering::SeqCst);
+            self.control.drained.store(true, Ordering::SeqCst);
             Ok(())
         }
 
         fn close_and_join(&self) -> Result<(), String> {
-            self.close_started.notify_one();
-            let mut released = self.close_released.lock().unwrap();
+            self.control.close_started.notify_one();
+            let mut released = self.control.close_released.lock().unwrap();
             while !*released {
-                released = self.close_wake.wait(released).unwrap();
+                released = self.control.close_wake.wait(released).unwrap();
             }
-            self.closed.store(true, Ordering::SeqCst);
+            self.control.closed.store(true, Ordering::SeqCst);
             Ok(())
         }
     }
 
     struct BlockingClosePublisher {
-        attachment: Arc<BlockingCloseAttachment>,
+        control: Arc<BlockingCloseControl>,
     }
 
     impl ShardRuntimePublisher for BlockingClosePublisher {
@@ -488,17 +520,20 @@ mod tests {
             '_,
             Result<PublishedShardRuntime, StoreRuntimeRegistryFailure>,
         > {
-            let attachment = Arc::clone(&self.attachment);
+            let control = Arc::clone(&self.control);
             Box::pin(async move {
-                let runtime = Arc::new(ShardRuntime::new(
+                let runtime = ShardRuntime::new(
                     request.binding().clone(),
                     matches!(request.binding().shard_id.scope, StoreShardScopeV1::Profile),
-                ));
+                );
                 runtime
                     .transition(RuntimeMaintenanceStateV1::Opening)
                     .and_then(|()| runtime.transition(RuntimeMaintenanceStateV1::Ready))
                     .unwrap();
-                Ok(PublishedShardRuntime::new(runtime, attachment))
+                Ok(PublishedShardRuntime::new(
+                    runtime,
+                    Box::new(BlockingCloseAttachment { control }),
+                ))
             })
         }
     }
@@ -513,7 +548,7 @@ mod tests {
         let profile_path = profile_path.canonicalize().unwrap();
         let code_path = code_path.canonicalize().unwrap();
         let opened_file_identity = crate::db::sqlite_generation_identity(&code_path).unwrap();
-        let attachment = Arc::new(BlockingCloseAttachment {
+        let control = Arc::new(BlockingCloseControl {
             opened_file_identity,
             drained: AtomicBool::new(false),
             close_started: tokio::sync::Notify::new(),
@@ -527,7 +562,7 @@ mod tests {
         let registry = StoreRuntimeRegistry::new(
             Arc::new(FixtureResolver { profile_path }),
             Arc::new(BlockingClosePublisher {
-                attachment: Arc::clone(&attachment),
+                control: Arc::clone(&control),
             }),
         );
         let incarnation = StoreIncarnationV1::new(1).unwrap();
@@ -574,11 +609,11 @@ mod tests {
                 .close_exact(&close_binding, &close_authority)
                 .await
         });
-        if tokio::time::timeout(Duration::from_secs(2), attachment.close_started.notified())
+        if tokio::time::timeout(Duration::from_secs(2), control.close_started.notified())
             .await
             .is_err()
         {
-            attachment.release_close();
+            control.release_close();
             panic!("exact close did not enter the blocking physical close");
         }
 
@@ -588,7 +623,7 @@ mod tests {
             )
             .await;
 
-        attachment.release_close();
+        control.release_close();
         close.await.unwrap().unwrap();
         assert!(matches!(
             reservation,
@@ -606,7 +641,7 @@ mod tests {
         let profile_path = profile_path.canonicalize().unwrap();
         let code_path = code_path.canonicalize().unwrap();
         let opened_file_identity = crate::db::sqlite_generation_identity(&code_path).unwrap();
-        let attachment = Arc::new(BlockingCloseAttachment {
+        let control = Arc::new(BlockingCloseControl {
             opened_file_identity,
             drained: AtomicBool::new(false),
             close_started: tokio::sync::Notify::new(),
@@ -622,7 +657,7 @@ mod tests {
         let registry = StoreRuntimeRegistry::new(
             Arc::new(FixtureResolver { profile_path }),
             Arc::new(BlockingClosePublisher {
-                attachment: Arc::clone(&attachment),
+                control: Arc::clone(&control),
             }),
         );
         let incarnation = StoreIncarnationV1::new(1).unwrap();
@@ -668,11 +703,11 @@ mod tests {
                 .begin_destructive_maintenance(target)
                 .await
         });
-        if tokio::time::timeout(Duration::from_secs(2), attachment.close_started.notified())
+        if tokio::time::timeout(Duration::from_secs(2), control.close_started.notified())
             .await
             .is_err()
         {
-            attachment.release_close();
+            control.release_close();
             panic!("destructive close did not enter the blocking physical close");
         }
         reservation.abort();
@@ -695,7 +730,7 @@ mod tests {
             Err(StoreRuntimeRegistryFailure::RuntimeEvictionInProgress { .. })
         ));
 
-        attachment.release_close();
+        control.release_close();
         tokio::time::timeout(Duration::from_secs(2), async {
             while !matches!(
                 registry.lookup(&binding),
@@ -706,7 +741,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(attachment.closed.load(Ordering::SeqCst));
+        assert!(control.closed.load(Ordering::SeqCst));
 
         let reopened = match registry
             .open(StoreRuntimeOpenRequest::new_authorized(

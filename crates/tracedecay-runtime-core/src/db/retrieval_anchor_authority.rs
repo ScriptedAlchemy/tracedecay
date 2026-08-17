@@ -415,7 +415,7 @@ impl super::Database {
     where
         O: serde::Serialize + Clone + Into<RetrievalAnchorOwnerV1>,
     {
-        let connection = self.engine_conn();
+        let connection = self.read_connection();
         resolve_anchor_derivatives(&connection, owner, anchor_id).await
     }
 
@@ -426,7 +426,7 @@ impl super::Database {
         kind: AnchorDerivativeKindV1,
         derivative_id: &str,
     ) -> Result<bool> {
-        let connection = self.engine_conn();
+        let connection = self.read_connection();
         resolve_anchor_derivative(&connection, owner, kind, derivative_id).await
     }
 
@@ -436,7 +436,7 @@ impl super::Database {
         anchor_id: &RetrievalAnchorId,
     ) -> Result<Vec<RetrievalAnchorDispositionRecordV1>> {
         let owner = owner_json(owner)?;
-        let connection = self.engine_conn();
+        let connection = self.read_connection();
         let mut rows = connection
             .query(
                 "SELECT record_json
@@ -783,7 +783,10 @@ mod tests {
         );
         assert!(
             database
-                .conn()
+                .writer_connection("test immutable retrieval-anchor disposition")
+                .await
+                .unwrap()
+                .engine_connection()
                 .execute(
                     "UPDATE retrieval_anchor_dispositions
                      SET reason_class = 'rewritten'
@@ -795,7 +798,10 @@ mod tests {
         );
         assert!(
             database
-                .conn()
+                .writer_connection("test immutable retrieval-anchor reverse lineage")
+                .await
+                .unwrap()
+                .engine_connection()
                 .execute(
                     "DELETE FROM retrieval_anchor_reverse_lineage
                      WHERE source_anchor_id = 'anchor-1'",

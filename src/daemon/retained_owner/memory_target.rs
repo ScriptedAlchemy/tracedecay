@@ -112,7 +112,7 @@ async fn open_selected_project_read_only<'a>(
         .await
         .map_err(map_target_infrastructure_error)?;
     let exact_scope = matches!(
-        &database.retained_runtime().binding().shard_id.scope,
+        &database.registered_binding().shard_id.scope,
         StoreShardScopeV1::Project { project_id } if project_id == selected_project_id
     );
     if database.is_writable() || !exact_scope {
@@ -276,12 +276,7 @@ mod tests {
             selected_target.database()
         ));
         assert!(matches!(
-            &selected_target
-                .database()
-                .retained_runtime()
-                .binding()
-                .shard_id
-                .scope,
+            &selected_target.database().registered_binding().shard_id.scope,
             StoreShardScopeV1::Project { project_id } if project_id == &selected_id
         ));
     }
