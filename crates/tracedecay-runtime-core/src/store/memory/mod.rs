@@ -8,7 +8,8 @@ use tracedecay_store::ProjectMemoryAutomationRunReceiptsV1;
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome, FactCurrentQuery,
     FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactReadControl, FactStore,
-    FactStoreResult, FactWriteBatch, FactWriteControl, ProjectMemoryAutomaticFactApplyResultV1,
+    FactStoreResult, FactWriteBatch, FactWriteControl,
+    ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
     ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
     ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
     ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
@@ -143,10 +144,7 @@ impl FactStore for DatabaseFactStore<'_> {
                     let retained = db.retained_runtime();
                     let outcome =
                         runtime::commit_fact(&db, retained, batch, &write_control).await?;
-                    if matches!(
-                        &outcome,
-                        FactCommitOutcome::Committed(_) | FactCommitOutcome::IdempotentReplay(_)
-                    ) {
+                    if matches!(&outcome, FactCommitOutcome::Committed(_)) {
                         graph::publish_project_memory_graph_after_write(db.clone()).await;
                     }
                     Ok(outcome)
@@ -454,9 +452,15 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactAddCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactAddOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(async move { add_project_memory_fact_tx(transaction, &request).await })
-        })
+        self.project_memory_write(
+            write_control,
+            |outcome: &ProjectMemoryFactAddOutcomeV1| {
+                outcome.commit_receipt().is_some() && !outcome.commit_replayed()
+            },
+            move |transaction| {
+                Box::pin(async move { add_project_memory_fact_tx(transaction, &request).await })
+            },
+        )
         .await
     }
 
@@ -465,9 +469,13 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactUpdateCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(async move { update_project_memory_fact_tx(transaction, &request).await })
-        })
+        self.project_memory_write(
+            write_control,
+            |outcome: &ProjectMemoryFactUpdateOutcomeV1| !outcome.commit_replayed(),
+            move |transaction| {
+                Box::pin(async move { update_project_memory_fact_tx(transaction, &request).await })
+            },
+        )
         .await
     }
 
@@ -476,9 +484,15 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactRemoveCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(async move { remove_project_memory_fact_tx(transaction, &request).await })
-        })
+        self.project_memory_write(
+            write_control,
+            |outcome: &ProjectMemoryFactRemoveOutcomeV1| {
+                outcome.was_removed() && !outcome.commit_replayed()
+            },
+            move |transaction| {
+                Box::pin(async move { remove_project_memory_fact_tx(transaction, &request).await })
+            },
+        )
         .await
     }
 
@@ -487,11 +501,15 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactFeedbackCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactFeedbackOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(
-                async move { record_project_memory_fact_feedback_tx(transaction, &request).await },
-            )
-        })
+        self.project_memory_write(
+            write_control,
+            |_| false,
+            move |transaction| {
+                Box::pin(async move {
+                    record_project_memory_fact_feedback_tx(transaction, &request).await
+                })
+            },
+        )
         .await
     }
 
@@ -533,11 +551,17 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactCurationBatchV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(
-                async move { apply_project_memory_fact_curation_tx(transaction, &request).await },
-            )
-        })
+        self.project_memory_write(
+            write_control,
+            |receipt: &ProjectMemoryFactCurationReceiptV1| {
+                !receipt.replayed() && !receipt.changed_facts().is_empty()
+            },
+            move |transaction| {
+                Box::pin(async move {
+                    apply_project_memory_fact_curation_tx(transaction, &request).await
+                })
+            },
+        )
         .await
     }
 
@@ -546,9 +570,13 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactMergeCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(async move { merge_project_memory_facts_tx(transaction, &request).await })
-        })
+        self.project_memory_write(
+            write_control,
+            |outcome: &ProjectMemoryFactMergeOutcomeV1| !outcome.replayed(),
+            move |transaction| {
+                Box::pin(async move { merge_project_memory_facts_tx(transaction, &request).await })
+            },
+        )
         .await
     }
 
@@ -613,11 +641,15 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactRetrievalCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactRetrievalOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(
-                async move { record_project_memory_fact_retrieval_tx(transaction, &request).await },
-            )
-        })
+        self.project_memory_write(
+            write_control,
+            |_| false,
+            move |transaction| {
+                Box::pin(async move {
+                    record_project_memory_fact_retrieval_tx(transaction, &request).await
+                })
+            },
+        )
         .await
     }
 
@@ -628,12 +660,23 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         evidence: ProjectMemoryAutomaticFactEvidenceV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryAutomaticFactApplyResultV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(async move {
-                apply_project_memory_automatic_fact_tx(transaction, apply_id, &request, &evidence)
+        self.project_memory_write(
+            write_control,
+            |outcome: &ProjectMemoryAutomaticFactApplyResultV1| {
+                outcome.disposition() == ProjectMemoryAutomaticFactApplyDispositionV1::Applied
+            },
+            move |transaction| {
+                Box::pin(async move {
+                    apply_project_memory_automatic_fact_tx(
+                        transaction,
+                        apply_id,
+                        &request,
+                        &evidence,
+                    )
                     .await
-            })
-        })
+                })
+            },
+        )
         .await
     }
 

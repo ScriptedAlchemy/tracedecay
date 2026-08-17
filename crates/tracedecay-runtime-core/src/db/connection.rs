@@ -28,8 +28,11 @@ mod runtime_lifecycle;
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 mod test_runtime;
 
-pub use memory_graph_reconciliation::MemoryGraphReconciliationTaskOwnerV1;
 pub(crate) use memory_graph_reconciliation::MemoryGraphReconciliationTaskScheduleV1;
+pub use memory_graph_reconciliation::{
+    MemoryGraphReconciliationTaskOwnerV1, ProjectMemoryReconciliationTelemetryObserverV1,
+    ProjectMemoryReconciliationTelemetrySnapshotV1,
+};
 #[cfg(test)]
 pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
 use registry::{DatabaseInner, database_slot};

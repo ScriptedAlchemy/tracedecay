@@ -1,3 +1,7 @@
+use super::memory_graph_reconciliation::{
+    ProjectMemoryReconciliationPassLeaseV1, ProjectMemoryReconciliationTelemetryObserverV1,
+    ProjectMemoryReconciliationTelemetryV1,
+};
 use super::{
     Arc, Connection, Database, DatabaseAccessMode, DatabaseAuthority, DatabaseInner, Path, Result,
     StoreRuntimeHandle, TraceDecayError, database_slot, integrity, registered_attachment_required,
@@ -29,6 +33,27 @@ impl Database {
         self.inner
             .memory_graph_reconciliation
             .schedule(self, operation)
+    }
+
+    pub fn project_memory_reconciliation_telemetry_observer(
+        &self,
+    ) -> ProjectMemoryReconciliationTelemetryObserverV1 {
+        ProjectMemoryReconciliationTelemetryObserverV1::new(
+            Arc::clone(&self.inner.memory_graph_reconciliation_telemetry),
+            Arc::downgrade(&self.inner),
+        )
+    }
+
+    pub(crate) fn project_memory_reconciliation_telemetry(
+        &self,
+    ) -> &ProjectMemoryReconciliationTelemetryV1 {
+        &self.inner.memory_graph_reconciliation_telemetry
+    }
+
+    pub(crate) fn begin_project_memory_reconciliation_pass(
+        &self,
+    ) -> std::result::Result<ProjectMemoryReconciliationPassLeaseV1, &'static str> {
+        Arc::clone(&self.inner.memory_graph_reconciliation_telemetry).begin_reconciliation_pass()
     }
 
     pub fn memory_graph_reconciliation_task_owner(

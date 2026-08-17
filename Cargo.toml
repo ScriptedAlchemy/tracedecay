@@ -460,6 +460,15 @@ debug = 1
 incremental = true
 opt-level = 1
 
+# Focused root unit tests retain test assertions while keeping rustc's
+# code-generation working set bounded on developer hosts.
+[profile.bounded-test]
+inherits = "test"
+debug = 0
+incremental = false
+opt-level = 0
+codegen-units = 1
+
 [profile.dev.package."*"]
 debug = 0
 
