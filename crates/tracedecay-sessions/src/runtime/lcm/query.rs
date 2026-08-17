@@ -683,14 +683,10 @@ fn compute_like_fallback_fetch_limit(limit: usize, query_plan: &GrepQueryPlan) -
 
 fn compute_search_fetch_limit(limit: usize, terms: &[String], phrases: &[String]) -> usize {
     let base = limit.saturating_mul(5).max(limit).max(20);
-    if should_widen_candidate_fetch(terms, phrases) {
+    if is_precise_query_shape(terms, phrases) {
         return base.max(limit.saturating_mul(10)).max(50);
     }
     base
-}
-
-fn should_widen_candidate_fetch(terms: &[String], phrases: &[String]) -> bool {
-    is_precise_query_shape(terms, phrases)
 }
 
 fn is_precise_query_shape(terms: &[String], phrases: &[String]) -> bool {

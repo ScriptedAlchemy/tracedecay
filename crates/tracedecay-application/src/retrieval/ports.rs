@@ -88,8 +88,6 @@ pub trait AffectedTestsRetrievalPort {
     ) -> RetrievalPortOutcome<AffectedTestsResult>;
 }
 
-pub use AffectedTestsRetrievalPort as TestRetrievalPort;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemporalRetrievalFailure {
     Unavailable,

@@ -562,22 +562,6 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    /// Singular convenience form for a host adapter that publishes one
-    /// coordinator-selected recipient at a time.
-    pub async fn publish_github_stack_delivery(
-        &self,
-        project_id: &str,
-        watermark_id: &str,
-        delivery: &GitHubStackDeliveryKeyV1,
-    ) -> Result<(), String> {
-        self.publish_github_stack_deliveries(
-            project_id,
-            watermark_id,
-            std::slice::from_ref(delivery),
-        )
-        .await
-    }
-
     /// Coordinator acknowledgement is intentionally not final host
     /// settlement.  It is idempotent for both `pending` and `host_pending`.
     pub async fn acknowledge_github_stack_deliveries(
@@ -590,21 +574,6 @@ impl RegisteredGlobalDb {
             project_id,
             watermark_id,
             deliveries,
-        )
-        .await
-    }
-
-    /// Singular convenience form for the coordinator's acknowledgement.
-    pub async fn acknowledge_github_stack_delivery(
-        &self,
-        project_id: &str,
-        watermark_id: &str,
-        delivery: &GitHubStackDeliveryKeyV1,
-    ) -> Result<(), String> {
-        self.acknowledge_github_stack_deliveries(
-            project_id,
-            watermark_id,
-            std::slice::from_ref(delivery),
         )
         .await
     }
@@ -903,27 +872,4 @@ impl RegisteredGlobalDb {
             .transpose()
     }
 
-    /// Returns the immutable recipient binding when it exists, independent of
-    /// whether the binding is pending, settled, or denied.
-    pub async fn github_stack_recipient_binding(
-        &self,
-        project_id: &str,
-        signal_id: &str,
-        recipient: &str,
-    ) -> Result<Option<GitHubStackDeliveryRecordV1>, String> {
-        let Some(signal) = self.github_stack_signal(project_id, signal_id).await? else {
-            return Ok(None);
-        };
-        if self
-            .github_stack_recipient_state(project_id, signal_id, recipient)
-            .await?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        Ok(Some(GitHubStackDeliveryRecordV1 {
-            signal,
-            recipient: recipient.to_owned(),
-        }))
-    }
 }

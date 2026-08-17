@@ -252,7 +252,7 @@ pub async fn publish_immutable_summary(
         publication_manifest_digest: projected_content_hash(&publication_json),
     };
     insert_sanitization_receipt(conn, &receipt_id, &summary_hash, &frozen_receipt).await?;
-    sources::insert_payload_manifests(conn, summary_id, &manifest, created_at).await?;
+    sources::insert_payload_manifests(conn, &manifest).await?;
 
     // The durable summary projection is deliberately last: a projection
     // failure rolls back all canonical rows and lets the outer payload
@@ -345,7 +345,7 @@ async fn exact_replay_receipt(
     verify_canonical_node(conn, summary_id, &manifest, created_at).await?;
     verify_summary_anchor(conn, summary_id, &manifest, created_at).await?;
     let receipt = load_and_verify_receipt(conn, summary_id, &manifest, created_at).await?;
-    sources::verify_payload_manifests(conn, summary_id, &manifest, created_at).await?;
+    sources::verify_payload_manifests(conn, &manifest).await?;
     Ok(LcmSummaryPublicationReceipt {
         summary: summary_node(summary_id, &manifest, created_at),
         disposition: LcmSummaryPublicationDisposition::ExactReplay,

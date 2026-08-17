@@ -92,7 +92,6 @@ pub use ports::{
     AffectedTestsRetrievalPort, AnchorHydrationPort, GraphImpactRetrievalPort, GraphRetrievalPort,
     OperationalRetrievalPort, RetrievalPortContext, RetrievalPortOutcome, SourceRetrievalPort,
     SymbolRetrievalPort, TemporalRetrievalFailure, TemporalRetrievalFuture, TemporalRetrievalPort,
-    TestRetrievalPort,
 };
 pub use primitive_surface::{
     CalleeV1, CalleesResultV1, CalleesSurfaceRequestV1, ContextCodeBlockV1, ContextModeV1,

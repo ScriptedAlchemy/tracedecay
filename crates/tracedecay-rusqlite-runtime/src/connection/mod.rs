@@ -528,13 +528,6 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
     Ok(connection)
 }
 
-/// Doctor compatibility name for the canonical immutable reader policy.
-///
-/// Doctor rejects non-empty WAL families before calling this function.
-pub fn open_immutable_health_reader(path: &Path) -> Result<Connection, ConnectionPolicyError> {
-    open_immutable_reader(path)
-}
-
 fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
     #[cfg(unix)]
     let raw = {

@@ -11,29 +11,15 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::{LCM_SCAN_PAGE_ROWS, LcmError};
 
-#[derive(Clone, Copy)]
-pub(super) enum BackupKind {
-    Gc,
-}
-
-impl BackupKind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Gc => "gc",
-        }
-    }
-}
-
 static BACKUP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) async fn backup_database(
     db_path: &Path,
     storage_root: &Path,
-    kind: BackupKind,
 ) -> Result<Value, LcmError> {
     let backup_dir = storage_root.join("lcm-clean-backups");
     fs::create_dir_all(&backup_dir).map_err(|err| LcmError::Io(err.to_string()))?;
-    let (staging_dir, published_dir) = allocate_backup_directory(&backup_dir, kind)?;
+    let (staging_dir, published_dir) = allocate_backup_directory(&backup_dir)?;
     let staging_path = staging_dir.join("sessions.db");
     let backup_path = published_dir.join("sessions.db");
     let result = async {
@@ -68,21 +54,14 @@ pub(super) async fn backup_database(
     }))
 }
 
-fn allocate_backup_directory(
-    backup_root: &Path,
-    kind: BackupKind,
-) -> Result<(PathBuf, PathBuf), LcmError> {
+fn allocate_backup_directory(backup_root: &Path) -> Result<(PathBuf, PathBuf), LcmError> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     loop {
         let nonce = BACKUP_NONCE.fetch_add(1, Ordering::Relaxed);
-        let name = format!(
-            "sessions-{}-{timestamp}-{}-{nonce}",
-            kind.name(),
-            std::process::id()
-        );
+        let name = format!("sessions-gc-{timestamp}-{}-{nonce}", std::process::id());
         let published = backup_root.join(&name);
         if published.exists() {
             continue;
@@ -184,10 +163,10 @@ mod tests {
             )
             .unwrap();
 
-        let first = backup_database(&source_path, root.path(), BackupKind::Gc)
+        let first = backup_database(&source_path, root.path())
             .await
             .unwrap();
-        let second = backup_database(&source_path, root.path(), BackupKind::Gc)
+        let second = backup_database(&source_path, root.path())
             .await
             .unwrap();
         let first_path = PathBuf::from(first["path"].as_str().unwrap());
@@ -217,7 +196,7 @@ mod tests {
         fs::write(&source_path, b"not sqlite").unwrap();
 
         assert!(
-            backup_database(&source_path, root.path(), BackupKind::Gc)
+            backup_database(&source_path, root.path())
                 .await
                 .is_err()
         );

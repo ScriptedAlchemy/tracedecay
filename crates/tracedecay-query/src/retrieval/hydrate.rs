@@ -21,10 +21,6 @@ use tracedecay_domain::{
 pub enum HydrationStageError {
     #[error("hydration exceeded its byte or deadline budget")]
     BudgetExceeded,
-    #[error("hydration was cancelled")]
-    Cancelled,
-    #[error("an anchor failed its authorization recheck")]
-    AuthorizationRecheckFailed,
     #[error("contract violation: {0}")]
     Contract(String),
 }

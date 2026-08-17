@@ -96,10 +96,6 @@ pub type RankedResult = Result<Vec<RankedCandidate>, RankingError>;
 
 const TIER_SPAN: u64 = 1_000_000;
 
-pub fn rank_candidates(candidates: &[RankingCandidate], limits: DiversityLimits) -> RankedResult {
-    rank_validated_candidates(candidates, limits)
-}
-
 /// Partition key for raw-score normalization. Absent sources stay singleton
 /// partitions without colliding with a concrete `source` string value.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -119,10 +115,7 @@ impl SourcePartitionKey {
     }
 }
 
-fn rank_validated_candidates(
-    candidates: &[RankingCandidate],
-    limits: DiversityLimits,
-) -> RankedResult {
+pub fn rank_candidates(candidates: &[RankingCandidate], limits: DiversityLimits) -> RankedResult {
     let candidates = prepare_candidates(candidates)?;
     let mut by_channel_and_source: BTreeMap<
         (CandidateChannel, SourcePartitionKey),

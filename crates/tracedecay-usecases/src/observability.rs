@@ -26,7 +26,7 @@ mod workflow_emit;
 
 pub use cost_latency::{provider_latency_read_model, unavailable_provider_latency};
 pub use costs::{
-    costs_cli_value, costs_export_bytes, costs_http_value, costs_mcp_value, costs_read_model,
+    costs_cli_value, costs_export_bytes, costs_mcp_value, costs_read_model,
     costs_read_model_with_provider_usage, costs_read_model_with_provider_usage_and_observability,
     costs_unavailable_read_model,
 };
@@ -563,13 +563,11 @@ mod tests {
             costs_unavailable_read_model(Some("scope:parity"), 10, "fixture_cost_unavailable");
         let cli = costs_cli_value(&costs).expect("CLI costs JSON");
         let mcp = costs_mcp_value(&costs).expect("MCP costs JSON");
-        let http = costs_http_value(&costs).expect("HTTP costs JSON");
         let dashboard = serde_json::to_value(&costs).expect("dashboard costs payload");
         let export: serde_json::Value =
             serde_json::from_slice(&costs_export_bytes(&costs).expect("costs export JSON"))
                 .expect("decode costs export JSON");
         assert_eq!(cli, mcp);
-        assert_eq!(cli, http);
         assert_eq!(cli, dashboard);
         assert_eq!(cli, export);
         assert_eq!(cli["usage"][0]["coverage"]["state"], "unknown");

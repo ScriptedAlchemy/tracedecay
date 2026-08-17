@@ -526,9 +526,7 @@ async fn verify_anchor(
 
 pub(super) async fn insert_payload_manifests(
     conn: &impl Executor,
-    _summary_id: &str,
     manifest: &CanonicalPublicationManifest,
-    _created_at: i64,
 ) -> Result<(), LcmError> {
     for payload in &manifest.payloads {
         let created_at =
@@ -554,9 +552,7 @@ pub(super) async fn insert_payload_manifests(
 
 pub(super) async fn verify_payload_manifests(
     conn: &impl Executor,
-    _summary_id: &str,
     manifest: &CanonicalPublicationManifest,
-    _created_at: i64,
 ) -> Result<(), LcmError> {
     for payload in &manifest.payloads {
         let created_at =

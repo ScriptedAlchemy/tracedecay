@@ -196,10 +196,6 @@ pub enum FeedbackCycleRuntimeError {
     ProviderSetMismatch,
     #[error("feedback cycle trigger is not supported by the feedback cycle runtime")]
     UnsupportedTrigger,
-    /// Retained for compatibility with callers that classify older rejection
-    /// results. Session-only overlays now execute through the isolated path.
-    #[error("feedback cycles require durable saved content")]
-    NonDurableRequest,
 }
 
 impl FeedbackCycleRuntimeError {
@@ -209,7 +205,6 @@ impl FeedbackCycleRuntimeError {
             Self::NoManagedDiagnosticProviders => "feedback-cycle-provider-missing",
             Self::ProviderSetMismatch => "feedback-cycle-provider-mismatch",
             Self::UnsupportedTrigger => "feedback-cycle-trigger-unsupported",
-            Self::NonDurableRequest => "feedback-cycle-non-durable",
         }
     }
 }

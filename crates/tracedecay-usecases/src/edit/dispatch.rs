@@ -10,7 +10,6 @@ use crate::graph::{
 use crate::tracedecay::{SourceEditGraphReadV1, SourceEditRuntime};
 use tracedecay_runtime_core::errors::Result;
 
-use super::control::SourceEditEffectControlV1;
 use super::outcome::SourceEditOutcome;
 
 pub(super) struct SourceEditGraphReadAuthorityV1<'a> {
@@ -49,7 +48,6 @@ pub(super) async fn run_source_edit(
     graph: &SourceEditRuntime,
     graph_read: SourceEditGraphReadAuthorityV1<'_>,
     request: SourceEditRequest,
-    _control: Option<&SourceEditEffectControlV1>,
 ) -> Result<SourceEditOutcome> {
     Ok(match request {
         SourceEditRequest::StrReplace {

@@ -495,23 +495,6 @@ pub struct FusionStageInput {
     pub lanes: Vec<CompositionLaneInput>,
 }
 
-/// The deterministic fusion stage contract (Plan 15: group contributions by
-/// stable anchor plus logical evidence identity; total order is exact class,
-/// utility, source validity, stable anchor ID, logical evidence ID, then
-/// ordered source occurrence IDs).
-pub trait DeterministicFusionStage {
-    /// Partition candidates into exact tiers and fuse approximate
-    /// contributions with checked fixed-point arithmetic. Exact admission
-    /// derives only from validated proofs.
-    fn fuse(&self, input: &FusionStageInput) -> Result<Vec<FusedCandidate>, FusionStageError>;
-
-    /// Compute the final deterministic order over fused candidates. One
-    /// hundred shuffled producer/completion runs must produce byte-identical
-    /// IDs, order, contributions, explanations, coverage, and cursors
-    /// (Plan 25 acceptance).
-    fn order(&self, candidates: Vec<FusedCandidate>) -> Vec<RankedCandidate>;
-}
-
 /// Complete comparator tuple retained for each final candidate. It records
 /// every field in the total order instead of reconstructing ordering from the
 /// final scalar utility.
@@ -1041,24 +1024,6 @@ impl DeterministicFixedPointFusion {
             source_occurrence_ids: ordered_occurrence_ids(candidate),
             comparator_revision: self.comparator_revision.clone(),
         }
-    }
-}
-
-impl DeterministicFusionStage for DeterministicFixedPointFusion {
-    fn fuse(&self, input: &FusionStageInput) -> Result<Vec<FusedCandidate>, FusionStageError> {
-        let admitted = admitted_lanes(input, &[])?;
-        self.fuse_compact(&input.profile, admitted.candidates)
-    }
-
-    fn order(&self, candidates: Vec<FusedCandidate>) -> Vec<RankedCandidate> {
-        self.order_fused(candidates)
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, candidate)| RankedCandidate {
-                candidate,
-                final_ordinal: ordinal as u32,
-            })
-            .collect()
     }
 }
 

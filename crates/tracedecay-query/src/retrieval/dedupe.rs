@@ -41,18 +41,6 @@ pub struct DedupeDecisionV1 {
     pub decision: RankingDecision,
 }
 
-/// The evidence-backed logical-copy collapse contract (Plan 15 pipeline
-/// step 8): resolve copy clusters, preserve independent corroboration and
-/// every admitted contradiction, then choose representatives.
-pub trait LogicalCopyCollapseStage {
-    /// Choose cluster representatives over fused candidates, recording one
-    /// representative-selection decision per cluster.
-    fn select_representatives(
-        &self,
-        candidates: Vec<FusedCandidate>,
-    ) -> Result<Vec<FusedCandidate>, DedupeStageError>;
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DeterministicDedupe;
 
@@ -225,15 +213,5 @@ impl DeterministicDedupe {
         }
         independent.sort_by(compare_fused);
         Ok((independent, decisions))
-    }
-}
-
-impl LogicalCopyCollapseStage for DeterministicDedupe {
-    fn select_representatives(
-        &self,
-        candidates: Vec<FusedCandidate>,
-    ) -> Result<Vec<FusedCandidate>, DedupeStageError> {
-        self.select_representatives_with_decisions(candidates)
-            .map(|(candidates, _)| candidates)
     }
 }

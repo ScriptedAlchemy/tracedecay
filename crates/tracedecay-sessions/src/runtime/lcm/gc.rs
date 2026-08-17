@@ -560,12 +560,7 @@ pub async fn run_payload_gc_in_transaction(
 
     if apply && cfg.backup_before_reap && (dir.is_some() || !all_metadata_refs.is_empty()) {
         report.backup = Some(
-            maintenance::backup_database(
-                &gc_database_path(storage_root),
-                storage_root,
-                maintenance::BackupKind::Gc,
-            )
-            .await?,
+            maintenance::backup_database(&gc_database_path(storage_root), storage_root).await?,
         );
     }
 

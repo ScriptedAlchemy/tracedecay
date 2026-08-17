@@ -795,7 +795,7 @@ impl SwiftExtractor {
             NodeKind::Function
         };
         let visibility = Self::extract_visibility(state, node);
-        let is_async = Self::has_async_keyword(node, &state.source);
+        let is_async = Self::has_async_keyword(node);
         let signature = Self::extract_first_line_signature(state, node);
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -1149,7 +1149,7 @@ impl SwiftExtractor {
     /// Check if a function declaration has the `async` keyword.
     ///
     /// In tree-sitter-swift, `async` is an anonymous child node with kind "async".
-    fn has_async_keyword(node: TsNode<'_>, _source: &[u8]) -> bool {
+    fn has_async_keyword(node: TsNode<'_>) -> bool {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {

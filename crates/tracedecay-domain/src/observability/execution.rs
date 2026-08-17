@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use super::CoverageStateV1;
 
 pub const MAX_LOCAL_ANCHORS_V1: usize = 8;
-pub const MAX_CAUSE_BUCKETS_V1: usize = 16;
 
 macro_rules! closed_enum {
     ($name:ident { $($variant:ident),+ $(,)? }) => {

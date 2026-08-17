@@ -530,7 +530,6 @@ where
                 cancellation: graph_cancellation,
             },
             request.edit.clone().with_dry_run(false),
-            control,
         ),
     )
     .await;
@@ -648,7 +647,6 @@ pub(super) async fn resolve_source_edit_preview(
             cancellation,
         },
         capture_edit,
-        None,
     ))
     .await;
     let mut outcome = outcome?;
