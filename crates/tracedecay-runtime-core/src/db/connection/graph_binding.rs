@@ -327,10 +327,10 @@ mod tests {
             tracedecay_graph_db::GraphProjectionId::new("delegation")
                 .expect("valid weak proxy projection"),
         );
-        assert_eq!(
+        assert!(matches!(
             proxy.verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false)),),
             Ok(None)
-        );
+        ));
         assert_eq!(snapshot_calls.load(Ordering::Acquire), 1);
 
         drop(runtime);
