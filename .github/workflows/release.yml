@@ -188,6 +188,9 @@ jobs:
           python3 .release-automation/scripts/test-resolve-installed-binary.py
           python3 .release-automation/scripts/test-check-packaged-mcp-stdio.py
           python3 .release-automation/scripts/test-resolve-release-source-profile.py
+          python3 .release-automation/scripts/test-package-release-archive.py
+          python3 .release-automation/scripts/test-plan-release-recovery.py
+          python3 .release-automation/scripts/test-check-release-artifacts.py
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
