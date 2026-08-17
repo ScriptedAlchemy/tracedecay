@@ -45,7 +45,6 @@ pub(crate) fn register_test_schema_installer() {
     tracedecay_global_db::register_test_schema_installer();
 }
 
-mod accounting;
 pub mod analytics_api;
 pub mod application_surface;
 mod automation_authority;
