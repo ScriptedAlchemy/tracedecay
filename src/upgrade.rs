@@ -24,7 +24,7 @@ const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 // whose CI hasn't finished uploading the current platform's binary yet.
 use crate::cloud::asset_name;
 #[cfg(test)]
-use crate::cloud::{asset_name, current_platform};
+use crate::cloud::current_platform;
 
 /// The GitHub release tag for a given version.
 fn release_tag(version: &str) -> String {

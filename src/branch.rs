@@ -80,6 +80,8 @@ fn gix_rev_distance(
 
 #[cfg(test)]
 mod default_branch_tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     fn run_git(project_root: &Path, args: &[&str]) {

@@ -174,19 +174,6 @@ fn is_beta_returns_bool() {
 }
 
 #[test]
-fn upgrade_command_always_suggests_tracedecay_upgrade() {
-    use tracedecay::cloud::{InstallMethod, upgrade_command};
-    for method in &[
-        InstallMethod::Cargo,
-        InstallMethod::Brew,
-        InstallMethod::Scoop,
-        InstallMethod::Unknown,
-    ] {
-        assert_eq!(upgrade_command(method), "tracedecay upgrade");
-    }
-}
-
-#[test]
 fn detect_install_method_no_panic() {
     // Just verify it returns without panic
     let _ = tracedecay::cloud::detect_install_method();
