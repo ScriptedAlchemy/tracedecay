@@ -49,15 +49,8 @@ pub(super) struct ProjectMemoryOperationReceiptV1 {
 }
 
 pub(super) fn project_memory_digest(material: Value) -> FactStoreResult<String> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let encoded = to_json(&material, "serialize project-memory request digest")?;
-    let digest = Sha256::digest(encoded.as_bytes());
-    let mut value = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        value.push(char::from(HEX[usize::from(byte >> 4)]));
-        value.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    Ok(value)
+    Ok(hex::encode(Sha256::digest(encoded.as_bytes())))
 }
 
 pub(super) async fn project_memory_lookup_operation_receipt_tx(

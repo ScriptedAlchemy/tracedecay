@@ -23,6 +23,7 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_graph_db::GraphCancellation;
+use tracedecay_runtime_core::redundancy::round4;
 
 pub struct TraceDecayAstGrepAuthorityV1 {
     source_runtime: Arc<SourceReadRuntime>,
@@ -396,6 +397,3 @@ fn count(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-fn round4(value: f64) -> f64 {
-    (value * 10_000.0).round() / 10_000.0
-}

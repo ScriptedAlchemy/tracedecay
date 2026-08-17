@@ -342,7 +342,9 @@ fn canonical_import_order(
         .then(left.module_kind.cmp(&right.module_kind))
 }
 
-fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), CodeGraphProjectionError> {
+pub(super) fn check_cancelled(
+    cancellation: &dyn GraphCancellation,
+) -> Result<(), CodeGraphProjectionError> {
     if cancellation.is_cancelled() {
         return Err(CodeGraphProjectionError::Cancelled);
     }

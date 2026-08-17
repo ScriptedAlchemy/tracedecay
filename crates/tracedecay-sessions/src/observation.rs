@@ -2,13 +2,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use thiserror::Error;
+use tracedecay_application::clock::now_micros;
 use tracedecay_domain::{
     CanonicalObservationIdV1, ManifestDigest, ObservationContractError,
     ObservationIdentityMaterialV1, ObservationSourceCursorV1, ProjectionGenerationId,
-    RetentionClass, SanitizationReceiptV1, SourceBindingIdentityV1, UtcMicros,
+    RetentionClass, SanitizationReceiptV1, SourceBindingIdentityV1,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
@@ -118,14 +117,6 @@ impl CaptureObservationRequest {
 
 pub type CaptureClaudeObservationRequest = CaptureObservationRequest;
 pub type CaptureClaudeObservationRequestError = CaptureObservationRequestError;
-
-fn observation_ingested_at() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
-}
 
 pub struct GetObservationRequest {
     observation_id: CanonicalObservationIdV1,
@@ -404,7 +395,7 @@ where
                     let projection_generation =
                         ProjectionGenerationId::new(SESSION_MESSAGE_PROJECTOR_VERSION)
                             .map_err(ObservationStoreError::RetrievalAnchorContract)?;
-                    let ingested_at = observation_ingested_at();
+                    let ingested_at = now_micros();
                     let authorization = build_observation_resolution_authorization_v1(
                         &observation,
                         tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,

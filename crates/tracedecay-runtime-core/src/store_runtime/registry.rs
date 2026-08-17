@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tracedecay_domain::UtcMicros;
 use tracedecay_store::{
@@ -37,6 +37,7 @@ use tracedecay_store::{
 };
 
 use super::shard::ShardRuntime;
+use super::utc_now;
 use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 
 #[cfg(test)]
@@ -954,12 +955,4 @@ impl StoreRuntimeRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-}
-
-fn utc_now() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }

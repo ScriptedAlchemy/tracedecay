@@ -6,9 +6,11 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use tracedecay_domain::UtcMicros;
+
+use super::utc_now;
 use tracedecay_store::{
     RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1, RuntimeMaintenanceTransitionV1,
     StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
@@ -767,14 +769,6 @@ impl Drop for ShardRuntimeQueuedWork<'_> {
                 .release_queued_work(self.operations, self.bytes);
         }
     }
-}
-
-fn utc_now() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

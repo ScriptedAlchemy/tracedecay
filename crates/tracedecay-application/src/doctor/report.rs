@@ -641,17 +641,7 @@ impl<'a> DoctorReportComposerV1<'a> {
             }
             consultations.push(consultation);
         }
-        let consultation = consultations
-            .iter()
-            .copied()
-            .find(|consultation| consultation.is_consulted())
-            .unwrap_or_else(|| {
-                consultations
-                    .into_iter()
-                    .max_by_key(|consultation| consultation.rank())
-                    .expect("at least one advisory port is wired")
-            });
-        Ok((entries, consultation))
+        Ok((entries, strongest_consultation(consultations)))
     }
 
     async fn compose_code_index(

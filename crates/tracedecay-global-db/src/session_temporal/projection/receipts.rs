@@ -284,7 +284,7 @@ pub(super) async fn validate_canonical_assertion_completeness(
     Ok(())
 }
 
-pub(super) fn digest_bytes(bytes: &[u8]) -> String {
+pub(in crate::session_temporal) fn digest_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256:{}", hex::encode(hasher.finalize()))

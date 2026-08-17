@@ -1,11 +1,7 @@
 use super::{Connection, IntoParams, Result};
 
-enum Target<'a> {
-    Connection(&'a Connection),
-}
-
 pub struct Statement<'a> {
-    target: Target<'a>,
+    connection: &'a Connection,
     sql: String,
 }
 
@@ -13,7 +9,7 @@ impl<'a> Statement<'a> {
     pub(super) fn for_connection(connection: &'a Connection, sql: &str) -> Result<Self> {
         validate_sql(sql)?;
         Ok(Self {
-            target: Target::Connection(connection),
+            connection,
             sql: sql.to_owned(),
         })
     }
@@ -22,9 +18,7 @@ impl<'a> Statement<'a> {
     where
         P: IntoParams,
     {
-        match self.target {
-            Target::Connection(connection) => connection.execute(&self.sql, params).await,
-        }
+        self.connection.execute(&self.sql, params).await
     }
 
     /// Execution owns no `SQLite` cursor or bound parameter state: every call is

@@ -7,6 +7,7 @@ use tracedecay_domain::repository_path_matches_scope;
 use tracedecay_graph_db::GraphCancellation;
 
 use super::super::CodeGraphProjectionError;
+use super::catalog::check_cancelled;
 use super::{CodeGraphInteractiveReader, require_positive};
 use crate::chunks::CodeIndexImportEvidenceV1;
 
@@ -57,11 +58,4 @@ fn matches_query(import: &CodeIndexImportEvidenceV1, query: &str) -> bool {
             .imported_name
             .as_deref()
             .is_some_and(|name| name.to_ascii_lowercase().contains(query))
-}
-
-fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), CodeGraphProjectionError> {
-    if cancellation.is_cancelled() {
-        return Err(CodeGraphProjectionError::Cancelled);
-    }
-    Ok(())
 }

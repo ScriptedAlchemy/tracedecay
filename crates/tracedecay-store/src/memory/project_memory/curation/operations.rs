@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
     ActorId, Confidence, DomainError, FactEventId, FactOwnerV1, ProvenanceId, RunId,
     canonical_sha256,
@@ -483,8 +483,7 @@ impl ProjectMemoryFactCurationBatchV1 {
                 field: "curation request digest material",
             })
         })?;
-        let digest = Sha256::digest(encoded.as_bytes());
-        Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+        Ok(sha256_hex(encoded.as_bytes()))
     }
 }
 

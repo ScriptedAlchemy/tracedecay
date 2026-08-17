@@ -91,14 +91,7 @@ pub fn encode_tagged_lowercase_hex(tag: &str, bytes: &[u8]) -> String {
 /// change.
 #[must_use]
 pub fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update((domain.len() as u64).to_be_bytes());
-    hasher.update(domain);
-    for part in parts {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part);
-    }
-    encode_lowercase_hex(&hasher.finalize())
+    encode_lowercase_hex(&canonical_framed_sha256_bytes(domain, parts))
 }
 
 /// Lowercase-hex SHA-256 of `bytes` — the one digest-to-text encoding every

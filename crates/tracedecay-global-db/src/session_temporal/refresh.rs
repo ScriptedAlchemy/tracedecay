@@ -1,5 +1,4 @@
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1,
     SessionRefreshKeyV1, SessionRefreshOperationIdV1, SessionRefreshSourceTargetV1,
@@ -22,7 +21,7 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 use super::super::RegisteredGlobalDb;
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{
-    persist_session_temporal_projection_batch_in_transaction,
+    digest_bytes, persist_session_temporal_projection_batch_in_transaction,
     seed_active_projection_in_transaction, session_temporal_projection_record_count,
     validate_final_projection_receipt,
 };
@@ -857,12 +856,6 @@ fn refresh_binding_digest(
 
 fn config_digest() -> String {
     digest_bytes(CONFIG_VERSION.as_bytes())
-}
-
-fn digest_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn operation_id_for_digest(

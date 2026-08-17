@@ -18,3 +18,13 @@ pub mod telemetry;
 mod verified_graph;
 
 pub use verified_graph::VerifiedGraphRuntimePortV1;
+
+/// Shared saturating wall clock for shard and registry stamps: a pre-epoch
+/// clock reads as zero and an overflowing one as `i64::MAX`.
+pub(crate) fn utc_now() -> tracedecay_domain::UtcMicros {
+    let micros = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    tracedecay_domain::UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
+}

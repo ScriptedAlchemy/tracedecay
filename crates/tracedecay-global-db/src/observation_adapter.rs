@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use tracedecay_application::clock::now_micros;
 
 use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
-    ObservationCollisionOutcomeV1, ObservationScopeV1, UtcMicros, canonical_sha256,
+    ObservationCollisionOutcomeV1, ObservationScopeV1, canonical_sha256,
     classify_observation_collision,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
@@ -348,7 +348,7 @@ fn dispatch_runtime_observation_read(
     let admission_bytes = serde_json::to_vec(&operation)
         .map_err(|error| runtime_storage_error("build observation runtime read", error))?
         .len();
-    let requested_at = runtime_now();
+    let requested_at = now_micros();
     let control = RuntimeRequestControlV1 {
         requested_at,
         deadline: RuntimeDeadlineV1 {
@@ -505,7 +505,7 @@ async fn submit_runtime_write(
         .as_str()
         .strip_prefix("sha256:")
         .ok_or_else(|| runtime_storage_error(operation, "canonical digest prefix is invalid"))?;
-    let admitted_at = runtime_now();
+    let admitted_at = now_micros();
     let binding = runtime.binding();
     let metadata = StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new(format!(
@@ -627,14 +627,6 @@ fn canonical_runtime_digest(value: &serde_json::Value) -> ObservationStoreResult
         })
 }
 
-fn runtime_now() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
-}
-
 fn runtime_storage_error(
     operation: &'static str,
     message: impl std::fmt::Display,
@@ -652,7 +644,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore<'_> {
         match dispatch_runtime_observation_read(
             self.runtime,
             ObservationReadOperationV1::NextQueuedProjection {
-                now_micros: tracedecay_application::clock::now_micros().0,
+                now_micros: now_micros().0,
             },
         )
         .map_err(projection_runtime_error)?

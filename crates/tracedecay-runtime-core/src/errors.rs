@@ -1,4 +1,3 @@
-// Rust guideline compliant 2025-10-17
 use thiserror::Error;
 
 #[derive(Error, Debug)]

@@ -148,7 +148,8 @@ impl ErlangExtractor {
     fn visit_fun_decl(state: &mut ExtractionState, node: TsNode<'_>) {
         // fun_decl contains one or more function_clause nodes.
         // The function name is in the first function_clause's `name` child.
-        let Some(first_clause) = Self::find_child(node, "function_clause") else {
+        let Some(first_clause) = crate::traversal::find_direct_child_by_kind(node, "function_clause")
+        else {
             return;
         };
 
@@ -317,23 +318,6 @@ impl ErlangExtractor {
             });
         }
         let _ = text;
-    }
-
-    /// Finds the first child of a node with a given kind.
-    fn find_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Extracts the atom (function name) from the first child of a `function_clause`.
