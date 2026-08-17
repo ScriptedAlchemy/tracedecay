@@ -147,4 +147,3 @@ fn setup_repo_with_meta() -> (tempfile::TempDir, PathBuf, PathBuf) {
     crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
     (base, project_root, tracedecay_dir)
 }
-

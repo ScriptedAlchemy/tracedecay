@@ -793,21 +793,20 @@ impl DaemonEngine {
                     handle.lifecycle = AutomationSchedulerLifecycle::Exiting;
                 }
 
-                let still_configured =
-                    match automation_scheduler_has_work_for_project(cg).await {
-                        Ok(configured) => configured,
-                        Err(error) => {
-                            log_daemon_event(
-                                "scheduler_project_open",
-                                &[
-                                    ("project", project_path.display().to_string()),
-                                    ("outcome", "error".to_string()),
-                                    ("error", error.to_string()),
-                                ],
-                            );
-                            true
-                        }
-                    };
+                let still_configured = match automation_scheduler_has_work_for_project(cg).await {
+                    Ok(configured) => configured,
+                    Err(error) => {
+                        log_daemon_event(
+                            "scheduler_project_open",
+                            &[
+                                ("project", project_path.display().to_string()),
+                                ("outcome", "error".to_string()),
+                                ("error", error.to_string()),
+                            ],
+                        );
+                        true
+                    }
+                };
                 let mut schedulers = self
                     .store_administration
                     .automation_schedulers()

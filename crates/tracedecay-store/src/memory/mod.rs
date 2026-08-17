@@ -52,7 +52,7 @@ pub use project_memory::{
     ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchGraphCoverageV1,
     ProjectMemoryFactSearchGraphDegradationV1, ProjectMemoryFactSearchHitV1,
     ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchScoresV1,
-    ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactSnapshotV1, ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
     derive_project_memory_fact_curation_child_operation_id,
 };

@@ -56,10 +56,9 @@ use primitives::{
     COMMIT_OPERATION, QUERY_OPERATION, ensure_project_memory_read_active, storage_error,
 };
 use search::{
-    find_project_memory_contradictions_tx,
-    probe_project_memory_facts_tx, reason_project_memory_facts_tx,
-    record_project_memory_fact_retrieval_tx, related_project_memory_facts,
-    search_project_memory_facts,
+    find_project_memory_contradictions_tx, probe_project_memory_facts_tx,
+    reason_project_memory_facts_tx, record_project_memory_fact_retrieval_tx,
+    related_project_memory_facts, search_project_memory_facts,
 };
 use status::project_memory_status_tx;
 

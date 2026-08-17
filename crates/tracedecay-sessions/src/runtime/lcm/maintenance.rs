@@ -163,12 +163,8 @@ mod tests {
             )
             .unwrap();
 
-        let first = backup_database(&source_path, root.path())
-            .await
-            .unwrap();
-        let second = backup_database(&source_path, root.path())
-            .await
-            .unwrap();
+        let first = backup_database(&source_path, root.path()).await.unwrap();
+        let second = backup_database(&source_path, root.path()).await.unwrap();
         let first_path = PathBuf::from(first["path"].as_str().unwrap());
         let second_path = PathBuf::from(second["path"].as_str().unwrap());
         assert_ne!(first_path, second_path);
@@ -195,11 +191,7 @@ mod tests {
         let source_path = root.path().join("sessions.db");
         fs::write(&source_path, b"not sqlite").unwrap();
 
-        assert!(
-            backup_database(&source_path, root.path())
-                .await
-                .is_err()
-        );
+        assert!(backup_database(&source_path, root.path()).await.is_err());
         let backup_root = root.path().join("lcm-clean-backups");
         assert_eq!(fs::read_dir(backup_root).unwrap().count(), 0);
     }

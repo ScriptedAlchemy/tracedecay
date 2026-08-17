@@ -37,8 +37,8 @@ use tracedecay_store::{
 };
 
 use super::shard::ShardRuntime;
-use super::utc_now;
 use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
+use super::utc_now;
 
 #[cfg(test)]
 pub(crate) use attachment::EmptyPhysicalRuntimeAttachment;

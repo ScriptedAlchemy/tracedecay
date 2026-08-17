@@ -175,9 +175,11 @@ fn projected_fact(
         owner,
         payload(),
         Confidence::new(0.5).unwrap(),
-        id("assertion.projected-fact"),
-        id("event.projected-fact"),
-        projected_as_of,
+        ProjectMemoryFactSnapshotV1::new(
+            id("assertion.projected-fact"),
+            id("event.projected-fact"),
+            projected_as_of,
+        ),
         source,
         ProjectMemoryFactTelemetryV1::new(
             0,
@@ -625,9 +627,11 @@ fn available_projections_reject_redacted_payload_receipts() {
         owner,
         payload,
         Confidence::new(0.5).unwrap(),
-        id("assertion.redacted-payload"),
-        id("event.redacted-payload"),
-        UtcMicros(2),
+        ProjectMemoryFactSnapshotV1::new(
+            id("assertion.redacted-payload"),
+            id("event.redacted-payload"),
+            UtcMicros(2),
+        ),
         source,
         ProjectMemoryFactTelemetryV1::new(0, 0, 0, 0, UtcMicros(1), UtcMicros(2), None, None, None)
             .unwrap(),
@@ -653,9 +657,11 @@ fn available_projection_requires_one_snapshot_timestamp() {
         owner,
         payload(),
         Confidence::new(0.5).unwrap(),
-        id("assertion.projection-snapshot-mismatch"),
-        id("event.projection-snapshot-mismatch"),
-        UtcMicros(2),
+        ProjectMemoryFactSnapshotV1::new(
+            id("assertion.projection-snapshot-mismatch"),
+            id("event.projection-snapshot-mismatch"),
+            UtcMicros(2),
+        ),
         source,
         ProjectMemoryFactTelemetryV1::new(0, 0, 0, 0, UtcMicros(1), UtcMicros(3), None, None, None)
             .unwrap(),
