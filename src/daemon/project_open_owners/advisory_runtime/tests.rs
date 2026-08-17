@@ -52,6 +52,70 @@ fn hook_notice_registration_is_released_with_the_published_owner() {
     ));
 }
 
+fn hook_binding(host: tracedecay_hooks::HookHostV1) -> tracedecay_hooks::HookScopeBindingV1 {
+    let capabilities = [
+        tracedecay_hooks::HookEventFamily::SessionBoundary,
+        tracedecay_hooks::HookEventFamily::PromptBoundary,
+        tracedecay_hooks::HookEventFamily::ToolLifecycle,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        tracedecay_hooks::HookEventFamily::TestLifecycle,
+    ]
+    .into_iter()
+    .map(|family| tracedecay_hooks::HookCapabilityV1 {
+        family,
+        support: tracedecay_hooks::stock_event_support(host, family),
+    })
+    .collect();
+    tracedecay_hooks::HookScopeBindingV1 {
+        host,
+        project_id: [1; 16],
+        repository_id: [2; 16],
+        worktree_id: [3; 16],
+        worktree_epoch: 1,
+        binding_token: [4; 32],
+        capabilities,
+    }
+}
+
+#[test]
+fn hook_notice_dispatch_requires_a_live_daemon_binding() {
+    let root = tempfile::tempdir().expect("hook config root");
+    let published_at = UtcMicros(1_000_000);
+    assert!(
+        advisory_hook_notice_dispatch(root.path(), published_at).is_none(),
+        "an unpublished binding set must stay typed unbound"
+    );
+
+    let host = tracedecay_hooks::HookHostV1::ClaudeCode;
+    let expires_at = UtcMicros(published_at.0 + 60_000_000);
+    tracedecay_hooks::HookConfigurationPublisherV1::new(
+        tracedecay_hooks::HookConfigurationFileWriterV1::new(hook_configuration_path(
+            root.path(),
+            host,
+        )),
+    )
+    .publish(tracedecay_hooks::HookConfigurationSnapshotV1 {
+        schema_version: tracedecay_hooks::HOOK_CONFIGURATION_SCHEMA_VERSION,
+        revision: 7,
+        published_at,
+        expires_at,
+        binding: hook_binding(host),
+    })
+    .expect("published hook binding");
+
+    let (kind, rollback) =
+        advisory_hook_notice_dispatch(root.path(), UtcMicros(published_at.0 + 1))
+            .expect("live binding authorizes hook notice dispatch");
+    assert_eq!(kind, HostKindV1::ClaudeCode);
+    assert_eq!(rollback.configuration_revision, 7);
+    assert_eq!(rollback.route, HookFeedbackDeliveryRouteV1::HookV2);
+
+    assert!(
+        advisory_hook_notice_dispatch(root.path(), expires_at).is_none(),
+        "an expired binding is not a live delivery authority"
+    );
+}
+
 #[test]
 fn advisory_deadline_outside_monotonic_horizon_is_typed() {
     let Err(problem) =

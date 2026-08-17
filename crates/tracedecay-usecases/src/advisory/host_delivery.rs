@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_application::{ApplicationContractError, RequestContext, ResolvedScope};
+use tracedecay_application::{ApplicationContractError, ResolvedScope};
 use tracedecay_domain::feedback::{
     FeedbackContentIdentityV1, FeedbackCycleId, FeedbackResultId, FeedbackScopeV1,
 };
@@ -34,9 +34,8 @@ use tracedecay_host_integration::{
 };
 
 use super::runtime::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryDaemonRegistrationV1,
-    AdvisoryProviderAuthoritiesV1, AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
-    open_advisory_daemon_registration,
+    AdvisoryCycleOutcome, AdvisoryDaemonRegistrationV1, AdvisoryProviderAuthoritiesV1,
+    AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1, open_advisory_daemon_registration,
 };
 
 /// A content-free notification for a host to perform its usual authorized
@@ -338,19 +337,6 @@ pub enum AdvisoryHostDeliveryErrorV1 {
 }
 
 #[derive(Debug, Error)]
-pub enum AdvisoryRunErrorV1 {
-    #[error(transparent)]
-    Cycle(#[from] ApplicationContractError),
-    #[error(transparent)]
-    Delivery(#[from] AdvisoryHostDeliveryErrorV1),
-}
-
-pub struct AdvisoryRunResultV1 {
-    pub outcome: AdvisoryCycleOutcome,
-    pub delivery: Option<AdvisoryCompletedDeliveryV1>,
-}
-
-#[derive(Debug, Error)]
 pub enum AdvisoryDaemonStartupErrorV1 {
     #[error(transparent)]
     Runtime(#[from] AdvisoryRuntimeOpenErrorV1),
@@ -401,25 +387,6 @@ where
     ) -> Result<AdvisoryCompletedDeliveryV1, AdvisoryHostDeliveryErrorV1> {
         self.host_delivery
             .consume_completed_publication(host, outcome, rollback)
-    }
-
-    /// Production one-shot execution. Only an atomically recorded publication
-    /// reaches the registered Hook and LSP consumers.
-    pub async fn run_once(
-        &self,
-        context: &RequestContext,
-        control: AdvisoryCycleControl,
-        request: AdvisoryCycleRequest,
-        host: HostKindV1,
-        rollback: HookFeedbackRollbackSwitchV1,
-    ) -> Result<AdvisoryRunResultV1, AdvisoryRunErrorV1> {
-        let outcome = Box::pin(self.runtime().run_once(context, control, request)).await?;
-        let delivery = if outcome.publication().is_some() {
-            Some(self.consume_completed_publication(host, &outcome, rollback)?)
-        } else {
-            None
-        };
-        Ok(AdvisoryRunResultV1 { outcome, delivery })
     }
 }
 
@@ -794,6 +761,10 @@ fn feedback_scope_matches(left: &FeedbackScopeV1, right: &FeedbackScopeV1) -> bo
         && left.branch_ref == right.branch_ref
         && left.head_commit_id == right.head_commit_id
 }
+
+#[cfg(test)]
+#[path = "host_delivery_consume_tests.rs"]
+mod consume_tests;
 
 #[cfg(test)]
 mod tests {

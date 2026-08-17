@@ -17,8 +17,12 @@ use tracedecay_domain::GitHeadStateV1;
 use tracedecay_domain::feedback::{
     CiFailureParserIdentityV1, FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
 };
-use tracedecay_domain::{CommitId, ProviderId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{CommitId, HostKindV1, ProviderId, UtcMicros, canonical_sha256};
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_hooks::{
+    HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
+    HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, hook_configuration_path,
+};
 use tracedecay_lsp::{
     DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
     LspRuntimeFuture,
@@ -30,13 +34,14 @@ use tracedecay_usecases::advisory::github_runtime::{
     discover_exact_commit_pull_request_v1, resolve_registered_github_read_only_credential_v1,
 };
 use tracedecay_usecases::advisory::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookLookupNoticeV1,
-    AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1, AdvisoryProductionOpenV1,
-    AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1, CiSourceAccessAuthorityV1,
-    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
-    GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
-    GitHubReviewRuntimeOwnerConfigV1, ProductionCiFailureDiscoveryOutcomeV1,
-    ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
+    AdvisoryHookLookupNoticeV1, AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1,
+    AdvisoryProductionOpenV1, AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
+    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
+    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
+    GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1,
+    ProductionCiFailureDiscoveryOutcomeV1, ProductionCiProviderConfigV1,
+    ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, register_advisory_hook_notice_queue,
     unregister_advisory_hook_notice_queue,
 };
@@ -80,6 +85,7 @@ struct ProjectOpenAdvisoryFeedbackCycleV1 {
     feedback_scope: FeedbackScopeV1,
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
     ci_discovery_config: Option<ProductionCiProviderConfigV1>,
+    hook_config_root: std::path::PathBuf,
 }
 
 struct ProjectOpenAdvisoryCycleExecutionV1 {
@@ -186,11 +192,107 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 );
                 LspRuntimeFailure::new("feedback-cycle-advisory-execution")
             })?;
+        if outcome.publication().is_some() {
+            self.deliver_completed_publication(&outcome);
+        }
         Ok(ProjectOpenAdvisoryCycleExecutionV1 {
             context: invocation.context,
             outcome,
         })
     }
+
+    /// Drives the mounted host-delivery half for one atomically recorded
+    /// publication: the content-free Hook V2 lookup notice is enqueued for the
+    /// bound hosts' next admission, while MCP/CLI/LSP callers keep reading the
+    /// same publication store. Every non-delivered state stays typed and
+    /// reported; none of them fails the already-completed cycle.
+    fn deliver_completed_publication(&self, outcome: &AdvisoryCycleOutcome) {
+        let project_id = self.feedback_scope.project_id.as_str();
+        let worktree_id = self.feedback_scope.worktree_id.as_str();
+        let Some((host, rollback)) =
+            advisory_hook_notice_dispatch(&self.hook_config_root, now_micros())
+        else {
+            tracing::warn!(
+                target: "tracedecay::feedback_advisory_cycle",
+                project_id,
+                worktree_id,
+                "advisory hook notice delivery is unavailable: no live daemon hook binding"
+            );
+            return;
+        };
+        match self
+            .registration
+            .consume_completed_publication(host, outcome, rollback)
+        {
+            // The daemon retains the LSP session factory itself, so the
+            // returned provider-bundle mount is already owned by the live LSP
+            // sessions; only the hook delivery outcome needs reporting here.
+            Ok(delivery) => match delivery.hook {
+                AdvisoryHookDeliveryV1::Delivered { outcome, .. } => {
+                    tracing::debug!(
+                        target: "tracedecay::feedback_advisory_cycle",
+                        project_id,
+                        worktree_id,
+                        ?outcome,
+                        "advisory hook lookup notice delivered for a completed publication"
+                    );
+                }
+                AdvisoryHookDeliveryV1::SinkUnavailable => {
+                    tracing::warn!(
+                        target: "tracedecay::feedback_advisory_cycle",
+                        project_id,
+                        worktree_id,
+                        "advisory hook notice sink is unavailable for a completed publication"
+                    );
+                }
+                AdvisoryHookDeliveryV1::Unavailable(reason) => {
+                    tracing::warn!(
+                        target: "tracedecay::feedback_advisory_cycle",
+                        project_id,
+                        worktree_id,
+                        ?reason,
+                        "advisory hook route is unavailable for a completed publication"
+                    );
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    target: "tracedecay::feedback_advisory_cycle",
+                    project_id,
+                    worktree_id,
+                    %error,
+                    "advisory host delivery failed for a completed publication"
+                );
+            }
+        }
+    }
+}
+
+/// Selects the daemon-published hook binding that authorizes one Hook V2
+/// lookup-notice delivery. Project admission publishes bindings for every
+/// native hook host together, so the first live binding carries the daemon's
+/// current hook configuration revision. `None` is the typed unbound state
+/// (expired or never-published bindings) under which no host could
+/// acknowledge a notice.
+fn advisory_hook_notice_dispatch(
+    hook_config_root: &Path,
+    now: UtcMicros,
+) -> Option<(HostKindV1, HookFeedbackRollbackSwitchV1)> {
+    crate::hooks::NATIVE_HOOK_HOSTS.iter().find_map(|host| {
+        let subscriber = HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(
+            hook_configuration_path(hook_config_root, *host),
+        ));
+        match subscriber.load_current(*host, now) {
+            HookConfigurationReadOutcomeV1::Bound(snapshot) => Some((
+                host.host_kind(),
+                HookFeedbackRollbackSwitchV1 {
+                    configuration_revision: snapshot.revision,
+                    route: HookFeedbackDeliveryRouteV1::HookV2,
+                },
+            )),
+            _ => None,
+        }
+    })
 }
 
 impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
@@ -607,6 +709,7 @@ async fn register_production_advisory_owner(
         feedback_scope: feedback_scope.clone(),
         github_pull_request_id,
         ci_discovery_config,
+        hook_config_root: state.graph.hook_store_layout().data_root.clone(),
     });
     let invocation_owner = DaemonAdvisoryCycleInvocationOwner::new(
         feedback_scope.project_id,

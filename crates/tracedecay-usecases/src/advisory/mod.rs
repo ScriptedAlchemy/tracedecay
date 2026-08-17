@@ -93,8 +93,8 @@ pub use host_delivery::{
     AdvisoryHookDeliveryPortV1, AdvisoryHookDeliveryV1, AdvisoryHookLookupNoticeV1,
     AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1, AdvisoryHostDeliveryErrorV1,
     AdvisoryHostDeliveryPathV1, AdvisoryHostDeliveryRegistrationV1, AdvisoryHostDeliveryRouteV1,
-    AdvisoryRunErrorV1, AdvisoryRunResultV1, mount_advisory_host_delivery,
-    new_advisory_hook_delivery_port, register_advisory_daemon_startup,
+    mount_advisory_host_delivery, new_advisory_hook_delivery_port,
+    register_advisory_daemon_startup,
 };
 pub use host_delivery::{
     acknowledge_advisory_hook_notice, peek_advisory_hook_notice,
