@@ -1259,7 +1259,7 @@ impl LcmTestRuntime {
 
     pub fn observation_store(
         &self,
-    ) -> Result<tracedecay::store::GlobalDbObservationStore<'_>, HostAdmissionOutcome> {
+    ) -> Result<tracedecay::store::GlobalDbObservationStore, HostAdmissionOutcome> {
         self.runtime.observation_store(HostAdmissionScope::Profile)
     }
 

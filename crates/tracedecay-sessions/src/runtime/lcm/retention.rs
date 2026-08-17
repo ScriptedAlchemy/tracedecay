@@ -62,8 +62,11 @@ use tracedecay_application::storage::{
 };
 use tracedecay_domain::UtcMicros;
 
-use tracedecay_runtime_core::db::engine::{
-    Connection, Executor, Params, QueryExecutor, Transaction, TransactionBehavior, params,
+#[cfg(test)]
+use tracedecay_runtime_core::db::engine::{Connection, Transaction, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::{
+    Database, DatabaseEngineReadConnection, DatabaseMemoryTransaction,
 };
 
 use super::payload::{ExternalPayloadWrite, PayloadFileRollback};
@@ -89,7 +92,7 @@ const OFFLOAD_KIND: &str = "retention_offload";
 /// copy after 30 days. Rows without durable summary lineage remain untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LcmRetentionConfig {
-    /// Master switch. When `false`, [`run_session_retention_authorized`] is a
+    /// Master switch. When `false`, [`run_session_retention`] is a
     /// no-op even in [`RetentionMode::Apply`].
     #[serde(default = "default_retention_enabled")]
     pub enabled: bool,
@@ -379,7 +382,37 @@ async fn scoped_row_count(
 /// `provider` may be `"all"` to span every provider; `session_id` narrows to a
 /// single session. In [`RetentionMode::DryRun`] nothing is mutated and each
 /// phase reports the candidate count and bytes that *would* be reclaimed.
-/// Apply mode requires `authorize` to admit each mutating intent.
+/// Apply mode obtains every writer through the supplied database's guarded
+/// transaction capability, so revocation is checked at transaction admission
+/// and commit without exposing a raw database authority.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_session_retention(
+    database: &Database,
+    storage_root: &Path,
+    provider: &str,
+    session_id: Option<&str>,
+    config: &LcmRetentionConfig,
+    mode: RetentionMode,
+    now: i64,
+) -> Result<LcmRetentionReport, LcmError> {
+    run_session_retention_inner(
+        RetentionStore::Database(database),
+        storage_root,
+        provider,
+        session_id,
+        config,
+        mode,
+        now,
+        None,
+    )
+    .await
+}
+
+/// Standalone engine fixtures retain the historical raw-connection seam only
+/// in unit tests. Production retention always enters through
+/// [`run_session_retention`] and therefore cannot receive a raw connection or
+/// authority object.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_session_retention_authorized(
     conn: &Connection,
@@ -389,13 +422,40 @@ pub async fn run_session_retention_authorized(
     config: &LcmRetentionConfig,
     mode: RetentionMode,
     now: i64,
-    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
+    authorize: &RetentionAuthorization<'_>,
 ) -> Result<LcmRetentionReport, LcmError> {
-    let raw_rows_before = scoped_row_count(conn, "lcm_raw_messages", provider, session_id).await;
+    run_session_retention_inner(
+        RetentionStore::Connection(conn),
+        storage_root,
+        provider,
+        session_id,
+        config,
+        mode,
+        now,
+        Some(authorize),
+    )
+    .await
+}
+
+type RetentionAuthorization<'a> = dyn Fn(&str) -> Result<(), LcmError> + Send + Sync + 'a;
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session_retention_inner(
+    store: RetentionStore<'_>,
+    storage_root: &Path,
+    provider: &str,
+    session_id: Option<&str>,
+    config: &LcmRetentionConfig,
+    mode: RetentionMode,
+    now: i64,
+    authorize: Option<&RetentionAuthorization<'_>>,
+) -> Result<LcmRetentionReport, LcmError> {
+    let read = store.read_connection();
+    let raw_rows_before = scoped_row_count(&read, "lcm_raw_messages", provider, session_id).await;
     let projected_rows_before =
-        scoped_row_count(conn, "session_messages", provider, session_id).await;
-    let freelist_before = pragma_u64(conn, "freelist_count").await;
-    let page_count_before = pragma_u64(conn, "page_count").await;
+        scoped_row_count(&read, "session_messages", provider, session_id).await;
+    let freelist_before = pragma_u64(&read, "freelist_count").await;
+    let page_count_before = pragma_u64(&read, "page_count").await;
 
     let mut report = LcmRetentionReport {
         provider: provider.to_string(),
@@ -427,7 +487,7 @@ pub async fn run_session_retention_authorized(
     // Drop first (terminal, longest window) so offload never externalizes a row
     // that is about to be deleted.
     report.dropped = run_drop_pass(
-        conn,
+        store,
         provider,
         session_id,
         config,
@@ -438,7 +498,7 @@ pub async fn run_session_retention_authorized(
     )
     .await?;
     report.offloaded = run_offload_pass(
-        conn,
+        store,
         storage_root,
         provider,
         session_id,
@@ -450,7 +510,7 @@ pub async fn run_session_retention_authorized(
     )
     .await?;
     report.projected_deduped = run_dedupe_pass(
-        conn,
+        store,
         provider,
         session_id,
         config,
@@ -469,20 +529,20 @@ pub async fn run_session_retention_authorized(
             .acted
             .saturating_add(report.offloaded.acted)
             .saturating_add(report.projected_deduped.acted);
-        authorize("begin session retention metadata")?;
-        let transaction = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        let transaction = store
+            .begin_memory_write_transaction("begin session retention metadata", authorize)
             .await?;
         write_retention_metadata(&transaction, now, acted, report.bytes_reclaimed()).await?;
         commit_authorized(transaction, authorize, "commit session retention metadata").await?;
     }
 
     report.ended_at = now;
-    report.raw_rows_after = scoped_row_count(conn, "lcm_raw_messages", provider, session_id).await;
+    let read = store.read_connection();
+    report.raw_rows_after = scoped_row_count(&read, "lcm_raw_messages", provider, session_id).await;
     report.projected_rows_after =
-        scoped_row_count(conn, "session_messages", provider, session_id).await;
-    report.freelist_after = pragma_u64(conn, "freelist_count").await;
-    report.page_count_after = pragma_u64(conn, "page_count").await;
+        scoped_row_count(&read, "session_messages", provider, session_id).await;
+    report.freelist_after = pragma_u64(&read, "freelist_count").await;
+    report.page_count_after = pragma_u64(&read, "page_count").await;
     Ok(report)
 }
 
@@ -503,11 +563,13 @@ async fn write_retention_metadata(
 }
 
 async fn commit_authorized(
-    transaction: Transaction,
-    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
+    transaction: RetentionWriteTransaction<'_>,
+    authorize: Option<&RetentionAuthorization<'_>>,
     intent: &str,
 ) -> Result<(), LcmError> {
-    if let Err(error) = authorize(intent) {
+    if let Some(authorize) = authorize
+        && let Err(error) = authorize(intent)
+    {
         return match transaction.rollback().await {
             Ok(()) => Err(error),
             Err(rollback_error) => Err(LcmError::Db(format!(
@@ -515,24 +577,164 @@ async fn commit_authorized(
             ))),
         };
     }
-    transaction.commit().await.map_err(Into::into)
+    transaction.commit().await
 }
 
-enum RetentionQueryExecutor<'a> {
-    Connection(&'a Connection),
-    Transaction(&'a Transaction),
+#[derive(Clone)]
+enum RetentionReadConnection {
+    Database(DatabaseEngineReadConnection),
+    #[cfg(test)]
+    Connection(Connection),
 }
 
-impl RetentionQueryExecutor<'_> {
+impl QueryExecutor for RetentionReadConnection {
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows>
+    where
+        P: tracedecay_runtime_core::db::engine::IntoParams,
+    {
+        match self {
+            Self::Database(connection) => connection.query(sql, params).await,
+            #[cfg(test)]
+            Self::Connection(connection) => connection.query(sql, params).await,
+        }
+    }
+}
+
+enum RetentionQueryExecutor<'query, 'store> {
+    Read(&'query RetentionReadConnection),
+    Transaction(&'query RetentionWriteTransaction<'store>),
+}
+
+impl RetentionQueryExecutor<'_, '_> {
     async fn query(
         &self,
         sql: &str,
-        params: Params,
+        params: impl tracedecay_runtime_core::db::engine::IntoParams,
     ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows>
     {
         match self {
-            Self::Connection(connection) => connection.query(sql, params).await,
+            Self::Read(connection) => connection.query(sql, params).await,
             Self::Transaction(transaction) => transaction.query(sql, params).await,
+        }
+    }
+}
+
+enum RetentionWriteTransaction<'a> {
+    Database(DatabaseMemoryTransaction<'a>),
+    #[cfg(test)]
+    Connection(Transaction),
+}
+
+impl RetentionWriteTransaction<'_> {
+    async fn commit(self) -> Result<(), LcmError> {
+        match self {
+            Self::Database(transaction) => transaction
+                .commit()
+                .await
+                .map_err(|error| LcmError::Db(error.to_string())),
+            #[cfg(test)]
+            Self::Connection(transaction) => transaction.commit().await.map_err(Into::into),
+        }
+    }
+
+    async fn rollback(self) -> Result<(), LcmError> {
+        match self {
+            Self::Database(transaction) => transaction
+                .rollback()
+                .await
+                .map_err(|error| LcmError::Db(error.to_string())),
+            #[cfg(test)]
+            Self::Connection(transaction) => transaction.rollback().await.map_err(Into::into),
+        }
+    }
+}
+
+impl QueryExecutor for RetentionWriteTransaction<'_> {
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows>
+    where
+        P: tracedecay_runtime_core::db::engine::IntoParams,
+    {
+        match self {
+            Self::Database(transaction) => transaction.query(sql, params).await,
+            #[cfg(test)]
+            Self::Connection(transaction) => transaction.query(sql, params).await,
+        }
+    }
+}
+
+impl Executor for RetentionWriteTransaction<'_> {
+    async fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<u64>
+    where
+        P: tracedecay_runtime_core::db::engine::IntoParams,
+    {
+        match self {
+            Self::Database(transaction) => transaction.execute(sql, params).await,
+            #[cfg(test)]
+            Self::Connection(transaction) => transaction.execute(sql, params).await,
+        }
+    }
+
+    async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
+        match self {
+            Self::Database(transaction) => transaction.execute_batch(sql).await,
+            #[cfg(test)]
+            Self::Connection(transaction) => transaction.execute_batch(sql).await,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RetentionStore<'a> {
+    Database(&'a Database),
+    #[cfg(test)]
+    Connection(&'a Connection),
+}
+
+impl<'a> RetentionStore<'a> {
+    fn read_connection(self) -> RetentionReadConnection {
+        match self {
+            Self::Database(database) => {
+                RetentionReadConnection::Database(database.read_connection())
+            }
+            #[cfg(test)]
+            Self::Connection(connection) => {
+                RetentionReadConnection::Connection((*connection).clone())
+            }
+        }
+    }
+
+    async fn begin_memory_write_transaction(
+        self,
+        intent: &str,
+        authorize: Option<&RetentionAuthorization<'_>>,
+    ) -> Result<RetentionWriteTransaction<'a>, LcmError> {
+        if let Some(authorize) = authorize {
+            authorize(intent)?;
+        }
+        match self {
+            Self::Database(database) => database
+                .begin_memory_write_transaction(intent)
+                .await
+                .map(RetentionWriteTransaction::Database)
+                .map_err(|error| LcmError::Db(error.to_string())),
+            #[cfg(test)]
+            Self::Connection(connection) => connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map(RetentionWriteTransaction::Connection)
+                .map_err(Into::into),
         }
     }
 }
@@ -547,14 +749,14 @@ struct DropRow {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_drop_pass(
-    conn: &Connection,
+    store: RetentionStore<'_>,
     provider: &str,
     session_id: Option<&str>,
     config: &LcmRetentionConfig,
     mode: RetentionMode,
     now: i64,
     errors: &mut Vec<String>,
-    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
+    authorize: Option<&RetentionAuthorization<'_>>,
 ) -> Result<LcmRetentionPhaseReport, LcmError> {
     let mut report = LcmRetentionPhaseReport {
         window_days: config.drop_after_days,
@@ -576,18 +778,19 @@ async fn run_drop_pass(
          LIMIT ?4"
     );
     let transaction = if mode.is_apply() {
-        authorize("begin session retention drop pass")?;
         Some(
-            conn.transaction_with_behavior(TransactionBehavior::Immediate)
+            store
+                .begin_memory_write_transaction("begin session retention drop pass", authorize)
                 .await?,
         )
     } else {
         None
     };
-    let query_executor = transaction.as_ref().map_or(
-        RetentionQueryExecutor::Connection(conn),
-        RetentionQueryExecutor::Transaction,
-    );
+    let read = store.read_connection();
+    let query_executor = match transaction.as_ref() {
+        Some(transaction) => RetentionQueryExecutor::Transaction(transaction),
+        None => RetentionQueryExecutor::Read(&read),
+    };
     let mut rows = query_executor
         .query(
             &sql,
@@ -620,7 +823,9 @@ async fn run_drop_pass(
         LcmError::Db("apply mode did not start a session retention drop transaction".to_owned())
     })?;
     for target in &targets {
-        authorize("drop session retention row")?;
+        if let Some(authorize) = authorize {
+            authorize("drop session retention row")?;
+        }
         // Drop the projected twin first (its FTS delete trigger fires), then
         // the raw row (its FTS delete trigger fires). Any external payload the
         // raw row referenced becomes unreferenced and is reaped by payload GC.
@@ -667,7 +872,7 @@ struct OffloadRow {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_offload_pass(
-    conn: &Connection,
+    store: RetentionStore<'_>,
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
@@ -675,7 +880,7 @@ async fn run_offload_pass(
     mode: RetentionMode,
     now: i64,
     errors: &mut Vec<String>,
-    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
+    authorize: Option<&RetentionAuthorization<'_>>,
 ) -> Result<LcmRetentionPhaseReport, LcmError> {
     let mut report = LcmRetentionPhaseReport {
         window_days: config.offload_after_days,
@@ -697,7 +902,8 @@ async fn run_offload_pass(
          ORDER BY r.timestamp ASC, r.store_id ASC
          LIMIT ?4"
     );
-    let mut rows = conn
+    let read = store.read_connection();
+    let mut rows = read
         .query(
             &sql,
             params![
@@ -732,7 +938,7 @@ async fn run_offload_pass(
     // flip the row to external + placeholder in its own transaction. A crash
     // between file write and commit is cleaned up by the rollback guard.
     for target in targets {
-        match offload_one(conn, storage_root, &target, authorize).await {
+        match offload_one(store, storage_root, &target, authorize).await {
             Ok(bytes) => {
                 report.acted += 1;
                 report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(bytes);
@@ -744,13 +950,15 @@ async fn run_offload_pass(
 }
 
 async fn offload_one(
-    conn: &Connection,
+    store: RetentionStore<'_>,
     storage_root: &Path,
     target: &OffloadRow,
-    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
+    authorize: Option<&RetentionAuthorization<'_>>,
 ) -> Result<u64, LcmError> {
     let byte_len = target.content.len() as u64;
-    authorize("begin session retention offload payload write")?;
+    if let Some(authorize) = authorize {
+        authorize("begin session retention offload payload write")?;
+    }
     let mut rollback = PayloadFileRollback::begin_cancellation_safe(storage_root);
     let payload_ref = payload::write_external_payload_tracked(
         storage_root,
@@ -773,13 +981,16 @@ async fn offload_one(
         payload_ref.kind, payload_ref.char_count, payload_ref.byte_count, payload_ref.payload_ref
     );
 
-    authorize("begin session retention offload pass")?;
-    let txn = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+    let txn = store
+        .begin_memory_write_transaction("begin session retention offload pass", authorize)
         .await?;
-    authorize("upsert session retention offload metadata")?;
+    if let Some(authorize) = authorize {
+        authorize("upsert session retention offload metadata")?;
+    }
     payload::upsert_payload_metadata(&txn, &payload_ref).await?;
-    authorize("compare and swap session retention offload row")?;
+    if let Some(authorize) = authorize {
+        authorize("compare and swap session retention offload row")?;
+    }
     let update_sql = format!(
         "UPDATE lcm_raw_messages AS r
          SET content = NULL,
@@ -828,14 +1039,14 @@ async fn offload_one(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_dedupe_pass(
-    conn: &Connection,
+    store: RetentionStore<'_>,
     provider: &str,
     session_id: Option<&str>,
     config: &LcmRetentionConfig,
     mode: RetentionMode,
     now: i64,
     errors: &mut Vec<String>,
-    authorize: &(dyn Fn(&str) -> Result<(), LcmError> + Send + Sync),
+    authorize: Option<&RetentionAuthorization<'_>>,
 ) -> Result<LcmRetentionPhaseReport, LcmError> {
     let mut report = LcmRetentionPhaseReport {
         window_days: config.dedupe_projected_after_days,
@@ -865,18 +1076,19 @@ async fn run_dedupe_pass(
          LIMIT ?4"
     );
     let transaction = if mode.is_apply() {
-        authorize("begin session retention dedupe pass")?;
         Some(
-            conn.transaction_with_behavior(TransactionBehavior::Immediate)
+            store
+                .begin_memory_write_transaction("begin session retention dedupe pass", authorize)
                 .await?,
         )
     } else {
         None
     };
-    let query_executor = transaction.as_ref().map_or(
-        RetentionQueryExecutor::Connection(conn),
-        RetentionQueryExecutor::Transaction,
-    );
+    let read = store.read_connection();
+    let query_executor = match transaction.as_ref() {
+        Some(transaction) => RetentionQueryExecutor::Transaction(transaction),
+        None => RetentionQueryExecutor::Read(&read),
+    };
     let mut rows = query_executor
         .query(
             &sql,
@@ -919,7 +1131,9 @@ async fn run_dedupe_pass(
            )"
     );
     for (provider_val, message_id, _, text_len) in &targets {
-        authorize("dedupe session retention projected row")?;
+        if let Some(authorize) = authorize {
+            authorize("dedupe session retention projected row")?;
+        }
         match txn
             .execute(
                 &delete_sql,

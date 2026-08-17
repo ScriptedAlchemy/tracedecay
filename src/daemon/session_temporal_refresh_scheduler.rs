@@ -15,14 +15,14 @@ pub(crate) use wake::SessionTemporalRefreshWake;
 #[cfg(test)]
 pub(crate) struct SessionTemporalRefreshTestAuthority {
     _runtime: crate::host_admission::HostAdmissionTestRuntimeV1,
-    database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+    database: crate::global_db::RegisteredGlobalDbLeaseV1,
 }
 
 #[cfg(test)]
 impl SessionTemporalRefreshTestAuthority {
     pub(crate) fn new(
         runtime: crate::host_admission::HostAdmissionTestRuntimeV1,
-        database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+        database: crate::global_db::RegisteredGlobalDbLeaseV1,
     ) -> Self {
         Self {
             _runtime: runtime,
@@ -32,10 +32,6 @@ impl SessionTemporalRefreshTestAuthority {
 
     fn database(&self) -> &crate::global_db::RegisteredGlobalDb {
         self.database.as_ref()
-    }
-
-    fn database_identity(&self) -> usize {
-        std::sync::Arc::as_ptr(&self.database) as usize
     }
 
     fn project<'a>(
@@ -60,10 +56,7 @@ impl SessionTemporalRefreshTestAuthority {
         registry: &registry::SessionTemporalRefreshSchedulerRegistry,
     ) -> wake::SessionTemporalRefreshWake {
         registry
-            .ensure_profile(
-                self.database.db_path().to_path_buf(),
-                std::sync::Arc::clone(&self.database),
-            )
+            .ensure_profile(self.database.db_path().to_path_buf(), self.database.clone())
             .await
     }
 
@@ -72,9 +65,7 @@ impl SessionTemporalRefreshTestAuthority {
         registry: &registry::SessionTemporalRefreshSchedulerRegistry,
         owner: super::StoreOwnerKey,
     ) -> wake::SessionTemporalRefreshWake {
-        registry
-            .ensure_project(owner, std::sync::Arc::clone(&self.database))
-            .await
+        registry.ensure_project(owner, self.database.clone()).await
     }
 
     async fn rekey_project(
@@ -84,7 +75,7 @@ impl SessionTemporalRefreshTestAuthority {
         new_owner: super::StoreOwnerKey,
     ) {
         registry
-            .rekey_project(old_owner, new_owner, std::sync::Arc::clone(&self.database))
+            .rekey_project(old_owner, new_owner, self.database.clone())
             .await;
     }
 }

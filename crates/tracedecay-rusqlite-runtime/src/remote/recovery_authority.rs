@@ -24,7 +24,8 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 
-use crate::exact_sql::{ExactSqlStatement, ExactSqlTransaction, ExactSqlValue};
+use crate::exact_sql::{ExactSqlHandle, ExactSqlStatement, ExactSqlTransaction, ExactSqlValue};
+use crate::repository::RetainedExactSqlCapability;
 
 use super::*;
 
@@ -112,23 +113,31 @@ pub trait RemoteRecoveryPhysicalEffectsV1: Send + Sync {
 
 #[derive(Clone)]
 pub struct RemoteRecoverySqliteAuthorityV1 {
-    handle: ExactSqlHandle,
+    retained: RetainedExactSqlCapability,
     effects: Arc<dyn RemoteRecoveryPhysicalEffectsV1>,
 }
 
 impl RemoteRecoverySqliteAuthorityV1 {
-    pub fn from_registered(
-        handle: ExactSqlHandle,
+    /// Attaches recovery authority to one retained, write-authorized runtime.
+    ///
+    /// The sealed capability keeps the issuing client token alive and never
+    /// exposes its exact SQL handle to a recovery caller.
+    pub fn from_retained_exact_sql(
+        retained: RetainedExactSqlCapability,
         effects: Arc<dyn RemoteRecoveryPhysicalEffectsV1>,
     ) -> Result<Self, RemoteSqliteStorageErrorV1> {
         if !matches!(
-            handle.binding().shard_id.scope,
+            retained.handle().binding().shard_id.scope,
             tracedecay_store::StoreShardScopeV1::RemoteNode { .. }
         ) {
             return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
         }
-        validate_final_schema(&handle)?;
-        Ok(Self { handle, effects })
+        validate_final_schema(retained.handle())?;
+        Ok(Self { retained, effects })
+    }
+
+    fn handle(&self) -> &ExactSqlHandle {
+        self.retained.handle()
     }
 
     /// Publishes the authority-store value used by every later recovery CAS.
@@ -142,7 +151,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
             .validate()
             .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let key = authority_key_for_writer(&authority.fence)?;
-        let transaction = self.handle.begin_immediate()?;
+        let transaction = self.handle().begin_immediate()?;
         if let Some((current, current_frontier)) = load_authority_in(&transaction, &key)?
             && (current.fence.authority_epoch > authority.fence.authority_epoch
                 || (current.fence.authority_epoch == authority.fence.authority_epoch
@@ -187,7 +196,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
         project_id: &tracedecay_domain::ProjectId,
     ) -> Result<u64, RemoteRecoveryOperationErrorV1> {
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT context_json FROM remote_recovery_operations
              WHERE operation_kind = 'promotion'
                AND state IN ('executing', 'forward_recovery_required')
@@ -223,7 +232,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
         let authority_key = authority_key_for_expectation(expected)
             .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| RemoteRecoveryOperationErrorV1::Unavailable)?;
         let stored = load_authority_in(&transaction, &authority_key).map_err(map_store_error)?;
@@ -252,7 +261,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
         operation_id: &str,
     ) -> Result<bool, RemoteRecoveryOperationErrorV1> {
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT EXISTS(
                 SELECT 1 FROM remote_recovery_operations
                 WHERE operation_id = ?1 AND operation_kind = 'promotion'
@@ -300,7 +309,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
             .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
         let started_at = request.sent_at;
         match begin_operation(
-            &self.handle,
+            self.handle(),
             kind,
             operation_id,
             &input_digest,
@@ -315,7 +324,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
             BeginOperationV1::Execute { pre_state_digest } => {
                 if let Some(interruption) = control.interruption(&request.request_id) {
                     record_interruption(
-                        &self.handle,
+                        self.handle(),
                         operation_id,
                         &input_digest,
                         interruption,
@@ -334,7 +343,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
                     Ok(physical) => physical,
                     Err(error) => {
                         record_physical_failure(
-                            &self.handle,
+                            self.handle(),
                             operation_id,
                             &input_digest,
                             error,
@@ -363,7 +372,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
                     .validate()
                     .map_err(|_| RemoteRecoveryOperationErrorV1::Corruption)?;
                 finish_operation(
-                    &self.handle,
+                    self.handle(),
                     operation_id,
                     &input_digest,
                     &physical.output,
@@ -371,7 +380,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
                 )?;
                 Ok(RemoteRecoveryCommittedV1 {
                     authority: available_authority_state(
-                        &self.handle,
+                        self.handle(),
                         &receipt.expected,
                         physical.committed_at,
                     ),
@@ -403,7 +412,7 @@ impl RemoteSqliteStorageV1 {
             .validate()
             .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT writer_json FROM remote_authorities WHERE brain_id = ?1",
             vec![text(&expected.brain_id)],
         )?;
@@ -425,7 +434,7 @@ impl RemoteSqliteStorageV1 {
             .validate()
             .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT writer_json FROM remote_authorities WHERE brain_id = ?1",
             vec![text(&expected.brain_id)],
         )?;
@@ -451,7 +460,7 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
         expected: &RecoveryAuthorityExpectationV1,
         observed_at: UtcMicros,
     ) -> CurrentRemoteAuthorityStateV1 {
-        available_authority_state(&self.handle, expected, observed_at)
+        available_authority_state(self.handle(), expected, observed_at)
     }
 
     fn create_backup(
@@ -532,7 +541,7 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
         let authority_key = authority_key_for_expectation(&expected)
             .map_err(|_| RemoteRecoveryOperationErrorV1::InvalidRequest)?;
         match begin_operation::<PromotionCasReceiptV1>(
-            &self.handle,
+            self.handle(),
             "promotion",
             &request.body.preview_id,
             &input_digest,
@@ -547,7 +556,7 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
             BeginOperationV1::Execute { pre_state_digest } => {
                 if let Some(interruption) = control.interruption(&request.request_id) {
                     record_interruption(
-                        &self.handle,
+                        self.handle(),
                         &request.body.preview_id,
                         &input_digest,
                         interruption,
@@ -574,7 +583,7 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
                     Ok(physical) => physical,
                     Err(error) => {
                         record_physical_failure(
-                            &self.handle,
+                            self.handle(),
                             &request.body.preview_id,
                             &input_digest,
                             RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired,
@@ -590,7 +599,7 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
                     &required_sink_ids,
                 )?;
                 publish_promoted_authorities(
-                    &self.handle,
+                    self.handle(),
                     &authority_key,
                     &expected,
                     &replacement,
@@ -598,7 +607,7 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
                     physical.committed_at,
                 )?;
                 persist_sink_receipts(
-                    &self.handle,
+                    self.handle(),
                     &request.body.preview_id,
                     &physical.output,
                     physical.committed_at,
@@ -623,7 +632,7 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
                     .validate()
                     .map_err(|_| RemoteRecoveryOperationErrorV1::Corruption)?;
                 finish_operation(
-                    &self.handle,
+                    self.handle(),
                     &request.body.preview_id,
                     &input_digest,
                     &physical.output,
@@ -631,7 +640,7 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
                 )?;
                 Ok(RemoteRecoveryCommittedV1 {
                     authority: available_authority_state(
-                        &self.handle,
+                        self.handle(),
                         &receipt.expected,
                         physical.committed_at,
                     ),

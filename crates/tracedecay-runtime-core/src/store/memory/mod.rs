@@ -8,7 +8,8 @@ use tracedecay_store::ProjectMemoryAutomationRunReceiptsV1;
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome, FactCurrentQuery,
     FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactReadControl, FactStore,
-    FactStoreResult, FactWriteBatch, FactWriteControl, ProjectMemoryAutomaticFactApplyResultV1,
+    FactStoreResult, FactWriteBatch, FactWriteControl,
+    ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
     ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
     ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
     ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
@@ -105,6 +106,7 @@ pub enum ProjectMemoryGraphReconciliationScheduleV1 {
     NotMounted,
     Scheduled,
     AlreadyScheduled,
+    Retiring,
     LifecycleClosed,
 }
 
@@ -132,20 +134,15 @@ impl FactStore for DatabaseFactStore<'_> {
         write_control: &FactWriteControl,
     ) -> FactStoreResult<FactCommitOutcome> {
         match runtime::retained_fact_runtime(self.db)? {
-            Some(_) => {
+            Some(retained) => {
                 let db = (*self.db).clone();
                 let write_control = write_control.clone();
                 // The task owns the retained-dispatch receipt path so caller
                 // cancellation cannot strand a durable commit before its
                 // derived graph reconciliation trigger is recorded.
                 tokio::spawn(async move {
-                    let retained = db.retained_runtime();
-                    let outcome =
-                        runtime::commit_fact(&db, retained, batch, &write_control).await?;
-                    if matches!(
-                        &outcome,
-                        FactCommitOutcome::Committed(_) | FactCommitOutcome::IdempotentReplay(_)
-                    ) {
+                    let outcome = runtime::commit_fact(&retained, batch, &write_control).await?;
+                    if matches!(&outcome, FactCommitOutcome::Committed(_)) {
                         graph::publish_project_memory_graph_after_write(db.clone()).await;
                     }
                     Ok(outcome)
@@ -175,7 +172,7 @@ impl FactStore for DatabaseFactStore<'_> {
         query: FactCurrentQuery,
     ) -> FactStoreResult<Option<StoredFactV1>> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
-            return runtime::query_fact_current(runtime, query);
+            return runtime::query_fact_current(&runtime, query);
         }
         let snapshot = self
             .db
@@ -193,10 +190,10 @@ impl FactStore for DatabaseFactStore<'_> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
             // The runtime read port answers the fact itself. It admits no
             // response-shaped operation, so coverage and contradiction are
-            // measured from the retained authority the runtime is mounted on —
-            // `validate_mount` proves it is the identical SQLite file — instead
-            // of being reported as constants that no read ever observed.
-            let fact = runtime::query_fact_current(runtime, query.clone())?;
+            // measured from the retained client with the database's exact
+            // binding and verified locator, rather than reported as constants
+            // that no read ever observed.
+            let fact = runtime::query_fact_current(&runtime, query.clone())?;
             let snapshot = self
                 .db
                 .begin_memory_read_transaction(QUERY_OPERATION)
@@ -248,7 +245,7 @@ impl FactStore for DatabaseFactStore<'_> {
         query: FactLineageQuery,
     ) -> FactStoreResult<Vec<FactLineageEventV1>> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
-            return runtime::query_fact_lineage(runtime, query);
+            return runtime::query_fact_lineage(&runtime, query);
         }
         let snapshot = self
             .db
@@ -267,7 +264,7 @@ impl FactStore for DatabaseFactStore<'_> {
             // As in `query_fact_current_response`: the runtime answers the
             // lineage page, and the accompanying coverage and contradiction are
             // measured from the retained authority rather than fabricated.
-            let events = runtime::query_fact_lineage(runtime, query.clone())?;
+            let events = runtime::query_fact_lineage(&runtime, query.clone())?;
             let snapshot = self
                 .db
                 .begin_memory_read_transaction(QUERY_OPERATION)
@@ -453,9 +450,15 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactAddCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactAddOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(async move { add_project_memory_fact_tx(transaction, &request).await })
-        })
+        self.project_memory_write(
+            write_control,
+            |outcome: &ProjectMemoryFactAddOutcomeV1| {
+                outcome.commit_receipt().is_some() && !outcome.commit_replayed()
+            },
+            move |transaction| {
+                Box::pin(async move { add_project_memory_fact_tx(transaction, &request).await })
+            },
+        )
         .await
     }
 
@@ -464,9 +467,13 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactUpdateCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(async move { update_project_memory_fact_tx(transaction, &request).await })
-        })
+        self.project_memory_write(
+            write_control,
+            |outcome: &ProjectMemoryFactUpdateOutcomeV1| !outcome.commit_replayed(),
+            move |transaction| {
+                Box::pin(async move { update_project_memory_fact_tx(transaction, &request).await })
+            },
+        )
         .await
     }
 
@@ -475,9 +482,15 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactRemoveCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(async move { remove_project_memory_fact_tx(transaction, &request).await })
-        })
+        self.project_memory_write(
+            write_control,
+            |outcome: &ProjectMemoryFactRemoveOutcomeV1| {
+                outcome.was_removed() && !outcome.commit_replayed()
+            },
+            move |transaction| {
+                Box::pin(async move { remove_project_memory_fact_tx(transaction, &request).await })
+            },
+        )
         .await
     }
 
@@ -486,11 +499,15 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactFeedbackCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactFeedbackOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(
-                async move { record_project_memory_fact_feedback_tx(transaction, &request).await },
-            )
-        })
+        self.project_memory_write(
+            write_control,
+            |_| false,
+            move |transaction| {
+                Box::pin(async move {
+                    record_project_memory_fact_feedback_tx(transaction, &request).await
+                })
+            },
+        )
         .await
     }
 
@@ -532,11 +549,17 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactCurationBatchV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(
-                async move { apply_project_memory_fact_curation_tx(transaction, &request).await },
-            )
-        })
+        self.project_memory_write(
+            write_control,
+            |receipt: &ProjectMemoryFactCurationReceiptV1| {
+                !receipt.replayed() && !receipt.changed_facts().is_empty()
+            },
+            move |transaction| {
+                Box::pin(async move {
+                    apply_project_memory_fact_curation_tx(transaction, &request).await
+                })
+            },
+        )
         .await
     }
 
@@ -545,9 +568,13 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactMergeCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(async move { merge_project_memory_facts_tx(transaction, &request).await })
-        })
+        self.project_memory_write(
+            write_control,
+            |outcome: &ProjectMemoryFactMergeOutcomeV1| !outcome.replayed(),
+            move |transaction| {
+                Box::pin(async move { merge_project_memory_facts_tx(transaction, &request).await })
+            },
+        )
         .await
     }
 
@@ -612,11 +639,15 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactRetrievalCommandV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactRetrievalOutcomeV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(
-                async move { record_project_memory_fact_retrieval_tx(transaction, &request).await },
-            )
-        })
+        self.project_memory_write(
+            write_control,
+            |_| false,
+            move |transaction| {
+                Box::pin(async move {
+                    record_project_memory_fact_retrieval_tx(transaction, &request).await
+                })
+            },
+        )
         .await
     }
 
@@ -627,12 +658,23 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         evidence: ProjectMemoryAutomaticFactEvidenceV1,
         write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryAutomaticFactApplyResultV1> {
-        self.project_memory_write(write_control, move |transaction| {
-            Box::pin(async move {
-                apply_project_memory_automatic_fact_tx(transaction, apply_id, &request, &evidence)
+        self.project_memory_write(
+            write_control,
+            |outcome: &ProjectMemoryAutomaticFactApplyResultV1| {
+                outcome.disposition() == ProjectMemoryAutomaticFactApplyDispositionV1::Applied
+            },
+            move |transaction| {
+                Box::pin(async move {
+                    apply_project_memory_automatic_fact_tx(
+                        transaction,
+                        apply_id,
+                        &request,
+                        &evidence,
+                    )
                     .await
-            })
-        })
+                })
+            },
+        )
         .await
     }
 

@@ -62,7 +62,7 @@ struct WorkBlockedIntervalObservationRecoveryInnerV1 {
 
 impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
     pub(in crate::daemon::service::invocation) fn mount(
-        database: Arc<crate::global_db::RegisteredGlobalDb>,
+        database: crate::global_db::RegisteredGlobalDbLeaseV1,
         actor: ActorId,
         grant: CapabilityGrantSnapshot,
         producer: Arc<BoundedObservabilityProducerV1>,
@@ -124,13 +124,13 @@ impl Drop for WorkBlockedIntervalObservationRecoveryInnerV1 {
 }
 
 async fn run_recovery(
-    database: Arc<crate::global_db::RegisteredGlobalDb>,
+    database: crate::global_db::RegisteredGlobalDbLeaseV1,
     context: RequestContext,
     producer: Arc<BoundedObservabilityProducerV1>,
     cancellation: CancellationToken,
 ) {
     loop {
-        let read_database = Arc::clone(&database);
+        let read_database = database.clone();
         let read_context = context.clone();
         let mut read = tokio::task::spawn_blocking(move || {
             read_pending_receipts(&read_database, &read_context)
@@ -190,7 +190,7 @@ async fn run_recovery(
                 continue;
             }
 
-            let mark_database = Arc::clone(&database);
+            let mark_database = database.clone();
             let mark_context = context.clone();
             let mut mark = tokio::task::spawn_blocking(move || {
                 mark_receipt_durable(&mark_database, &mark_context, &receipt)

@@ -84,7 +84,7 @@ fn replace_enrollment(
         serde_json::to_string(expected).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
     let replacement_json =
         serde_json::to_string(replacement).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-    let result = storage.handle.execute(ExactSqlStatement::new(
+    let result = storage.handle().execute(ExactSqlStatement::new(
         "UPDATE remote_enrollments
          SET revision = ?1, credential_fingerprint = ?2, enrollment_json = ?3
          WHERE enrollment_id = ?4 AND revision = ?5 AND enrollment_json = ?6"

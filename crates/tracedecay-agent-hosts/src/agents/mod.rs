@@ -300,6 +300,15 @@ pub trait AgentIntegration {
     /// Verify installation health (replaces agent-specific doctor checks).
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext);
 
+    /// Whether Doctor must report this supported host's absence even when it
+    /// has no configuration directory yet. Most optional hosts stay quiet
+    /// until their own registration exists; hosts with a documented deferred
+    /// or native-only lifecycle opt in so Doctor does not turn their absence
+    /// into an empty success.
+    fn reports_absence_to_doctor(&self) -> bool {
+        false
+    }
+
     /// Verify installation health using the daemon-owned snapshot already
     /// collected by Doctor. Integrations with daemon-backed diagnostics can
     /// override this without issuing another daemon call.

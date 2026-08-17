@@ -157,7 +157,7 @@ fn verified_graph(
     requested: &VerifiedWorkGraphVersionV1,
 ) -> Result<(VerifiedWorkGraphVersionV1, WorkProductGraphV1), PortError> {
     let scope = context.authorized_scope();
-    let covered = load_covered_journal(&storage.handle, scope).ok_or(PortError::Unavailable)?;
+    let covered = load_covered_journal(storage.handle(), scope).ok_or(PortError::Unavailable)?;
     let (journal, published) = (covered.journal, covered.published);
     let Some(version) = published
         .iter()

@@ -2,20 +2,33 @@ use std::fmt::Write as _;
 use std::fs;
 
 use tempfile::TempDir;
+use tracedecay_domain::ProjectId;
 use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_runtime_core::errors::TraceDecayError;
 use tracedecay_rusqlite_runtime::workflow::{
     WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_TABLE_CONTRACTS_V1,
 };
 
+use crate::tests::harness::open_registered_test_database_fixture;
+use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
+
 async fn assert_workflow_schema_reset_without_mutation(malformed_schema: String) {
     crate::register_test_schema_installer();
     let directory = TempDir::new().unwrap();
     let database_path = directory.path().join("project/sessions.db");
     fs::create_dir_all(database_path.parent().unwrap()).unwrap();
+    drop(
+        open_registered_test_database_fixture(
+            &database_path,
+            TestDatabaseRuntimeScope::ProjectSessions {
+                project_id: ProjectId::new("project.workflow-schema").unwrap(),
+            },
+        )
+        .await
+        .unwrap(),
+    );
     let database = TestConnection::open(&database_path);
     let connection = (*database).clone();
-    crate::ensure_registered_schema(&connection).await.unwrap();
     let mut drop_workflow_schema = String::new();
     for table in WORKFLOW_TABLE_CONTRACTS_V1.iter().rev() {
         writeln!(drop_workflow_schema, "DROP TABLE IF EXISTS {};", table.name).unwrap();
@@ -36,13 +49,22 @@ async fn assert_workflow_schema_reset_without_mutation(malformed_schema: String)
             )
             .unwrap();
     }
+    let before_bytes = fs::read(&database_path).unwrap();
     let database = TestConnection::open(&database_path);
     let connection = (*database).clone();
-    let before_bytes = fs::read(&database_path).unwrap();
     let before_schema = schema_snapshot(&connection).await;
+    drop(connection);
+    drop(database);
 
-    let error = match crate::ensure_registered_schema(&connection).await {
-        Ok(()) => panic!("malformed workflow schema must not be completed"),
+    let error = match open_registered_test_database_fixture(
+        &database_path,
+        TestDatabaseRuntimeScope::ProjectSessions {
+            project_id: ProjectId::new("project.workflow-schema").unwrap(),
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("malformed workflow schema must not be completed"),
         Err(error) => error,
     };
 
@@ -58,11 +80,13 @@ async fn assert_workflow_schema_reset_without_mutation(malformed_schema: String)
         before_bytes,
         "typed refusal must preserve the exact main database bytes"
     );
+    let preserved = TestConnection::open(&database_path);
     assert_eq!(
-        schema_snapshot(&connection).await,
+        schema_snapshot(&preserved).await,
         before_schema,
         "typed refusal must preserve every schema object byte-for-byte"
     );
+    let connection = TestConnection::open(&database_path);
     let mut canary = connection
         .query("SELECT value FROM workflow_reset_canary", ())
         .await

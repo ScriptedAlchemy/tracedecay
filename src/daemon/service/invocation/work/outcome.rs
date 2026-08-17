@@ -91,6 +91,11 @@ pub(super) fn work_product_problem(
             code: "work.graph_revision_conflict".to_owned(),
             message: "The Work policy, configuration, or catalog revision changed".to_owned(),
         }),
+        Error::EvidenceContinuationStale => ApplicationProblem::stale(SafeDiagnostic {
+            code: "work.evidence_continuation_stale".to_owned(),
+            message: "The Work evidence continuation is stale; restart the evidence read"
+                .to_owned(),
+        }),
         Error::IdempotencyConflict => ApplicationProblem::Conflict {
             diagnostic: SafeDiagnostic {
                 code: "work.graph_idempotency_conflict".to_owned(),
@@ -565,6 +570,32 @@ mod workflow_effect_receipt_tests {
         assert_eq!(
             workflow_effect_terminal_observation(EffectTermination::Completed, observed_at),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod work_product_problem_tests {
+    use tracedecay_application::{
+        ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic,
+        WorkProductApplicationErrorV1,
+    };
+
+    use super::work_product_problem;
+
+    #[test]
+    fn stale_evidence_continuation_requires_a_refresh() {
+        assert_eq!(
+            work_product_problem(WorkProductApplicationErrorV1::EvidenceContinuationStale),
+            ApplicationProblem::Stale {
+                diagnostic: SafeDiagnostic {
+                    code: "work.evidence_continuation_stale".to_owned(),
+                    message: "The Work evidence continuation is stale; restart the evidence read"
+                        .to_owned(),
+                },
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+            }
         );
     }
 }

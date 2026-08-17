@@ -10,15 +10,24 @@ fn run_acquisition(
     source: &dyn ModelMemberSourceV1,
     model_id: &str,
     epoch: &AcquisitionEpochV1,
-    inner: &Mutex<LifecycleInner>,
+    inner: &LifecyclePublicationGateV1,
+    verified_ready: &watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
 ) -> Result<(), ModelLifecycleErrorV1> {
-    let result = run_acquisition_inner(root, catalog, source, model_id, epoch, inner);
+    let result = run_acquisition_inner(
+        root,
+        catalog,
+        source,
+        model_id,
+        epoch,
+        inner,
+        verified_ready,
+    );
     if let Err(error) = &result
         && !matches!(error, ModelLifecycleErrorV1::Cancelled)
         && let Some(model) = catalog.get(model_id)
     {
         let already_failed = {
-            let guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
+            let guard = inner.read();
             matches!(
                 guard.durable.state.as_ref(),
                 Some(SemanticModelLifecycleStateV1::Failed { .. })
@@ -52,7 +61,8 @@ fn run_acquisition_inner(
     source: &dyn ModelMemberSourceV1,
     model_id: &str,
     epoch: &AcquisitionEpochV1,
-    inner: &Mutex<LifecycleInner>,
+    inner: &LifecyclePublicationGateV1,
+    verified_ready: &watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
 ) -> Result<(), ModelLifecycleErrorV1> {
     let model = catalog
         .get(model_id)
@@ -62,7 +72,7 @@ fn run_acquisition_inner(
     let bytes_total: u64 = model.members.values().map(|member| member.length).sum();
 
     epoch.while_active(|| {
-        let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = inner.writer();
         guard.durable.selected_model = Some(model.model_id.clone());
         guard.durable.state = Some(SemanticModelLifecycleStateV1::Downloading {
             model_id: model.model_id.clone(),
@@ -101,7 +111,7 @@ fn run_acquisition_inner(
         }
         bytes_received = bytes_received.saturating_add(member.length);
         let progress = epoch.while_active(|| {
-            let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut guard = inner.writer();
             guard.durable.state = Some(SemanticModelLifecycleStateV1::Downloading {
                 model_id: model.model_id.clone(),
                 revision: model.source.revision.clone(),
@@ -122,7 +132,7 @@ fn run_acquisition_inner(
         return Err(ModelLifecycleErrorV1::Cancelled);
     }
     let verifying = epoch.while_active(|| {
-        let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = inner.writer();
         guard.durable.state = Some(SemanticModelLifecycleStateV1::Verifying {
             model_id: model.model_id.clone(),
             revision: model.source.revision.clone(),
@@ -138,8 +148,7 @@ fn run_acquisition_inner(
     for member in model.members.values() {
         let path = staging.join(&member.path);
         if !verify_member_file(&path, member.length, &member.sha256) {
-            fs::remove_dir_all(&staging)
-                .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+            fs::remove_dir_all(&staging).map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
             return fail_state(
                 root,
                 inner,
@@ -187,14 +196,16 @@ fn run_acquisition_inner(
     metadata?;
 
     let publication = epoch.while_active(|| {
-        let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = inner.writer();
         guard.durable.state = Some(SemanticModelLifecycleStateV1::Installed {
             model_id: model.model_id.clone(),
             revision: model.source.revision.clone(),
             artifact_digest: digest,
             install_path: install_path.clone(),
         });
-        persist_durable(root, &guard.durable)
+        persist_durable(root, &guard.durable)?;
+        publish_verified_ready_event(verified_ready, &guard);
+        Ok(())
     });
     if matches!(&publication, Err(ModelLifecycleErrorV1::Cancelled)) {
         cleanup_cancelled_path(root, &install_path, epoch)?;
@@ -221,8 +232,7 @@ fn cleanup_cancelled_path(
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("unknown");
-        let quarantine_path =
-            quarantine_root.join(format!("acquisition-{}-{leaf}", epoch.epoch));
+        let quarantine_path = quarantine_root.join(format!("acquisition-{}-{leaf}", epoch.epoch));
         fs::rename(path, &quarantine_path)
             .map_err(|_| ModelLifecycleErrorV1::CancellationCleanupFailed(path.to_path_buf()))?;
         match fs::remove_dir_all(&quarantine_path) {
@@ -236,7 +246,7 @@ fn cleanup_cancelled_path(
 
 fn fail_state(
     root: &Path,
-    inner: &Mutex<LifecycleInner>,
+    inner: &LifecyclePublicationGateV1,
     model: &CatalogedFastEmbedModelV1,
     digest: &str,
     detail: &str,

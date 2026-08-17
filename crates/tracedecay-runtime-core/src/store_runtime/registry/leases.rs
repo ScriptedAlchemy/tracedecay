@@ -10,14 +10,57 @@ use super::{
     StoreRuntimeRegistryFailure, utc_now,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ProfileAuthorityPin {
-    pub(super) binding: Arc<StoreRuntimeBindingV1>,
+    inner: Arc<ProfileAuthorityPinToken>,
+}
+
+struct ProfileAuthorityPinToken {
+    registry: StoreRuntimeRegistry,
+    binding: StoreRuntimeBindingV1,
+    token: u64,
 }
 
 impl ProfileAuthorityPin {
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {
-        &self.binding
+        &self.inner.binding
+    }
+
+    fn belongs_to(&self, registry: &StoreRuntimeRegistry) -> bool {
+        Arc::ptr_eq(&self.inner.registry.inner, &registry.inner)
+    }
+
+    fn is_live_in(&self, state: &RegistryState) -> bool {
+        state
+            .profile_pin_tokens
+            .get(&StoreRuntimeKey::from_binding(self.binding()))
+            .is_some_and(|tokens| tokens.contains(&self.inner.token))
+    }
+}
+
+impl std::fmt::Debug for ProfileAuthorityPin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProfileAuthorityPin")
+            .field("binding", self.binding())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ProfileAuthorityPin {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner.registry.inner, &other.inner.registry.inner)
+            && self.binding() == other.binding()
+            && self.inner.token == other.inner.token
+    }
+}
+
+impl Eq for ProfileAuthorityPin {}
+
+impl Drop for ProfileAuthorityPinToken {
+    fn drop(&mut self) {
+        self.registry
+            .release_profile_authority_pin(&self.binding, self.token);
     }
 }
 
@@ -159,20 +202,48 @@ impl StoreRuntimeRegistry {
             let state = self.lock_state();
             match state.entries.get(&key) {
                 Some(RegistryEntry::Ready(ready)) => {
-                    let actual = ready.handle.binding();
+                    let actual = ready.owner.binding();
                     if actual.authority_epoch != expected.authority_epoch {
                         return StoreRuntimeLeaseAcquireResult::Fenced {
                             expected: Box::new(expected),
                             actual: Box::new(actual.clone()),
                         };
                     }
-                    Arc::clone(ready.handle.runtime())
+                    Arc::clone(ready.owner.runtime())
                 }
                 Some(RegistryEntry::Opening(_)) => {
                     return StoreRuntimeLeaseAcquireResult::Opening { key: Box::new(key) };
                 }
                 Some(RegistryEntry::Evicting(_)) => {
                     return StoreRuntimeLeaseAcquireResult::Evicting { key: Box::new(key) };
+                }
+                Some(RegistryEntry::Retiring(_)) => {
+                    return StoreRuntimeLeaseAcquireResult::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                            key: Box::new(key),
+                        },
+                    );
+                }
+                Some(RegistryEntry::Committing(_)) => {
+                    return StoreRuntimeLeaseAcquireResult::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementCommitting {
+                            key: Box::new(key),
+                        },
+                    );
+                }
+                Some(RegistryEntry::Faulted(_)) => {
+                    return StoreRuntimeLeaseAcquireResult::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementFaulted {
+                            key: Box::new(key),
+                        },
+                    );
+                }
+                Some(RegistryEntry::DurabilityUncertain(_)) => {
+                    return StoreRuntimeLeaseAcquireResult::Rejected(
+                        StoreRuntimeRegistryFailure::RuntimeRetirementDurabilityUncertain {
+                            key: Box::new(key),
+                        },
+                    );
                 }
                 None => {
                     return StoreRuntimeLeaseAcquireResult::Missing { key: Box::new(key) };
@@ -209,10 +280,10 @@ impl StoreRuntimeRegistry {
             let Some(RegistryEntry::Ready(ready)) = state.entries.get(&key) else {
                 return false;
             };
-            if ready.handle.binding() != binding {
+            if ready.owner.binding() != binding {
                 return false;
             }
-            Arc::clone(ready.handle.runtime())
+            Arc::clone(ready.owner.runtime())
         };
         runtime.release_runtime_lease(lease_id)
     }
@@ -228,13 +299,33 @@ impl StoreRuntimeRegistry {
                 },
             );
         }
-        let state = self.lock_state();
-        if let Some(binding) = state.profile_authorities.get(profile_shard) {
-            if let Err(failure) = require_ready_profile_runtime(&state, binding) {
+        let mut state = self.lock_state();
+        if let Some(binding) = state.profile_authorities.get(profile_shard).cloned() {
+            if let Err(failure) = require_ready_profile_runtime(&state, &binding) {
                 return ProfileAuthorityPinResult::Rejected(failure);
             }
+            let key = StoreRuntimeKey::from_binding(&binding);
+            let token = state.next_profile_pin_token.checked_add(1).ok_or_else(|| {
+                StoreRuntimeRegistryFailure::ProfilePinTokenExhausted {
+                    key: Box::new(key.clone()),
+                }
+            });
+            let token = match token {
+                Ok(token) => token,
+                Err(failure) => return ProfileAuthorityPinResult::Rejected(failure),
+            };
+            state.next_profile_pin_token = token;
+            state
+                .profile_pin_tokens
+                .entry(key)
+                .or_default()
+                .insert(token);
             return ProfileAuthorityPinResult::Pinned(ProfileAuthorityPin {
-                binding: Arc::new(binding.clone()),
+                inner: Arc::new(ProfileAuthorityPinToken {
+                    registry: self.clone(),
+                    binding,
+                    token,
+                }),
             });
         }
         state
@@ -251,9 +342,24 @@ impl StoreRuntimeRegistry {
                 profile_shard: Box::new(profile_shard.clone()),
             })
     }
+
+    fn release_profile_authority_pin(&self, binding: &StoreRuntimeBindingV1, token: u64) {
+        let key = StoreRuntimeKey::from_binding(binding);
+        let mut state = self.lock_state();
+        let Some(tokens) = state.profile_pin_tokens.get_mut(&key) else {
+            return;
+        };
+        if !tokens.remove(&token) {
+            return;
+        }
+        if tokens.is_empty() {
+            state.profile_pin_tokens.remove(&key);
+        }
+    }
 }
 
 pub(super) fn validate_profile_authority(
+    registry: &StoreRuntimeRegistry,
     state: &RegistryState,
     request: &StoreRuntimeOpenRequest,
 ) -> Result<(), StoreRuntimeRegistryFailure> {
@@ -277,10 +383,15 @@ pub(super) fn validate_profile_authority(
         request.key.shard_id.brain_id.clone(),
         request.key.shard_id.profile_id.clone(),
     );
-    if pin.binding.shard_id != expected_profile {
+    if pin.binding().shard_id != expected_profile {
         return Err(StoreRuntimeRegistryFailure::ProfileAuthorityShardMismatch {
             key: Box::new(request.key.clone()),
-            pin: Box::new(pin.binding.as_ref().clone()),
+            pin: Box::new(pin.binding().clone()),
+        });
+    }
+    if !pin.belongs_to(registry) || !pin.is_live_in(state) {
+        return Err(StoreRuntimeRegistryFailure::ProfileAuthorityNotPinned {
+            profile_shard: Box::new(expected_profile),
         });
     }
     let actual = state.profile_authorities.get(&expected_profile).ok_or(
@@ -288,9 +399,9 @@ pub(super) fn validate_profile_authority(
             profile_shard: Box::new(expected_profile),
         },
     )?;
-    if actual != pin.binding.as_ref() {
+    if actual != pin.binding() {
         return Err(StoreRuntimeRegistryFailure::ProfileAuthorityFenced {
-            expected: Box::new(pin.binding.as_ref().clone()),
+            expected: Box::new(pin.binding().clone()),
             actual: Box::new(actual.clone()),
         });
     }
@@ -302,12 +413,37 @@ fn require_ready_profile_runtime(
     binding: &StoreRuntimeBindingV1,
 ) -> Result<(), StoreRuntimeRegistryFailure> {
     let key = StoreRuntimeKey::from_binding(binding);
-    let Some(RegistryEntry::Ready(ready)) = state.entries.get(&key) else {
-        return Err(StoreRuntimeRegistryFailure::ProfileAuthorityNotPinned {
-            profile_shard: Box::new(binding.shard_id.clone()),
-        });
+    let ready = match state.entries.get(&key) {
+        Some(RegistryEntry::Ready(ready)) => ready,
+        Some(RegistryEntry::Retiring(_)) => {
+            return Err(StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                key: Box::new(key),
+            });
+        }
+        Some(RegistryEntry::Committing(_)) => {
+            return Err(StoreRuntimeRegistryFailure::RuntimeRetirementCommitting {
+                key: Box::new(key),
+            });
+        }
+        Some(RegistryEntry::Faulted(_)) => {
+            return Err(StoreRuntimeRegistryFailure::RuntimeRetirementFaulted {
+                key: Box::new(key),
+            });
+        }
+        Some(RegistryEntry::DurabilityUncertain(_)) => {
+            return Err(
+                StoreRuntimeRegistryFailure::RuntimeRetirementDurabilityUncertain {
+                    key: Box::new(key),
+                },
+            );
+        }
+        Some(RegistryEntry::Opening(_) | RegistryEntry::Evicting(_)) | None => {
+            return Err(StoreRuntimeRegistryFailure::ProfileAuthorityNotPinned {
+                profile_shard: Box::new(binding.shard_id.clone()),
+            });
+        }
     };
-    let runtime_state = ready.handle.runtime().maintenance_state();
+    let runtime_state = ready.owner.runtime().maintenance_state();
     if runtime_state != RuntimeMaintenanceStateV1::Ready {
         return Err(StoreRuntimeRegistryFailure::ProfileAuthorityUnavailable {
             binding: Box::new(binding.clone()),

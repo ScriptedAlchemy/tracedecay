@@ -533,6 +533,7 @@ where
                             if let Some(source) = provider_session {
                                 self.authorize_root(context, &request)?;
                                 let continuation = task_session_continuation(&request, &identity);
+                                let has_matched_task_session_continuation = continuation.is_some();
                                 let accepted_attempts =
                                     root.item.accepted_attempts().iter().cloned().collect();
                                 match self
@@ -572,6 +573,13 @@ where
                                             attempt: identity,
                                             evidence,
                                         });
+                                    }
+                                    Err(WorkEvidenceHydrationErrorV1::Stale)
+                                        if has_matched_task_session_continuation =>
+                                    {
+                                        return Err(
+                                            WorkProductApplicationErrorV1::EvidenceContinuationStale,
+                                        );
                                     }
                                     Err(error) => {
                                         omissions.push(hydration_omission("task_session", error))
@@ -984,7 +992,8 @@ fn task_session_reauthorization_error(
         | WorkProductApplicationErrorV1::NotFoundOrNotAuthorized => {
             WorkTaskSessionReauthorizationErrorV1::Denied
         }
-        WorkProductApplicationErrorV1::VersionConflict => {
+        WorkProductApplicationErrorV1::VersionConflict
+        | WorkProductApplicationErrorV1::EvidenceContinuationStale => {
             WorkTaskSessionReauthorizationErrorV1::Stale
         }
         WorkProductApplicationErrorV1::InvalidRequest

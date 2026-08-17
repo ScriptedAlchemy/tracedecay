@@ -62,8 +62,7 @@ mod tests {
         enter_daemon_database_scope,
     };
 
-    use super::*;
-    use crate::RegisteredGlobalDb;
+    use super::TraceDecayError;
 
     fn schema_snapshot(path: &Path) -> Vec<(String, String, String)> {
         let connection = rusqlite::Connection::open(path).expect("open schema snapshot");
@@ -82,8 +81,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_paths_require_typed_reset_without_mutating_legacy_profile_shape() {
-        for daemon_attach in [false, true] {
+    async fn installation_requires_typed_reset_without_mutating_legacy_profile_shape() {
+        for _ in [false, true] {
             crate::register_test_schema_installer();
             let directory = TempDir::new().expect("temporary profile");
             let database_path = directory.path().join("sessions.db");
@@ -108,48 +107,24 @@ mod tests {
                 "legacy relation shape test runtime",
             )
             .expect("database authority");
-            let (database, _) = Database::publish_registered_test_runtime(
+            // The runtime open itself configures the journal mode, so the
+            // untouched-shape contract is captured before the sealed schema
+            // installer rejects the retired relation authority.
+            let before_schema = schema_snapshot(&database_path);
+            let before_bytes = fs::read(&database_path).expect("legacy database bytes");
+            let before_len = fs::metadata(&database_path)
+                .expect("legacy database metadata")
+                .len();
+            let error = match Database::publish_registered_test_runtime_with_retirement_control(
                 &database_path,
                 &authority,
                 TestDatabaseRuntimeMode::Existing,
                 TestDatabaseRuntimeScope::ProfileSessions,
             )
             .await
-            .expect("existing registered runtime");
-            // The runtime open itself configures the journal mode, so the
-            // untouched-shape contract is captured after publication: the
-            // attach refusal below must not migrate, write, or checkpoint.
-            let before_schema = schema_snapshot(&database_path);
-            let before_bytes = fs::read(&database_path).expect("legacy database bytes");
-            let before_len = fs::metadata(&database_path)
-                .expect("legacy database metadata")
-                .len();
-            let runtime = database.retained_runtime().clone();
-            let expected_binding = runtime.binding().clone();
-            let expected_locator = runtime.locator().verified().clone();
-            let attach_authority = runtime
-                .database_authority("reject legacy relation shape")
-                .expect("attach authority");
-            let error = if daemon_attach {
-                RegisteredGlobalDb::migrate_and_attach_for_daemon(
-                    runtime,
-                    expected_binding,
-                    expected_locator,
-                    attach_authority,
-                )
-                .await
-                .err()
-                .expect("daemon attach must reject legacy relation shape")
-            } else {
-                RegisteredGlobalDb::migrate_and_attach(
-                    runtime,
-                    expected_binding,
-                    expected_locator,
-                    attach_authority,
-                )
-                .await
-                .err()
-                .expect("attach must reject legacy relation shape")
+            {
+                Ok(_) => panic!("sealed installer must reject legacy relation shape"),
+                Err(error) => error,
             };
 
             assert!(matches!(error, TraceDecayError::ResetRequired { .. }));

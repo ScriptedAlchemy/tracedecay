@@ -51,6 +51,7 @@ pub(crate) struct Inner {
 pub struct GraphSnapshot {
     pub(crate) database: Arc<GraphDb>,
     _lease: ArcRwLockReadGuard<RawRwLock, ()>,
+    _client: Option<crate::GraphDbLeaseV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +76,12 @@ impl std::fmt::Debug for GraphSnapshot {
         formatter
             .debug_struct("GraphSnapshot")
             .finish_non_exhaustive()
+    }
+}
+
+impl GraphSnapshot {
+    pub(crate) fn retain_client(&mut self, client: crate::GraphDbLeaseV1) {
+        self._client = Some(client);
     }
 }
 
@@ -132,6 +139,7 @@ impl GraphDb {
         Ok(GraphSnapshot {
             database: Arc::clone(self),
             _lease: lease,
+            _client: None,
         })
     }
 
@@ -519,25 +527,32 @@ impl GraphDb {
 
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
         let _snapshot_gate = self.inner.snapshot_gate.write();
+        let mut guard = match self.inner.database.write() {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.inner.closed.store(true, Ordering::Release);
+                self.inner.poisoned.store(true, Ordering::Release);
+                return Err(GraphDbError::DurabilityUncertain {
+                    message:
+                        "graph database write lock is poisoned; physical close cannot be confirmed"
+                            .to_owned(),
+                });
+            }
+        };
         let was_uncertain = self.inner.poisoned.load(Ordering::Acquire);
         if self.inner.closed.swap(true, Ordering::AcqRel) {
             return if was_uncertain {
                 Err(durability_uncertain())
             } else {
-                Ok(())
+                Err(GraphDbError::Closed)
             };
         }
-        let mut guard = self
-            .inner
-            .database
-            .write()
-            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
         let Some(database) = guard.take() else {
-            return if was_uncertain {
-                Err(durability_uncertain())
-            } else {
-                Ok(())
-            };
+            self.inner.poisoned.store(true, Ordering::Release);
+            return Err(GraphDbError::DurabilityUncertain {
+                message: "graph database was absent before physical close could be confirmed"
+                    .to_owned(),
+            });
         };
         if let Err(error) = database.close() {
             self.inner.poisoned.store(true, Ordering::Release);

@@ -12,6 +12,8 @@ pub enum ProjectionArtifactPinV1 {
     Pooling,
     TruncationSide,
     TruncationLength,
+    InferenceBatchSize,
+    InferenceBatchBytes,
     RuntimeBackend,
     RuntimeBuildRevision,
     DeviceClass,

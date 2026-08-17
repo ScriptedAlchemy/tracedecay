@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphEntity, GraphEntityId,
-    GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
-    GraphRelation, GraphRelationId, GraphRelationKind, GraphWatermark, GraphWriteBatch,
-    NeverCancelled, SourceGeneration,
+    GraphCancellation, GraphDb, GraphDbError, GraphDbLeaseV1, GraphDbOwner, GraphEntity,
+    GraphEntityId, GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty,
+    GraphPropertyName, GraphRelation, GraphRelationId, GraphRelationKind, GraphWatermark,
+    GraphWriteBatch, NeverCancelled, SourceGeneration,
 };
 
 mod support;
@@ -61,8 +61,8 @@ fn relation(value: &str, from: &str, to: &str) -> GraphRelation {
     .unwrap()
 }
 
-fn open_memory() -> Arc<GraphDb> {
-    GraphDbOwner::memory(live()).unwrap().handle()
+fn open_memory() -> GraphDbLeaseV1 {
+    GraphDbOwner::memory(live()).unwrap().issue_lease().unwrap()
 }
 
 fn publish(db: &GraphDb, generation: &str) {
@@ -87,7 +87,7 @@ fn publish(db: &GraphDb, generation: &str) {
 #[test]
 fn typed_point_reads_preserve_snapshot_and_reopen_identity() {
     let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open_raw(temp.path()).unwrap();
+    let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
     publish(&db, "generation.one");
     let snapshot = db.snapshot().unwrap();
 
@@ -137,7 +137,7 @@ fn typed_point_reads_preserve_snapshot_and_reopen_identity() {
 
     drop(db);
     registered.close().unwrap();
-    let reopened = registered.reopen_raw().unwrap();
+    let reopened = registered.reopen_lease().unwrap();
     assert_eq!(
         reopened
             .entity(&namespace(), &entity_id("root"), live())

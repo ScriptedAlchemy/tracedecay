@@ -1154,9 +1154,8 @@ mod tests {
         // Capacity one against an eight-observation composition: the queue
         // must refuse most of them without blocking the query that produced
         // them, and every refusal must be counted.
-        let producer =
-            BoundedObservabilityProducerV1::start(std::sync::Arc::clone(&db), identity.clone(), 1)
-                .expect("bounded producer");
+        let producer = BoundedObservabilityProducerV1::start(db.clone(), identity.clone(), 1)
+            .expect("bounded producer");
 
         let source = |kind: &str| ObservedWithCoverageV1 {
             observation: RetrievalSourceObservedV1 {

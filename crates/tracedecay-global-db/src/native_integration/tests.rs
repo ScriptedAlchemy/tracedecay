@@ -8,12 +8,12 @@ use tracedecay_domain::{
     NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, ProjectId, RefId,
     RepositoryId, UtcMicros, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
 };
-use tracedecay_runtime_core::db::engine::{TestConnection, TransactionBehavior};
 use tracedecay_store::{
     NativeIntegrationBeginResultV1, NativeIntegrationRecordV1, NativeIntegrationStoreError,
 };
 
 use super::store::GlobalDbNativeIntegrationStore;
+use crate::{RegisteredGlobalDb, tests::harness::RegisteredGlobalDbHarness};
 
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("fixture digest")
@@ -166,32 +166,18 @@ fn terminal_receipt(
     .expect("sealed receipt")
 }
 
-async fn open_database() -> (tempfile::TempDir, std::path::PathBuf, TestConnection) {
-    let directory = tempfile::tempdir().expect("temporary database directory");
-    let path = directory.path().join("project-sessions.db");
-    let database = TestConnection::open(&path);
-    let transaction = database
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .expect("begin schema transaction");
-    super::ensure_native_integration_schema(&transaction)
-        .await
-        .expect("ensure native integration schema");
-    transaction
-        .commit()
-        .await
-        .expect("commit native integration schema");
-    (directory, path, database)
+async fn open_database() -> RegisteredGlobalDbHarness {
+    RegisteredGlobalDbHarness::open("native-integration-store").await
 }
 
-fn test_store(database: &TestConnection) -> GlobalDbNativeIntegrationStore<'_> {
-    GlobalDbNativeIntegrationStore::for_engine_test(database)
+fn test_store(database: &RegisteredGlobalDb) -> GlobalDbNativeIntegrationStore<'_> {
+    GlobalDbNativeIntegrationStore::new(database)
 }
 
 #[tokio::test]
 async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
-    let (_directory, _path, database) = open_database().await;
-    let store = test_store(&database);
+    let database = open_database().await;
+    let store = test_store(database.registered.as_ref());
     let preview = preview_fixture("preview.native.one");
 
     store
@@ -222,8 +208,8 @@ async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
 
 #[tokio::test]
 async fn issued_approvals_persist_and_conflicting_reissue_is_rejected() {
-    let (_directory, _path, database) = open_database().await;
-    let store = test_store(&database);
+    let database = open_database().await;
+    let store = test_store(database.registered.as_ref());
     let preview = preview_fixture("preview.native.approvals");
     let approval = approval_fixture("approval.native.one", &preview);
 
@@ -259,8 +245,8 @@ async fn issued_approvals_persist_and_conflicting_reissue_is_rejected() {
 
 #[tokio::test]
 async fn begin_consumes_the_approval_exactly_once() {
-    let (_directory, _path, database) = open_database().await;
-    let store = test_store(&database);
+    let database = open_database().await;
+    let store = test_store(database.registered.as_ref());
     let preview = preview_fixture("preview.native.begin");
     let approval = approval_fixture("approval.native.begin", &preview);
     let record = prepared_record("transaction.native.begin", &preview, &approval);
@@ -319,8 +305,8 @@ fn preview_with_expiry(preview_id: &str, expires_at: UtcMicros) -> NativeIntegra
 
 #[tokio::test]
 async fn status_compare_and_swap_rejects_stale_revisions_and_identity_rebinds() {
-    let (_directory, _path, database) = open_database().await;
-    let store = test_store(&database);
+    let database = open_database().await;
+    let store = test_store(database.registered.as_ref());
     let preview = preview_fixture("preview.native.cas");
     let approval = approval_fixture("approval.native.cas", &preview);
     let record = prepared_record("transaction.native.cas", &preview, &approval);
@@ -391,8 +377,8 @@ async fn status_compare_and_swap_rejects_stale_revisions_and_identity_rebinds() 
 
 #[tokio::test]
 async fn terminal_receipts_replay_and_survive_restart() {
-    let (_directory, path, database) = open_database().await;
-    let store = test_store(&database);
+    let database = open_database().await;
+    let store = test_store(database.registered.as_ref());
     let preview = preview_fixture("preview.native.terminal");
     let approval = approval_fixture("approval.native.terminal", &preview);
     let record = prepared_record("transaction.native.terminal", &preview, &approval);
@@ -434,9 +420,8 @@ async fn terminal_receipts_replay_and_survive_restart() {
     }
 
     drop(store);
-    drop(database);
-    let reopened = TestConnection::open(&path);
-    let store = test_store(&reopened);
+    let database = database.restart().await;
+    let store = test_store(database.registered.as_ref());
     let restored = store
         .read_record(&record.status.transaction_id)
         .await
@@ -461,8 +446,8 @@ async fn terminal_receipts_replay_and_survive_restart() {
 
 #[tokio::test]
 async fn needs_inspection_quarantines_the_repository_until_recovery() {
-    let (_directory, path, database) = open_database().await;
-    let store = test_store(&database);
+    let database = open_database().await;
+    let store = test_store(database.registered.as_ref());
     let preview = preview_fixture("preview.native.inspect");
     let approval = approval_fixture("approval.native.inspect", &preview);
     let record = prepared_record("transaction.native.inspect", &preview, &approval);
@@ -491,9 +476,8 @@ async fn needs_inspection_quarantines_the_repository_until_recovery() {
 
     // The fence survives restart.
     drop(store);
-    drop(database);
-    let reopened = TestConnection::open(&path);
-    let store = test_store(&reopened);
+    let database = database.restart().await;
+    let store = test_store(database.registered.as_ref());
     assert_eq!(
         store.begin_or_replay(next).await,
         Err(NativeIntegrationStoreError::RepositoryQuarantined)
@@ -502,8 +486,8 @@ async fn needs_inspection_quarantines_the_repository_until_recovery() {
 
 #[tokio::test]
 async fn pending_transactions_expose_unfinished_work_for_restart_recovery() {
-    let (_directory, path, database) = open_database().await;
-    let store = test_store(&database);
+    let database = open_database().await;
+    let store = test_store(database.registered.as_ref());
     let preview = preview_fixture("preview.native.pending");
     let approval = approval_fixture("approval.native.pending", &preview);
     let record = prepared_record("transaction.native.pending", &preview, &approval);
@@ -513,9 +497,8 @@ async fn pending_transactions_expose_unfinished_work_for_restart_recovery() {
         .expect("begin starts");
 
     drop(store);
-    drop(database);
-    let reopened = TestConnection::open(&path);
-    let store = test_store(&reopened);
+    let database = database.restart().await;
+    let store = test_store(database.registered.as_ref());
     let pending = store
         .pending_transactions(None)
         .await

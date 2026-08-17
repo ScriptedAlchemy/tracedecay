@@ -13,7 +13,7 @@
 //! ## Outward seams that could not follow the kernel
 //!
 //! `daemon::store_runtime::session_registry` stayed in the root crate: it
-//! stores `Arc<RegisteredGlobalDb>` in its public surface, and
+//! stores `RegisteredGlobalDbLeaseV1` in its public surface, and
 //! `tracedecay-global-db` depends on this kernel — so the kernel taking that
 //! edge back would be a Cargo cycle. `global_db`, sessions, and semantic
 //! projection are above this crate for the same reason.

@@ -67,9 +67,8 @@ fn transferred_frames_cannot_exceed_the_registered_spool_limits() {
         RemoteSpoolLimitsV1::new(2, first_transfer.ciphertext.len() as u64).unwrap(),
     ] {
         let destination_fixture = fixture();
-        let destination = RemoteSqliteStorageV1::from_registered_with_limits(
-            destination_fixture.handle.clone(),
-            destination_fixture.binding.clone(),
+        let destination = RemoteSqliteStorageV1::from_retained_exact_sql_with_limits(
+            retained(&destination_fixture),
             Arc::new(TestKeyring(Arc::new(
                 RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
             ))),

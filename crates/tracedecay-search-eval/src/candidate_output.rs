@@ -10,6 +10,7 @@
 //! digests. Labels are ordinary reviewable fixture data and never confer
 //! activation authority.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -745,14 +746,46 @@ pub fn compute_corpus_digest(
     workload: &CandidateWorkloadV1,
 ) -> Result<String, CandidateOutputError> {
     validate_source_bindings(repo_root, workload)?;
+    compute_corpus_digest_from_document_bytes(workload, |document| {
+        let absolute = repo_root.join(&document.path);
+        fs::read(&absolute)
+            .map(Cow::Owned)
+            .map_err(|source| CandidateOutputError::Read {
+                path: absolute,
+                source,
+            })
+    })
+}
+
+/// Compute the corpus identity from the package's embedded authoritative
+/// bytes. Unlike [`compute_corpus_digest`], this validates no filesystem or
+/// Git state and therefore cannot materialize the evaluator fixture.
+pub(crate) fn compute_corpus_digest_from_embedded_bytes(
+    workload: &CandidateWorkloadV1,
+    files: &[(&str, &[u8])],
+) -> Result<String, CandidateOutputError> {
+    compute_corpus_digest_from_document_bytes(workload, |document| {
+        files
+            .iter()
+            .find_map(|(path, bytes)| (*path == document.path).then_some(*bytes))
+            .map(Cow::Borrowed)
+            .ok_or_else(|| {
+                CandidateOutputError::Contract(format!(
+                    "packaged evaluator corpus is missing {}",
+                    document.path
+                ))
+            })
+    })
+}
+
+fn compute_corpus_digest_from_document_bytes<'a>(
+    workload: &CandidateWorkloadV1,
+    mut document_bytes: impl FnMut(&CorpusDocumentV1) -> Result<Cow<'a, [u8]>, CandidateOutputError>,
+) -> Result<String, CandidateOutputError> {
     let mut bindings = Vec::with_capacity(workload.corpus.len());
     let mut corpus_bytes = 0_u64;
     for document in &workload.corpus {
-        let absolute = repo_root.join(&document.path);
-        let bytes = fs::read(&absolute).map_err(|source| CandidateOutputError::Read {
-            path: absolute,
-            source,
-        })?;
+        let bytes = document_bytes(document)?;
         corpus_bytes = corpus_bytes
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| {

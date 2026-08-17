@@ -44,7 +44,7 @@ impl RemoteSqliteStorageV1 {
             .and_then(|limit| i64::try_from(limit).ok())
             .ok_or(RemoteCredentialInventoryErrorV1::InvalidLimit)?;
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT credential_class, credential_fingerprint, credential_json
              FROM (
                  SELECT 0 AS credential_class, credential_fingerprint,
@@ -80,7 +80,7 @@ impl RemoteCredentialLookupPortV1 for RemoteSqliteStorageV1 {
         match class {
             RemoteCredentialClassV1::EnrollmentGrant => {
                 let rows = query(
-                    &self.handle,
+                    self.handle(),
                     "SELECT grant_json, admission_json, consumed_at
                      FROM remote_enrollment_grants
                      WHERE credential_fingerprint = ?1",
@@ -99,7 +99,7 @@ impl RemoteCredentialLookupPortV1 for RemoteSqliteStorageV1 {
             }
             RemoteCredentialClassV1::Enrollment => {
                 let rows = query(
-                    &self.handle,
+                    self.handle(),
                     "SELECT enrollment_json, commit_receipt_json
                      FROM remote_enrollments
                      WHERE credential_fingerprint = ?1",

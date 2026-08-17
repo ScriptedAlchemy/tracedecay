@@ -27,7 +27,7 @@ impl WorkPlacementStoragePort for WorkSqliteStorage {
         identity: &WorkPlacementIdentityV1,
     ) -> Result<Option<WorkPlacementV1>, WorkPlacementStorageError> {
         let rows = registered_work_query(
-            &self.handle,
+            self.handle(),
             "SELECT placement_payload FROM work_placements_v1
              WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
                AND actor_id = ?4 AND policy_digest = ?5
@@ -56,7 +56,7 @@ impl WorkPlacementStoragePort for WorkSqliteStorage {
         root: &str,
     ) -> Result<Option<WorkPlacementIdentityV1>, WorkPlacementStorageError> {
         let rows = registered_work_query(
-            &self.handle,
+            self.handle(),
             "SELECT task_id, run_id FROM work_placements_v1
              WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
                AND actor_id = ?4 AND policy_digest = ?5
@@ -88,7 +88,7 @@ impl WorkPlacementStoragePort for WorkSqliteStorage {
         root: &str,
     ) -> Result<bool, WorkPlacementStorageError> {
         let rows = registered_work_query(
-            &self.handle,
+            self.handle(),
             "SELECT task_id FROM work_placements_v1
              WHERE project_id = ?1 AND repository_id = ?2
                AND target_root = ?3 AND state IN ('admitted', 'quarantined')
@@ -117,7 +117,7 @@ impl WorkPlacementStoragePort for WorkSqliteStorage {
             ExactSqlValue::Text(root.to_owned())
         });
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| WorkPlacementStorageError::Unavailable)?;
 

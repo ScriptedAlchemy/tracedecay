@@ -11,7 +11,7 @@
 
 use serde::Serialize;
 
-use tracedecay_runtime_core::db::engine::{ReadSnapshot, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 /// Max characters of collapsed evidence text kept per unfinished-run row before
 /// a single-character `…` truncation, so one row never dominates the listing.
@@ -31,7 +31,7 @@ pub struct WorkflowStateItem {
 /// Reads through one caller-pinned snapshot, so every returned row is observed
 /// at a single database generation. The store adapter owns opening it.
 pub async fn list_unfinished(
-    snapshot: &ReadSnapshot,
+    snapshot: &impl QueryExecutor,
     limit: usize,
 ) -> Result<Vec<WorkflowStateItem>, String> {
     let limit = limit.clamp(1, 250) as i64;

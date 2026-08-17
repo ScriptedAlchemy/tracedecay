@@ -25,33 +25,27 @@ use tracedecay_store::{
     StoredObservationRowV1,
 };
 
-use tracedecay_runtime_core::db::DatabaseAuthority;
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeHandle;
+use tracedecay_runtime_core::db::{Database, DatabaseRuntimeClientV1};
 /// Observation-store adapter over the already-registered authoritative runtime.
-pub struct GlobalDbObservationStore<'a> {
-    runtime: &'a StoreRuntimeHandle,
-    write_authority: &'a DatabaseAuthority,
+#[derive(Clone)]
+pub struct GlobalDbObservationStore {
+    database: Database,
+    runtime: DatabaseRuntimeClientV1,
 }
 
-impl<'a> GlobalDbObservationStore<'a> {
-    pub const fn with_runtime(
-        runtime: &'a StoreRuntimeHandle,
-        write_authority: &'a DatabaseAuthority,
-    ) -> Self {
-        Self {
-            runtime,
-            write_authority,
-        }
+impl GlobalDbObservationStore {
+    pub fn new(database: Database) -> Self {
+        let runtime = database.runtime_client();
+        Self { database, runtime }
     }
 }
 
-impl ObservationStore for GlobalDbObservationStore<'_> {
+impl ObservationStore for GlobalDbObservationStore {
     async fn persist_observation(
         &self,
         write: AnchoredObservationWrite,
     ) -> ObservationStoreResult<ObservationPersistOutcome> {
-        let runtime = self.runtime;
-        let authority = self.write_authority;
+        let runtime = &self.runtime;
         let observation_id = write.observation().observation_id().clone();
         let candidate = write.observation().clone();
         let candidate_cursor = write.next_cursor().clone();
@@ -136,7 +130,6 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
         );
         let outcome = submit_runtime_write(
             runtime,
-            authority,
             RepositoryWritePayloadV1::Observation(Box::new(write)),
             idempotency_key,
             "submit anchored observation",
@@ -196,15 +189,14 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
         source: &ClaudeSourceIdentityV1,
         scope: &ObservationScopeV1,
     ) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
-        read_runtime_source_cursor(self.runtime, source, scope)
+        read_runtime_source_cursor(&self.runtime, source, scope)
     }
 
     async fn advance_source_cursor(
         &self,
         advance: ObservationCursorAdvance,
     ) -> ObservationStoreResult<CursorAdvanceOutcome> {
-        let runtime = self.runtime;
-        let authority = self.write_authority;
+        let runtime = &self.runtime;
         let actual_cursor = read_runtime_source_cursor(
             runtime,
             advance.next_cursor().source(),
@@ -225,7 +217,6 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
         let key = format!("cursor.{}", canonical_runtime_digest(&identity)?);
         let outcome = submit_runtime_write(
             runtime,
-            authority,
             RepositoryWritePayloadV1::ObservationCursorAdvance(Box::new(advance)),
             key,
             "advance observation source cursor",
@@ -260,7 +251,7 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
         &self,
         observation_id: &CanonicalObservationIdV1,
     ) -> ObservationStoreResult<Option<StoredObservation>> {
-        read_runtime_stored_observation(self.runtime, observation_id)
+        read_runtime_stored_observation(&self.runtime, observation_id)
     }
 
     async fn replay_observations(
@@ -274,7 +265,7 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
             )
         })?;
         match dispatch_runtime_observation_read(
-            self.runtime,
+            &self.runtime,
             ObservationReadOperationV1::Replay {
                 after_sequence: request.after_sequence(),
                 limit,
@@ -331,7 +322,7 @@ impl RuntimeRequestProbeV1 for RuntimeObservationProbe {
 }
 
 fn dispatch_runtime_observation_read(
-    runtime: &StoreRuntimeHandle,
+    runtime: &DatabaseRuntimeClientV1,
     operation: ObservationReadOperationV1,
 ) -> ObservationStoreResult<ObservationReadResultV1> {
     let command_digest = canonical_sha256(&operation)
@@ -432,7 +423,7 @@ fn stored_observation_from_runtime_row(
 }
 
 fn read_runtime_source_cursor(
-    runtime: &StoreRuntimeHandle,
+    runtime: &DatabaseRuntimeClientV1,
     source: &ClaudeSourceIdentityV1,
     scope: &ObservationScopeV1,
 ) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
@@ -452,7 +443,7 @@ fn read_runtime_source_cursor(
 }
 
 fn read_runtime_retrieval_anchor_by_alias(
-    runtime: &StoreRuntimeHandle,
+    runtime: &DatabaseRuntimeClientV1,
     scope: &ObservationScopeV1,
     alias: &tracedecay_domain::NativeAliasV2,
 ) -> ObservationStoreResult<Option<tracedecay_domain::RetrievalAnchorId>> {
@@ -472,7 +463,7 @@ fn read_runtime_retrieval_anchor_by_alias(
 }
 
 fn read_runtime_stored_observation(
-    runtime: &StoreRuntimeHandle,
+    runtime: &DatabaseRuntimeClientV1,
     observation_id: &CanonicalObservationIdV1,
 ) -> ObservationStoreResult<Option<StoredObservation>> {
     match dispatch_runtime_observation_read(
@@ -492,8 +483,7 @@ fn read_runtime_stored_observation(
 }
 
 async fn submit_runtime_write(
-    runtime: &StoreRuntimeHandle,
-    authority: &DatabaseAuthority,
+    runtime: &DatabaseRuntimeClientV1,
     payload: RepositoryWritePayloadV1,
     idempotency_key: String,
     operation: &'static str,
@@ -566,14 +556,13 @@ async fn submit_runtime_write(
     )
     .map_err(|error| runtime_storage_error(operation, error.to_string()))?;
     runtime
-        .dispatch_submit_authorized(
+        .dispatch_submit(
             request,
             Arc::new(RuntimeObservationProbe {
                 cancellation,
                 deadline,
                 commit_started: AtomicBool::new(false),
             }),
-            authority.clone(),
         )
         .await
         .map_err(|error| runtime_storage_error(operation, format!("{error:?}")))
@@ -637,12 +626,12 @@ fn runtime_storage_error(
     }
 }
 
-impl ObservationProjectionStore for GlobalDbObservationStore<'_> {
+impl ObservationProjectionStore for GlobalDbObservationStore {
     async fn next_queued_observation(
         &self,
     ) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
         match dispatch_runtime_observation_read(
-            self.runtime,
+            &self.runtime,
             ObservationReadOperationV1::NextQueuedProjection {
                 now_micros: now_micros().0,
             },
@@ -661,22 +650,12 @@ impl ObservationProjectionStore for GlobalDbObservationStore<'_> {
         &self,
         observation_id: &CanonicalObservationIdV1,
     ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
-        let handle = self
-            .runtime
-            .authorized_exact_sql_handle(self.write_authority.clone())
-            .map_err(|error| {
-                projection_runtime_error(runtime_storage_error(
-                    "project observation",
-                    format!("registered runtime authority failed: {error:?}"),
-                ))
-            })?;
-        let connection = tracedecay_runtime_core::db::engine::Connection::attach(handle);
-        crate::project_observation_with_engine(&connection, observation_id).await
+        crate::project_observation(&self.database, observation_id).await
     }
 
     async fn projection_checkpoint(&self) -> ProjectionStoreResult<ProjectionCheckpoint> {
         match dispatch_runtime_observation_read(
-            self.runtime,
+            &self.runtime,
             ObservationReadOperationV1::ProjectionCheckpoint,
         )
         .map_err(projection_runtime_error)?
@@ -695,17 +674,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore<'_> {
         &self,
         frontier_sequence: u64,
     ) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
-        let handle = self
-            .runtime
-            .authorized_exact_sql_handle(self.write_authority.clone())
-            .map_err(|error| {
-                projection_runtime_error(runtime_storage_error(
-                    "rebuild observation projection",
-                    format!("registered runtime authority failed: {error:?}"),
-                ))
-            })?;
-        let connection = tracedecay_runtime_core::db::engine::Connection::attach(handle);
-        crate::rebuild_projection_with_engine(&connection, frontier_sequence).await
+        crate::rebuild_projection(&self.database, frontier_sequence).await
     }
 }
 
@@ -723,18 +692,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adapter_contains_only_registered_runtime_handles() {
-        fn assert_exact_fields(store: &GlobalDbObservationStore<'_>) {
+    fn adapter_contains_only_guarded_database_client() {
+        fn assert_exact_fields(store: &GlobalDbObservationStore) {
             let GlobalDbObservationStore {
+                database: _,
                 runtime: _,
-                write_authority: _,
             } = store;
         }
 
         let _ = assert_exact_fields;
-        assert_eq!(
-            std::mem::size_of::<GlobalDbObservationStore<'static>>(),
-            std::mem::size_of::<(&'static StoreRuntimeHandle, &'static DatabaseAuthority,)>()
-        );
     }
 }

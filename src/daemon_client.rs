@@ -674,6 +674,65 @@ impl DaemonInvocationClient {
         }
     }
 
+    pub async fn qualify_semantic_profile_until(
+        &self,
+        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        deadline_micros: i64,
+        cancellation: CancellationSignal,
+    ) -> crate::errors::Result<SemanticEvaluationQualificationResultV1> {
+        let request_id = mint_global_request_id(GlobalRequestSurface::SemanticQualification)
+            .map_err(|error| crate::errors::TraceDecayError::Config {
+                message: error.to_string(),
+            })?;
+        let observed_at =
+            current_system_micros().ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "semantic qualification clock is unavailable".to_owned(),
+            })?;
+        let deadline = Deadline::new(UtcMicros(
+            observed_at.0.checked_add(deadline_micros).ok_or_else(|| {
+                crate::errors::TraceDecayError::Config {
+                    message: "semantic qualification deadline is unavailable".to_owned(),
+                }
+            })?,
+        ))
+        .map_err(|error| crate::errors::TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+        let response = self
+            .invoke_controlled(
+                crate::daemon_contract::DaemonInvocationRequest::semantic_qualify(
+                    request_id.as_str(),
+                    candidate,
+                    observed_at,
+                    deadline.clone(),
+                    cancellation.context(),
+                ),
+                deadline,
+                cancellation,
+                InvocationCancellationPolicy::ReadOnly,
+            )
+            .await
+            .map_err(|error| {
+                semantic_qualification_application_problem(error.into_application_problem())
+            })?;
+        match response.outcome {
+            crate::daemon_contract::DaemonInvocationOutcome::SemanticEvaluatedProfileQualified {
+                qualification,
+            } => Ok(SemanticEvaluationQualificationResultV1 {
+                qualification_bytes: qualification.into_bytes(),
+            }),
+            crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
+                Err(semantic_qualification_daemon_problem(problem))
+            }
+            crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                Err(semantic_qualification_application_problem(problem))
+            }
+            _ => Err(crate::errors::TraceDecayError::Config {
+                message: "daemon returned an invalid semantic qualification response".to_owned(),
+            }),
+        }
+    }
+
     async fn cancel_invocation(&self, target_request_id: &str) -> crate::errors::Result<()> {
         let stream = crate::daemon::connect_to_daemon_connection(&self.connection).await?;
         let (_reader, mut writer) = stream.into_split();
@@ -997,6 +1056,110 @@ fn semantic_evaluation_application_problem(
     }
 }
 
+fn semantic_qualification_daemon_problem(
+    problem: crate::daemon_contract::DaemonInvocationProblem,
+) -> crate::errors::TraceDecayError {
+    match problem {
+        crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
+        | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
+            crate::errors::TraceDecayError::Config {
+                message: format!("semantic qualification rejected: {problem:?}"),
+            }
+        }
+        crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+            crate::errors::TraceDecayError::project_route(
+                "semantic_qualification_denied",
+                false,
+                "Semantic qualification was not found or not authorized",
+            )
+        }
+        crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
+            crate::errors::TraceDecayError::reset_required(
+                "semantic qualification",
+                "the semantic qualification authority requires reset",
+            )
+        }
+        crate::daemon_contract::DaemonInvocationProblem::ApplicationContractViolation
+        | crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
+            crate::errors::TraceDecayError::project_route(
+                "semantic_qualification_unavailable",
+                false,
+                "Semantic qualification is unavailable",
+            )
+        }
+    }
+}
+
+fn semantic_qualification_application_problem(
+    problem: ApplicationProblem,
+) -> crate::errors::TraceDecayError {
+    let retryable = problem.retry() != RetryDirective::Never;
+    match problem.kind() {
+        ApplicationProblemKind::Cancelled => crate::errors::TraceDecayError::project_route(
+            "semantic_qualification_cancelled",
+            retryable,
+            "Semantic qualification was cancelled",
+        ),
+        ApplicationProblemKind::TimedOut => crate::errors::TraceDecayError::project_route(
+            "semantic_qualification_deadline_exceeded",
+            retryable,
+            "Semantic qualification exceeded its deadline",
+        ),
+        ApplicationProblemKind::Unavailable | ApplicationProblemKind::Saturated => {
+            crate::errors::TraceDecayError::project_route(
+                "semantic_qualification_unavailable",
+                retryable,
+                "Semantic qualification is unavailable",
+            )
+        }
+        ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
+            crate::errors::TraceDecayError::project_route(
+                "semantic_qualification_stale",
+                retryable,
+                "Semantic qualification became stale",
+            )
+        }
+        ApplicationProblemKind::PartialEffect => crate::errors::TraceDecayError::project_route(
+            "semantic_qualification_partial_result",
+            retryable,
+            problem.diagnostic().map_or(
+                "Semantic qualification returned only a partial result",
+                |diagnostic| diagnostic.message.as_str(),
+            ),
+        ),
+        ApplicationProblemKind::ExecutionFailed => crate::errors::TraceDecayError::project_route(
+            "semantic_qualification_execution_failed",
+            false,
+            "Semantic qualification execution failed",
+        ),
+        ApplicationProblemKind::ResetRequired => crate::errors::TraceDecayError::reset_required(
+            "semantic qualification",
+            problem.diagnostic().map_or(
+                "the semantic qualification authority requires reset",
+                |diagnostic| diagnostic.message.as_str(),
+            ),
+        ),
+        ApplicationProblemKind::NotFoundOrNotAuthorized => {
+            crate::errors::TraceDecayError::project_route(
+                "semantic_qualification_denied",
+                retryable,
+                "Semantic qualification was not found or not authorized",
+            )
+        }
+        ApplicationProblemKind::InvalidRequest | ApplicationProblemKind::Unsupported => {
+            crate::errors::TraceDecayError::Config {
+                message: format!(
+                    "semantic qualification rejected: {}",
+                    problem.diagnostic().map_or_else(
+                        || format!("{problem:?}"),
+                        |diagnostic| diagnostic.message.clone(),
+                    )
+                ),
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct SemanticEvaluationPublicationResultV1 {
     pub project_id: String,
@@ -1005,6 +1168,11 @@ pub struct SemanticEvaluationPublicationResultV1 {
     pub report: crate::search_eval::DirectEvaluationReportV1,
     pub source_generation: String,
     pub snapshot_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticEvaluationQualificationResultV1 {
+    pub qualification_bytes: Vec<u8>,
 }
 
 pub(crate) fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
@@ -1038,8 +1206,9 @@ mod tests {
     use super::{
         DaemonInvocationError, SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
         SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
-        SemanticEvaluationPublicationResultV1, application_response,
-        semantic_evaluation_application_problem,
+        SemanticEvaluationPublicationResultV1, SemanticEvaluationQualificationResultV1,
+        application_response, semantic_evaluation_application_problem,
+        semantic_qualification_application_problem,
     };
     use tracedecay_application::{
         ApplicationProblem, ApplicationProblemKind, CancellationStage, InvocationError, RequestId,
@@ -1127,6 +1296,27 @@ mod tests {
     }
 
     #[test]
+    fn semantic_qualification_client_maps_typed_application_problems() {
+        for (problem, expected_reason) in [
+            (
+                ApplicationProblem::cancelled_before_admission(),
+                "semantic_qualification_cancelled",
+            ),
+            (
+                ApplicationProblem::timed_out_before_admission(),
+                "semantic_qualification_deadline_exceeded",
+            ),
+        ] {
+            let error = semantic_qualification_application_problem(problem);
+            let (reason, retryable, _) = error
+                .project_route_context()
+                .expect("typed semantic qualification error");
+            assert_eq!(reason, expected_reason);
+            assert!(!retryable);
+        }
+    }
+
+    #[test]
     fn semantic_evaluation_client_prints_rejection_diagnostic() {
         let error = semantic_evaluation_application_problem(ApplicationProblem::InvalidRequest {
             diagnostic: tracedecay_application::SafeDiagnostic {
@@ -1190,5 +1380,14 @@ mod tests {
         let encoded = serde_json::to_value(result).expect("serialize evaluation result");
         assert_eq!(encoded["report"]["status"], "pass");
         assert_eq!(encoded["report"]["command"], "compare");
+    }
+
+    #[test]
+    fn semantic_qualification_result_preserves_canonical_bytes() {
+        let result = SemanticEvaluationQualificationResultV1 {
+            qualification_bytes: vec![0x51, 0x55, 0x41, 0x4c],
+        };
+
+        assert_eq!(result.qualification_bytes, vec![0x51, 0x55, 0x41, 0x4c]);
     }
 }

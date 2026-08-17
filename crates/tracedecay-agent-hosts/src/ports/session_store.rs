@@ -20,7 +20,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::OnceLock;
 
-use tracedecay_runtime_core::db::engine::ReadSnapshot;
+use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_store::StoreRuntimeBindingV1;
 
 /// Boxed future returned by the port's asynchronous reads.
@@ -84,7 +84,7 @@ pub trait AutomationSessionStore: Send + Sync {
     fn latest_session_activity_secs(&self) -> StoreFuture<'_, Option<i64>>;
 
     /// Opens a read snapshot for a bounded direct query.
-    fn read_snapshot(&self) -> StoreFuture<'_, Result<ReadSnapshot, String>>;
+    fn read_snapshot(&self) -> StoreFuture<'_, Result<DatabaseEngineReadSnapshot, String>>;
 
     /// Runs one bounded analytics-event scan.
     fn query_analytics_events<'a>(
@@ -106,7 +106,7 @@ impl AutomationSessionStore for tracedecay_global_db::RegisteredGlobalDb {
         Box::pin(self.latest_session_activity_secs())
     }
 
-    fn read_snapshot(&self) -> StoreFuture<'_, Result<ReadSnapshot, String>> {
+    fn read_snapshot(&self) -> StoreFuture<'_, Result<DatabaseEngineReadSnapshot, String>> {
         Box::pin(async move {
             self.read_snapshot()
                 .await

@@ -708,7 +708,7 @@ pub(super) async fn register_project_open_production_owners(
             .install_authority(
                 &repository_root,
                 access.clone(),
-                Arc::clone(&session_db),
+                session_db.clone(),
                 tokio::runtime::Handle::current(),
             )
             .await
@@ -725,7 +725,7 @@ pub(super) async fn register_project_open_production_owners(
         super::project_delivery_mount::ensure_project_delivery_settlement(
             invocation,
             project_root,
-            Arc::clone(&session_db),
+            session_db.clone(),
             &scope,
             &access,
         )
@@ -790,7 +790,7 @@ pub(super) async fn register_project_open_production_owners(
     {
         let native_owner = native_integration
             .ensure(
-                Arc::clone(&session_db),
+                session_db.clone(),
                 repository_root,
                 scope.project_id.clone(),
                 scope.repository_id.clone(),
@@ -867,7 +867,7 @@ pub(super) async fn register_project_open_production_owners(
         if let Some(native_owner) = native_owner.as_ref() {
             let stack_runtime = native_owner
                 .mount_github_stack_runtime(
-                    Arc::clone(&session_db),
+                    session_db.clone(),
                     scope.clone(),
                     access.clone(),
                     Arc::clone(&stack_coordinator),
@@ -887,7 +887,7 @@ pub(super) async fn register_project_open_production_owners(
         .work_runtime_registrar()
         .register(
             project_root.to_path_buf(),
-            Arc::clone(&session_db),
+            session_db.clone(),
             work_authority.clone(),
             requester.clone(),
             work_grant.clone(),
@@ -963,7 +963,7 @@ pub(super) async fn register_project_open_production_owners(
         project_root,
         graph.clone(),
         server,
-        Arc::clone(&session_db),
+        session_db.clone(),
         access.clone(),
         &admitted_root_uri,
     )
@@ -1021,7 +1021,7 @@ pub(super) async fn register_project_open_production_owners(
                 invocation,
                 project_root,
                 lsp_scope_grant,
-                Arc::clone(&session_db),
+                session_db.clone(),
                 database.clone(),
                 Arc::clone(&diagnostic_broker),
                 &admitted_providers,
@@ -1051,7 +1051,7 @@ pub(super) async fn register_project_open_production_owners(
             invocation,
             project_root,
             lsp_scope_grant,
-            Arc::clone(&session_db),
+            session_db.clone(),
             database.clone(),
             Arc::clone(&diagnostic_broker),
             &[],
@@ -1116,7 +1116,7 @@ async fn register_semantic_activation_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     graph: &Arc<crate::tracedecay::TraceDecay>,
-    session_db: Arc<crate::global_db::RegisteredGlobalDb>,
+    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
     configuration: &tracedecay_usecases::configuration::ConfigurationCurrentStateV1,
 ) -> Result<()> {
@@ -1147,7 +1147,7 @@ async fn register_semantic_activation_owner(
             message: format!("semantic retrieval current state unavailable: {error}"),
         })?;
     let profile_id = session_db.binding().shard_id.profile_id.clone();
-    let observer = invocation.query_activation_registrar(project_root, Arc::clone(&session_db));
+    let observer = invocation.query_activation_registrar(project_root, session_db.clone());
     if let Some(current_state) = current_state {
         if current_state.audit().is_empty() {
             let cursor_keys = Arc::new(
@@ -1254,7 +1254,7 @@ async fn register_semantic_activation_owner(
                             project_root.to_path_buf(),
                             scope.clone(),
                             query_authority_upgrade::DeferredQueryAuthorityMountV1::CoreFallback {
-                                session_db: Arc::clone(&session_db),
+                                session_db: session_db.clone(),
                             },
                         );
                     }
@@ -1325,7 +1325,7 @@ async fn register_production_lsp_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     scope_grant: tracedecay_application::CapabilityGrantSnapshot,
-    registered_database: Arc<crate::global_db::RegisteredGlobalDb>,
+    registered_database: crate::global_db::RegisteredGlobalDbLeaseV1,
     database: crate::db::Database,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     admitted_providers: &[AdmittedLspProvider],
@@ -1869,7 +1869,12 @@ mod tests {
         assert!(gateway.supports_document_diagnostics);
         assert!(gateway.supports_managed_diagnostics);
         assert!(gateway.supports_workspace_diagnostics);
-        assert!(gateway.semantic.is_empty());
+        assert_eq!(
+            gateway.semantic,
+            tracedecay_lsp::SemanticCapability::ALL
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]
@@ -1883,7 +1888,12 @@ mod tests {
             let (selected, gateway) = production_lsp_registration(&admitted);
 
             assert_eq!(selected, vec!["rust", language, "go"]);
-            assert!(gateway.semantic.is_empty());
+            assert_eq!(
+                gateway.semantic,
+                tracedecay_lsp::SemanticCapability::ALL
+                    .into_iter()
+                    .collect()
+            );
         }
     }
 }

@@ -1,7 +1,7 @@
 use super::{
     Arc, CheckpointBlockers, CheckpointOutcome, CheckpointRequest, DATABASE_HEALTH_GATE, Database,
-    DatabaseAuthorityRole, DatabaseHealth, Result, TraceDecayError, database_checkpoint_probe,
-    database_health,
+    DatabaseAuthorityRole, DatabaseHealth, DatabaseStorageTelemetryHandle, Result, TraceDecayError,
+    database_checkpoint_probe, database_health,
 };
 
 impl Database {
@@ -26,7 +26,9 @@ impl Database {
                 message: format!("failed to release SQLite reader cache: {error}"),
                 operation: "release SQLite database memory".to_owned(),
             })?;
-        if let Some(connection) = &self.inner.write_conn {
+        if self.is_writable()
+            && let Some(connection) = &self.inner.write_conn
+        {
             connection
                 .execute_batch("PRAGMA shrink_memory")
                 .await
@@ -125,8 +127,8 @@ impl Database {
             Arc::new(database_checkpoint_probe()?),
         );
         let outcome = self
-            .inner
-            ._runtime
+            .client
+            .runtime()
             .run_checkpoint(request, authority)
             .await
             .map_err(|error| TraceDecayError::Database {
@@ -227,19 +229,24 @@ impl Database {
         result
     }
 
-    pub fn storage_telemetry_handle(
-        &self,
-    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle> {
-        self.retained_runtime()
+    pub fn storage_telemetry_handle(&self) -> Result<DatabaseStorageTelemetryHandle> {
+        let handle = self
+            .client
+            .runtime()
             .telemetry_read_handle()
             .map_err(|error| TraceDecayError::Database {
                 message: format!("failed to attach SQLite-store telemetry reader: {error:?}"),
                 operation: "attach SQLite-store telemetry reader".to_owned(),
-            })
+            })?;
+        Ok(DatabaseStorageTelemetryHandle {
+            handle,
+            _client_guard: self.client_guard(),
+        })
     }
 
     pub async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
-        self.retained_runtime()
+        self.client
+            .runtime()
             .storage_page_counts(std::time::Duration::from_secs(5))
             .map_err(|error| TraceDecayError::Database {
                 message: format!("failed to sample SQLite-store pages: {error:?}"),
@@ -250,12 +257,48 @@ impl Database {
     /// Runs bounded incremental vacuum through the canonical writer lane.
     pub async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
         let authority = self.write_authority()?;
-        self.retained_runtime()
+        self.client
+            .runtime()
             .run_bounded_incremental_compaction(pages, authority)
             .await
             .map_err(|error| TraceDecayError::Database {
                 message: format!("failed to compact SQLite store: {error:?}"),
                 operation: "run bounded SQLite-store compaction".to_owned(),
+            })
+    }
+
+    /// Produces an online snapshot through this database's canonical writer
+    /// runtime. Read-only clients cannot request a snapshot because the
+    /// writer samples the retained write authority throughout publication.
+    pub async fn snapshot_to(&self, destination: &std::path::Path) -> Result<()> {
+        let authority = self.write_authority()?;
+        self.client
+            .runtime()
+            .snapshot_to(destination.to_path_buf(), authority)
+            .await
+            .map(|_| ())
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to snapshot SQLite store: {error:?}"),
+                operation: "snapshot SQLite store".to_owned(),
+            })
+    }
+
+    /// Produces an interruption-aware online snapshot through this database's
+    /// canonical writer runtime. The caller supplies only request control;
+    /// this guarded facade retains and revalidates the exact write authority.
+    pub async fn snapshot_to_interruptible(
+        &self,
+        destination: &std::path::Path,
+        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
+    ) -> Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt> {
+        let authority = self.write_authority()?;
+        self.client
+            .runtime()
+            .snapshot_to_interruptible(destination.to_path_buf(), probe, authority)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to snapshot SQLite store: {error:?}"),
+                operation: "snapshot SQLite store".to_owned(),
             })
     }
 }

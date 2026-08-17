@@ -115,7 +115,7 @@ pub async fn dashboard_configuration_application_runtime_for_test(
 #[doc(hidden)]
 pub struct DashboardGraphTestRuntimeV1 {
     profile_root: std::path::PathBuf,
-    profile_database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+    profile_database: crate::global_db::RegisteredGlobalDbLeaseV1,
     registry: std::sync::Arc<
         crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
     >,
@@ -152,38 +152,38 @@ impl DashboardGraphTestRuntimeV1 {
         })
     }
 
-    pub fn profile_database(&self) -> std::sync::Arc<crate::global_db::RegisteredGlobalDb> {
-        std::sync::Arc::clone(&self.profile_database)
+    pub fn profile_database(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
+        self.profile_database.clone()
     }
 
     pub async fn project_sessions(
         &self,
         project_root: &std::path::Path,
         project_id: tracedecay_domain::ProjectId,
-    ) -> crate::errors::Result<std::sync::Arc<crate::global_db::RegisteredGlobalDb>> {
+    ) -> crate::errors::Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
         let registered = self
             .registry
             .project_sessions(project_id.clone(), [project_root.to_path_buf()])
             .await?;
-        // Production project open binds the retained project graph runtime to
-        // the registered project-sessions authority before any ingest runs;
+        // Production project open binds a weak project graph proxy to the
+        // registered project-sessions authority before any ingest runs;
         // git-evidence publication (Loom spans) requires that mount, so the
         // dashboard test composition provides the same binding. The registry
-        // caches the mount per project, so repeated opens reuse it.
+        // caches the mount per project, so repeated opens reuse the proxy.
         if registered.project_graph_runtime().is_none() {
             let project_database = self
                 .registry
                 .project_memory(project_id.clone(), [project_root.to_path_buf()])
                 .await?;
-            let graph_runtime = project_database.memory_graph_runtime().ok_or_else(|| {
+            let graph_proxy = project_database.memory_graph_runtime().ok_or_else(|| {
                 crate::errors::TraceDecayError::Database {
                     operation: "bind dashboard project graph".to_owned(),
                     message: "project memory database has no verified graph runtime".to_owned(),
                 }
             })?;
             // A lost set race means another caller already bound the same
-            // retained runtime; the required postcondition holds either way.
-            let _ = registered.bind_project_graph_runtime(graph_runtime);
+            // weak proxy; the required postcondition holds either way.
+            let _ = registered.bind_project_graph_runtime(graph_proxy);
         }
         Ok(registered)
     }
@@ -221,7 +221,7 @@ impl DashboardGraphTestRuntimeV1 {
             options,
             layout,
             project_database,
-            std::sync::Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             std::sync::Arc::clone(&self.registry),
         )
         .await
@@ -261,7 +261,7 @@ impl DashboardGraphTestRuntimeV1 {
             options,
             layout,
             project_database,
-            std::sync::Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             std::sync::Arc::clone(&self.registry),
         )
         .await
@@ -278,7 +278,7 @@ impl DashboardGraphTestRuntimeV1 {
 pub async fn dashboard_lcm_read_authority_for_test(
     cg: &crate::tracedecay::TraceDecay,
     registry: &crate::global_db::RegisteredGlobalDb,
-    project_database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+    project_database: crate::global_db::RegisteredGlobalDbLeaseV1,
 ) -> Option<std::sync::Arc<dyn DashboardLcmReadPortV1>> {
     let root =
         match crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project(cg, registry)
@@ -291,7 +291,7 @@ pub async fn dashboard_lcm_read_authority_for_test(
         };
     let identity = root.identity().clone();
     let service = crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
-        std::sync::Arc::clone(&project_database),
+        project_database.clone(),
         root,
         None,
     )?;
@@ -310,7 +310,7 @@ pub async fn dashboard_lcm_read_authority_for_test(
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
 pub fn dashboard_git_correlation_read_authority_for_test(
-    project_database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+    project_database: crate::global_db::RegisteredGlobalDbLeaseV1,
 ) -> std::sync::Arc<dyn DashboardGitCorrelationReadPortV1> {
     std::sync::Arc::new(
         crate::mcp::tools::handlers::DashboardGitCorrelationReadAdapter::new(project_database),

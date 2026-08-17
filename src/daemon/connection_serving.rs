@@ -1305,7 +1305,11 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         let result = match request.action.clone() {
             Ok(action) => {
                 store_administration
-                    .execute_branch_admin_for_handshake(&handshake, action)
+                    .execute_branch_admin_for_handshake(
+                        &invocation.code_index_schedulers,
+                        &handshake,
+                        action,
+                    )
                     .await
             }
             Err(message) => Err(TraceDecayError::Config { message }),

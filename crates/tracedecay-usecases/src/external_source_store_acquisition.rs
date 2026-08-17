@@ -6,7 +6,7 @@ use tracedecay_domain::{ManifestDigest, SourceBindingIdentityV1, UtcMicros, cano
 use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, RepositoryReadResultV1,
     RepositoryWritePayloadV1, RuntimeReadCoverageV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
-    SourceAcquisitionQueueCasV1, SourceAcquisitionQueueStateV1, StorageRuntimeReadPort,
+    SourceAcquisitionQueueCasV1, SourceAcquisitionQueueStateV1,
 };
 
 use super::{
@@ -73,10 +73,7 @@ impl RuntimeExternalSourceStore {
         let request =
             runtime_submit_request(self.runtime.binding(), payload, &command, &idempotency_key)?;
         let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
-        let submitted = self
-            .runtime
-            .dispatch_submit_authorized(request, probe, self.authority.clone())
-            .await;
+        let submitted = self.runtime.dispatch_submit(request, probe).await;
         if matches!(
             submitted,
             Ok(RuntimeSubmitOutcomeV1::Committed { .. }
@@ -105,8 +102,7 @@ impl RuntimeExternalSourceStore {
         let probe = ExternalSourceRuntimeProbe::from_control(request.control());
         let outcome = self
             .runtime
-            .read(request, &probe)
-            .await
+            .dispatch_read(request, &probe)
             .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?;
         if !matches!(
             outcome.coverage(),

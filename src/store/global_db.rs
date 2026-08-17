@@ -18,7 +18,8 @@ use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, SpanObs
 /// The adapter deliberately borrows `RegisteredGlobalDb`: runtime ownership,
 /// authority checks, and all transaction begin/commit/rollback decisions stay
 /// in the registered database implementation.
-/// The holder `D` is generic so callers that own an `Arc<RegisteredGlobalDb>`
+/// The holder `D` is generic so callers that own a
+/// [`crate::global_db::RegisteredGlobalDbLeaseV1`]
 /// can build a lifetime-free (`'static`) adapter. A borrowed adapter makes the
 /// trait impls below apply only "for some specific lifetime", which turns any
 /// `Send` proof over a future holding one across an await into a higher-ranked

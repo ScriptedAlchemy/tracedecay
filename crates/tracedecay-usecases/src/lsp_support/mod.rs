@@ -3,7 +3,7 @@
 mod factory;
 mod runtime_adapters;
 
-pub use factory::DaemonLspSessionFactory;
+pub use factory::{DaemonLspSessionFactory, UpstreamCapabilityInitializationAuthority};
 pub use runtime_adapters::{
     BrokerDiagnosticSnapshotAuthority, DaemonSemanticProviderAdapter, LspDiagnosticDocumentPort,
     LspSemanticRequestAuthority, LspWorkspaceDocumentIndexPort,

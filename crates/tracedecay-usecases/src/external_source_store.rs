@@ -24,11 +24,11 @@ use tracedecay_store::{
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
     SourceCommitReceiptV1, SourceCommitV1, SourceObjectMutationV1, SourceObjectTransitionV1,
     SourceObservationEvidenceV1, SourcePendingProjectionV1, SourceProjectionCommitV1,
-    SourceStoreStateV1, StorageRuntimeReadPort, build_source_projection,
+    SourceStoreStateV1, build_source_projection,
 };
 
 use crate::request_identity::{LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency};
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeHandle;
+use tracedecay_runtime_core::db::DatabaseRuntimeClientV1;
 
 #[derive(Debug, Error)]
 pub enum RuntimeExternalSourceErrorV1 {
@@ -86,21 +86,12 @@ pub(crate) struct RuntimeSourceCaptureRequestV1<'a> {
 
 #[derive(Clone)]
 pub struct RuntimeExternalSourceStore {
-    runtime: StoreRuntimeHandle,
-    authority: tracedecay_runtime_core::db::DatabaseAuthority,
+    runtime: DatabaseRuntimeClientV1,
 }
 
 impl RuntimeExternalSourceStore {
-    pub fn new(
-        runtime: StoreRuntimeHandle,
-        authority: tracedecay_runtime_core::db::DatabaseAuthority,
-    ) -> Result<Self, RuntimeExternalSourceErrorV1> {
-        if authority.canonical_database_path() != runtime.locator().path() {
-            return Err(RuntimeExternalSourceErrorV1::Invalid(
-                "external source authority is not attached to the selected runtime".to_owned(),
-            ));
-        }
-        Ok(Self { runtime, authority })
+    pub fn new(runtime: DatabaseRuntimeClientV1) -> Self {
+        Self { runtime }
     }
 
     /// The production consumer of `SourceCaptureApplicationV1::capture_sanitized`.
@@ -195,7 +186,7 @@ impl RuntimeExternalSourceStore {
         let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
         match self
             .runtime
-            .dispatch_submit_authorized(request, probe, self.authority.clone())
+            .dispatch_submit(request, probe)
             .await
             .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?
         {
@@ -514,8 +505,7 @@ impl RuntimeExternalSourceStore {
         let probe = ExternalSourceRuntimeProbe::from_control(request.control());
         let outcome = self
             .runtime
-            .read(request, &probe)
-            .await
+            .dispatch_read(request, &probe)
             .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?;
         if !matches!(
             outcome.coverage(),
@@ -543,8 +533,7 @@ impl RuntimeExternalSourceStore {
         let probe = ExternalSourceRuntimeProbe::from_control(request.control());
         let outcome = self
             .runtime
-            .read(request, &probe)
-            .await
+            .dispatch_read(request, &probe)
             .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?;
         if !matches!(
             outcome.coverage(),
@@ -578,7 +567,7 @@ impl RuntimeExternalSourceStore {
         let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
         match self
             .runtime
-            .dispatch_submit_authorized(request, probe, self.authority.clone())
+            .dispatch_submit(request, probe)
             .await
             .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?
         {
@@ -601,8 +590,7 @@ impl RuntimeExternalSourceStore {
         let probe = ExternalSourceRuntimeProbe::from_control(request.control());
         let outcome = self
             .runtime
-            .read(request, &probe)
-            .await
+            .dispatch_read(request, &probe)
             .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?;
         if !matches!(
             outcome.coverage(),

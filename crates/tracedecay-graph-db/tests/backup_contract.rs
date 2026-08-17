@@ -98,7 +98,7 @@ fn traversal(start: &str) -> TraversalRequest {
 /// Seeds a closed store at `root/graph.grafeo` holding only entity `a`.
 fn seeded_store(root: &Path) -> PathBuf {
     fs::create_dir_all(root).unwrap();
-    let (registered, db) = RegisteredGraph::open_raw(root).unwrap();
+    let (registered, db) = RegisteredGraph::open_lease(root).unwrap();
     db.apply_unverified(batch(
         "watermark-1",
         vec![GraphMutation::UpsertEntity(entity("a"))],
@@ -143,7 +143,7 @@ fn full_backup_restores_the_fenced_snapshot_and_excludes_later_writes() {
     let backup_receipt = GraphDb::create_verified_backup(&source, &backup, &live()).unwrap();
     assert!(backup_receipt.artifact_count >= 1);
 
-    let (registered, db) = RegisteredGraph::open_raw(&store_root).unwrap();
+    let (registered, db) = RegisteredGraph::open_lease(&store_root).unwrap();
     db.apply_unverified(batch(
         "watermark-2",
         vec![
@@ -161,7 +161,7 @@ fn full_backup_restores_the_fenced_snapshot_and_excludes_later_writes() {
     assert_eq!(restore_receipt, backup_receipt);
     assert_no_staging_residue(&restored_root);
 
-    let (registered, restored) = RegisteredGraph::open_raw(&restored_root).unwrap();
+    let (registered, restored) = RegisteredGraph::open_lease(&restored_root).unwrap();
     let from_a = restored.traverse(traversal("a")).unwrap();
     assert_eq!(from_a.visits.len(), 1);
     assert_eq!(from_a.visits[0].entity.as_str(), "a");
@@ -178,7 +178,7 @@ fn backup_rejects_a_source_still_held_open_by_its_owner() {
     let store_root = temp.path().join("store");
     let backup = temp.path().join("backup");
     seeded_store(&store_root);
-    let (registered, _db) = RegisteredGraph::open_raw(&store_root).unwrap();
+    let (registered, _db) = RegisteredGraph::open_lease(&store_root).unwrap();
 
     let error =
         GraphDb::create_verified_backup(&graph_path(&store_root), &backup, &live()).unwrap_err();

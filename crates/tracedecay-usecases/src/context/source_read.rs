@@ -66,7 +66,7 @@ pub async fn read_source(
         "last_sync_at": last_sync_at,
     }))?;
 
-    let cache_connection = database.engine_conn();
+    let cache_connection = database.read_connection();
     if let Some(cached) = read_cache::get(
         &cache_connection,
         project_id,

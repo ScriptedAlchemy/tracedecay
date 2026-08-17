@@ -32,7 +32,7 @@ impl WorkProductOwnerAuthorizationPortV1 for WorkSqliteStorage {
         selection: &WorkProductSelectionScopeV1,
         _observed_at: UtcMicros,
     ) -> Result<AuthorizedWorkProductScopeV1, WorkProductOwnerAuthorizationErrorV1> {
-        let shard = &self.handle.binding().shard_id;
+        let shard = &self.handle().binding().shard_id;
         if !selection_is_within_resolved_scope(context, selection) {
             return Err(WorkProductOwnerAuthorizationErrorV1::NotAuthorized);
         }

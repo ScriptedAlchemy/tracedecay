@@ -368,7 +368,7 @@ mod tests {
             }
         }
 
-        async fn mount_observability(&self) -> Arc<crate::global_db::RegisteredGlobalDb> {
+        async fn mount_observability(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
             let session_db = self
                 .memory
                 .store_runtime_registry()
@@ -386,7 +386,7 @@ mod tests {
                 .invocation_service()
                 .mount_observability_producer(
                     self.project_root.clone(),
-                    Arc::clone(&session_db),
+                    session_db.clone(),
                     self.project_id.clone(),
                     self.configuration_digest.clone(),
                     policy_digest,

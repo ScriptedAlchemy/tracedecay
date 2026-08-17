@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use tracedecay_domain::VectorGenerationIdV1;
@@ -19,7 +18,7 @@ use super::publication_support::{
 };
 use super::staging::{map_staging_error, require_authority_binding};
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
-use crate::GraphDbError;
+use crate::{GraphDbError, GraphDbLeaseV1};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SemanticVectorRetentionAction {
@@ -48,7 +47,7 @@ pub struct SemanticVectorRetirementReservation {
     revision: SemanticVectorStageCensusRevision,
     kind: SemanticVectorRetirementReservationKind,
     locator: crate::lease::GenerationLocator,
-    database: Arc<crate::GraphDb>,
+    database: GraphDbLeaseV1,
     armed: bool,
 }
 
@@ -354,7 +353,7 @@ fn reserve_published(
     _registration: &GraphDbRegistration,
     authority: &mut dyn SemanticVectorPublicationAuthority,
     context: &GraphPublicationOperationContextV1<'_>,
-    database: &Arc<crate::GraphDb>,
+    database: &GraphDbLeaseV1,
     record: &tracedecay_store::SemanticVectorStageRecord,
     revision: SemanticVectorStageCensusRevision,
 ) -> Result<Result<SemanticVectorRetirementReservation, SemanticVectorRetentionAction>, GraphDbError>
@@ -410,13 +409,13 @@ fn reserve_published(
         revision,
         kind: SemanticVectorRetirementReservationKind::Published(Box::new(retirement)),
         locator,
-        database: Arc::clone(database),
+        database: database.clone(),
         armed: true,
     }))
 }
 
 fn reserve_cancelled(
-    database: &Arc<crate::GraphDb>,
+    database: &GraphDbLeaseV1,
     record: &tracedecay_store::SemanticVectorStageRecord,
     revision: SemanticVectorStageCensusRevision,
 ) -> Result<SemanticVectorRetirementReservation, GraphDbError> {
@@ -426,7 +425,7 @@ fn reserve_cancelled(
         revision,
         kind: SemanticVectorRetirementReservationKind::Cancelled,
         locator: locator_from_key(&record.plan.publication_key)?,
-        database: Arc::clone(database),
+        database: database.clone(),
         armed: true,
     })
 }

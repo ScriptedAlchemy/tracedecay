@@ -823,7 +823,7 @@
         owner.mark_ready().unwrap();
         // Corrupt to Failed then retry.
         {
-            let mut guard = owner.inner.lock().unwrap();
+            let mut guard = owner.inner.writer();
             if let Some(SemanticModelLifecycleStateV1::Ready {
                 model_id,
                 revision,
@@ -858,6 +858,127 @@
         owner.select_model(None, false).unwrap();
         assert!(!owner.enqueue_startup_acquisition_if_needed());
         assert!(owner.status().selected_model.is_none());
+    }
+
+    #[test]
+    fn publication_lease_blocks_selection_until_the_commit_boundary_releases_it() {
+        struct ActiveCancellation;
+
+        impl SemanticExecutionAuthority for ActiveCancellation {
+            fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
+                None
+            }
+        }
+
+        impl SemanticEvaluationCancellationV1 for ActiveCancellation {}
+
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(FixtureSource {
+            root: fixture.path().to_path_buf(),
+            calls: AtomicUsize::new(0),
+        });
+        let owner = Arc::new(
+            SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap(),
+        );
+        owner.select_model(Some(&model_id), true).unwrap();
+        owner.acquire_blocking_for_tests().unwrap();
+        owner.mark_ready().unwrap();
+
+        let identity = owner.verified_evaluation_publication_identity().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let lease = runtime
+            .block_on(owner.acquire_verified_evaluation_publication_lease(
+                &identity,
+                Arc::new(ActiveCancellation),
+            ))
+            .unwrap();
+
+        let (attempted_tx, attempted_rx) = mpsc::sync_channel(1);
+        let (selected_tx, selected_rx) = mpsc::sync_channel(1);
+        let selecting_owner = Arc::clone(&owner);
+        let selecting = thread::spawn(move || {
+            attempted_tx.send(()).unwrap();
+            selected_tx
+                .send(selecting_owner.select_model(None, false))
+                .unwrap();
+        });
+        attempted_rx.recv().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while owner.inner.read().evaluation_publication_writers_waiting == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "selection never reached the lifecycle writer gate"
+            );
+            thread::yield_now();
+        }
+        assert!(
+            selected_rx.try_recv().is_err(),
+            "selection must remain blocked until the publication lease drops"
+        );
+
+        drop(lease);
+        let selected = selected_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        selecting.join().unwrap();
+        assert!(selected.selected_model.is_none());
+    }
+
+    #[test]
+    fn cancelled_publication_lease_releases_the_lifecycle_reader() {
+        struct CancelAfterAcquisition {
+            checks: AtomicUsize,
+        }
+
+        impl SemanticExecutionAuthority for CancelAfterAcquisition {
+            fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
+                (self.checks.fetch_add(1, Ordering::SeqCst) != 0)
+                    .then_some(SemanticExecutionInterruptionV1::Cancelled)
+            }
+        }
+
+        impl SemanticEvaluationCancellationV1 for CancelAfterAcquisition {}
+
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(FixtureSource {
+            root: fixture.path().to_path_buf(),
+            calls: AtomicUsize::new(0),
+        });
+        let owner = SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap();
+        owner.select_model(Some(&model_id), true).unwrap();
+        owner.acquire_blocking_for_tests().unwrap();
+        owner.mark_ready().unwrap();
+
+        let identity = owner.verified_evaluation_publication_identity().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let cancelled = runtime.block_on(owner.acquire_verified_evaluation_publication_lease(
+            &identity,
+            Arc::new(CancelAfterAcquisition {
+                checks: AtomicUsize::new(0),
+            }),
+        ));
+        assert!(matches!(cancelled, Err(ModelLifecycleErrorV1::Cancelled)));
+
+        let selected = owner.select_model(None, false).unwrap();
+        assert!(selected.selected_model.is_none());
+    }
+
+    #[test]
+    fn publication_lease_is_send_for_daemon_owned_commit_work() {
+        fn assert_send<T: Send>() {}
+
+        assert_send::<SemanticModelLifecycleEvaluationPublicationLeaseV1>();
     }
 
     #[test]

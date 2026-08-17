@@ -59,6 +59,7 @@ use crate::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
     exact_sql::{ExactSqlWriteAuthority, ExactSqlWriteIntent},
     reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
+    repository::RetainedExactSqlCapability,
 };
 
 use super::*;
@@ -101,10 +102,26 @@ struct Fixture {
     _writer: PersistentWriter,
     _readers: ReaderPool<NoReads>,
     handle: ExactSqlHandle,
-    binding: StoreRuntimeBindingV1,
 }
 
 fn fixture() -> Fixture {
+    fixture_with_binding(remote_test_binding())
+}
+
+fn remote_test_binding() -> StoreRuntimeBindingV1 {
+    serde_json::from_value(serde_json::json!({
+        "shard_id": {
+            "brain_id": "brain.remote",
+            "profile_id": "profile.remote",
+            "scope": { "kind": "remote_node", "node_id": "node.remote" }
+        },
+        "incarnation": 3,
+        "authority_epoch": 11
+    }))
+    .unwrap()
+}
+
+fn fixture_with_binding(binding: StoreRuntimeBindingV1) -> Fixture {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("remote.sqlite3");
     let connection = rusqlite::Connection::open(&path).unwrap();
@@ -119,16 +136,6 @@ fn fixture() -> Fixture {
         .unwrap();
     drop(connection);
     let path = path.canonicalize().unwrap();
-    let binding: StoreRuntimeBindingV1 = serde_json::from_value(serde_json::json!({
-        "shard_id": {
-            "brain_id": "brain.remote",
-            "profile_id": "profile.remote",
-            "scope": { "kind": "remote_node", "node_id": "node.remote" }
-        },
-        "incarnation": 3,
-        "authority_epoch": 11
-    }))
-    .unwrap();
     let locator = VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
         StoreIncarnationV1::new(3).unwrap(),
@@ -155,7 +162,6 @@ fn fixture() -> Fixture {
         _writer: writer,
         _readers: readers,
         handle,
-        binding,
     }
 }
 
@@ -185,14 +191,20 @@ impl RemoteSpoolKeyringV1 for TestKeyring {
 }
 
 fn storage(fixture: &Fixture) -> RemoteSqliteStorageV1 {
-    RemoteSqliteStorageV1::from_registered(
-        fixture.handle.clone(),
-        fixture.binding.clone(),
+    RemoteSqliteStorageV1::from_retained_exact_sql(
+        retained(fixture),
         Arc::new(TestKeyring(Arc::new(
             RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
         ))),
     )
     .unwrap()
+}
+
+fn retained(fixture: &Fixture) -> RetainedExactSqlCapability {
+    RetainedExactSqlCapability::from_authorized_handle_with_guard(
+        fixture.handle.clone(),
+        fixture.handle.clone(),
+    )
 }
 
 fn writer() -> RemoteWriterAuthorityV1 {
@@ -405,12 +417,7 @@ fn runtime_attachment_requires_registered_remote_binding() {
             RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
         ))) as Arc<dyn RemoteSpoolKeyringV1>
     };
-    RemoteSqliteStorageV1::from_registered(
-        canonical.handle.clone(),
-        canonical.binding.clone(),
-        keyring(),
-    )
-    .unwrap();
+    RemoteSqliteStorageV1::from_retained_exact_sql(retained(&canonical), keyring()).unwrap();
     let project_binding: StoreRuntimeBindingV1 = serde_json::from_value(serde_json::json!({
         "shard_id": {
             "brain_id": "brain.remote",
@@ -421,12 +428,9 @@ fn runtime_attachment_requires_registered_remote_binding() {
         "authority_epoch": 11
     }))
     .unwrap();
+    let project = fixture_with_binding(project_binding);
     assert!(matches!(
-        RemoteSqliteStorageV1::from_registered(
-            canonical.handle.clone(),
-            project_binding,
-            keyring(),
-        ),
+        RemoteSqliteStorageV1::from_retained_exact_sql(retained(&project), keyring()),
         Err(RemoteSqliteStorageErrorV1::BindingMismatch)
     ));
 }
@@ -440,9 +444,8 @@ fn runtime_attachment_rejects_a_missing_registered_identity_without_repairing_it
         .unwrap();
 
     assert!(matches!(
-        RemoteSqliteStorageV1::from_registered(
-            fixture.handle.clone(),
-            fixture.binding.clone(),
+        RemoteSqliteStorageV1::from_retained_exact_sql(
+            retained(&fixture),
             Arc::new(TestKeyring(Arc::new(
                 RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
             ))),
@@ -474,9 +477,8 @@ fn runtime_attachment_rejects_any_non_final_persisted_shape() {
         .execute_batch("DROP TABLE remote_enrollments".to_owned())
         .unwrap();
     assert!(matches!(
-        RemoteSqliteStorageV1::from_registered(
-            fixture.handle.clone(),
-            fixture.binding.clone(),
+        RemoteSqliteStorageV1::from_retained_exact_sql(
+            retained(&fixture),
             Arc::new(TestKeyring(Arc::new(
                 RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
             ))),
@@ -505,9 +507,8 @@ fn runtime_attachment_rejects_same_tables_with_stale_columns() {
         )
         .unwrap();
     assert!(matches!(
-        RemoteSqliteStorageV1::from_registered(
-            fixture.handle.clone(),
-            fixture.binding.clone(),
+        RemoteSqliteStorageV1::from_retained_exact_sql(
+            retained(&fixture),
             Arc::new(TestKeyring(Arc::new(
                 RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
             ))),
@@ -793,9 +794,8 @@ fn capture_rejects_sequence_gaps_and_corrupt_ciphertext() {
 #[test]
 fn capture_enforces_the_registered_spool_event_bound() {
     let fixture = fixture();
-    let storage = RemoteSqliteStorageV1::from_registered_with_limits(
-        fixture.handle.clone(),
-        fixture.binding.clone(),
+    let storage = RemoteSqliteStorageV1::from_retained_exact_sql_with_limits(
+        retained(&fixture),
         Arc::new(TestKeyring(Arc::new(
             RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
         ))),
@@ -1163,9 +1163,8 @@ fn credential_derived_spool_key_isolates_rotated_and_foreign_credentials() {
         )
         .unwrap(),
     );
-    let owner_storage = RemoteSqliteStorageV1::from_registered(
-        fixture.handle.clone(),
-        fixture.binding.clone(),
+    let owner_storage = RemoteSqliteStorageV1::from_retained_exact_sql(
+        retained(&fixture),
         Arc::clone(&owner_keyring),
     )
     .unwrap();
@@ -1177,9 +1176,8 @@ fn credential_derived_spool_key_isolates_rotated_and_foreign_credentials() {
 
     // A restart re-derives the same key from the same credential and decrypts.
     let restart_bytes = owner.derive_spool_key_bytes().unwrap();
-    let restart_storage = RemoteSqliteStorageV1::from_registered(
-        fixture.handle.clone(),
-        fixture.binding.clone(),
+    let restart_storage = RemoteSqliteStorageV1::from_retained_exact_sql(
+        retained(&fixture),
         Arc::new(
             CredentialDerivedSpoolKeyringV1::from_secret_bytes(
                 capture.enrollment_revision,
@@ -1199,9 +1197,8 @@ fn credential_derived_spool_key_isolates_rotated_and_foreign_credentials() {
 
     // A foreign credential derives a disjoint key and cannot decrypt the frame.
     let foreign = OpaqueRemoteCredential::new(vec![6_u8; 32].into_boxed_slice()).unwrap();
-    let foreign_storage = RemoteSqliteStorageV1::from_registered(
-        fixture.handle.clone(),
-        fixture.binding.clone(),
+    let foreign_storage = RemoteSqliteStorageV1::from_retained_exact_sql(
+        retained(&fixture),
         Arc::new(
             CredentialDerivedSpoolKeyringV1::from_secret_bytes(
                 capture.enrollment_revision,
@@ -1217,9 +1214,8 @@ fn credential_derived_spool_key_isolates_rotated_and_foreign_credentials() {
     );
 
     // A rotated credential revision resolves to no key at all.
-    let rotated_storage = RemoteSqliteStorageV1::from_registered(
-        fixture.handle.clone(),
-        fixture.binding.clone(),
+    let rotated_storage = RemoteSqliteStorageV1::from_retained_exact_sql(
+        retained(&fixture),
         Arc::new(
             CredentialDerivedSpoolKeyringV1::from_secret_bytes(
                 capture.enrollment_revision + 1,

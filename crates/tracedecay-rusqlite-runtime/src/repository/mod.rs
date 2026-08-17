@@ -39,6 +39,7 @@ mod graph_publication;
 mod observation;
 mod project;
 mod remote;
+mod retained_exact_sql;
 mod retrieval_anchor;
 mod scope_set;
 mod semantic_vector_staging;
@@ -65,6 +66,7 @@ pub use fact::FactExecutor;
 pub use graph_publication::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage};
 pub use observation::ObservationExecutor;
 pub use project::ProjectExecutor;
+pub use retained_exact_sql::RetainedExactSqlCapability;
 pub use retrieval_anchor::RetrievalAnchorExecutor;
 pub use scope_set::{
     AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetExecutor, AuthorizedScopeSetSqliteStorage,

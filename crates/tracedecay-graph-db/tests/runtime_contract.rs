@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphEntity,
+    GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwner, GraphEntity,
     GraphEntityId, GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace,
     GraphProjectionId, GraphProperty, GraphPropertyName, GraphPublication,
     GraphPublicationInputDigest, GraphRelation, GraphRelationId, GraphRelationKind,
@@ -76,14 +76,14 @@ fn watermark(value: &str) -> GraphWatermark {
     GraphWatermark::new(value).unwrap()
 }
 
-fn memory_db() -> Arc<GraphDb> {
-    GraphDbOwner::memory(live()).unwrap().handle()
+fn memory_db() -> GraphDbLeaseV1 {
+    GraphDbOwner::memory(live()).unwrap().issue_lease().unwrap()
 }
 
 #[test]
 fn only_the_owner_can_close_shared_operation_handles() {
     let owner = GraphDbOwner::memory(live()).unwrap();
-    let handle = owner.handle();
+    let handle = owner.issue_lease().unwrap();
     let peer = handle.clone();
 
     assert!(handle.snapshot().is_ok());
@@ -294,7 +294,7 @@ fn apply_rechecks_cancellation_immediately_before_commit() {
 #[test]
 fn derived_identity_apply_rolls_back_and_survives_reopen() {
     let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open_raw(temp.path()).unwrap();
+    let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
     assert_eq!(
         db.apply_unverified(batch(
             "code",
@@ -324,7 +324,7 @@ fn derived_identity_apply_rolls_back_and_survives_reopen() {
     drop(db);
     assert!(registered.close().unwrap());
 
-    let reopened = registered.reopen_raw().unwrap();
+    let reopened = registered.reopen_lease().unwrap();
     assert_eq!(
         reopened
             .entity(&namespace(), &entity_id("committed"), live())
@@ -426,7 +426,7 @@ fn snapshot_is_immutable_after_live_write() {
 
 #[test]
 fn traversal_is_deterministic_across_mutation_order() {
-    fn populated(order: [&str; 2]) -> Arc<GraphDb> {
+    fn populated(order: [&str; 2]) -> GraphDbLeaseV1 {
         let db = memory_db();
         let mut mutations = vec![
             GraphMutation::UpsertEntity(entity("a")),
@@ -1328,7 +1328,7 @@ fn publication_changed_input_and_stale_watermark_conflict() {
 #[test]
 fn persistent_close_and_reopen_preserves_graph_and_vector() {
     let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open_raw(temp.path()).unwrap();
+    let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
     db.apply_unverified(batch(
         "vectors",
         "g1",
@@ -1343,7 +1343,7 @@ fn persistent_close_and_reopen_preserves_graph_and_vector() {
     drop(db);
     registered.close().unwrap();
 
-    let reopened = registered.reopen_raw().unwrap();
+    let reopened = registered.reopen_lease().unwrap();
     assert_eq!(reopened.traverse(traversal("a")).unwrap().visits.len(), 2);
     let index = GraphVectorIndexRequest {
         namespace: namespace(),
@@ -1375,7 +1375,7 @@ fn persistent_close_and_reopen_preserves_graph_and_vector() {
 #[test]
 fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
     let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open_raw(temp.path()).unwrap();
+    let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
     let vectors = (0..2_049)
         .map(|ordinal| {
             GraphMutation::UpsertEntity(vector_entity(
@@ -1391,7 +1391,7 @@ fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
     registered.close().unwrap();
 
     let admission_started = Instant::now();
-    let reopened = registered.reopen_raw().unwrap();
+    let reopened = registered.reopen_lease().unwrap();
     let admission_elapsed = admission_started.elapsed();
     assert!(
         admission_elapsed < Duration::from_secs(5),
@@ -1416,7 +1416,7 @@ fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
 #[test]
 fn vector_write_after_reopen_leaves_index_activation_to_background_owner() {
     let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open_raw(temp.path()).unwrap();
+    let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
     db.apply_unverified(batch(
         "vectors",
         "g1",
@@ -1431,7 +1431,7 @@ fn vector_write_after_reopen_leaves_index_activation_to_background_owner() {
     drop(db);
     registered.close().unwrap();
 
-    let reopened = registered.reopen_raw().unwrap();
+    let reopened = registered.reopen_lease().unwrap();
     let index = GraphVectorIndexRequest {
         namespace: namespace(),
         projection: projection("vectors"),
@@ -1479,11 +1479,11 @@ fn vector_write_after_reopen_leaves_index_activation_to_background_owner() {
 #[test]
 fn publication_state_survives_reopen() {
     let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open_raw(temp.path()).unwrap();
+    let (registered, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
     let first = db.publish_unverified(publication("event-1", None)).unwrap();
     drop(db);
     registered.close().unwrap();
-    let reopened = registered.reopen_raw().unwrap();
+    let reopened = registered.reopen_lease().unwrap();
     assert_eq!(
         reopened
             .publish_unverified(publication("event-1", None))
@@ -1503,7 +1503,7 @@ fn valid_foreign_grafeo_store_requires_reset() {
     .unwrap();
     raw.session().create_node(&["foreign"]);
     raw.close().unwrap();
-    let error = RegisteredGraph::open_raw(temp.path()).err().unwrap();
+    let error = RegisteredGraph::open_lease(temp.path()).err().unwrap();
     assert!(matches!(error, GraphDbError::ResetRequired { .. }));
 }
 
@@ -1523,14 +1523,14 @@ fn wrong_tracedecay_format_requires_reset() {
         )
         .unwrap();
     raw.close().unwrap();
-    let error = RegisteredGraph::open_raw(temp.path()).err().unwrap();
+    let error = RegisteredGraph::open_lease(temp.path()).err().unwrap();
     assert!(matches!(error, GraphDbError::ResetRequired { .. }));
 }
 
 #[test]
 fn closed_handle_fails_typed() {
     let owner = GraphDbOwner::memory(live()).unwrap();
-    let db = owner.handle();
+    let db = owner.issue_lease().unwrap();
     owner.close().unwrap();
     assert_eq!(
         db.apply_unverified(batch("code", "g1", "w1", Vec::new()))

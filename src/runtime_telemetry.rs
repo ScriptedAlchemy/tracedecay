@@ -147,6 +147,8 @@ pub struct DatabaseSnapshot {
 pub struct ReaderPoolOccupancy {
     /// `ready` or `draining`.
     pub state: String,
+    /// Successful exact-SQL snapshot admissions since this reader pool attached.
+    pub snapshot_admissions: u64,
     pub general: ReaderLaneOccupancy,
     pub health: ReaderLaneOccupancy,
 }
@@ -167,6 +169,7 @@ impl ReaderPoolOccupancy {
                 crate::db::engine::ReaderPoolState::Ready => "ready".to_string(),
                 crate::db::engine::ReaderPoolState::Draining => "draining".to_string(),
             },
+            snapshot_admissions: snapshot.snapshot_admissions,
             general: ReaderLaneOccupancy {
                 workers: snapshot.general_workers,
                 available: snapshot.available_general,
@@ -532,7 +535,7 @@ async fn collect_database_with_generation_census(
     };
     let reader_pool = cg
         .db()
-        .conn()
+        .read_connection()
         .reader_pool_occupancy()
         .as_ref()
         .map(ReaderPoolOccupancy::from_pool);
@@ -613,7 +616,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 async fn read_journal_mode(cg: &crate::tracedecay::TraceDecay) -> Result<String> {
     let mut rows = cg
         .db()
-        .conn()
+        .read_connection()
         .query("PRAGMA journal_mode", ())
         .await
         .map_err(|e| TraceDecayError::Database {
@@ -642,15 +645,15 @@ async fn read_pragma_i64(
     sql: &str,
     operation: &str,
 ) -> Result<i64> {
-    let mut rows =
-        cg.db()
-            .conn()
-            .query(sql, ())
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to query {sql}: {error}"),
-                operation: operation.to_string(),
-            })?;
+    let mut rows = cg
+        .db()
+        .read_connection()
+        .query(sql, ())
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to query {sql}: {error}"),
+            operation: operation.to_string(),
+        })?;
     rows.next()
         .await
         .map_err(|error| TraceDecayError::Database {
@@ -780,6 +783,7 @@ mod tests {
             limbo_health: 0,
             waiting_general: 4,
             waiting_health: 0,
+            snapshot_admissions: 73,
         });
         let wire = serde_json::to_value(&occupancy).unwrap();
 
@@ -788,6 +792,7 @@ mod tests {
         assert_eq!(wire["general"]["limbo"], 2);
         assert_eq!(wire["general"]["waiting"], 4);
         assert_eq!(wire["health"]["leased"], 1);
+        assert_eq!(wire["snapshot_admissions"], 73);
         // Every worker in a lane is accounted for by exactly one bucket.
         assert_eq!(
             occupancy.general.available + occupancy.general.leased + occupancy.general.limbo,

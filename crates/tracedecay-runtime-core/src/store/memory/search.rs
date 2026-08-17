@@ -366,7 +366,7 @@ async fn project_memory_graph_assist(
     candidates: &mut SearchCandidates,
     read_control: &FactReadControl,
 ) -> FactStoreResult<ProjectMemoryFactSearchGraphCoverageV1> {
-    if db.memory_graph_runtime().is_none() {
+    if db.issue_memory_graph_runtime_operation().is_err() {
         return Ok(ProjectMemoryFactSearchGraphCoverageV1::NotMounted);
     }
     let roots = candidates

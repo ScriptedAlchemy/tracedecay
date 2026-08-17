@@ -25,7 +25,7 @@ mod schema;
 mod sql;
 pub mod store;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -47,6 +47,7 @@ use tracedecay_query::retrieval::evidence_lanes::{
     CanonicalTaskSessionCandidateExportPortV1, TaskSessionLaneRequestV1,
     TaskSessionLaneRetrieverV1, TaskSessionPlan23BindingV1,
 };
+use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_sessions::lcm::contracts::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
     LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
@@ -55,7 +56,7 @@ use tracedecay_sessions::runtime::git_correlation::{
     GitCorrelationError, GitScopeFilter, git_evidence_projection_identity,
     recover_git_evidence_projection,
 };
-use tracedecay_store::SessionMessageRecord;
+use tracedecay_store::{SessionMessageRecord, SessionRecord};
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use tracedecay_temporal_query::hydrate_temporal_candidate_selection;
@@ -107,11 +108,8 @@ impl RegisteredGlobalDb {
         // Absence is not an authoritative empty projection. Until Git
         // evidence has been published, callers cannot prove that no durable
         // session holds a matching worktree.
-        let Some(projection) = recover_git_evidence_projection(
-            runtime.as_ref(),
-            &identity,
-            Arc::new(AtomicBool::new(false)),
-        )?
+        let Some(projection) =
+            recover_git_evidence_projection(runtime, &identity, Arc::new(AtomicBool::new(false)))?
         else {
             return Err(GitCorrelationError::Unavailable(
                 "verified Git-evidence projection has not been published".to_owned(),
@@ -152,7 +150,7 @@ impl RegisteredGlobalDb {
         let read = self.read_snapshot().await.map_err(|source| {
             cursor_keys::GlobalDbCursorKeyProviderError::Storage {
                 operation: "load registered session cursor authentication key",
-                source,
+                source: EngineError::invalid_operation(source.to_string()),
             }
         })?;
         GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key).await
@@ -164,7 +162,7 @@ impl RegisteredGlobalDb {
         let read = self.read_snapshot().await.map_err(|source| {
             cursor_keys::GlobalDbCursorKeyProviderError::Storage {
                 operation: "load pre-provisioned session cursor authentication key",
-                source,
+                source: EngineError::invalid_operation(source.to_string()),
             }
         })?;
         GlobalDbCursorKeyProvider::from_registered_active(&read).await
@@ -176,34 +174,194 @@ pub struct RegisteredGlobalDbSessionTemporalExecution<'db> {
     db: &'db RegisteredGlobalDb,
 }
 
-impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
-    pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
-        Self { db }
-    }
+/// One page item whose owning session must be resolved from the same frozen
+/// registered read as its canonical content.
+pub enum SessionPageReconstructionRequest<'a> {
+    Occurrence {
+        snapshot: &'a TemporalExecutionSnapshot,
+        anchor_id: &'a RetrievalAnchorId,
+        provider: &'a str,
+        session_id: &'a str,
+        content: &'a [u8],
+    },
+    Summary {
+        snapshot: &'a TemporalExecutionSnapshot,
+        provider: &'a str,
+        session_id: &'a str,
+    },
+}
 
-    pub async fn session_message_from_hydrated_occurrence(
-        &self,
-        snapshot: &TemporalExecutionSnapshot,
-        anchor_id: &RetrievalAnchorId,
-        provider: &str,
-        session_id: &str,
-        content: &[u8],
-    ) -> Result<SessionMessageRecord, SessionTemporalExecutionError> {
-        let read = self
-            .db
-            .read_snapshot()
-            .await
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        hydration::session_message_from_hydrated_bytes(
-            &TemporalSqlRead::registered(&read),
+impl<'a> SessionPageReconstructionRequest<'a> {
+    pub const fn occurrence(
+        snapshot: &'a TemporalExecutionSnapshot,
+        anchor_id: &'a RetrievalAnchorId,
+        provider: &'a str,
+        session_id: &'a str,
+        content: &'a [u8],
+    ) -> Self {
+        Self::Occurrence {
             snapshot,
             anchor_id,
             provider,
             session_id,
             content,
-        )
-        .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)
+        }
+    }
+
+    pub const fn summary(
+        snapshot: &'a TemporalExecutionSnapshot,
+        provider: &'a str,
+        session_id: &'a str,
+    ) -> Self {
+        Self::Summary {
+            snapshot,
+            provider,
+            session_id,
+        }
+    }
+
+    fn snapshot(&self) -> &TemporalExecutionSnapshot {
+        match self {
+            Self::Occurrence { snapshot, .. } | Self::Summary { snapshot, .. } => snapshot,
+        }
+    }
+}
+
+/// Canonical session metadata and, for occurrence entries, canonical message
+/// content reconstructed under one registered read snapshot.
+pub enum SessionPageReconstruction {
+    Occurrence {
+        session: SessionRecord,
+        message: SessionMessageRecord,
+    },
+    Summary {
+        session: SessionRecord,
+    },
+}
+
+impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
+    pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
+        Self { db }
+    }
+
+    /// Resolves ordered page records under one frozen registered read snapshot.
+    /// Every request must carry the exact same authorized root; accepting a
+    /// mixed-root batch would make a registered shard an implicit cross-project
+    /// cache.
+    pub async fn reconstruct_session_page<'a>(
+        &self,
+        requests: impl IntoIterator<Item = SessionPageReconstructionRequest<'a>>,
+    ) -> Result<
+        Vec<Result<SessionPageReconstruction, SessionTemporalExecutionError>>,
+        SessionTemporalExecutionError,
+    > {
+        let requests = requests.into_iter().collect::<Vec<_>>();
+        let Some(first) = requests.first() else {
+            return Ok(Vec::new());
+        };
+        let Some(authorized_root) = first.snapshot().request().authorized_root().cloned() else {
+            return Err(SessionTemporalExecutionError::WrongScope);
+        };
+        if requests
+            .iter()
+            .any(|request| request.snapshot().request().authorized_root() != Some(&authorized_root))
+        {
+            return Err(SessionTemporalExecutionError::WrongScope);
+        }
+        first
+            .snapshot()
+            .request()
+            .execution_control()
+            .checkpoint()
+            .map_err(map_control_error)?;
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let read = TemporalSqlRead::registered(&read);
+        let mut sessions = HashMap::<(String, String), Option<SessionRecord>>::new();
+        let mut reconstructed = Vec::with_capacity(requests.len());
+        for request in requests {
+            request
+                .snapshot()
+                .request()
+                .execution_control()
+                .checkpoint()
+                .map_err(map_control_error)?;
+            let (snapshot, provider, session_id) = match &request {
+                SessionPageReconstructionRequest::Occurrence {
+                    snapshot,
+                    provider,
+                    session_id,
+                    ..
+                }
+                | SessionPageReconstructionRequest::Summary {
+                    snapshot,
+                    provider,
+                    session_id,
+                } => (*snapshot, *provider, *session_id),
+            };
+            let session_key = (provider.to_owned(), session_id.to_owned());
+            let session = if let Some(session) = sessions.get(&session_key) {
+                Ok(session.clone())
+            } else {
+                let session = session_record_from_frozen_read(
+                    &read,
+                    authorized_root.project_key(),
+                    provider,
+                    session_id,
+                )
+                .await;
+                if let Ok(session) = &session {
+                    sessions.insert(session_key, session.clone());
+                }
+                session
+            };
+            let session = match session {
+                Ok(session) => session,
+                Err(error) => {
+                    reconstructed.push(Err(error));
+                    continue;
+                }
+            };
+            let Some(session) = session else {
+                reconstructed.push(Err(SessionTemporalExecutionError::Unavailable));
+                continue;
+            };
+            let result = match request {
+                SessionPageReconstructionRequest::Summary { .. } => {
+                    Ok(SessionPageReconstruction::Summary { session })
+                }
+                SessionPageReconstructionRequest::Occurrence {
+                    anchor_id, content, ..
+                } => hydration::session_message_from_hydrated_bytes(
+                    &read, snapshot, anchor_id, provider, session_id, content,
+                )
+                .await
+                .map_err(map_hydration_error)
+                .and_then(|message| {
+                    if message.provider != provider
+                        || message.session_id != session_id
+                        || session.provider != provider
+                        || session.session_id != session_id
+                        || session.project_key != authorized_root.project_key()
+                    {
+                        return Err(SessionTemporalExecutionError::Unavailable);
+                    }
+                    Ok(SessionPageReconstruction::Occurrence { session, message })
+                }),
+            };
+            match result {
+                Err(
+                    error @ (SessionTemporalExecutionError::Cancelled
+                    | SessionTemporalExecutionError::BudgetExhausted
+                    | SessionTemporalExecutionError::ResetRequired),
+                ) => return Err(error),
+                result => reconstructed.push(result),
+            }
+        }
+        Ok(reconstructed)
     }
 
     pub async fn resolve_lcm_describe_target(
@@ -615,7 +773,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         request: &AuthorizedTemporalExecutionRequest,
     ) -> Result<
         (
-            tracedecay_runtime_core::db::engine::ReadSnapshot,
+            tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
             TemporalExecutionSnapshot,
         ),
         SessionTemporalExecutionError,
@@ -889,6 +1047,75 @@ fn map_kernel_execution_error(
     } else {
         SessionTemporalExecutionError::Kernel(error)
     }
+}
+
+fn map_hydration_error(
+    error: tracedecay_temporal_query::hydration::HydrationError,
+) -> SessionTemporalExecutionError {
+    match error {
+        tracedecay_temporal_query::hydration::HydrationError::Unavailable
+        | tracedecay_temporal_query::hydration::HydrationError::InvalidDenial => {
+            SessionTemporalExecutionError::Unavailable
+        }
+        tracedecay_temporal_query::hydration::HydrationError::ResetRequired { .. } => {
+            SessionTemporalExecutionError::ResetRequired
+        }
+        tracedecay_temporal_query::hydration::HydrationError::BudgetExceeded { .. } => {
+            SessionTemporalExecutionError::BudgetExhausted
+        }
+        tracedecay_temporal_query::hydration::HydrationError::Interrupted(error) => {
+            map_control_error(error)
+        }
+    }
+}
+
+async fn session_record_from_frozen_read(
+    read: &TemporalSqlRead<'_>,
+    project_key: &str,
+    provider: &str,
+    session_id: &str,
+) -> Result<Option<SessionRecord>, SessionTemporalExecutionError> {
+    let mut rows = read
+        .query(
+            "SELECT provider, session_id, project_key, project_path, title, started_at,
+                    ended_at, transcript_path, metadata_json, parent_session_id,
+                    is_subagent, agent_id, parent_tool_use_id
+             FROM sessions
+             WHERE project_key = ?1 AND provider = ?2 AND session_id = ?3",
+            tracedecay_runtime_core::db::engine::params![project_key, provider, session_id],
+        )
+        .await
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(SessionRecord {
+        provider: row
+            .get(0)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+        session_id: row
+            .get(1)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+        project_key: row
+            .get(2)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+        project_path: row
+            .get(3)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+        title: row.get(4).ok(),
+        started_at: row.get(5).ok(),
+        ended_at: row.get(6).ok(),
+        transcript_path: row.get(7).ok(),
+        metadata_json: row.get(8).ok(),
+        parent_session_id: row.get(9).ok(),
+        is_subagent: row.get::<i64>(10).unwrap_or_default() != 0,
+        agent_id: row.get(11).ok(),
+        parent_tool_use_id: row.get(12).ok(),
+    }))
 }
 
 fn map_control_error(

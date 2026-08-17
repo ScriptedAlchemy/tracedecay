@@ -27,6 +27,7 @@ use tracedecay_domain::{
     RepositoryId, ScopeSetId, ScopeSetRevision, StackNodeId, UserProfileId, UtcMicros, WorktreeId,
     WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
 };
+use tracedecay_global_db::VerifiedGraphRuntimePortV1;
 use tracedecay_graph_db::{GraphCancellation, GraphProjectorRevision};
 use tracedecay_store::{FactReadControl, runtime::ScopeSetCasOutcomeV1};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -396,7 +397,7 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
         .expect("first project graph runtime");
     assert!(
         first_sessions
-            .bind_project_graph_runtime(Arc::clone(&first_runtime))
+            .bind_project_graph_runtime(first_runtime.clone())
             .is_ok(),
         "bind first graph runtime"
     );
@@ -592,7 +593,7 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
         .expect("restarted project graph runtime");
     assert!(
         restarted_sessions
-            .bind_project_graph_runtime(Arc::clone(&restarted_runtime))
+            .bind_project_graph_runtime(restarted_runtime.clone())
             .is_ok(),
         "bind restarted graph runtime"
     );
@@ -600,7 +601,7 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
         .authorized_scope_set_storage()
         .expect("restarted scope-set storage");
     super::git_topology::publish_native_topology(
-        Arc::clone(&restarted_runtime),
+        Arc::new(restarted_runtime.clone()),
         roots[0].clone(),
         repository.clone(),
         main_worktree,
@@ -665,7 +666,7 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
     ));
     assert_eq!(
         super::git_topology::publish_native_topology(
-            restarted_runtime,
+            Arc::new(restarted_runtime.clone()),
             roots[0].clone(),
             repository,
             feature_worktree,
@@ -785,8 +786,8 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
             project_root,
             transcript_source_home: None,
             project_sessions,
-            user_sessions: Arc::clone(&profile_sessions),
-            registry: Arc::clone(&profile_sessions),
+            user_sessions: profile_sessions.clone(),
+            registry: profile_sessions.clone(),
             startup_import: false,
             project_refresh:
                 crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),

@@ -672,7 +672,7 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
     // and often carry history the event log does not — surface both.
     let conn = gdb.read_connection();
     let lifetime_projects = match query_rows(
-        conn,
+        &conn,
         "SELECT path, tokens_saved FROM projects
          WHERE tokens_saved > 0 ORDER BY tokens_saved DESC LIMIT ?1",
         params![PROJECT_LIMIT],
@@ -690,7 +690,7 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
         }
     };
     let lifetime_total = match query_i64_result(
-        conn,
+        &conn,
         "SELECT COALESCE(SUM(tokens_saved), 0) FROM projects",
         (),
     )
@@ -707,7 +707,7 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
         }
     };
     let project_total = match query_i64_result(
-        conn,
+        &conn,
         "SELECT COUNT(*) FROM projects WHERE tokens_saved > 0",
         (),
     )
@@ -769,12 +769,12 @@ async fn sessions_overview(
                 SUM(CASE WHEN model = '' THEN 1 ELSE 0 END) AS unknown_model_messages
          FROM ({MESSAGE_TOKENS_CTE})"
     );
-    let rows = query_rows(conn, &sql, ()).await?;
+    let rows = query_rows(&conn, &sql, ()).await?;
     let agg = rows
         .first()
         .cloned()
         .ok_or_else(|| "session overview query returned no row".to_string())?;
-    let session_count = query_i64_result(conn, "SELECT COUNT(*) FROM sessions", ()).await?;
+    let session_count = query_i64_result(&conn, "SELECT COUNT(*) FROM sessions", ()).await?;
 
     let overlay = token_count::non_usage_message_tokens(state).await;
     let total_tiers = overlay.as_deref().map(|messages| {
@@ -865,7 +865,7 @@ pub async fn ledger(
     let history = gdb.savings_history(None, since).await;
     let conn = gdb.read_connection();
     let by_tool = query_rows(
-        conn,
+        &conn,
         "SELECT tool_name,
                 COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved_tokens,
                 COUNT(*) AS calls
@@ -876,7 +876,7 @@ pub async fn ledger(
     .await
     .unwrap_or_default();
     let by_project = query_rows(
-        conn,
+        &conn,
         "SELECT project_path,
                 COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved_tokens,
                 COUNT(*) AS calls
@@ -964,11 +964,11 @@ pub async fn sessions(
                 WHERE m.provider = s.provider AND m.session_id = s.session_id), 0) >= ?1
         ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC
         LIMIT ?2 OFFSET ?3";
-    let page = query_rows(conn, page_sql, params![since, limit, offset])
+    let page = query_rows(&conn, page_sql, params![since, limit, offset])
         .await
         .unwrap_or_default();
     let total = query_i64(
-        conn,
+        &conn,
         "SELECT COUNT(*) FROM sessions s
          WHERE ?1 = 0 OR COALESCE(s.started_at,
                (SELECT MAX(m.timestamp) FROM session_messages m
@@ -1023,7 +1023,7 @@ pub async fn sessions(
             agg_params.push(DbValue::Text(str_field(row, "provider").to_string()));
             agg_params.push(DbValue::Text(str_field(row, "session_id").to_string()));
         }
-        let rows = query_rows(conn, &agg_sql, params_from_iter(agg_params))
+        let rows = query_rows(&conn, &agg_sql, params_from_iter(agg_params))
             .await
             .unwrap_or_default();
         for row in rows {
@@ -1186,7 +1186,7 @@ pub async fn models(
              WHERE ?1 = 0 OR COALESCE(timestamp, 0) >= ?1
              GROUP BY model ORDER BY messages DESC LIMIT 100"
         );
-        let model_rows = query_rows(conn, &model_sql, params![since])
+        let model_rows = query_rows(&conn, &model_sql, params![since])
             .await
             .unwrap_or_default();
         payload["models"] = Value::Array(
@@ -1234,7 +1234,7 @@ pub async fn models(
              FROM daily JOIN latest_days ON latest_days.day = daily.day
              ORDER BY daily.day ASC, daily.messages DESC"
         );
-        let daily_rows = query_rows(conn, &daily_sql, params![since])
+        let daily_rows = query_rows(&conn, &daily_sql, params![since])
             .await
             .unwrap_or_default();
         payload["daily"] = Value::Array(

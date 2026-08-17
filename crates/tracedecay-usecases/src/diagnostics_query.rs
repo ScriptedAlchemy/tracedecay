@@ -28,8 +28,10 @@ use tracedecay_domain::{
 };
 
 use crate::diagnostics_store::{DiagnosticsStore, DirtyDiagnosticOverlay};
-use tracedecay_runtime_core::db::engine::{Connection, params};
-use tracedecay_runtime_core::errors::{Result as CrateResult, TraceDecayError};
+use tracedecay_runtime_core::db::Database;
+#[cfg(test)]
+use tracedecay_runtime_core::db::engine::Connection;
+use tracedecay_runtime_core::errors::Result as CrateResult;
 
 /// Default page limit when a request carries `limit: 0`.
 pub const DEFAULT_DIAGNOSTIC_PAGE_LIMIT: usize = 200;
@@ -288,17 +290,24 @@ impl LogicalFindingKey {
 
 /// Typed, bounded, read-only query surface over [`DiagnosticsStore`].
 ///
-/// Owns no connection of its own and exposes no write path; every method
-/// borrows the store's connection for the duration of one read.
+/// Owns a guarded diagnostics store and exposes no write path. Production
+/// callers retain the canonical database capability for each read.
 pub struct DiagnosticsQuery<'a> {
-    conn: &'a Connection,
     store: DiagnosticsStore<'a>,
 }
 
-impl<'a> DiagnosticsQuery<'a> {
-    pub fn new(conn: &'a Connection) -> Self {
+impl DiagnosticsQuery<'static> {
+    pub fn new(database: Database) -> Self {
         Self {
-            conn,
+            store: DiagnosticsStore::new(database),
+        }
+    }
+}
+
+impl<'a> DiagnosticsQuery<'a> {
+    #[cfg(test)]
+    pub fn new_runtime(conn: &'a Connection) -> Self {
+        Self {
             store: DiagnosticsStore::new_runtime(conn),
         }
     }
@@ -703,28 +712,7 @@ impl<'a> DiagnosticsQuery<'a> {
     /// Every published generation id, ascending. Read-only probe over the
     /// store's publication ledger used to scope backward chain walks.
     async fn list_generations(&self) -> CrateResult<Vec<String>> {
-        let operation = "diagnostics query list_generations";
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT generation_id FROM diagnostic_generation_publications \
-                 ORDER BY generation_id",
-                params![],
-            )
-            .await
-            .map_err(|error| db_error(operation, error))?;
-        let mut generations = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| db_error(operation, error))?
-        {
-            generations.push(
-                row.get::<String>(0)
-                    .map_err(|error| db_error(operation, error))?,
-            );
-        }
-        Ok(generations)
+        self.store.published_generation_ids().await
     }
 }
 
@@ -884,13 +872,6 @@ fn paginate_chain(
     })
 }
 
-fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {
-    TraceDecayError::Database {
-        message: error.to_string(),
-        operation: operation.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,7 +1009,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new(&conn);
+        let query = DiagnosticsQuery::new_runtime(&conn);
 
         let first = query
             .current_by_generation(&id(GEN2), &DiagnosticPageRequest::new(1, None))
@@ -1083,7 +1064,7 @@ mod tests {
             .publish_clean_generation(&id(GEN1), &[])
             .await
             .expect("publish clean empty generation");
-        let query = DiagnosticsQuery::new(&conn);
+        let query = DiagnosticsQuery::new_runtime(&conn);
         let current = query.current_generation().await;
         assert_eq!(current.generation, Some(id(GEN1)));
         assert_eq!(current.coverage, DiagnosticQueryCoverage::Complete);
@@ -1104,7 +1085,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new(&conn);
+        let query = DiagnosticsQuery::new_runtime(&conn);
 
         let current = query
             .current_by_file(
@@ -1177,7 +1158,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new(&conn);
+        let query = DiagnosticsQuery::new_runtime(&conn);
 
         let hit = query.by_anchor(&id("anchor.diagnostic.1")).await.unwrap();
         assert_eq!(hit.coverage, DiagnosticQueryCoverage::Complete);
@@ -1202,7 +1183,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new(&conn);
+        let query = DiagnosticsQuery::new_runtime(&conn);
 
         // Forward from the gen1 record crosses into its gen2 successor.
         let forward = query
@@ -1288,7 +1269,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new(&conn);
+        let query = DiagnosticsQuery::new_runtime(&conn);
 
         let diff = query
             .generation_file_diff(&id(GEN1), &id(GEN2), &id("file.occurrence.1"), 0)
@@ -1344,7 +1325,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new(&conn);
+        let query = DiagnosticsQuery::new_runtime(&conn);
 
         // Introduce a second new finding in gen2 so the introduced lane
         // exceeds a lane limit of 1.
@@ -1398,7 +1379,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let conn = open_store(&temp.path().join("diagnostics.db")).await;
         seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new(&conn);
+        let query = DiagnosticsQuery::new_runtime(&conn);
 
         let mut overlay = DirtyDiagnosticOverlay::new(id(GEN2));
         // Same logical finding key as the durable gen2 record anchor.3, under
@@ -1504,7 +1485,7 @@ mod tests {
         )
         .await
         .expect("drop schema to simulate an unavailable store");
-        let query = DiagnosticsQuery::new(&conn);
+        let query = DiagnosticsQuery::new_runtime(&conn);
 
         let is_unavailable = |coverage: &DiagnosticQueryCoverage| {
             matches!(coverage, DiagnosticQueryCoverage::StoreUnavailable { .. })

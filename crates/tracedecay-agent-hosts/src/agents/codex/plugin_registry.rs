@@ -441,13 +441,11 @@ exit 0"#;
             CODEX_PLUGIN_CLI_LIFECYCLE,
         )
         .expect_err("an absent host binary is a hard requirement failure");
-        let TraceDecayError::Config { message } = error else {
-            panic!("host CLI absence must surface as a config error");
+        let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
+            panic!("host CLI absence must surface as a typed requirement");
         };
-        assert!(
-            message.contains("binary required for codex plugin lifecycle"),
-            "the refusal must name the binary and what it was needed for: {message}"
-        );
+        assert_eq!(program, "codex-definitely-absent");
+        assert_eq!(lifecycle, CODEX_PLUGIN_CLI_LIFECYCLE);
         assert_eq!(
             std::fs::read_to_string(&config_path).unwrap(),
             operator_owned

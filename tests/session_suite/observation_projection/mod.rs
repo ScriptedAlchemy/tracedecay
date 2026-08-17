@@ -212,7 +212,7 @@ fn write(
 }
 
 async fn persist(
-    store: &GlobalDbObservationStore<'_>,
+    store: &GlobalDbObservationStore,
     observation: DurableClaudeObservationV1,
     expected_cursor: Option<ClaudeSourceCursorV1>,
 ) -> u64 {
@@ -226,14 +226,14 @@ async fn persist(
     }
 }
 
-async fn drain_projection_queue(store: &GlobalDbObservationStore<'_>) {
+async fn drain_projection_queue(store: &GlobalDbObservationStore) {
     while let Some(observation_id) = store.next_queued_observation().await.unwrap() {
         store.project_observation(&observation_id).await.unwrap();
     }
 }
 
 async fn rebuild_projection_to_completion(
-    store: &GlobalDbObservationStore<'_>,
+    store: &GlobalDbObservationStore,
     frontier: u64,
 ) -> ProjectionRebuildOutcome {
     for _ in 0..32 {

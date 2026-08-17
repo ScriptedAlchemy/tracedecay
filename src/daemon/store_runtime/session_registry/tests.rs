@@ -15,7 +15,7 @@ use super::{
     LocalProfileIdentityAuthorityV1, ProjectId, StoreRuntimeRegistryFailure, StoreShardIdV1,
     TraceDecayError, process_runtime_generation, registry_open_error,
 };
-use crate::db::engine::{Executor, TestConnection};
+use crate::db::engine::TestConnection;
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
@@ -83,15 +83,30 @@ async fn project_sessions_pending_convergence(
             .join(crate::storage::SESSIONS_DB_FILENAME);
     std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
         .expect("session database directory");
-    let connection = TestConnection::open(&sessions_path);
-    crate::global_db::ensure_registered_schema(&connection)
-        .await
-        .expect("seed complete registered schema");
-    connection
-        .execute("DELETE FROM authority_audit_checkpoints", ())
+    crate::daemon::store_runtime::register_registered_schema_installer();
+    let authority = crate::db::DatabaseAuthority::acquire_test(
+        &sessions_path,
+        "seed project sessions registered schema fixture",
+    )
+    .expect("project sessions fixture database authority");
+    let (database, _) = crate::db::Database::publish_registered_test_runtime(
+        &sessions_path,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::Initialize,
+        crate::db::TestDatabaseRuntimeScope::ProjectSessions {
+            project_id: project_id.clone(),
+        },
+    )
+    .await
+    .expect("seed complete registered schema");
+    database
+        .execute_write_batch(
+            "remove durable convergence checkpoint",
+            "DELETE FROM authority_audit_checkpoints",
+        )
         .await
         .expect("remove durable convergence checkpoint");
-    drop(connection);
+    drop(database);
     (
         temporary,
         identity,
@@ -209,7 +224,12 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     let first_registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
         .expect("first session runtime registry");
-    let stale = first_registry.profile_runtime.binding().clone();
+    let stale = first_registry
+        .profile_database()
+        .await
+        .expect("first profile authority client")
+        .binding()
+        .clone();
     assert_eq!(
         stale.incarnation.get(),
         first_authority.record().epoch,
@@ -231,7 +251,12 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     let second_registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("successor session runtime registry");
-    let current = second_registry.profile_runtime.binding();
+    let current = second_registry
+        .profile_database()
+        .await
+        .expect("successor profile authority client")
+        .binding()
+        .clone();
 
     assert_eq!(current.incarnation.get(), second_authority.record().epoch);
     assert!(current.incarnation > stale.incarnation);
@@ -240,7 +265,7 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
         super::super::registry::StoreRuntimeLookup::WrongIncarnation {
             expected,
             actual,
-        } if *expected == stale && actual.as_ref() == current
+        } if *expected == stale && actual.as_ref() == &current
     ));
 }
 
@@ -319,7 +344,7 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
     )));
 
     let mut rows = database
-        .conn()
+        .read_connection()
         .query(
             "SELECT COUNT(*) FROM sqlite_master
                  WHERE type = 'table' AND name = 'memory_v2_fact_relations'",
@@ -545,7 +570,7 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
         .await
         .expect("idempotent project sessions");
 
-    assert!(Arc::ptr_eq(&first, &second));
+    assert!(first.shares_client_with(&second));
     assert_eq!(
         &first.binding().shard_id,
         &StoreShardIdV1::project_sessions(
@@ -632,7 +657,7 @@ async fn duplicate_project_attaches_schedule_one_historical_convergence() {
         .await
         .expect("duplicate project session attach");
 
-    assert!(Arc::ptr_eq(&first, &second));
+    assert!(first.shares_client_with(&second));
     assert_eq!(
         registry.registered_schema_convergence_schedule_count_for_test(),
         1,
@@ -866,9 +891,6 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
         .project_memory(project_id.clone(), [project_root])
         .await
         .expect("project database");
-    let runtime = project_database
-        .memory_graph_runtime()
-        .expect("project graph runtime");
     let projection = GraphProjectionIdentity::new(
         GraphNamespace::new("journey:generic-test").expect("namespace"),
         GraphProjectionId::new("projection.generic-test").expect("projection"),
@@ -885,7 +907,10 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     .expect("manifest");
     let idempotency = GraphIdempotencyKey::new("idempotency.generic-test.1").expect("idempotency");
 
-    let published = runtime
+    let published = project_database
+        .issue_memory_graph_runtime_operation()
+        .expect("project graph publication operation")
+        .runtime()
         .publish_verified_manifest(
             &manifest,
             idempotency.clone(),
@@ -893,11 +918,17 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
         )
         .expect("publish inline manifest");
     assert_eq!(published.generation(), &manifest.generation);
-    let replayed = runtime
+    let replayed = project_database
+        .issue_memory_graph_runtime_operation()
+        .expect("project graph replay operation")
+        .runtime()
         .publish_verified_manifest(&manifest, idempotency, Arc::new(AtomicBool::new(false)))
         .expect("recover exact publication");
     assert_eq!(replayed.generation(), &manifest.generation);
-    let recovered = runtime
+    let recovered = project_database
+        .issue_memory_graph_runtime_operation()
+        .expect("project graph snapshot operation")
+        .runtime()
         .verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false)))
         .expect("recover verified head")
         .expect("published verified head");
@@ -913,7 +944,10 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
         vec![],
     )
     .expect("successor manifest");
-    runtime
+    project_database
+        .issue_memory_graph_runtime_operation()
+        .expect("project graph successor operation")
+        .runtime()
         .publish_verified_manifest(
             &successor,
             GraphIdempotencyKey::new("idempotency.generic-test.2").expect("successor idempotency"),
@@ -921,17 +955,25 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
         )
         .expect("publish successor");
     assert!(matches!(
-        runtime.publish_verified_manifest(
-            &manifest,
-            GraphIdempotencyKey::new("idempotency.generic-test.1").expect("stale idempotency"),
-            Arc::new(AtomicBool::new(false)),
-        ),
+        project_database
+            .issue_memory_graph_runtime_operation()
+            .expect("project graph stale-publication operation")
+            .runtime()
+            .publish_verified_manifest(
+                &manifest,
+                GraphIdempotencyKey::new("idempotency.generic-test.1").expect("stale idempotency"),
+                Arc::new(AtomicBool::new(false)),
+            ),
         Err(GraphDbError::Conflict)
     ));
 
     let cancelled = FactReadControl::new(Arc::new(|| true));
     assert!(matches!(
-        runtime.verified_snapshot(&projection, cancelled),
+        project_database
+            .issue_memory_graph_runtime_operation()
+            .expect("project graph cancelled-read operation")
+            .runtime()
+            .verified_snapshot(&projection, cancelled),
         Err(GraphDbError::Cancelled)
     ));
     let missing = GraphProjectionIdentity::new(
@@ -940,7 +982,11 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     );
     // Never published: the typed empty start, not an unavailability error.
     assert!(matches!(
-        runtime.verified_snapshot(&missing, FactReadControl::new(Arc::new(|| false))),
+        project_database
+            .issue_memory_graph_runtime_operation()
+            .expect("project graph empty-read operation")
+            .runtime()
+            .verified_snapshot(&missing, FactReadControl::new(Arc::new(|| false))),
         Ok(None)
     ));
 }
@@ -1089,7 +1135,7 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
         )
         .await
         .expect("daemon-owned project graph publication");
-    let publication_id = main.retained_runtime().publication().publication_id.clone();
+    let publication_id = main.runtime_client().publication().publication_id;
     let unpublished_authority =
         DatabaseAuthority::for_runtime(&unpublished_path, "reserve unpublished project store")
             .expect("unpublished daemon project-store authority");
@@ -1105,7 +1151,7 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
         .expect("read-only facade over retained project graph publication");
     assert_eq!(read_only.database_path(), main_path);
     assert_eq!(
-        read_only.retained_runtime().publication().publication_id,
+        read_only.runtime_client().publication().publication_id,
         publication_id,
         "read-only publication must reuse the exact retained runtime"
     );

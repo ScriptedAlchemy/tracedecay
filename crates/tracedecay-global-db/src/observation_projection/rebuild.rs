@@ -1,8 +1,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
-use tracedecay_runtime_core::db::engine::{
-    Connection, Executor, QueryExecutor, TransactionBehavior, params,
+#[cfg(test)]
+use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
+use tracedecay_runtime_core::db::{
+    Database,
+    engine::{Executor, QueryExecutor, params},
 };
 use tracedecay_sessions::retrieval_content::{
     derived_text_for_index, derived_text_for_snippet, projected_content_hash,
@@ -36,6 +39,77 @@ const PROJECTION_RETRY_BASE_MICROS: i64 = 5_000_000;
 const PROJECTION_RETRY_MAX_MICROS: i64 = 300_000_000;
 static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 
+/// Projects one queued observation through the guarded registered database
+/// client. The transaction remains bound to that client for its whole life;
+/// no physical engine handle escapes the runtime boundary.
+pub async fn project_observation(
+    database: &Database,
+    observation_id: &CanonicalObservationIdV1,
+) -> ProjectionStoreResult<ProjectionPersistOutcome> {
+    let transaction = database
+        .begin_write_transaction("begin projection transaction")
+        .await
+        .map_err(|error| storage("begin projection transaction", error))?;
+    let now_micros = tracedecay_application::clock::now_micros().0;
+    if let Some(retry) = projection_retry_state(&transaction, observation_id).await?
+        && retry.next_retry_at_micros > now_micros
+    {
+        transaction
+            .rollback()
+            .await
+            .map_err(|error| storage("rollback deferred projection transaction", error))?;
+        return Err(ProjectionStoreError::RetryDeferred {
+            attempt_count: retry.attempt_count,
+            next_retry_at_micros: retry.next_retry_at_micros,
+            last_error: retry.last_error.ok_or_else(|| {
+                storage_message(
+                    "read deferred projection retry",
+                    "deferred projection retry has no failure detail",
+                )
+            })?,
+        });
+    }
+    match project_observation_in_transaction(&transaction, observation_id).await {
+        Ok(outcome) => match transaction.commit().await {
+            Ok(()) => Ok(outcome),
+            Err(commit_error) => {
+                let error = storage("commit projection transaction", commit_error);
+                persist_projection_retry_on_database(
+                    database,
+                    observation_id,
+                    now_micros,
+                    &error.durable_detail(),
+                )
+                .await?;
+                Err(error)
+            }
+        },
+        Err(error) => {
+            transaction.rollback().await.map_err(|rollback_error| {
+                storage("rollback failed projection transaction", rollback_error)
+            })?;
+            if matches!(error, ProjectionStoreError::Storage { .. }) {
+                persist_projection_retry_on_database(
+                    database,
+                    observation_id,
+                    now_micros,
+                    &error.durable_detail(),
+                )
+                .await?;
+            } else if matches!(error, ProjectionStoreError::Contract(_)) {
+                persist_projection_rejection_on_database(
+                    database,
+                    observation_id,
+                    ProjectionSkipReason::InvalidContract,
+                )
+                .await?;
+            }
+            Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
 pub async fn project_observation_with_engine(
     conn: &Connection,
     observation_id: &CanonicalObservationIdV1,
@@ -68,8 +142,13 @@ pub async fn project_observation_with_engine(
             Ok(()) => Ok(outcome),
             Err(commit_error) => {
                 let error = storage("commit projection transaction", commit_error);
-                persist_projection_retry(conn, observation_id, now_micros, &error.durable_detail())
-                    .await?;
+                persist_projection_retry_with_engine(
+                    conn,
+                    observation_id,
+                    now_micros,
+                    &error.durable_detail(),
+                )
+                .await?;
                 Err(error)
             }
         },
@@ -78,10 +157,15 @@ pub async fn project_observation_with_engine(
                 storage("rollback failed projection transaction", rollback_error)
             })?;
             if matches!(error, ProjectionStoreError::Storage { .. }) {
-                persist_projection_retry(conn, observation_id, now_micros, &error.durable_detail())
-                    .await?;
+                persist_projection_retry_with_engine(
+                    conn,
+                    observation_id,
+                    now_micros,
+                    &error.durable_detail(),
+                )
+                .await?;
             } else if matches!(error, ProjectionStoreError::Contract(_)) {
-                persist_projection_rejection(
+                persist_projection_rejection_with_engine(
                     conn,
                     observation_id,
                     ProjectionSkipReason::InvalidContract,
@@ -100,7 +184,73 @@ fn projection_retry_delay_micros(attempt_count: u32) -> i64 {
         .min(PROJECTION_RETRY_MAX_MICROS)
 }
 
-async fn persist_projection_retry(
+async fn persist_projection_retry_on_database(
+    database: &Database,
+    observation_id: &CanonicalObservationIdV1,
+    now_micros: i64,
+    last_error: &str,
+) -> ProjectionStoreResult<()> {
+    let transaction = database
+        .begin_write_transaction("begin projection retry transaction")
+        .await
+        .map_err(|error| storage("begin projection retry transaction", error))?;
+    let retry = projection_retry_state(&transaction, observation_id)
+        .await?
+        .ok_or(ProjectionStoreError::NotQueued)?;
+    let attempt_count = retry.attempt_count.saturating_add(1);
+    let next_retry_at_micros =
+        now_micros.saturating_add(projection_retry_delay_micros(attempt_count));
+    schedule_projection_retry(
+        &transaction,
+        observation_id,
+        attempt_count,
+        next_retry_at_micros,
+        last_error,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage("commit projection retry transaction", error))
+}
+
+async fn persist_projection_rejection_on_database(
+    database: &Database,
+    observation_id: &CanonicalObservationIdV1,
+    reason: ProjectionSkipReason,
+) -> ProjectionStoreResult<()> {
+    let transaction = database
+        .begin_write_transaction("begin projection rejection transaction")
+        .await
+        .map_err(|error| storage("begin projection rejection transaction", error))?;
+    let checkpoint = read_checkpoint(&transaction).await?;
+    let Some((sequence, observation)) = read_observation(&transaction, observation_id).await?
+    else {
+        return Err(ProjectionStoreError::ObservationNotFound);
+    };
+    let expected = checkpoint.last_sequence().saturating_add(1);
+    if sequence > checkpoint.last_sequence() && sequence != expected {
+        return Err(ProjectionStoreError::Gap {
+            expected,
+            actual: sequence,
+        });
+    }
+    if queued_sequence(&transaction, observation_id).await? != Some(sequence) {
+        return Err(ProjectionStoreError::NotQueued);
+    }
+    apply_skip_disposition(&transaction, &observation, reason).await?;
+    consume_projection_queue_item(&transaction, observation_id).await?;
+    if sequence > checkpoint.last_sequence() {
+        write_checkpoint(&transaction, sequence).await?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage("commit projection rejection transaction", error))
+}
+
+#[cfg(test)]
+async fn persist_projection_retry_with_engine(
     conn: &Connection,
     observation_id: &CanonicalObservationIdV1,
     now_micros: i64,
@@ -130,7 +280,8 @@ async fn persist_projection_retry(
         .map_err(|error| storage("commit projection retry transaction", error))
 }
 
-async fn persist_projection_rejection(
+#[cfg(test)]
+async fn persist_projection_rejection_with_engine(
     conn: &Connection,
     observation_id: &CanonicalObservationIdV1,
     reason: ProjectionSkipReason,
@@ -165,6 +316,99 @@ async fn persist_projection_rejection(
         .map_err(|error| storage("commit projection rejection transaction", error))
 }
 
+pub async fn rebuild_projection(
+    database: &Database,
+    frontier_sequence: u64,
+) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
+    rebuild_projection_until_cancelled(database, frontier_sequence, &NEVER_CANCELLED).await
+}
+
+async fn rebuild_projection_until_cancelled(
+    database: &Database,
+    frontier_sequence: u64,
+    cancelled: &AtomicBool,
+) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
+    prepare_projection_rebuild(database, frontier_sequence).await?;
+    for _ in 0..REBUILD_MAX_STEPS_PER_INVOCATION {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        match advance_projection_rebuild(database, frontier_sequence, cancelled).await? {
+            RebuildAdvance::Pending => {}
+            RebuildAdvance::Complete(outcome) => return Ok(outcome),
+        }
+    }
+    projection_rebuild_progress_on(&database.read_connection()).await
+}
+
+async fn prepare_projection_rebuild(
+    database: &Database,
+    frontier_sequence: u64,
+) -> ProjectionStoreResult<()> {
+    let transaction = database
+        .begin_write_transaction("begin projection rebuild staging")
+        .await
+        .map_err(|error| storage("begin projection rebuild staging", error))?;
+    start_or_resume_projection_rebuild_transaction(&transaction, frontier_sequence).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage("commit projection rebuild staging", error))
+}
+
+async fn advance_projection_rebuild(
+    database: &Database,
+    frontier_sequence: u64,
+    cancelled: &AtomicBool,
+) -> ProjectionStoreResult<RebuildAdvance> {
+    let job = read_rebuild_job(&database.read_connection()).await?;
+    match job.state {
+        RebuildState::Aliasing => {
+            let transaction = database
+                .begin_write_transaction("begin projection alias staging")
+                .await
+                .map_err(|error| storage("begin projection alias staging", error))?;
+            stage_projection_alias_batch_transaction(&transaction).await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage("commit projection alias batch", error))?;
+            Ok(RebuildAdvance::Pending)
+        }
+        RebuildState::Building => {
+            let transaction = database
+                .begin_write_transaction("begin projection rebuild batch")
+                .await
+                .map_err(|error| storage("begin projection rebuild batch", error))?;
+            let outcome =
+                stage_projection_rebuild_batch_transaction(&transaction, cancelled).await?;
+            let commit_operation = match outcome {
+                RebuildBatchStage::AlreadyReady => "commit completed projection rebuild batch",
+                RebuildBatchStage::Advanced => "commit projection rebuild batch",
+            };
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage(commit_operation, error))?;
+            Ok(RebuildAdvance::Pending)
+        }
+        RebuildState::Ready => {
+            let transaction = database
+                .begin_write_transaction("begin projection rebuild activation")
+                .await
+                .map_err(|error| storage("begin projection rebuild activation", error))?;
+            let outcome =
+                activate_projection_rebuild_transaction(&transaction, frontier_sequence).await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage("commit projection rebuild activation", error))?;
+            Ok(RebuildAdvance::Complete(outcome))
+        }
+    }
+}
+
+#[cfg(test)]
 pub async fn rebuild_projection_with_engine(
     conn: &Connection,
     frontier_sequence: u64,
@@ -172,6 +416,7 @@ pub async fn rebuild_projection_with_engine(
     rebuild_projection_until_cancelled_with_engine(conn, frontier_sequence, &NEVER_CANCELLED).await
 }
 
+#[cfg(test)]
 async fn rebuild_projection_until_cancelled_with_engine(
     conn: &Connection,
     frontier_sequence: u64,
@@ -190,6 +435,7 @@ async fn rebuild_projection_until_cancelled_with_engine(
     projection_rebuild_progress_on(conn).await
 }
 
+#[cfg(test)]
 async fn prepare_projection_rebuild_with_engine(
     conn: &Connection,
     frontier_sequence: u64,
@@ -205,6 +451,7 @@ async fn prepare_projection_rebuild_with_engine(
         .map_err(|error| storage("commit projection rebuild staging", error))
 }
 
+#[cfg(test)]
 async fn advance_projection_rebuild_with_engine(
     conn: &Connection,
     frontier_sequence: u64,
@@ -226,6 +473,7 @@ async fn advance_projection_rebuild_with_engine(
     }
 }
 
+#[cfg(test)]
 async fn stage_projection_alias_batch_with_engine(conn: &Connection) -> ProjectionStoreResult<()> {
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -238,10 +486,11 @@ async fn stage_projection_alias_batch_with_engine(conn: &Connection) -> Projecti
         .map_err(|error| storage("commit projection alias batch", error))
 }
 
+#[cfg(test)]
 async fn stage_projection_rebuild_batch_with_engine(
     conn: &Connection,
     cancelled: &AtomicBool,
-) -> ProjectionStoreResult<bool> {
+) -> ProjectionStoreResult<()> {
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
@@ -249,15 +498,16 @@ async fn stage_projection_rebuild_batch_with_engine(
     let outcome = stage_projection_rebuild_batch_transaction(&transaction, cancelled).await?;
     let commit_operation = match outcome {
         RebuildBatchStage::AlreadyReady => "commit completed projection rebuild batch",
-        RebuildBatchStage::Advanced { .. } => "commit projection rebuild batch",
+        RebuildBatchStage::Advanced => "commit projection rebuild batch",
     };
     transaction
         .commit()
         .await
         .map_err(|error| storage(commit_operation, error))?;
-    Ok(outcome.still_building())
+    Ok(())
 }
 
+#[cfg(test)]
 async fn activate_projection_rebuild_with_engine(
     conn: &Connection,
     frontier_sequence: u64,
@@ -578,24 +828,13 @@ async fn stage_projection_rebuild_batch_transaction(
         )
         .await
         .map_err(|error| storage("advance projection rebuild batch", error))?;
-    Ok(RebuildBatchStage::Advanced {
-        still_building: state == RebuildState::Building,
-    })
+    Ok(RebuildBatchStage::Advanced)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RebuildBatchStage {
     AlreadyReady,
-    Advanced { still_building: bool },
-}
-
-impl RebuildBatchStage {
-    const fn still_building(self) -> bool {
-        match self {
-            Self::AlreadyReady => false,
-            Self::Advanced { still_building } => still_building,
-        }
-    }
+    Advanced,
 }
 
 async fn activate_projection_rebuild_transaction(

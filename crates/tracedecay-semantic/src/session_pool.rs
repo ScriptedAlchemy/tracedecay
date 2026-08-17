@@ -958,6 +958,12 @@ pub mod test_support {
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: 512,
+            inference_batch_size: payload.resource_ceiling.max_batch_size,
+            inference_batch_bytes: payload
+                .resource_ceiling
+                .max_batch_size
+                .saturating_mul(payload.resource_ceiling.max_sequence_length)
+                .saturating_mul(4),
             runtime_backend: "fastembed-ort".to_owned(),
             runtime_build_revision: "ort-test-rev-1".to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
@@ -1265,6 +1271,12 @@ mod tests {
             (ProjectionArtifactPinV1::TruncationLength, |key| {
                 key.truncation_length = 256;
             }),
+            (ProjectionArtifactPinV1::InferenceBatchSize, |key| {
+                key.inference_batch_size = 1;
+            }),
+            (ProjectionArtifactPinV1::InferenceBatchBytes, |key| {
+                key.inference_batch_bytes = 1;
+            }),
             (ProjectionArtifactPinV1::RuntimeBackend, |key| {
                 key.runtime_backend = "other-runtime".to_owned();
             }),
@@ -1302,6 +1314,38 @@ mod tests {
         );
         assert_eq!(counters.sessions_opened.load(AtomicOrdering::SeqCst), 0);
         drop(runtime);
+    }
+
+    #[test]
+    fn projection_artifact_admission_rejects_inference_batch_size_mismatch() {
+        let artifact = admitted_artifact();
+        let mut projection = projection_for(&artifact);
+        projection.inference_batch_size += 1;
+        let projection = projection
+            .admit()
+            .expect("batch-size mutation remains structurally valid");
+
+        assert_eq!(
+            AdmittedProjectionArtifactV1::admit(&artifact, &projection),
+            Err(ProjectionArtifactPinV1::InferenceBatchSize),
+            "admission must identify a projection inference batch that differs from the manifest ceiling"
+        );
+    }
+
+    #[test]
+    fn projection_artifact_admission_rejects_inference_batch_byte_ceiling_mismatch() {
+        let artifact = admitted_artifact();
+        let mut projection = projection_for(&artifact);
+        projection.inference_batch_bytes -= 1;
+        let projection = projection
+            .admit()
+            .expect("byte-ceiling mutation remains structurally valid");
+
+        assert_eq!(
+            AdmittedProjectionArtifactV1::admit(&artifact, &projection),
+            Err(ProjectionArtifactPinV1::InferenceBatchBytes),
+            "admission must identify a projection byte ceiling that differs from the manifest ceiling"
+        );
     }
 
     #[test]

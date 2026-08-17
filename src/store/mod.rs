@@ -9,7 +9,6 @@ pub mod global_db;
 /// database engine it is built on; the adapters in this module stayed because
 /// they borrow `global_db`/`sessions` types that sit above the kernel.
 pub use tracedecay_runtime_core::store::memory;
-pub mod observation;
 pub mod session;
 mod session_ingest_authority;
 pub(crate) mod vector_generations;
@@ -18,11 +17,11 @@ pub mod workflow;
 pub use git_correlation::GlobalDbGitCorrelationStore;
 pub use global_db::GlobalDbTranscriptStore;
 pub use memory::DatabaseFactStore;
-pub use observation::GlobalDbObservationStore;
 pub use session::{
     GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
 pub(crate) use session_ingest_authority::GlobalDbSessionIngestAuthority;
+pub use tracedecay_global_db::GlobalDbObservationStore;
 pub use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 pub use workflow::GlobalDbWorkflowStore;
 

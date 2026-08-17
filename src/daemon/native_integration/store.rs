@@ -23,9 +23,7 @@ use tracedecay_store::{
     NativeIntegrationStoreError, NativeIntegrationStoreResult, NativeWorktreeCleanupBeginResultV1,
 };
 
-#[cfg(test)]
-use crate::db::engine::TestConnection;
-use crate::global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDb};
+use crate::global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDbLeaseV1};
 
 /// The actor queue is intentionally finite: saturation fails closed instead of
 /// accumulating unbounded mutation work while a durable writer is stalled.
@@ -107,17 +105,13 @@ enum StoreCommand {
 }
 
 enum ActorDatabase {
-    Registered(Arc<RegisteredGlobalDb>),
-    #[cfg(test)]
-    Engine(Box<TestConnection>),
+    Registered(RegisteredGlobalDbLeaseV1),
 }
 
 impl ActorDatabase {
     fn native_integration_store(&self) -> GlobalDbNativeIntegrationStore<'_> {
         match self {
             Self::Registered(database) => GlobalDbNativeIntegrationStore::new(database),
-            #[cfg(test)]
-            Self::Engine(database) => GlobalDbNativeIntegrationStore::for_engine_test(database),
         }
     }
 }
@@ -135,13 +129,8 @@ pub(crate) struct DaemonNativeIntegrationStore {
 }
 
 impl DaemonNativeIntegrationStore {
-    pub(crate) fn open(database: Arc<RegisteredGlobalDb>) -> NativeIntegrationStoreResult<Self> {
+    pub(crate) fn open(database: RegisteredGlobalDbLeaseV1) -> NativeIntegrationStoreResult<Self> {
         Self::open_actor(ActorDatabase::Registered(database))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn open_engine_test(database: TestConnection) -> NativeIntegrationStoreResult<Self> {
-        Self::open_actor(ActorDatabase::Engine(Box::new(database)))
     }
 
     fn open_actor(database: ActorDatabase) -> NativeIntegrationStoreResult<Self> {

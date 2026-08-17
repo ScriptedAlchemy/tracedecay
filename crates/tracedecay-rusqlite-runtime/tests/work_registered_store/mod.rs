@@ -12,6 +12,7 @@ use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
+use tracedecay_rusqlite_runtime::repository::RetainedExactSqlCapability;
 use tracedecay_rusqlite_runtime::work::{WorkSqliteStorage, install_work_schema};
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
@@ -22,6 +23,8 @@ use tracedecay_store::{
 };
 
 struct NoTypedWrites;
+
+struct WorkStoreTestRetentionGuard;
 
 impl StorageOperationExecutor for NoTypedWrites {
     fn execute(
@@ -111,7 +114,12 @@ impl RegisteredWorkStore {
         .expect("start work store readers");
         let handle = ExactSqlHandle::attach(&writer, &readers).expect("attach work store");
         Self {
-            storage: WorkSqliteStorage::from_registered(handle),
+            storage: WorkSqliteStorage::from_retained_exact_sql(
+                RetainedExactSqlCapability::from_authorized_handle_with_guard(
+                    handle,
+                    WorkStoreTestRetentionGuard,
+                ),
+            ),
             path,
             _writer: writer,
             _readers: readers,

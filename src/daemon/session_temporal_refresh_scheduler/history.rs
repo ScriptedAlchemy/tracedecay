@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_usecases::observation::ObservationCancellation;
 
 pub(in crate::daemon) type SessionHistoricalIngestPass<'a> =
@@ -52,7 +52,7 @@ pub(in crate::daemon) trait SessionHistoricalIngestor: Send + Sync {
 pub(in crate::daemon) type SharedSessionHistoricalIngestor = Arc<dyn SessionHistoricalIngestor>;
 
 pub(in crate::daemon) struct ProjectSessionHistoricalIngestor {
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
     profile_identity: LocalProfileIdentityAuthorityV1,
     project_root: PathBuf,
     project_id: tracedecay_domain::ProjectId,
@@ -62,7 +62,7 @@ pub(in crate::daemon) struct ProjectSessionHistoricalIngestor {
 
 impl ProjectSessionHistoricalIngestor {
     pub(in crate::daemon) fn new(
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         profile_identity: LocalProfileIdentityAuthorityV1,
         project_root: PathBuf,
         project_id: tracedecay_domain::ProjectId,
@@ -83,7 +83,7 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
             let authority =
-                crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(&self.database));
+                crate::store::GlobalDbSessionIngestAuthority::new(self.database.clone());
             let pass =
                 tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
                     self.profile_identity.brain_id(),
@@ -111,8 +111,8 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
 }
 
 pub(in crate::daemon) struct ProfileSessionHistoricalIngestor {
-    database: Arc<RegisteredGlobalDb>,
-    registry_database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
+    registry_database: RegisteredGlobalDbLeaseV1,
     profile_identity: LocalProfileIdentityAuthorityV1,
     transcript_source_home: Option<PathBuf>,
     cancellation: ObservationCancellation,
@@ -120,8 +120,8 @@ pub(in crate::daemon) struct ProfileSessionHistoricalIngestor {
 
 impl ProfileSessionHistoricalIngestor {
     pub(in crate::daemon) fn new(
-        database: Arc<RegisteredGlobalDb>,
-        registry_database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
+        registry_database: RegisteredGlobalDbLeaseV1,
         profile_identity: LocalProfileIdentityAuthorityV1,
         transcript_source_home: Option<PathBuf>,
     ) -> Self {
@@ -139,10 +139,9 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
             let authority =
-                crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(&self.database));
-            let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(
-                &self.registry_database,
-            ));
+                crate::store::GlobalDbSessionIngestAuthority::new(self.database.clone());
+            let registry_authority =
+                crate::store::GlobalDbSessionIngestAuthority::new(self.registry_database.clone());
             let pass = tracedecay_sessions::runtime::ingest_user_global_sources_for_startup_with_db(
                 self.profile_identity.brain_id(),
                 self.profile_identity.profile_id(),

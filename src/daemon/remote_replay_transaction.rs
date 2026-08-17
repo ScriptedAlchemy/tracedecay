@@ -11,9 +11,7 @@ use tracedecay_application::remote::replay::{
 use tracedecay_domain::{
     ManifestDigest, ObservationSourceCursorV1, ProjectionGenerationId, UtcMicros, canonical_sha256,
 };
-use tracedecay_runtime_core::db::DatabaseAuthority;
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeHandle;
-use tracedecay_rusqlite_runtime::exact_sql::{ExactSqlStatement, ExactSqlValue};
+use tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1;
 use tracedecay_store::{
     AnchoredObservationWrite, CommandDigestV1, DurabilityClassV1, IdempotencyIdentityV1,
     ObservationWrite, OperationPriorityV1, ProjectId, RemoteObservationReplayWriteV1,
@@ -22,8 +20,8 @@ use tracedecay_store::{
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
     RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
     RuntimeTransactionScopeV1, StoreClientIdV1, StoreCommitReceiptV1, StoreIdempotencyKeyV1,
-    StoreOperationIdV1, StoreOperationMetadataV1, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    StoreOperationIdV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
 const CHANNEL_CAPACITY: usize = 128;
@@ -31,8 +29,10 @@ const PROJECTION_GENERATION: &str = "remote-replay.v1";
 
 #[derive(Clone)]
 struct ReplayTargetV1 {
-    runtime: StoreRuntimeHandle,
-    authority: DatabaseAuthority,
+    issuer: RegisteredGlobalDbWeakLeaseIssuerV1,
+    binding: StoreRuntimeBindingV1,
+    locator: VerifiedStoreLocatorV1,
+    path: std::path::PathBuf,
 }
 
 enum ReplayCommandV1 {
@@ -142,8 +142,12 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
                             authority_key,
                             reply,
                         } => {
-                            let outcome =
-                                read_writer_fence(&worker_targets, &project_id, &authority_key);
+                            let outcome = read_writer_fence(
+                                &runtime,
+                                &worker_targets,
+                                &project_id,
+                                &authority_key,
+                            );
                             if reply.send(outcome).is_err() {
                                 tracing::debug!(
                                     "remote recovery caller ended before fence read delivery"
@@ -164,23 +168,38 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
     pub(crate) fn register_target(
         &self,
         project_id: ProjectId,
-        runtime: StoreRuntimeHandle,
-        authority: DatabaseAuthority,
+        issuer: RegisteredGlobalDbWeakLeaseIssuerV1,
+        binding: StoreRuntimeBindingV1,
+        locator: VerifiedStoreLocatorV1,
+        path: std::path::PathBuf,
     ) -> Result<(), String> {
+        if issuer.registered_binding() != &binding
+            || issuer.registered_verified_locator() != &locator
+        {
+            return Err(
+                "remote replay target descriptor does not match its weak owner issuer".into(),
+            );
+        }
         let mut targets = self
             .targets
             .write()
             .map_err(|_| "remote replay target registry lock is poisoned".to_owned())?;
         if let Some(existing) = targets.get(&project_id)
-            && (existing.runtime.binding() != runtime.binding()
-                || existing.authority.canonical_database_path()
-                    != authority.canonical_database_path())
+            && (existing.binding != binding || existing.locator != locator || existing.path != path)
         {
             return Err(
                 "remote replay target registration conflicts with mounted authority".into(),
             );
         }
-        targets.insert(project_id, ReplayTargetV1 { runtime, authority });
+        targets.insert(
+            project_id,
+            ReplayTargetV1 {
+                issuer,
+                binding,
+                locator,
+                path,
+            },
+        );
         Ok(())
     }
 
@@ -196,7 +215,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
         let target = targets
             .get(project_id)
             .ok_or_else(|| "remote replay target is not registered".to_owned())?;
-        if target.runtime.binding() != expected_binding {
+        if &target.binding != expected_binding {
             return Err("remote replay target binding changed before retirement".to_owned());
         }
         targets.remove(project_id);
@@ -214,10 +233,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
         let target = targets
             .get(project_id)
             .ok_or_else(|| "remote replay target is not registered".to_owned())?;
-        Ok((
-            target.runtime.binding().clone(),
-            target.authority.canonical_database_path().to_path_buf(),
-        ))
+        Ok((target.binding.clone(), target.path.clone()))
     }
 
     pub(crate) fn snapshot_target(
@@ -284,16 +300,18 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
     pub(crate) fn registered_query_target(
         &self,
         project_id: &ProjectId,
-    ) -> Result<StoreRuntimeHandle, String> {
+    ) -> Result<tracedecay_runtime_core::db::DatabaseRuntimeClientV1, String> {
         if !self.accepting.load(Ordering::Acquire) {
             return Err("remote replay target registry is unavailable".to_owned());
         }
-        self.targets
+        let target = self
+            .targets
             .read()
             .map_err(|_| "remote replay target registry lock is poisoned".to_owned())?
             .get(project_id)
-            .map(|target| target.runtime.clone())
-            .ok_or_else(|| "remote query target is not registered".to_owned())
+            .cloned()
+            .ok_or_else(|| "remote query target is not registered".to_owned())?;
+        issue_target_lease(&target).map(|lease| lease.runtime_client())
     }
 }
 
@@ -326,6 +344,31 @@ impl Drop for DaemonRemoteReplayTransactionAuthorityV1 {
     }
 }
 
+fn issue_target_lease(
+    target: &ReplayTargetV1,
+) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1, String> {
+    let lease = target.issuer.issue_lease().map_err(|error| match error {
+        tracedecay_runtime_core::db::DatabaseOwnerWeakLeaseIssuerErrorV1::Retiring => {
+            "remote replay target is retiring".to_owned()
+        }
+        tracedecay_runtime_core::db::DatabaseOwnerWeakLeaseIssuerErrorV1::Terminal => {
+            "remote replay target reached a terminal lifecycle state".to_owned()
+        }
+        tracedecay_runtime_core::db::DatabaseOwnerWeakLeaseIssuerErrorV1::Unavailable => {
+            "remote replay target owner is unavailable".to_owned()
+        }
+    })?;
+    if lease.binding() != &target.binding
+        || lease.verified_locator() != &target.locator
+        || lease.db_path() != target.path
+    {
+        return Err(
+            "remote replay target issuer returned a different registered database".to_owned(),
+        );
+    }
+    Ok(lease)
+}
+
 fn execute_snapshot(
     tokio_runtime: &tokio::runtime::Handle,
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
@@ -339,12 +382,9 @@ fn execute_snapshot(
         .get(project_id)
         .cloned()
         .ok_or_else(|| "remote backup target is not registered".to_owned())?;
+    let lease = issue_target_lease(&target)?;
     tokio_runtime
-        .block_on(
-            target
-                .runtime
-                .snapshot_to_interruptible(destination, probe, target.authority),
-        )
+        .block_on(lease.snapshot_to_interruptible(&destination, probe))
         .map_err(|error| format!("registered online backup failed: {error:?}"))
 }
 
@@ -361,7 +401,7 @@ fn execute_fence_install(
         .get(project_id)
         .cloned()
         .ok_or_else(|| "remote promotion target is not registered".to_owned())?;
-    if target.runtime.binding() != &install.target_binding {
+    if target.binding != install.target_binding {
         return Err("remote promotion target binding changed".to_owned());
     }
     let request = prepare_fence_request(&target, install)?;
@@ -371,12 +411,9 @@ fn execute_fence_install(
         interruption,
         commit_started: AtomicBool::new(false),
     });
+    let lease = issue_target_lease(&target)?;
     let outcome = tokio_runtime
-        .block_on(
-            target
-                .runtime
-                .dispatch_submit_authorized(request, probe, target.authority),
-        )
+        .block_on(lease.runtime_client().dispatch_submit(request, probe))
         .map_err(|error| format!("registered remote fence dispatch failed: {error:?}"))?;
     match outcome {
         RuntimeSubmitOutcomeV1::Committed { receipt }
@@ -404,6 +441,7 @@ fn execute_fence_install(
 }
 
 fn read_writer_fence(
+    tokio_runtime: &tokio::runtime::Handle,
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
     project_id: &ProjectId,
     authority_key: &ManifestDigest,
@@ -414,41 +452,44 @@ fn read_writer_fence(
         .get(project_id)
         .cloned()
         .ok_or_else(|| "remote recovery target is not registered".to_owned())?;
-    let handle = target
-        .runtime
-        .authorized_exact_sql_handle(target.authority)
-        .map_err(|error| format!("authorize remote recovery fence read: {error:?}"))?;
-    let rows = handle
-        .query(
-            ExactSqlStatement::new(
+    let lease = issue_target_lease(&target)?;
+    tokio_runtime.block_on(async move {
+        let mut rows = lease
+            .read_connection()
+            .query(
                 "SELECT writer_fence_json, frontier_sequence
-                 FROM remote_writer_fences WHERE authority_key = ?1"
-                    .to_owned(),
-                vec![ExactSqlValue::Text(authority_key.as_str().to_owned())],
+                 FROM remote_writer_fences WHERE authority_key = ?1",
+                (authority_key.as_str(),),
             )
-            .map_err(|error| format!("prepare remote recovery fence read: {error}"))?,
-            std::time::Duration::from_secs(5),
-        )
-        .map_err(|error| format!("read remote recovery fence: {error}"))?;
-    let mut rows = rows.rows.into_iter();
-    let Some(row) = rows.next() else {
-        return Ok(None);
-    };
-    if rows.next().is_some() {
-        return Err("remote recovery fence authority is not unique".to_owned());
-    }
-    let [
-        ExactSqlValue::Text(encoded),
-        ExactSqlValue::Integer(frontier),
-    ] = row.values.as_slice()
-    else {
-        return Err("remote recovery fence row is malformed".to_owned());
-    };
-    let frontier = u64::try_from(*frontier)
-        .map_err(|_| "remote recovery fence frontier is invalid".to_owned())?;
-    let fence = serde_json::from_str(encoded)
-        .map_err(|error| format!("decode remote recovery fence: {error}"))?;
-    Ok(Some((fence, frontier)))
+            .await
+            .map_err(|error| format!("read remote recovery fence: {error}"))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("read remote recovery fence row: {error}"))?
+        else {
+            return Ok(None);
+        };
+        if rows
+            .next()
+            .await
+            .map_err(|error| format!("read remote recovery fence row: {error}"))?
+            .is_some()
+        {
+            return Err("remote recovery fence authority is not unique".to_owned());
+        }
+        let encoded = row
+            .get::<String>(0)
+            .map_err(|error| format!("decode remote recovery fence JSON: {error}"))?;
+        let frontier = row
+            .get::<i64>(1)
+            .map_err(|error| format!("decode remote recovery fence frontier: {error}"))?;
+        let frontier = u64::try_from(frontier)
+            .map_err(|_| "remote recovery fence frontier is invalid".to_owned())?;
+        let fence = serde_json::from_str(&encoded)
+            .map_err(|error| format!("decode remote recovery fence: {error}"))?;
+        Ok(Some((fence, frontier)))
+    })
 }
 
 fn prepare_fence_request(
@@ -481,7 +522,7 @@ fn prepare_fence_request(
     )
     .map_err(|_| "remote fence command size exceeds u64".to_owned())?
     .max(1);
-    let binding = target.runtime.binding();
+    let binding = &target.binding;
     let metadata = StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new(format!("operation.remote-fence.{digest_suffix}"))
             .map_err(|error| error.to_string())?,
@@ -567,12 +608,10 @@ fn execute_replay(
         accepting: Arc::clone(accepting),
         commit_started: AtomicBool::new(false),
     });
+    let lease =
+        issue_target_lease(&target).map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
     let outcome = tokio_runtime
-        .block_on(
-            target
-                .runtime
-                .dispatch_submit_authorized(request, probe, target.authority),
-        )
+        .block_on(lease.runtime_client().dispatch_submit(request, probe))
         .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
     map_submit_outcome(frame, current_writer, prepared.admission_bytes, outcome)
 }
@@ -645,7 +684,7 @@ fn prepare_request(
         "frame_digest": frame_digest,
         "capture": frame.capture,
         "writer_fence": current_writer.authority.fence,
-        "target_binding": target.runtime.binding(),
+            "target_binding": &target.binding,
     });
     let command_digest = canonical_sha256(&command_value)
         .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
@@ -675,7 +714,7 @@ fn prepare_request(
             observation: anchored,
         },
     ));
-    let binding = target.runtime.binding();
+    let binding = &target.binding;
     let metadata = StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new(format!("operation.remote-replay.{digest_suffix}"))
             .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,

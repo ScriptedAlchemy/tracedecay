@@ -45,7 +45,7 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) mounted_profile_id: Option<tracedecay_domain::UserProfileId>,
     pub(crate) mounted_session_store_id: Option<tracedecay_usecases::context::SessionStoreId>,
     pub(crate) mounted_session_root_id: Option<tracedecay_usecases::context::SessionRootId>,
-    pub(crate) registered_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    pub(crate) registered_session_db: Option<crate::global_db::RegisteredGlobalDbLeaseV1>,
     pub(crate) project_refresh: Option<Arc<dyn session_refresh::RetainedSessionRefreshPortV1>>,
     pub(crate) project_retrieval:
         Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
@@ -175,9 +175,28 @@ pub(super) fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExec
         | TraceDecayError::Database { .. }
         | TraceDecayError::Search { .. }
         | TraceDecayError::File { .. }
+        | TraceDecayError::HostCliUnavailable { .. }
         | TraceDecayError::Io(_)
         | TraceDecayError::Sqlite(_)
         | TraceDecayError::Json(_)
         | TraceDecayError::Automation(_) => RetainedSurfaceExecutionErrorV1::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_cli_requirement_maps_to_unavailable() {
+        let error = TraceDecayError::HostCliUnavailable {
+            program: "kiro-cli".to_string(),
+            lifecycle: "kiro MCP registry lifecycle".to_string(),
+        };
+
+        assert_eq!(
+            map_execution_error(error),
+            RetainedSurfaceExecutionErrorV1::Unavailable
+        );
     }
 }

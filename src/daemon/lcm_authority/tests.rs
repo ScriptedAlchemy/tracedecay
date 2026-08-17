@@ -8,6 +8,7 @@ use tracedecay_application::{
 use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
 };
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::context::{
     BranchId, ProfileId, RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId,
@@ -641,7 +642,7 @@ async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages(
     .await
     .unwrap();
     let database = runtime.profile_database_arc();
-    let authority = DaemonLcmAuthority::registered(Arc::clone(&database));
+    let authority = DaemonLcmAuthority::registered(database.clone());
     let mut request = preflight("cursor");
     request.messages = vec![serde_json::json!({
         "id": "message.must-not-persist",
@@ -708,7 +709,7 @@ async fn registered_doctor_reads_snapshot_while_writer_lane_is_held() {
         .unwrap();
     committed.commit().await.unwrap();
 
-    let task_database = Arc::clone(&database);
+    let task_database = database.clone();
     let (writer_ready_tx, writer_ready_rx) = tokio::sync::oneshot::channel();
     let writer = tokio::spawn(async move {
         let transaction = task_database.begin_write_transaction().await.unwrap();

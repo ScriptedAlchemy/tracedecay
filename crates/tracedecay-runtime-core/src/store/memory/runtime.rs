@@ -14,73 +14,53 @@ use tracedecay_store::{
     RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
     RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1,
     StoreOperationIdV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, StoreShardScopeV1,
-    StoredFactV1, VerifiedStoreLocatorV1,
+    StoredFactV1,
 };
 
 use super::Database;
-// The store-runtime registry moved into this kernel, so the fact store reaches
-// the concrete handle directly rather than through an erased port.
-use crate::store_runtime::registry::StoreRuntimeHandle;
+use crate::db::DatabaseRuntimeClientV1;
 
 const COMMIT_OPERATION: &str = "commit fact through storage runtime";
 const CURRENT_OPERATION: &str = "query current fact through storage runtime";
 const LINEAGE_OPERATION: &str = "query fact lineage through storage runtime";
 
-pub(super) fn retained_fact_runtime(db: &Database) -> FactStoreResult<Option<&StoreRuntimeHandle>> {
-    let runtime = db.retained_runtime();
+pub(super) fn retained_fact_runtime(
+    db: &Database,
+) -> FactStoreResult<Option<DatabaseRuntimeClientV1>> {
+    let runtime = db.runtime_client();
     if !fact_capable_scope(&runtime.binding().shard_id.scope) {
         return Ok(None);
     }
-    validate_mount(db, runtime)?;
+    validate_mount(db, &runtime)?;
     Ok(Some(runtime))
 }
 
-fn validate_mount(db: &Database, runtime: &StoreRuntimeHandle) -> FactStoreResult<()> {
-    let current_file_identity = crate::db::sqlite_generation_identity(db.canonical_database_path())
-        .map_err(|error| {
-            runtime_error(
-                "mount fact storage runtime",
-                format!("could not verify SQLite file identity: {error:?}"),
-            )
-        })?;
+fn validate_mount(db: &Database, runtime: &DatabaseRuntimeClientV1) -> FactStoreResult<()> {
     validate_mount_parts(
-        db.canonical_database_path(),
-        db.opened_file_identity(),
+        db.registered_binding(),
+        db.registered_verified_locator(),
         runtime.binding(),
         runtime.verified_locator(),
-        runtime.canonical_path(),
-        runtime.opened_file_identity(),
-        current_file_identity,
     )
 }
 
 fn validate_mount_parts(
-    database_path: &std::path::Path,
-    database_opened_file_identity: u64,
-    binding: &StoreRuntimeBindingV1,
-    locator: &VerifiedStoreLocatorV1,
-    runtime_path: &std::path::Path,
-    runtime_opened_file_identity: Option<u64>,
-    current_file_identity: u64,
+    database_binding: &StoreRuntimeBindingV1,
+    database_locator: &tracedecay_store::VerifiedStoreLocatorV1,
+    runtime_binding: &StoreRuntimeBindingV1,
+    runtime_locator: &tracedecay_store::VerifiedStoreLocatorV1,
 ) -> FactStoreResult<()> {
-    if locator.shard_id != binding.shard_id
-        || locator.incarnation != binding.incarnation
-        || runtime_path != database_path
+    if runtime_binding != database_binding
+        || runtime_locator != database_locator
+        || runtime_locator.shard_id != runtime_binding.shard_id
+        || runtime_locator.incarnation != runtime_binding.incarnation
     {
         return Err(runtime_error(
             "mount fact storage runtime",
-            "verified runtime locator does not match the held database authority",
+            "runtime binding or verified locator does not match the held database client",
         ));
     }
-    if runtime_opened_file_identity != Some(database_opened_file_identity)
-        || current_file_identity != database_opened_file_identity
-    {
-        return Err(runtime_error(
-            "mount fact storage runtime",
-            "database and runtime do not retain the same current SQLite file identity",
-        ));
-    }
-    if !fact_capable_scope(&binding.shard_id.scope) {
+    if !fact_capable_scope(&runtime_binding.shard_id.scope) {
         return Err(runtime_error(
             "mount fact storage runtime",
             "typed fact runtime requires a profile-memory or project shard",
@@ -124,8 +104,7 @@ pub(super) fn validate_owner_binding(
 }
 
 pub(super) async fn commit_fact(
-    db: &Database,
-    runtime: &StoreRuntimeHandle,
+    runtime: &DatabaseRuntimeClientV1,
     batch: FactWriteBatch,
     write_control: &FactWriteControl,
 ) -> FactStoreResult<FactCommitOutcome> {
@@ -155,13 +134,7 @@ pub(super) async fn commit_fact(
         request.control(),
         write_control.clone(),
     ));
-    let write_authority = db
-        .write_authority()
-        .map_err(|error| runtime_error(COMMIT_OPERATION, error.to_string()))?;
-    let outcome = match runtime
-        .dispatch_submit_authorized(request, probe, write_authority)
-        .await
-    {
+    let outcome = match runtime.dispatch_submit(request, probe).await {
         Ok(outcome) => outcome,
         Err(error) => {
             let actual = query_fact_current(
@@ -237,7 +210,7 @@ fn finish_commit_outcome(
 }
 
 pub(super) fn query_fact_current(
-    runtime: &StoreRuntimeHandle,
+    runtime: &DatabaseRuntimeClientV1,
     query: FactCurrentQuery,
 ) -> FactStoreResult<Option<StoredFactV1>> {
     validate_owner_binding(runtime.binding(), query.owner(), CURRENT_OPERATION)?;
@@ -255,7 +228,7 @@ pub(super) fn query_fact_current(
 }
 
 pub(super) fn query_fact_lineage(
-    runtime: &StoreRuntimeHandle,
+    runtime: &DatabaseRuntimeClientV1,
     query: FactLineageQuery,
 ) -> FactStoreResult<Vec<tracedecay_domain::FactLineageEventV1>> {
     validate_owner_binding(runtime.binding(), query.owner(), LINEAGE_OPERATION)?;
@@ -273,7 +246,7 @@ pub(super) fn query_fact_lineage(
 }
 
 fn dispatch_fact_read(
-    runtime: &StoreRuntimeHandle,
+    runtime: &DatabaseRuntimeClientV1,
     operation: FactReadOperationV1,
     operation_name: &'static str,
 ) -> FactStoreResult<FactReadResultV1> {
@@ -516,7 +489,6 @@ fn runtime_error(operation: &'static str, message: impl Into<String>) -> FactSto
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -528,6 +500,8 @@ mod tests {
     use tracedecay_store::{
         StoreAuthorityEpochV1, StoreIncarnationV1, StoreShardIdV1, VerifiedStoreLocatorV1,
     };
+
+    use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
 
     use super::*;
 
@@ -600,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn mounted_runtime_requires_exact_verified_locator() {
+    fn mounted_runtime_requires_exact_database_client_identity() {
         let project = ProjectId::new("project.fact-runtime").unwrap();
         let binding = binding(&project);
         let locator = VerifiedStoreLocatorV1::new(
@@ -608,30 +582,13 @@ mod tests {
             binding.incarnation,
             LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
         );
-        assert!(
-            validate_mount_parts(
-                Path::new("/stores/project.db"),
-                7,
-                &binding,
-                &locator,
-                Path::new("/stores/project.db"),
-                Some(7),
-                7,
-            )
-            .is_ok()
+        assert!(validate_mount_parts(&binding, &locator, &binding, &locator,).is_ok());
+        let different_locator = VerifiedStoreLocatorV1::new(
+            binding.shard_id.clone(),
+            binding.incarnation,
+            LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
         );
-        assert!(
-            validate_mount_parts(
-                Path::new("/stores/project.db"),
-                7,
-                &binding,
-                &locator,
-                Path::new("/stores/other.db"),
-                Some(7),
-                7,
-            )
-            .is_err()
-        );
+        assert!(validate_mount_parts(&binding, &locator, &binding, &different_locator,).is_err());
 
         let profile_binding = profile_binding();
         let profile_locator = VerifiedStoreLocatorV1::new(
@@ -641,20 +598,17 @@ mod tests {
         );
         assert!(
             validate_mount_parts(
-                Path::new("/stores/profile-memory.db"),
-                9,
                 &profile_binding,
                 &profile_locator,
-                Path::new("/stores/profile-memory.db"),
-                Some(9),
-                9,
+                &profile_binding,
+                &profile_locator,
             )
             .is_ok()
         );
     }
 
     #[test]
-    fn mounted_runtime_rejects_replaced_or_unidentified_database_file() {
+    fn mounted_runtime_rejects_a_different_database_client_binding() {
         let project = ProjectId::new("project.fact-runtime").unwrap();
         let binding = binding(&project);
         let locator = VerifiedStoreLocatorV1::new(
@@ -662,20 +616,86 @@ mod tests {
             binding.incarnation,
             LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
         );
-        for (runtime_opened, current) in [(Some(8), 8), (Some(7), 8), (None, 7)] {
-            assert!(
-                validate_mount_parts(
-                    Path::new("/stores/project.db"),
-                    7,
-                    &binding,
-                    &locator,
-                    Path::new("/stores/project.db"),
-                    runtime_opened,
-                    current,
-                )
-                .is_err()
-            );
-        }
+        let other_binding = profile_binding();
+        let other_locator = VerifiedStoreLocatorV1::new(
+            other_binding.shard_id.clone(),
+            other_binding.incarnation,
+            LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+        );
+        assert!(validate_mount_parts(&binding, &locator, &other_binding, &other_locator).is_err());
+    }
+
+    #[tokio::test]
+    async fn read_only_runtime_client_denies_submit_and_serves_typed_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("readonly-runtime-client.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "readonly runtime client").unwrap();
+        let fixture = Database::publish_registered_test_runtime_with_retirement_control(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+            TestDatabaseRuntimeScope::ProfileMemory,
+        )
+        .await
+        .unwrap();
+        let (owner, published, _control) = fixture.into_parts();
+        drop(published);
+
+        let database = owner.issue_read_only_lease().unwrap();
+        let runtime = database.runtime_client();
+        let fact_owner = FactOwnerV1::Profile;
+        let fact_id = fact_id(fact_owner.clone());
+        let event = FactLineageEventV1::new(
+            fact_id.clone(),
+            fact_owner.clone(),
+            FactLineageEventKindV1::PayloadAccessChanged {
+                previous: PayloadAccessState::Eligible,
+                current: PayloadAccessState::Deleted,
+            },
+            UtcMicros(1),
+            None,
+        )
+        .unwrap();
+        let batch = FactWriteBatch::new(
+            fact_id.clone(),
+            fact_owner.clone(),
+            None,
+            vec![event],
+            vec![],
+            vec![],
+            None,
+        )
+        .unwrap();
+        let command = fact_command(&batch);
+        let digest = canonical_sha256(&command).unwrap();
+        let submit = build_submit_request(
+            runtime.binding(),
+            RepositoryWritePayloadV1::Fact(Box::new(batch)),
+            &command,
+            digest.as_str(),
+            "fact.readonly-runtime-client",
+        )
+        .unwrap();
+        let submit_probe = Arc::new(RuntimeFactProbe::for_write(
+            submit.control(),
+            FactWriteControl::new(Arc::new(|| false), Arc::new(|| true)),
+        ));
+        assert!(matches!(
+            runtime.dispatch_submit(submit, submit_probe).await,
+            Err(crate::store_runtime::registry::StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "submit through database client",
+                ..
+            })
+        ));
+
+        let read = build_read_request(
+            runtime.binding(),
+            FactReadOperationV1::Current(FactCurrentQuery::new(fact_owner, fact_id).unwrap()),
+            CURRENT_OPERATION,
+        )
+        .unwrap();
+        let read_probe = RuntimeFactProbe::for_read(read.control());
+        assert!(runtime.dispatch_read(read, &read_probe).is_ok());
     }
 
     #[test]

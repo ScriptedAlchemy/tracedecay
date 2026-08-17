@@ -31,7 +31,7 @@ pub(crate) mod registry_drift;
 /// registered reader pool instead of an ad-hoc connection.
 #[cfg(test)]
 pub(crate) struct DoctorTestRuntime {
-    database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+    database: crate::global_db::RegisteredGlobalDbLeaseV1,
     _registry: crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
     _scope: crate::db::DaemonDatabaseScope,
 }
@@ -143,7 +143,7 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
             project_path: project_path.clone(),
         };
         for agent in agents::all_integrations() {
-            if agent.has_tracedecay(home) {
+            if should_run_host_healthcheck(agent.as_ref(), home) {
                 agent.healthcheck_with_daemon_status(&mut dc, &hctx, daemon_status.as_ref().ok());
             }
         }
@@ -155,6 +155,10 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
     print_summary(&dc);
 
     doctor_result(&dc, &storage_health)
+}
+
+fn should_run_host_healthcheck(agent: &dyn agents::AgentIntegration, home: &Path) -> bool {
+    agent.reports_absence_to_doctor() || agent.has_tracedecay(home)
 }
 
 fn render_canonical_doctor_report(
@@ -624,6 +628,7 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
         | crate::errors::TraceDecayError::Parse { .. }
         | crate::errors::TraceDecayError::Database { .. }
         | crate::errors::TraceDecayError::Search { .. }
+        | crate::errors::TraceDecayError::HostCliUnavailable { .. }
         | crate::errors::TraceDecayError::ProfileResetRequired { .. }
         | crate::errors::TraceDecayError::SyncLock { .. }
         | crate::errors::TraceDecayError::Sqlite(_)

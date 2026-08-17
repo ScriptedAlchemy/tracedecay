@@ -2,7 +2,72 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use super::*;
+use crate::agents::AgentIntegration;
 use crate::display::format_bytes;
+
+#[test]
+fn supported_kimi_and_kiro_absence_reaches_doctor_without_host_directories() {
+    let home = tempfile::tempdir().expect("isolated home");
+    let reported = agents::all_integrations()
+        .into_iter()
+        .filter(|agent| should_run_host_healthcheck(agent.as_ref(), home.path()))
+        .map(|agent| agent.id())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        reported,
+        std::collections::BTreeSet::from(["kimi", "kiro"]),
+        "supported Kimi and Kiro absences must remain visible while unrelated absent hosts stay quiet"
+    );
+
+    let context = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: home.path().to_path_buf(),
+    };
+    let mut counters = DoctorCounters::new();
+    for agent in agents::all_integrations()
+        .into_iter()
+        .filter(|agent| should_run_host_healthcheck(agent.as_ref(), home.path()))
+    {
+        agent.healthcheck(&mut counters, &context);
+    }
+    assert_eq!(
+        counters.issues, 0,
+        "an absent optional host is a truthful Doctor warning, not a broken installation"
+    );
+    assert_eq!(counters.warnings, 2);
+}
+
+#[test]
+fn detected_kiro_without_a_tracedecay_registration_is_optional_absence() {
+    let home = tempfile::tempdir().expect("isolated Kiro home");
+    let mcp_config = home.path().join(".kiro/settings/mcp.json");
+    std::fs::create_dir_all(mcp_config.parent().expect("Kiro settings parent"))
+        .expect("create Kiro settings");
+    std::fs::write(
+        &mcp_config,
+        br#"{"mcpServers":{"operator":{"command":"other"}}}"#,
+    )
+    .expect("write operator-owned Kiro config");
+
+    let kiro = agents::KiroIntegration;
+    assert!(
+        should_run_host_healthcheck(&kiro, home.path()),
+        "Kiro remains a visible optional host"
+    );
+
+    let mut counters = DoctorCounters::new();
+    kiro.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.warnings, 1);
+}
 
 #[test]
 fn domain_symbol_rules_warning_is_silent_without_the_file() {
@@ -556,6 +621,22 @@ fn daemon_startup_reset_requirement_is_terminal() {
     );
 
     assert!(!super::daemon_startup_error_is_retryable(&error));
+}
+
+#[test]
+fn daemon_startup_host_cli_requirement_is_terminal() {
+    let error = crate::errors::TraceDecayError::HostCliUnavailable {
+        program: "kiro-cli".to_string(),
+        lifecycle: "kiro MCP registry lifecycle".to_string(),
+    };
+
+    assert!(!super::daemon_startup_error_is_retryable(&error));
+    assert!(matches!(
+        super::classify_daemon_startup_health_result(Err(error)),
+        super::DaemonStartupHealthOutcome::Terminal {
+            error: crate::errors::TraceDecayError::HostCliUnavailable { program, lifecycle },
+        } if program == "kiro-cli" && lifecycle == "kiro MCP registry lifecycle"
+    ));
 }
 
 #[tokio::test]

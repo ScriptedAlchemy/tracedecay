@@ -103,7 +103,7 @@ fn runtime_frontier() -> WorkHandoffFrontierV1 {
 }
 
 fn authority(store: &RegisteredWorkflowStore) -> WorkflowSqliteAuthority {
-    WorkflowSqliteAuthority::from_registered(store.storage().clone()).unwrap()
+    WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap()
 }
 
 #[derive(Clone, Copy)]
@@ -278,7 +278,7 @@ fn non_final_store_requires_reset_without_runtime_schema_mutation() {
         });
 
     assert!(matches!(
-        WorkflowSqliteAuthority::from_registered(store.storage().clone()),
+        WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()),
         Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
     ));
     assert_eq!(
@@ -335,7 +335,7 @@ fn attachment_rejects_wrong_schema_version_digest_and_definition() {
             connection.execute_batch(mutation).unwrap();
         });
         assert!(matches!(
-            WorkflowSqliteAuthority::from_registered(store.storage().clone()),
+            WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()),
             Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
         ));
     }
@@ -619,7 +619,8 @@ fn definition_source_journal_and_handoff_survive_registered_store_restart() {
     );
 
     let store = store.restart("workflow-restart");
-    let authority = WorkflowSqliteAuthority::from_registered(store.storage().clone()).unwrap();
+    let authority =
+        WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
     assert_eq!(
         WorkflowEffectAuthorityPortV1::execute_effect(
             &authority,

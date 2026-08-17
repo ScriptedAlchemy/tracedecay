@@ -5,29 +5,29 @@
 //! until that port is injected, missing and ambiguous analyzer routes expose
 //! the protocol's typed unavailable provider.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
-use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
+use tracedecay_lsp::analyzer::broker::{DiagnosticBroker, StdioLspSemanticAuthority};
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_lsp::analyzer::{LanguageSemanticRoute, PolyglotSemanticProvider};
 use tracedecay_lsp::{
-    AdmittedRoot, LspAnalyzerCancellationAuthority, LspRequestId, SemanticCapability,
-    SemanticProviderPort, UnavailableSemanticProvider,
+    AdmittedRoot, LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFailure,
+    LspRuntimeFuture, SemanticProviderPort, UnavailableSemanticProvider, UpstreamCapabilities,
 };
 
 use crate::errors::{Result, TraceDecayError};
-use tracedecay_usecases::lsp_runtime::DaemonSemanticProviderAdapter;
+use tracedecay_usecases::lsp_runtime::{
+    DaemonSemanticProviderAdapter, UpstreamCapabilityInitializationAuthority,
+};
 
 #[derive(Clone)]
 pub struct ProductionSemanticAuthorities {
     pub semantics: Arc<dyn SemanticProviderPort + Send + Sync>,
     pub cancellation: Arc<dyn LspAnalyzerCancellationAuthority>,
-    pub analyzer_available: bool,
-    pub semantic_capabilities: BTreeSet<SemanticCapability>,
+    pub upstream_capability_initializer: Arc<dyn UpstreamCapabilityInitializationAuthority>,
 }
 
 /// Builds the concrete semantic and cancellation trait objects consumed by
@@ -35,9 +35,12 @@ pub struct ProductionSemanticAuthorities {
 ///
 /// Each installed analyzer remains bound to its declared document extensions.
 /// No analyzer (or an ambiguous extension) resolves through the typed
-/// unavailable fallback. Analyzer availability alone does not prove support
-/// for any semantic method, so capabilities remain empty until negotiation or
-/// a current application query port supplies exact evidence.
+/// unavailable fallback, and that fallback serves nothing, so the no-analyzer
+/// route reports no semantic capability at all.
+///
+/// Analyzer processes stay unstarted at project open. An actual LSP session
+/// initializes its retained shared client and uses that standard response as
+/// the upstream capability authority.
 pub async fn production_semantic_authorities(
     runtime: Handle,
     diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,
@@ -62,7 +65,7 @@ pub async fn production_semantic_authorities(
                 root_uri.clone(),
                 timeouts,
             )? {
-                routes.push((adapter, authority));
+                routes.push((language, adapter, authority));
             }
         }
         routes
@@ -74,15 +77,16 @@ pub async fn production_semantic_authorities(
         return Ok(ProductionSemanticAuthorities {
             semantics: fallback,
             cancellation: Arc::new(UnavailableSemanticCancellation),
-            analyzer_available: false,
-            semantic_capabilities: BTreeSet::new(),
+            upstream_capability_initializer: Arc::new(UnavailableUpstreamCapabilities),
         });
     }
 
     let mut routes = Vec::with_capacity(upstream_routes.len());
     let mut cancellation: Vec<Arc<dyn LspAnalyzerCancellationAuthority>> =
         Vec::with_capacity(upstream_routes.len());
-    for (adapter, upstream) in upstream_routes {
+    let mut initializers = Vec::with_capacity(upstream_routes.len());
+    for (_, adapter, upstream) in upstream_routes {
+        initializers.push(Arc::clone(&upstream));
         let authority = DaemonSemanticProviderAdapter::shared_protocol(runtime.clone(), upstream);
         cancellation.push(authority.clone());
         routes.push(LanguageSemanticRoute::new(adapter.extensions, authority));
@@ -91,9 +95,42 @@ pub async fn production_semantic_authorities(
     Ok(ProductionSemanticAuthorities {
         semantics: Arc::new(PolyglotSemanticProvider::new(routes, fallback)),
         cancellation: Arc::new(CompositeSemanticCancellation { cancellation }),
-        analyzer_available: true,
-        semantic_capabilities: BTreeSet::new(),
+        upstream_capability_initializer: Arc::new(CompositeUpstreamCapabilities { initializers }),
     })
+}
+
+struct UnavailableUpstreamCapabilities;
+
+impl UpstreamCapabilityInitializationAuthority for UnavailableUpstreamCapabilities {
+    fn initialize_upstream_capabilities(
+        &self,
+    ) -> LspRuntimeFuture<std::result::Result<UpstreamCapabilities, LspRuntimeFailure>> {
+        Box::pin(async { Ok(UpstreamCapabilities::default()) })
+    }
+}
+
+struct CompositeUpstreamCapabilities {
+    initializers: Vec<Arc<StdioLspSemanticAuthority>>,
+}
+
+impl UpstreamCapabilityInitializationAuthority for CompositeUpstreamCapabilities {
+    fn initialize_upstream_capabilities(
+        &self,
+    ) -> LspRuntimeFuture<std::result::Result<UpstreamCapabilities, LspRuntimeFailure>> {
+        let initializers = self.initializers.clone();
+        Box::pin(async move {
+            let mut capabilities = UpstreamCapabilities::default();
+            for initializer in initializers {
+                let current = initializer
+                    .upstream_capabilities()
+                    .await
+                    .map_err(|_| LspRuntimeFailure::new("upstream-analyzer-initialize"))?;
+                capabilities.supports_diagnostics |= current.supports_diagnostics;
+                capabilities.semantic.extend(current.semantic);
+            }
+            Ok(capabilities)
+        })
+    }
 }
 
 struct UnavailableSemanticCancellation;

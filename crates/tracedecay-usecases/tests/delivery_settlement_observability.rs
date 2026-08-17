@@ -50,12 +50,10 @@ async fn fanout_observation_exists_only_after_durable_terminal_settlement() {
         policy_revision: "delivery-settlement-policy.v1".to_owned(),
     };
     let producer = Arc::new(
-        BoundedObservabilityProducerV1::start(Arc::clone(&db), identity.clone(), 8)
-            .expect("producer"),
+        BoundedObservabilityProducerV1::start(db.clone(), identity.clone(), 8).expect("producer"),
     );
-    let authority =
-        DeliverySettlementAuthorityV1::new(Arc::clone(&db), Arc::clone(&producer), identity)
-            .expect("settlement authority");
+    let authority = DeliverySettlementAuthorityV1::new(db.clone(), Arc::clone(&producer), identity)
+        .expect("settlement authority");
 
     authority
         .begin(&attempt())
@@ -140,11 +138,10 @@ async fn bounded_recorder_keeps_settlement_io_off_the_delivery_boundary_and_drai
         policy_revision: "delivery-recorder-policy.v1".to_owned(),
     };
     let producer = Arc::new(
-        BoundedObservabilityProducerV1::start(Arc::clone(&db), identity.clone(), 8)
-            .expect("producer"),
+        BoundedObservabilityProducerV1::start(db.clone(), identity.clone(), 8).expect("producer"),
     );
     let authority = Arc::new(
-        DeliverySettlementAuthorityV1::new(Arc::clone(&db), Arc::clone(&producer), identity)
+        DeliverySettlementAuthorityV1::new(db.clone(), Arc::clone(&producer), identity)
             .expect("settlement authority"),
     );
     let recorder =
@@ -208,11 +205,10 @@ async fn recorder_queue_saturation_retains_every_durable_receipt() {
         policy_revision: "delivery-saturation-policy.v1".to_owned(),
     };
     let producer = Arc::new(
-        BoundedObservabilityProducerV1::start(Arc::clone(&db), identity.clone(), 1)
-            .expect("producer"),
+        BoundedObservabilityProducerV1::start(db.clone(), identity.clone(), 1).expect("producer"),
     );
     let authority = Arc::new(
-        DeliverySettlementAuthorityV1::new(Arc::clone(&db), Arc::clone(&producer), identity)
+        DeliverySettlementAuthorityV1::new(db.clone(), Arc::clone(&producer), identity)
             .expect("settlement authority"),
     );
     let recorder =
@@ -275,11 +271,10 @@ async fn recorder_replays_retained_receipt_after_transient_db_failure_and_restar
         policy_revision: "delivery-restart-policy.v1".to_owned(),
     };
     let producer = Arc::new(
-        BoundedObservabilityProducerV1::start(Arc::clone(&db), identity.clone(), 8)
-            .expect("producer"),
+        BoundedObservabilityProducerV1::start(db.clone(), identity.clone(), 8).expect("producer"),
     );
     let authority = Arc::new(
-        DeliverySettlementAuthorityV1::new(Arc::clone(&db), Arc::clone(&producer), identity)
+        DeliverySettlementAuthorityV1::new(db.clone(), Arc::clone(&producer), identity)
             .expect("settlement authority"),
     );
     let transaction = db

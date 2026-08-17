@@ -201,7 +201,7 @@ pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<
     let db = state.lcm_db.as_deref()?;
     let conn = db.read_connection();
 
-    let fingerprint = overlay_fingerprint(conn).await?;
+    let fingerprint = overlay_fingerprint(&conn).await?;
     let mut cached = state.token_counts.overlay.lock().await;
     if let Some(existing) = cached.as_ref()
         && existing.fingerprint == fingerprint
@@ -209,7 +209,7 @@ pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<
         return Some(existing.overlay.clone());
     }
 
-    let overlay = Arc::new(build_overlay(state, conn).await?);
+    let overlay = Arc::new(build_overlay(state, &conn).await?);
     *cached = Some(OverlayCache {
         fingerprint,
         overlay: overlay.clone(),

@@ -55,6 +55,38 @@ impl tracedecay_graph_db::GraphCancellation for SharedGraphCancellation {
     }
 }
 
+#[derive(Default)]
+struct SourceLoadMeasurement {
+    rows: u64,
+    bytes: u64,
+}
+
+impl SourceLoadMeasurement {
+    fn record_row(&mut self, values: &[&str]) -> FactStoreResult<()> {
+        self.rows = self.rows.checked_add(1).ok_or_else(|| {
+            storage_message(
+                OPERATION,
+                "project memory reconciliation source row counter overflowed",
+            )
+        })?;
+        for value in values {
+            let bytes = u64::try_from(value.len()).map_err(|_| {
+                storage_message(
+                    OPERATION,
+                    "project memory reconciliation source byte counter overflowed",
+                )
+            })?;
+            self.bytes = self.bytes.checked_add(bytes).ok_or_else(|| {
+                storage_message(
+                    OPERATION,
+                    "project memory reconciliation source byte counter overflowed",
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
 pub(super) async fn project_memory_graph(
     db: &Database,
     query: ProjectMemoryGraphQueryV1,
@@ -64,15 +96,13 @@ pub(super) async fn project_memory_graph(
     let fact_runtime =
         super::runtime::retained_fact_runtime(db)?.ok_or(FactStoreError::GraphUnavailable)?;
     super::runtime::validate_owner_binding(fact_runtime.binding(), &owner, OPERATION)?;
-    let runtime = db
-        .memory_graph_runtime()
-        .ok_or(FactStoreError::GraphUnavailable)?;
+    let runtime = issue_memory_graph_operation(db)?;
     let namespace = namespace(&owner)?;
     let projection =
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?;
     let projection_identity = GraphProjectionIdentity::new(namespace.clone(), projection.clone());
     ensure_not_cancelled(read_control)?;
-    let source = load_source(db, &owner, Some(read_control)).await?;
+    let source = load_source(db, &owner, Some(read_control), None).await?;
     let expected_watermark = source_watermark(&owner, &source, Some(read_control))?;
     let expected_manifest = build_manifest(
         &owner,
@@ -83,11 +113,12 @@ pub(super) async fn project_memory_graph(
     )?;
     let expected_generation = expected_manifest.generation;
     ensure_source_read_active(Some(read_control))?;
-    let runtime_for_read = Arc::clone(&runtime);
     let control_for_snapshot = read_control.clone();
     let projection_for_snapshot = projection_identity.clone();
     let verified_snapshot = tokio::task::spawn_blocking(move || {
-        runtime_for_read.verified_snapshot(&projection_for_snapshot, control_for_snapshot)
+        runtime
+            .runtime()
+            .verified_snapshot(&projection_for_snapshot, control_for_snapshot)
     })
     .await
     .map_err(|error| storage_error(OPERATION, error))?
@@ -217,7 +248,7 @@ pub(super) async fn project_memory_graph(
     let hydrated = hydrate_page(db, owner.clone(), &hydration_roots, page, read_control).await?;
     if source_watermark(
         &owner,
-        &load_source(db, &owner, Some(read_control)).await?,
+        &load_source(db, &owner, Some(read_control), None).await?,
         Some(read_control),
     )? != expected_watermark
     {
@@ -229,7 +260,7 @@ pub(super) async fn project_memory_graph(
 pub(super) fn schedule_project_memory_graph_reconciliation(
     db: Database,
 ) -> super::ProjectMemoryGraphReconciliationScheduleV1 {
-    if db.memory_graph_runtime().is_none() {
+    if db.issue_memory_graph_runtime_operation().is_err() {
         return super::ProjectMemoryGraphReconciliationScheduleV1::NotMounted;
     }
     match db.schedule_memory_graph_reconciliation(|weak_db| async move {
@@ -253,6 +284,9 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
         crate::db::MemoryGraphReconciliationTaskScheduleV1::AlreadyScheduled => {
             super::ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled
         }
+        crate::db::MemoryGraphReconciliationTaskScheduleV1::Retiring => {
+            super::ProjectMemoryGraphReconciliationScheduleV1::Retiring
+        }
         crate::db::MemoryGraphReconciliationTaskScheduleV1::Closed => {
             super::ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
         }
@@ -260,10 +294,15 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
 }
 
 async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<()> {
+    let _pass = db
+        .begin_project_memory_reconciliation_pass()
+        .map_err(|counter| {
+            storage_message(
+                OPERATION,
+                format!("project memory reconciliation telemetry overflowed: {counter}"),
+            )
+        })?;
     let owner = bound_owner(db)?;
-    let runtime = db
-        .memory_graph_runtime()
-        .ok_or(FactStoreError::GraphUnavailable)?;
     let fact_runtime =
         super::runtime::retained_fact_runtime(db)?.ok_or(FactStoreError::GraphUnavailable)?;
     super::runtime::validate_owner_binding(fact_runtime.binding(), &owner, OPERATION)?;
@@ -271,16 +310,26 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
         namespace(&owner)?,
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?,
     );
-    let source = load_source(db, &owner, None).await?;
+    let source = load_source(db, &owner, None, Some(db)).await?;
     let watermark = source_watermark(&owner, &source, None)?;
     let manifest = build_manifest(&owner, projection.clone(), &source, watermark.clone(), None)?;
     let expected_generation = manifest.generation.clone();
     let idempotency_key =
         GraphIdempotencyKey::new(format!("publish:{}", expected_generation.as_str()))
             .map_err(|error| graph_error(&owner, error))?;
-    let runtime_for_reconciliation = Arc::clone(&runtime);
+    db.project_memory_reconciliation_telemetry()
+        .record_publication_attempt()
+        .map_err(|counter| {
+            storage_message(
+                OPERATION,
+                format!("project memory reconciliation telemetry overflowed: {counter}"),
+            )
+        })?;
+    let runtime = issue_memory_graph_operation(db)?;
     let snapshot = match tokio::task::spawn_blocking(move || {
-        runtime_for_reconciliation.reconcile_verified_manifest(&manifest, idempotency_key)
+        runtime
+            .runtime()
+            .reconcile_verified_manifest(&manifest, idempotency_key)
     })
     .await
     .map_err(|error| storage_error(OPERATION, error))?
@@ -289,13 +338,8 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
         Err(error) => {
             let mapped = graph_error(&owner, error);
             if matches!(mapped, FactStoreError::GraphConflict)
-                && verified_head_matches_expected(
-                    &runtime,
-                    &projection,
-                    &expected_generation,
-                    &owner,
-                )
-                .await?
+                && verified_head_matches_expected(db, &projection, &expected_generation, &owner)
+                    .await?
             {
                 return finish_reconciliation_watermark(db, &owner, watermark).await;
             }
@@ -303,9 +347,7 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
         }
     };
     if snapshot.projection() != &projection || snapshot.generation() != &expected_generation {
-        if verified_head_matches_expected(&runtime, &projection, &expected_generation, &owner)
-            .await?
-        {
+        if verified_head_matches_expected(db, &projection, &expected_generation, &owner).await? {
             return finish_reconciliation_watermark(db, &owner, watermark).await;
         }
         return Err(FactStoreError::GraphConflict);
@@ -318,7 +360,7 @@ async fn finish_reconciliation_watermark(
     owner: &FactOwnerV1,
     watermark: tracedecay_graph_db::GraphWatermark,
 ) -> FactStoreResult<()> {
-    if source_watermark(owner, &load_source(db, owner, None).await?, None)? != watermark
+    if source_watermark(owner, &load_source(db, owner, None, Some(db)).await?, None)? != watermark
         && !db.memory_graph_reconciliation_pending()
     {
         return Err(FactStoreError::GraphConflict);
@@ -327,15 +369,15 @@ async fn finish_reconciliation_watermark(
 }
 
 async fn verified_head_matches_expected(
-    runtime: &Arc<dyn crate::store_runtime::VerifiedGraphRuntimePortV1>,
+    db: &Database,
     projection: &GraphProjectionIdentity,
     expected_generation: &tracedecay_graph_db::GraphGenerationId,
     owner: &FactOwnerV1,
 ) -> FactStoreResult<bool> {
-    let runtime = Arc::clone(runtime);
+    let runtime = issue_memory_graph_operation(db)?;
     let projection_for_read = projection.clone();
     let snapshot = tokio::task::spawn_blocking(move || {
-        runtime.verified_snapshot(
+        runtime.runtime().verified_snapshot(
             &projection_for_read,
             FactReadControl::new(Arc::new(|| false)),
         )
@@ -346,6 +388,13 @@ async fn verified_head_matches_expected(
     Ok(snapshot.is_some_and(|snapshot| {
         snapshot.projection() == projection && snapshot.generation() == expected_generation
     }))
+}
+
+fn issue_memory_graph_operation(
+    db: &Database,
+) -> FactStoreResult<crate::db::MemoryGraphRuntimeOperationV1> {
+    db.issue_memory_graph_runtime_operation()
+        .map_err(|_| FactStoreError::GraphUnavailable)
 }
 
 pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
@@ -362,7 +411,7 @@ pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
 }
 
 fn bound_owner(db: &Database) -> FactStoreResult<FactOwnerV1> {
-    match &db.retained_runtime().binding().shard_id.scope {
+    match &db.registered_binding().shard_id.scope {
         StoreShardScopeV1::ProfileMemory => Ok(FactOwnerV1::Profile),
         StoreShardScopeV1::Project { project_id } => Ok(FactOwnerV1::Project {
             project_id: project_id.clone(),
@@ -416,6 +465,7 @@ async fn load_source(
     db: &Database,
     owner: &FactOwnerV1,
     read_control: Option<&FactReadControl>,
+    telemetry_database: Option<&Database>,
 ) -> FactStoreResult<MemoryGraphSource> {
     ensure_source_read_active(read_control)?;
     let key = OwnerKey::new(owner)?;
@@ -423,6 +473,7 @@ async fn load_source(
         .begin_memory_read_transaction(OPERATION)
         .await
         .map_err(|error| storage_error(OPERATION, error))?;
+    let mut source_load = SourceLoadMeasurement::default();
     let result = async {
         let mut entities = Vec::new();
         let mut all_fact_ids = BTreeSet::new();
@@ -445,7 +496,9 @@ async fn load_source(
             .map_err(|error| storage_error(OPERATION, error))?
         {
             ensure_source_read_active(read_control)?;
-            let fact_id = FactId::new(row_string(&row, 0, OPERATION)?)?;
+            let fact_id = row_string(&row, 0, OPERATION)?;
+            source_load.record_row(&[fact_id.as_str()])?;
+            let fact_id = FactId::new(fact_id)?;
             fact_id
                 .validate_owner(owner)
                 .map_err(|_| FactStoreError::OwnerMismatch)?;
@@ -480,10 +533,16 @@ async fn load_source(
             .map_err(|error| storage_error(OPERATION, error))?
         {
             ensure_source_read_active(read_control)?;
-            let fact_id = FactId::new(row_string(&row, 0, OPERATION)?)?;
+            let fact_id = row_string(&row, 0, OPERATION)?;
+            let active_assertion = row_optional_string(&row, 1, OPERATION)?;
+            if let Some(assertion) = active_assertion.as_deref() {
+                source_load.record_row(&[fact_id.as_str(), assertion])?;
+            } else {
+                source_load.record_row(&[fact_id.as_str()])?;
+            }
+            let fact_id = FactId::new(fact_id)?;
             ensure_projected_fact_exists(&all_fact_ids, owner, &fact_id)?;
-            let active_assertion = row_optional_string(&row, 1, OPERATION)?
-                .ok_or(FactStoreError::PayloadAccessMismatch)?;
+            let active_assertion = active_assertion.ok_or(FactStoreError::PayloadAccessMismatch)?;
             push_source_entity(&mut entities, fact_entity_id_from_str(fact_id.as_str())?)?;
             active_assertions.insert(fact_id.clone(), active_assertion);
             fact_ids.insert(fact_id);
@@ -511,10 +570,12 @@ async fn load_source(
             .map_err(|error| storage_error(OPERATION, error))?
         {
             ensure_source_read_active(read_control)?;
-            let stored_fact_id = FactId::new(row_string(&row, 0, OPERATION)?)?;
-            let event =
-                serde_json::from_str::<FactLineageEventV1>(&row_string(&row, 1, OPERATION)?)
-                    .map_err(|error| storage_error(OPERATION, error))?;
+            let stored_fact_id = row_string(&row, 0, OPERATION)?;
+            let event_json = row_string(&row, 1, OPERATION)?;
+            source_load.record_row(&[stored_fact_id.as_str(), event_json.as_str()])?;
+            let stored_fact_id = FactId::new(stored_fact_id)?;
+            let event = serde_json::from_str::<FactLineageEventV1>(&event_json)
+                .map_err(|error| storage_error(OPERATION, error))?;
             if event.owner() != owner || event.fact_id() != &stored_fact_id {
                 return Err(storage_message(
                     OPERATION,
@@ -627,14 +688,17 @@ async fn load_source(
             .map_err(|error| storage_error(OPERATION, error))?
         {
             ensure_source_read_active(read_control)?;
-            let fact = FactId::new(row_string(&row, 0, OPERATION)?)?;
-            ensure_projected_fact_exists(&fact_ids, owner, &fact)?;
+            let fact = row_string(&row, 0, OPERATION)?;
             let assertion = row_string(&row, 1, OPERATION)?;
+            let anchor = row_string(&row, 2, OPERATION)?;
+            source_load.record_row(&[fact.as_str(), assertion.as_str(), anchor.as_str()])?;
+            let fact = FactId::new(fact)?;
+            ensure_projected_fact_exists(&fact_ids, owner, &fact)?;
             push_source_relation(
                 &mut relations,
                 SourceRelation {
                     source: assertion_entity_id_from_str(fact.as_str(), &assertion)?,
-                    target: anchor_entity_id_from_str(&row_string(&row, 2, OPERATION)?)?,
+                    target: anchor_entity_id_from_str(&anchor)?,
                     kind: EVIDENCE_ANCHOR.to_owned(),
                 },
             )?;
@@ -663,10 +727,16 @@ async fn load_source(
             .map_err(|error| storage_error(OPERATION, error))?
         {
             ensure_source_read_active(read_control)?;
-            let fact = FactId::new(row_string(&row, 0, OPERATION)?)?;
+            let fact = row_string(&row, 0, OPERATION)?;
+            let payload_json = row_optional_string(&row, 1, OPERATION)?;
+            if let Some(payload_json) = payload_json.as_deref() {
+                source_load.record_row(&[fact.as_str(), payload_json])?;
+            } else {
+                source_load.record_row(&[fact.as_str()])?;
+            }
+            let fact = FactId::new(fact)?;
             ensure_projected_fact_exists(&fact_ids, owner, &fact)?;
-            let payload_json = row_optional_string(&row, 1, OPERATION)?
-                .ok_or(FactStoreError::PayloadAccessMismatch)?;
+            let payload_json = payload_json.ok_or(FactStoreError::PayloadAccessMismatch)?;
             let payload = serde_json::from_str::<FactPayloadV1>(&payload_json)
                 .map_err(|error| storage_error(OPERATION, error))?;
             for entity in payload.entities() {
@@ -690,7 +760,31 @@ async fn load_source(
         })
     }
     .await;
-    finish_read_snapshot(transaction, result).await
+    let source_result = finish_read_snapshot(transaction, result).await;
+    let telemetry_result = if let Some(telemetry_database) = telemetry_database {
+        telemetry_database
+            .project_memory_reconciliation_telemetry()
+            .record_source_load(source_load.rows, source_load.bytes)
+            .map_err(|counter| {
+                storage_message(
+                    OPERATION,
+                    format!("project memory reconciliation telemetry overflowed: {counter}"),
+                )
+            })
+    } else {
+        Ok(())
+    };
+    match (source_result, telemetry_result) {
+        (Ok(source), Ok(())) => Ok(source),
+        (Ok(_), Err(telemetry_error)) => Err(telemetry_error),
+        (Err(source_error), Ok(())) => Err(source_error),
+        (Err(source_error), Err(telemetry_error)) => Err(storage_message(
+            OPERATION,
+            format!(
+                "{source_error}; reconciliation source telemetry also failed: {telemetry_error}"
+            ),
+        )),
+    }
 }
 
 fn ensure_projected_fact_exists(
@@ -715,7 +809,7 @@ pub(in crate::store::memory) async fn relation_kinds_from_canonical_source_for_t
     owner: &FactOwnerV1,
     read_control: &FactReadControl,
 ) -> FactStoreResult<BTreeSet<FactRelationKindV1>> {
-    load_source(db, owner, Some(read_control))
+    load_source(db, owner, Some(read_control), None)
         .await?
         .relations
         .iter()
@@ -731,6 +825,144 @@ pub(in crate::store::memory) async fn relation_kinds_from_canonical_source_for_t
             ))),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use serde_json::json;
+    use tempfile::{TempDir, tempdir};
+    use tracedecay_domain::{
+        Confidence, FactCategoryV1, FactId, FactOwnerV1, ProvenanceId, UtcMicros,
+    };
+    use tracedecay_store::{
+        FactCommitOutcome, FactReadControl, FactStore, FactStoreError, FactWriteControl,
+    };
+
+    use super::*;
+    use crate::db::engine::params;
+    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+    use crate::store::memory::DatabaseFactStore;
+    use crate::store::memory::crud::{initial_batch, sanitize_payload};
+
+    async fn database(label: &str) -> (TempDir, Database) {
+        let directory = tempdir().expect("create graph telemetry fixture directory");
+        let path = directory.path().join(format!("{label}.db"));
+        let authority = DatabaseAuthority::acquire_test(&path, "graph telemetry test authority")
+            .expect("acquire graph telemetry fixture authority");
+        let (database, _) = Database::publish_profile_memory_test_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("publish graph telemetry fixture runtime");
+        (directory, database)
+    }
+
+    fn write_control() -> FactWriteControl {
+        FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
+    }
+
+    async fn seed_source_fact(database: &Database, label: &str) -> FactId {
+        let sanitized = sanitize_payload(
+            &format!("canonical {label} source fact"),
+            FactCategoryV1::General,
+            &[],
+            &[],
+            &json!({"fixture": label}),
+            None,
+        )
+        .expect("sanitize graph telemetry fixture payload")
+        .expect("graph telemetry fixture remains durable");
+        let batch = initial_batch(
+            &FactOwnerV1::Profile,
+            &ProvenanceId::new(format!("graph.telemetry.{label}.seed"))
+                .expect("graph telemetry fixture operation id"),
+            sanitized.payload,
+            sanitized.access,
+            Confidence::new(0.8).expect("graph telemetry fixture confidence"),
+            None,
+            UtcMicros(1_000_000),
+        )
+        .expect("create graph telemetry fixture batch");
+        let fact_id = batch.fact_id().clone();
+        let outcome = DatabaseFactStore::new(database)
+            .commit_fact(batch, &write_control())
+            .await
+            .expect("commit graph telemetry fixture fact");
+        assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+        fact_id
+    }
+
+    #[tokio::test]
+    async fn cancelled_source_load_records_materialized_source_work() {
+        let (_directory, database) = database("cancelled-source-telemetry").await;
+        seed_source_fact(&database, "cancelled-source-telemetry").await;
+        let observer = database.project_memory_reconciliation_telemetry_observer();
+        let before = observer.snapshot();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&checks);
+        let control = FactReadControl::new(Arc::new(move || {
+            observed.fetch_add(1, Ordering::AcqRel) >= 3
+        }));
+
+        let error = load_source(
+            &database,
+            &FactOwnerV1::Profile,
+            Some(&control),
+            Some(&database),
+        )
+        .await
+        .expect_err("source read must stop after materializing its first fact row");
+        assert!(matches!(error, FactStoreError::ReadCancelled));
+        assert_eq!(checks.load(Ordering::Acquire), 4);
+
+        let cancelled = observer.snapshot();
+        assert!(cancelled.source_rows_loaded > before.source_rows_loaded);
+        assert!(cancelled.source_bytes_loaded > before.source_bytes_loaded);
+    }
+
+    #[tokio::test]
+    async fn failed_source_load_records_materialized_source_work() {
+        let (_directory, database) = database("failed-source-telemetry").await;
+        let fact_id = seed_source_fact(&database, "failed-source-telemetry").await;
+        let transaction = database
+            .begin_memory_write_transaction(OPERATION)
+            .await
+            .expect("begin source corruption transaction");
+        assert_eq!(
+            transaction
+                .execute(
+                    "UPDATE memory_v2_current_facts
+                     SET active_assertion_id = NULL
+                     WHERE fact_id = ?1",
+                    params![fact_id.as_str()],
+                )
+                .await
+                .expect("clear canonical assertion reference"),
+            1
+        );
+        transaction
+            .commit()
+            .await
+            .expect("commit source corruption transaction");
+        let observer = database.project_memory_reconciliation_telemetry_observer();
+        let before = observer.snapshot();
+
+        let error = load_source(&database, &FactOwnerV1::Profile, None, Some(&database))
+            .await
+            .expect_err("missing canonical assertion must fail source loading");
+        assert!(matches!(error, FactStoreError::PayloadAccessMismatch));
+
+        let failed = observer.snapshot();
+        assert!(failed.source_rows_loaded > before.source_rows_loaded);
+        assert!(failed.source_bytes_loaded > before.source_bytes_loaded);
+    }
 }
 
 fn push_source_entity(entities: &mut Vec<String>, entity: String) -> FactStoreResult<()> {

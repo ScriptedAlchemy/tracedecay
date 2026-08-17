@@ -8,7 +8,7 @@ impl WorkStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         task_id: &TaskId,
     ) -> Result<Vec<WorkEvent>, WorkStorageError> {
-        load_registered_history(&self.handle, authority, task_id)
+        load_registered_history(self.handle(), authority, task_id)
     }
 
     fn projection(
@@ -16,12 +16,12 @@ impl WorkStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         task_id: &TaskId,
     ) -> Result<WorkProjection, WorkStorageError> {
-        let history = load_registered_history(&self.handle, authority, task_id)?;
+        let history = load_registered_history(self.handle(), authority, task_id)?;
         WorkProjection::rebuild(&history).map_err(|_| WorkStorageError::Unavailable)
     }
 
     fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError> {
-        append_registered(&self.handle, request)
+        append_registered(self.handle(), request)
     }
 }
 

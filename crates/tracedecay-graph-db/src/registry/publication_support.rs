@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracedecay_store::runtime::{
@@ -7,51 +8,194 @@ use tracedecay_store::runtime::{
     GraphPublicationReplayCursorV1, GraphPublicationReplayLookupV1, GraphPublicationReplayRecordV1,
     GraphPublicationStoreErrorV1, GraphVerifiedHeadV1, RuntimeInterruptionV1,
 };
+use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
 use super::path::canonical_graph_database_file;
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::lease::{GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot};
 use crate::{
-    GraphDb, GraphDbError, GraphGenerationDependency, GraphGenerationId, GraphGenerationManifest,
-    GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
+    GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationDependency, GraphGenerationId,
+    GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
+    GraphProjectionIdentity,
 };
 
+/// Registry-validated graph operation capability.
+///
+/// It retains the one ordinary graph lease issued for the operation and its
+/// exact mounted Store binding. Lease-derived operations never reconstruct a
+/// `GraphDbRegistration`; the registry proves the lease token belongs to its
+/// current owner before constructing this capability.
+pub(super) struct RegisteredGraphDbOperationV1 {
+    database: GraphDbLeaseV1,
+    binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
+    canonical_path: PathBuf,
+    request: Option<GraphDbRegistration>,
+}
+
+impl RegisteredGraphDbOperationV1 {
+    pub(super) fn database(&self) -> &GraphDbLeaseV1 {
+        &self.database
+    }
+
+    pub(super) fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    pub(super) fn check(
+        &self,
+        registry: &GraphDbRegistry,
+        context: &GraphPublicationOperationContextV1<'_>,
+    ) -> Result<(), GraphDbError> {
+        if let Some(request) = &self.request {
+            check_registration_request(request)?;
+        }
+        let current = registry.registered_operation_with_lease(&self.database)?;
+        if current.binding != self.binding
+            || current.verified_locator != self.verified_locator
+            || current.canonical_path != self.canonical_path
+        {
+            return Err(GraphDbError::Conflict);
+        }
+        check_context(context)
+    }
+
+    pub(super) fn require_publication_binding(
+        &self,
+        key: &GraphPublicationKeyV1,
+    ) -> Result<(), GraphDbError> {
+        self.require_projection_binding(&key.projection)
+    }
+
+    pub(super) fn require_projection_binding(
+        &self,
+        projection: &GraphProjectionIdentityV1,
+    ) -> Result<(), GraphDbError> {
+        if projection.shard_id != self.binding.shard_id {
+            return Err(GraphDbError::Conflict);
+        }
+        Ok(())
+    }
+}
+
 impl GraphDbRegistry {
+    pub(super) fn registered_operation(
+        &self,
+        registration: GraphDbRegistration,
+    ) -> Result<RegisteredGraphDbOperationV1, GraphDbError> {
+        check_registration_request(&registration)?;
+        let binding = registration.binding().clone();
+        let verified_locator = registration.verified_locator().clone();
+        let canonical_path = registration.canonical_path().to_path_buf();
+        let database = self.registered_database(&registration)?;
+        Ok(RegisteredGraphDbOperationV1 {
+            database,
+            binding,
+            verified_locator,
+            canonical_path,
+            request: Some(registration),
+        })
+    }
+
+    pub(super) fn registered_operation_with_lease(
+        &self,
+        database: &GraphDbLeaseV1,
+    ) -> Result<RegisteredGraphDbOperationV1, GraphDbError> {
+        let lease_owner_id = database.owner_id();
+        let mut state = self.state_lock()?;
+        for entry in state.entries.values_mut() {
+            match entry {
+                super::RegistryEntry::Ready {
+                    binding,
+                    verified_locator,
+                    path,
+                    expected_format: _expected_format,
+                    owner,
+                    last_used,
+                } if owner.owns_lease(database) => {
+                    *last_used = std::time::Instant::now();
+                    return Ok(RegisteredGraphDbOperationV1 {
+                        database: database.clone(),
+                        binding: binding.clone(),
+                        verified_locator: verified_locator.clone(),
+                        canonical_path: path.clone(),
+                        request: None,
+                    });
+                }
+                super::RegistryEntry::Closing { owner_id, .. }
+                | super::RegistryEntry::Retiring { owner_id, .. }
+                    if *owner_id == lease_owner_id =>
+                {
+                    return Err(GraphDbError::Conflict);
+                }
+                super::RegistryEntry::Faulted {
+                    owner: Some(owner),
+                    error,
+                    ..
+                } if owner.owns_lease(database) => return Err(error.clone()),
+                _ => {}
+            }
+        }
+        Err(GraphDbError::unavailable(
+            "graph lease is not retained by this registry's mounted owner",
+        ))
+    }
+
     pub(super) fn registered_database(
         &self,
         registration: &GraphDbRegistration,
-    ) -> Result<Arc<GraphDb>, GraphDbError> {
+    ) -> Result<GraphDbLeaseV1, GraphDbError> {
         let canonical_path = canonical_graph_database_file(registration.canonical_path())?;
         let mut state = self.state_lock()?;
         let entry = state
             .entries
             .get_mut(&registration.binding().shard_id)
             .ok_or_else(|| GraphDbError::unavailable("graph runtime is not registered"))?;
-        let super::RegistryEntry::Ready {
-            binding,
-            verified_locator,
-            path,
-            expected_format,
-            owner,
-            last_used,
-            ..
-        } = entry
-        else {
-            return Err(GraphDbError::unavailable(
+        match entry {
+            super::RegistryEntry::Ready {
+                binding,
+                verified_locator,
+                path,
+                expected_format,
+                owner,
+                last_used,
+                ..
+            } => {
+                super::require_binding(
+                    (binding, verified_locator, path, *expected_format),
+                    (
+                        registration.binding(),
+                        registration.verified_locator(),
+                        &canonical_path,
+                        crate::GraphFormatVersion::current(),
+                    ),
+                )?;
+                *last_used = std::time::Instant::now();
+                owner.issue_registered_lease(registration)
+            }
+            super::RegistryEntry::Faulted {
+                binding,
+                verified_locator,
+                path,
+                expected_format,
+                error,
+                ..
+            } => {
+                super::require_binding(
+                    (binding, verified_locator, path, *expected_format),
+                    (
+                        registration.binding(),
+                        registration.verified_locator(),
+                        &canonical_path,
+                        crate::GraphFormatVersion::current(),
+                    ),
+                )?;
+                Err(error.clone())
+            }
+            _ => Err(GraphDbError::unavailable(
                 "graph runtime is not ready for verified reads",
-            ));
-        };
-        super::require_binding(
-            (binding, verified_locator, path, *expected_format),
-            (
-                registration.binding(),
-                registration.verified_locator(),
-                &canonical_path,
-                crate::GraphFormatVersion::current(),
-            ),
-        )?;
-        *last_used = std::time::Instant::now();
-        Ok(owner.handle())
+            )),
+        }
     }
 
     pub fn verified_snapshot(
@@ -76,13 +220,13 @@ impl GraphDbRegistry {
     }
 }
 
-pub(super) fn dependency_key(
-    registration: &GraphDbRegistration,
+pub(super) fn dependency_key_for_binding(
+    binding: &StoreRuntimeBindingV1,
     dependency: &GraphGenerationDependency,
 ) -> Result<GraphPublicationKeyV1, GraphDbError> {
     Ok(GraphPublicationKeyV1::new(
         GraphProjectionIdentityV1 {
-            shard_id: registration.binding().shard_id.clone(),
+            shard_id: binding.shard_id.clone(),
             namespace: GraphNamespaceV1::new(dependency.projection.namespace.as_str())
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
             projection: GraphProjectionIdV1::new(dependency.projection.projection.as_str())
@@ -276,6 +420,12 @@ pub(super) fn check_all(
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> Result<(), GraphDbError> {
     check_registration_request(registration)?;
+    check_context(context)
+}
+
+pub(super) fn check_context(
+    context: &GraphPublicationOperationContextV1<'_>,
+) -> Result<(), GraphDbError> {
     if let Some(error) = interruption_error(context) {
         return Err(error);
     }

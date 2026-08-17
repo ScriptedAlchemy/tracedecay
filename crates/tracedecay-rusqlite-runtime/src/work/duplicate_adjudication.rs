@@ -42,7 +42,7 @@ impl WorkDuplicateAdjudicationPortV1 for WorkSqliteStorage {
             .relation_ref(authority)
             .map_err(|_| StorageError::Unavailable)?;
         let transaction = self
-            .handle
+            .handle()
             .begin_immediate()
             .map_err(|_| StorageError::Unavailable)?;
 
@@ -101,7 +101,7 @@ impl WorkDuplicateAdjudicationPortV1 for WorkSqliteStorage {
             * (MAX_WORK_DUPLICATE_CLASSIFICATION_ATTEMPTS_V1 - 1)
             / 2;
         let rows = registered_work_query(
-            &self.handle,
+            self.handle(),
             "SELECT receipt_payload, relation_digest FROM (
                 SELECT receipt_payload, relation_digest, work_generation, topology_generation,
                        ROW_NUMBER() OVER (
@@ -167,7 +167,7 @@ impl WorkDuplicateAdjudicationPortV1 for WorkSqliteStorage {
             second_attempt,
         )
         .map_err(|_| StorageError::Unavailable)?;
-        current_adjudication(&self.handle, authority, relation_ref.as_str())
+        current_adjudication(self.handle(), authority, relation_ref.as_str())
     }
 }
 

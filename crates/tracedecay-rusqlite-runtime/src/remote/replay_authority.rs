@@ -25,7 +25,7 @@ impl RemoteSqliteStorageV1 {
             .validate()
             .map_err(|_| RemoteExactObservationQueryErrorV1::ScopeMismatch)?;
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT authority_state_json, writer_json, runtime_binding_json, updated_at
              FROM remote_authorities WHERE brain_id = ?1",
             vec![text(self.binding.shard_id.brain_id.as_str())],
@@ -67,7 +67,7 @@ impl RemoteSqliteStorageV1 {
         {
             return Err(RemoteExactObservationQueryErrorV1::ReceiptMismatch);
         }
-        if promotion_pending(&self.handle, &writer.authority.fence)
+        if promotion_pending(self.handle(), &writer.authority.fence)
             .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?
         {
             return Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable);
@@ -81,13 +81,13 @@ impl RemoteReplayCurrentWriterPortV1 for RemoteSqliteStorageV1 {
         &self,
         frame: &RemoteReplayFrameV1,
     ) -> Result<RemoteReplayCurrentWriterV1, RemoteCapturePersistenceErrorV1> {
-        if promotion_pending(&self.handle, &frame.capture.writer.authority.fence)
+        if promotion_pending(self.handle(), &frame.capture.writer.authority.fence)
             .map_err(map_persistence_error)?
         {
             return Err(RemoteCapturePersistenceErrorV1::Unavailable);
         }
         let rows = query(
-            &self.handle,
+            self.handle(),
             "SELECT authority_state_json, writer_json, runtime_binding_json
              FROM remote_authorities WHERE brain_id = ?1",
             vec![text(frame.capture.writer.authority.fence.brain_id.as_str())],

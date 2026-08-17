@@ -116,26 +116,26 @@ fn require_host_cli_from(
     lifecycle: &str,
     path_var: Option<&std::ffi::OsStr>,
 ) -> Result<PathBuf> {
-    resolve_on_path(program, path_var).ok_or_else(|| TraceDecayError::Config {
-        message: format!(
-            "`{program}` binary required for {lifecycle} but was not found on PATH. \
-             TraceDecay drives the host's own plugin commands and never edits host-owned \
-             plugin state directly; install {program} (or add it to PATH) and retry."
-        ),
+    resolve_on_path(program, path_var)?.ok_or_else(|| TraceDecayError::HostCliUnavailable {
+        program: program.to_string(),
+        lifecycle: lifecycle.to_string(),
     })
 }
 
 /// First executable match for `program` across `path_var`.
-fn resolve_on_path(program: &str, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
-    std::env::split_paths(path_var?).find_map(|dir| {
+fn resolve_on_path(program: &str, path_var: Option<&std::ffi::OsStr>) -> Result<Option<PathBuf>> {
+    let Some(path_var) = path_var else {
+        return Ok(None);
+    };
+    for dir in std::env::split_paths(path_var) {
         for name in candidate_file_names(program) {
             let candidate = dir.join(&name);
-            if is_executable_file(&candidate) {
-                return Some(candidate);
+            if is_executable_file(&candidate)? {
+                return Ok(Some(candidate));
             }
         }
-        None
-    })
+    }
+    Ok(None)
 }
 
 /// Executable spellings to try for a bare program name.
@@ -153,16 +153,29 @@ fn candidate_file_names(program: &str) -> Vec<String> {
 }
 
 #[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
+fn is_executable_file(path: &Path) -> Result<bool> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    match std::fs::metadata(path) {
+        Ok(metadata) if !metadata.is_file() => Ok(false),
+        Ok(metadata) if metadata.permissions().mode() & 0o111 != 0 => Ok(true),
+        Ok(_) => Err(TraceDecayError::Config {
+            message: format!(
+                "host CLI candidate `{}` exists but is not executable",
+                path.display()
+            ),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(TraceDecayError::Io(error)),
+    }
 }
 
 #[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
+fn is_executable_file(path: &Path) -> Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(TraceDecayError::Io(error)),
+    }
 }
 
 /// Spawn a host command, absorbing the transient `ETXTBSY` window that follows
@@ -350,13 +363,13 @@ fn resolve_launch_command(program: &Path) -> Result<(PathBuf, Vec<OsString>)> {
         if interpreter.starts_with('-') || interpreter.contains('=') {
             return Ok((program.to_path_buf(), Vec::new()));
         }
-        let interpreter_path = resolve_on_path(interpreter, std::env::var_os("PATH").as_deref())
+        let interpreter_path = resolve_on_path(interpreter, std::env::var_os("PATH").as_deref())?
             .ok_or_else(|| TraceDecayError::Config {
-                message: format!(
-                    "could not resolve env-shebang interpreter `{interpreter}` for `{}` on PATH",
-                    program.display()
-                ),
-            })?;
+            message: format!(
+                "could not resolve env-shebang interpreter `{interpreter}` for `{}` on PATH",
+                program.display()
+            ),
+        })?;
         let interpreter_path =
             std::fs::canonicalize(&interpreter_path).map_err(|error| TraceDecayError::Config {
                 message: format!(
@@ -428,13 +441,11 @@ mod tests {
         )
         .expect_err("an absent host binary must refuse, never fall back");
 
-        let TraceDecayError::Config { message } = error else {
-            panic!("host CLI absence must surface as a config error");
+        let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
+            panic!("host CLI absence must surface as a typed requirement");
         };
-        assert!(
-            message.contains("`claude` binary required for claude plugin lifecycle"),
-            "the refusal must name the binary and the lifecycle: {message}"
-        );
+        assert_eq!(program, "claude");
+        assert_eq!(lifecycle, "claude plugin lifecycle");
     }
 
     #[cfg(unix)]
@@ -458,16 +469,44 @@ mod tests {
     #[test]
     fn a_non_executable_file_does_not_satisfy_the_requirement() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("claude"), b"not executable").unwrap();
+        let candidate = dir.path().join("claude");
+        std::fs::write(&candidate, b"not executable").unwrap();
+
+        let error = require_host_cli_from(
+            "claude",
+            "claude plugin lifecycle",
+            Some(dir.path().as_os_str()),
+        )
+        .expect_err("a non-executable PATH candidate must refuse");
+
+        let TraceDecayError::Config { message } = error else {
+            panic!(
+                "a present non-executable candidate must not become HostCliUnavailable: {error}"
+            );
+        };
+        assert!(
+            message.contains(&candidate.display().to_string()),
+            "the typed failure must identify the unusable PATH candidate: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_metadata_failure_is_not_relabelled_as_host_cli_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let non_directory = dir.path().join("not-a-directory");
+        std::fs::write(&non_directory, b"not a directory").unwrap();
+
+        let error = require_host_cli_from(
+            "claude",
+            "claude plugin lifecycle",
+            Some(non_directory.as_os_str()),
+        )
+        .expect_err("a broken PATH entry must preserve its filesystem failure");
 
         assert!(
-            require_host_cli_from(
-                "claude",
-                "claude plugin lifecycle",
-                Some(dir.path().as_os_str()),
-            )
-            .is_err(),
-            "a non-executable file must not be mistaken for the host CLI"
+            matches!(error, TraceDecayError::Io(_)),
+            "only an exhausted search may become HostCliUnavailable: {error}"
         );
     }
 

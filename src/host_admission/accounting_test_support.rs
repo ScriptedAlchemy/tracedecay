@@ -190,7 +190,7 @@ impl HostAdmissionTestRuntimeV1 {
         Ok(
             crate::dashboard::DashboardHostAdmissionTestAuthorityV1::new(
                 Arc::clone(self),
-                Arc::clone(&self.profile_database),
+                self.profile_database.clone(),
                 project_sessions,
             ),
         )

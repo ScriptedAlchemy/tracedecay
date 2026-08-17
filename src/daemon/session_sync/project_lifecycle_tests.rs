@@ -32,7 +32,7 @@ async fn register(
     project_id: ProjectId,
 ) -> (
     crate::host_admission::HostAdmissionTestRuntimeV1,
-    Arc<crate::global_db::RegisteredGlobalDb>,
+    crate::global_db::RegisteredGlobalDbLeaseV1,
     UserProfileId,
 ) {
     let project_root = root.path().join(project_id.as_str());
@@ -60,8 +60,8 @@ async fn register(
             profile_root: root.path().to_path_buf(),
             project_root,
             transcript_source_home: None,
-            project_sessions: Arc::clone(&project_sessions),
-            user_sessions: Arc::clone(&profile_sessions),
+            project_sessions: project_sessions.clone(),
+            user_sessions: profile_sessions.clone(),
             registry: profile_sessions,
             startup_import: false,
             project_refresh:
@@ -140,14 +140,14 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
             .project_sessions()
             .is_err()
     );
-    assert!(Arc::ptr_eq(
-        &service
+    assert!(
+        service
             .context_for(&scope_b)
             .unwrap()
             .project_sessions()
-            .unwrap(),
-        &database_b
-    ));
+            .unwrap()
+            .shares_client_with(&database_b)
+    );
     assert!(!cancellation_b.is_cancelled());
 
     let unavailable_service = service.clone();
@@ -178,16 +178,19 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
             .is_err()
     );
 
-    let replacement_a = Arc::new(
-        crate::global_db::RegisteredGlobalDb::migrate_and_attach(
-            old_a.runtime().clone(),
-            old_a.binding().clone(),
-            old_a.runtime().locator().verified().clone(),
-            old_a.authority().clone(),
-        )
-        .await
-        .unwrap(),
-    );
+    // Re-enter the canonical host-admission owner map. This mints a fresh
+    // short-lived registered lease without recovering a runtime or authority
+    // from the retired client.
+    let replacement_runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+        root_a.path(),
+        root_a.path().join(project_a.as_str()),
+        project_a.clone(),
+    )
+    .await
+    .unwrap();
+    let replacement_a = replacement_runtime
+        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
+        .unwrap();
     let recovery_request = SessionSyncRequestV1::new(
         RequestId::new("session-sync.rebind-recovery").unwrap(),
         IdempotencyKey::new("session-sync.rebind-recovery").unwrap(),
@@ -208,7 +211,7 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
         )
         .await
         .unwrap();
-    assert!(!Arc::ptr_eq(&old_a, &replacement_a));
+    assert!(!old_a.shares_client_with(&replacement_a));
     assert_eq!(old_a.binding(), replacement_a.binding());
     assert!(
         service
@@ -216,14 +219,14 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
             .await
             .unwrap()
     );
-    assert!(Arc::ptr_eq(
-        &service
+    assert!(
+        service
             .context_for(&scope_a)
             .unwrap()
             .project_sessions()
-            .unwrap(),
-        &replacement_a
-    ));
+            .unwrap()
+            .shares_client_with(&replacement_a)
+    );
     let recovered: SessionSyncJournalV1 = serde_json::from_str(
         &service
             .context_for(&scope_a)
@@ -319,7 +322,7 @@ async fn registration_recovery_fences_concurrent_execute() {
                 project_root,
                 transcript_source_home: None,
                 project_sessions,
-                user_sessions: Arc::clone(&profile_sessions),
+                user_sessions: profile_sessions.clone(),
                 registry: profile_sessions,
                 startup_import: false,
                 project_refresh:
@@ -431,8 +434,8 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
             project_root,
             transcript_source_home: None,
             project_sessions,
-            user_sessions: Arc::clone(&profile_sessions),
-            registry: Arc::clone(&profile_sessions),
+            user_sessions: profile_sessions.clone(),
+            registry: profile_sessions.clone(),
             startup_import: true,
             project_refresh:
                 crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),

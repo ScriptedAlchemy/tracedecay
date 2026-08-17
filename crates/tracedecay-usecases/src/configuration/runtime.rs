@@ -20,7 +20,7 @@ use crate::config::{
 use crate::semantic_runtime::{
     ProductionSemanticActivationCoordinatorV1, SemanticConfigurationSnapshotSourceV1,
 };
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
@@ -46,7 +46,7 @@ pub(crate) const RUNTIME_CONFIGURATION_COMPONENT: &str = "configuration.runtime-
 /// local transport.
 pub struct ProjectConfigurationRuntime {
     target: RuntimeConfigurationTarget,
-    configuration_database: Arc<RegisteredGlobalDb>,
+    configuration_database: RegisteredGlobalDbLeaseV1,
     authorities: Arc<ConfigurationAuthoritySlots>,
     client: Arc<ProductionConfigurationDaemonClient>,
     semantic_runtime: OnceLock<Arc<ProductionSemanticActivationCoordinatorV1>>,
@@ -68,7 +68,7 @@ impl ProjectConfigurationRuntime {
         })?;
         let registry = Arc::new(registry);
         let store = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
-            Arc::clone(&registered_database),
+            registered_database.clone(),
         );
         let authorities = Arc::new(ConfigurationAuthoritySlots::new());
         let control_plane: SharedConfigurationControlPlane =
@@ -108,8 +108,8 @@ impl ProjectConfigurationRuntime {
         &self.target
     }
 
-    pub fn registered_database(&self) -> Arc<RegisteredGlobalDb> {
-        Arc::clone(&self.configuration_database)
+    pub fn registered_database(&self) -> RegisteredGlobalDbLeaseV1 {
+        self.configuration_database.clone()
     }
 
     pub fn install_authorities(

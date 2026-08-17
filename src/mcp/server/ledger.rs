@@ -1,6 +1,7 @@
 //! Token-savings ledger and tool/hook analytics recording.
 
 use super::*;
+use crate::global_db::RegisteredGlobalDb;
 
 /// Upper bound for [`McpServer::ledger_writes_settled`]. Savings-ledger writes
 /// are fire-and-forget `SQLite` appends that finish in well under a second on a
@@ -50,7 +51,7 @@ fn upload_enabled_from_desired_configuration(
 /// [`McpServer::ledger_sink_is_mounted`] — and collapses three copies of
 /// the same fallback into one resolution.
 pub(crate) enum LedgerSink {
-    Mounted(Arc<crate::global_db::RegisteredGlobalDb>),
+    Mounted(crate::global_db::RegisteredGlobalDbLeaseV1),
     NotMounted,
 }
 
@@ -74,9 +75,7 @@ impl McpServer {
         self.accounting_db
             .as_ref()
             .or(self.global_db.as_ref())
-            .map_or(LedgerSink::NotMounted, |db| {
-                LedgerSink::Mounted(Arc::clone(db))
-            })
+            .map_or(LedgerSink::NotMounted, |db| LedgerSink::Mounted(db.clone()))
     }
 
     /// Whether any ledger write from this server can reach a database.

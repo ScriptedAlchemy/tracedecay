@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_domain::CoverageStateV1;
@@ -36,7 +35,7 @@ async fn idle_producer_publishes_one_proved_completed_quiet_day() {
     transaction.commit().await.expect("commit frontier fixture");
 
     let producer = BoundedObservabilityProducerV1::start(
-        Arc::clone(&db),
+        db.clone(),
         ObservabilityProducerIdentityV1 {
             authorized_scope_ref: scope.to_owned(),
             process_boot_id: "boot:empty-day".to_owned(),

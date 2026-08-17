@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::branch;
 use crate::branch_meta;
-use crate::db::{Database, DatabaseAccessMode};
+use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::storage::StoreLayout;
 
@@ -79,7 +79,7 @@ impl TraceDecay {
             self.open_options.clone(),
             self.store_layout.clone(),
             self.configuration_runtime.registered_database(),
-            Arc::clone(&self.profile_database),
+            self.profile_database.clone(),
             Arc::clone(&self.store_runtime_registry),
         )
         .await
@@ -146,11 +146,14 @@ impl TraceDecay {
 
     pub async fn open_project_store_db_read_only(&self) -> Result<Database> {
         let database = self.retained_project_store_db()?;
-        Database::publish_runtime(
-            database.retained_runtime().clone(),
-            DatabaseAccessMode::ReadOnly,
-        )
-        .await
+        if database.is_writable() {
+            return Err(TraceDecayError::Config {
+                message:
+                    "cannot issue a read-only project store client from a writable database lease"
+                        .to_string(),
+            });
+        }
+        Ok(database)
     }
 
     fn build_branch_diagnostics(

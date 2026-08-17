@@ -460,11 +460,11 @@ impl RegisteredGlobalDb {
         parse_offset: ParseOffset,
         policy: TranscriptWritePolicy,
     ) -> Result<(), TranscriptPersistenceError> {
-        let transaction = self.begin_transcript_transaction().await?;
         let storage_root = self
             .db_path()
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
+        let transaction = self.begin_transcript_transaction().await?;
         let mut payload_rollback =
             tracedecay_sessions::runtime::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
                 storage_root,
@@ -554,7 +554,8 @@ impl RegisteredGlobalDb {
         // Per-transcript point lookup on the shared registered reader pool: take
         // one short-held query lease rather than pinning a snapshot worker for
         // the whole read.
-        get_parse_offset(self.read_connection(), path).await
+        let reader = self.read_connection();
+        get_parse_offset(&reader, path).await
     }
 
     pub async fn set_parse_offset(&self, path: &str, offset: ParseOffset) -> Result<(), String> {

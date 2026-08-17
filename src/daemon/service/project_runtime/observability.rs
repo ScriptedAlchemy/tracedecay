@@ -6,7 +6,7 @@ use tracedecay_usecases::observability::{
 };
 
 pub(crate) struct RegisteredObservabilityProducerV1 {
-    database: Arc<crate::global_db::RegisteredGlobalDb>,
+    database: crate::global_db::RegisteredGlobalDbLeaseV1,
     producer: Arc<BoundedObservabilityProducerV1>,
     delivery_settlement_authority: Arc<DeliverySettlementAuthorityV1>,
     delivery_settlements: Arc<BoundedDeliverySettlementRecorderV1>,
@@ -15,7 +15,7 @@ pub(crate) struct RegisteredObservabilityProducerV1 {
 
 impl RegisteredObservabilityProducerV1 {
     pub(crate) fn new(
-        database: Arc<crate::global_db::RegisteredGlobalDb>,
+        database: crate::global_db::RegisteredGlobalDbLeaseV1,
         producer: BoundedObservabilityProducerV1,
         delivery_capacity: usize,
     ) -> Result<Self, &'static str> {
@@ -24,7 +24,7 @@ impl RegisteredObservabilityProducerV1 {
             .map_err(|_| "work_owner_observation_storage_unavailable")?;
         let producer = Arc::new(producer);
         let delivery_settlement_authority = Arc::new(DeliverySettlementAuthorityV1::new(
-            Arc::clone(&database),
+            database.clone(),
             Arc::clone(&producer),
             producer.identity().clone(),
         )?);
@@ -49,8 +49,8 @@ impl RegisteredObservabilityProducerV1 {
         Arc::clone(&self.producer)
     }
 
-    pub(crate) fn database(&self) -> Arc<crate::global_db::RegisteredGlobalDb> {
-        Arc::clone(&self.database)
+    pub(crate) fn database(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
+        self.database.clone()
     }
 
     pub(crate) fn delivery_settlement_authority(
@@ -65,10 +65,10 @@ impl RegisteredObservabilityProducerV1 {
 
     pub(crate) fn matches(
         &self,
-        database: &Arc<crate::global_db::RegisteredGlobalDb>,
+        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
         identity: &ObservabilityProducerIdentityV1,
     ) -> bool {
-        Arc::ptr_eq(&self.database, database) && self.producer.identity() == identity
+        self.database.shares_client_with(database) && self.producer.identity() == identity
     }
 
     pub(crate) async fn shutdown(

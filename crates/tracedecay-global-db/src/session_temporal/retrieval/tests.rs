@@ -10,8 +10,9 @@ use super::queries::*;
 use super::records::*;
 use super::*;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay_runtime_core::db::engine::{
-    Connection, Executor, ReadSnapshot, TestConnection, Value as SqlValue,
+use tracedecay_runtime_core::db::{
+    DatabaseEngineReadSnapshot,
+    engine::{Connection, Executor, TestConnection, Value as SqlValue},
 };
 use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::ports::{
@@ -246,7 +247,7 @@ fn candidate_for_anchor(anchor_id: &str) -> RankingCandidate {
 }
 
 struct RegisteredTemporalRead {
-    read: ReadSnapshot,
+    read: DatabaseEngineReadSnapshot,
 }
 
 impl RegisteredTemporalRead {

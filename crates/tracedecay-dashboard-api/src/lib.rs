@@ -149,8 +149,10 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_agent_hosts::automation::backend;
 use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
-use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::db::{Database, DatabaseEngineConnection};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::db::{
+    Database, DatabaseEngineReadConnection, DatabaseStorageTelemetryHandle,
+};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{StorageMode, StoreLayout};
 
@@ -248,7 +250,7 @@ pub struct DashboardStateCompositionV1 {
     /// this exact project. Standalone dashboards leave it absent and graph
     /// structure routes report typed unavailable.
     pub code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
-    pub registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+    pub registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
     /// Daemon-owned typed read over the verified session-git-evidence graph
     /// projection. Loom's git sources report unavailable without it.
@@ -257,7 +259,7 @@ pub struct DashboardStateCompositionV1 {
     /// application admission and provider/store access; HTTP receives only
     /// bounded typed source outcomes.
     pub delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
-    pub registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
+    pub registered_savings_db: Option<RegisteredGlobalDbLeaseV1>,
     /// Exact daemon-selected profile plus its canonical automation run and
     /// managed-skill materialization capabilities. Standalone states leave it
     /// absent and automation mutation routes report typed unavailable.
@@ -328,14 +330,14 @@ pub struct DashboardState {
     /// Immutable authoritative owner for every memory operation served here.
     pub memory_owner: FactOwnerV1,
     /// Active code-graph database. This can be branch-specific.
-    pub graph_conn: DatabaseEngineConnection,
-    /// Keeps every project-database authority alive as long as cloned raw
-    /// connections remain reachable through this state.
+    pub graph_conn: DatabaseEngineReadConnection,
+    /// Keeps every project-database authority alive as long as guarded
+    /// capabilities remain reachable through this state.
     pub _database_guards: Vec<Arc<Database>>,
     /// Read-only telemetry handle attached to the retained active graph runtime.
     /// This remains distinct from project memory when those stores use
     /// different files.
-    pub graph_telemetry_handle: Option<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle>,
+    pub graph_telemetry_handle: Option<DatabaseStorageTelemetryHandle>,
     /// Display path of the active code-graph database.
     pub graph_db_path: String,
     /// Authoritative project-memory handle and process-local writer lane.
@@ -344,7 +346,7 @@ pub struct DashboardState {
     pub mem_db_path: String,
     /// Registered LCM session store retained for legacy analytics and
     /// accounting routes that have not yet moved to application read models.
-    pub lcm_db: Option<Arc<RegisteredGlobalDb>>,
+    pub lcm_db: Option<RegisteredGlobalDbLeaseV1>,
     /// Display path of the retained legacy session store.
     pub lcm_db_path: String,
     /// Storage scope of the retained legacy session store.
@@ -360,7 +362,7 @@ pub struct DashboardState {
     /// Global accounting DB for the savings ledger and lifetime counters used
     /// by the Savings & Cost tab. Provider usage lives in the retained project
     /// session store exposed separately through `lcm_db`.
-    pub savings_db: Option<Arc<RegisteredGlobalDb>>,
+    pub savings_db: Option<RegisteredGlobalDbLeaseV1>,
     /// Display path of the global accounting DB.
     pub savings_db_path: String,
     pub project_root: PathBuf,
@@ -413,8 +415,8 @@ pub struct DashboardState {
 /// raw database handles never cross the public test seam.
 pub struct DashboardHostAdmissionTestAuthorityV1 {
     _runtime: Arc<dyn Send + Sync>,
-    project_sessions: Arc<RegisteredGlobalDb>,
-    profile_database: Arc<RegisteredGlobalDb>,
+    project_sessions: RegisteredGlobalDbLeaseV1,
+    profile_database: RegisteredGlobalDbLeaseV1,
     automation_authority: Option<DashboardAutomationAuthorityV1>,
     automation_writer: Option<DashboardAutomationWriter>,
     lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
@@ -428,8 +430,8 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
 impl DashboardHostAdmissionTestAuthorityV1 {
     pub fn new<T>(
         runtime: Arc<T>,
-        profile_database: Arc<RegisteredGlobalDb>,
-        project_sessions: Arc<RegisteredGlobalDb>,
+        profile_database: RegisteredGlobalDbLeaseV1,
+        project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> Self
     where
         T: Send + Sync + 'static,
@@ -573,21 +575,21 @@ impl DashboardState {
 
 /// The retained session store for legacy dashboard routes.
 pub struct LcmStoreSelection {
-    pub lcm_db: Option<Arc<RegisteredGlobalDb>>,
+    pub lcm_db: Option<RegisteredGlobalDbLeaseV1>,
     pub path: String,
     pub scope: String,
 }
 
 pub async fn resolve_lcm_store(
     cg: &TraceDecay,
-    registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+    registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
 ) -> LcmStoreSelection {
     resolve_lcm_store_for_layout(cg.store_layout(), registered_project_session_db)
 }
 
 fn resolve_lcm_store_for_layout(
     layout: &StoreLayout,
-    registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+    registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
 ) -> LcmStoreSelection {
     if let Some(db) = registered_project_session_db {
         return LcmStoreSelection {
@@ -708,9 +710,12 @@ async fn build_state_inner(
         project_graph,
         project_graph_resolver,
         memory_owner,
-        graph_conn: mem_db.engine_conn(),
+        graph_conn: mem_db.read_connection(),
         _database_guards: vec![mem_db.clone()],
-        graph_telemetry_handle: cg.storage_telemetry_handle().ok(),
+        graph_telemetry_handle: cg
+            .dashboard_database_guard()
+            .storage_telemetry_handle()
+            .ok(),
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_db,
         mem_db_path,
@@ -967,7 +972,7 @@ where
             code_graph_projection_read_port: test_authority
                 .and_then(|authority| authority.code_graph_projection_read_port.clone()),
             registered_project_session_db: test_authority
-                .map(|authority| Arc::clone(&authority.project_sessions)),
+                .map(|authority| authority.project_sessions.clone()),
             lcm_read_authority: test_authority
                 .and_then(|authority| authority.lcm_read_authority.clone()),
             git_correlation_read_authority: test_authority
@@ -975,7 +980,7 @@ where
             delivery_read_authority: test_authority
                 .and_then(|authority| authority.delivery_read_authority.clone()),
             registered_savings_db: test_authority
-                .map(|authority| Arc::clone(&authority.profile_database)),
+                .map(|authority| authority.profile_database.clone()),
             automation_authority: test_authority
                 .and_then(|authority| authority.automation_authority.clone()),
             automation_observation: None,
@@ -2167,7 +2172,7 @@ mod authority_tests {
                 project_graph: None,
                 project_graph_resolver: None,
                 memory_owner,
-                graph_conn: database.engine_conn(),
+                graph_conn: database.read_connection(),
                 _database_guards: vec![Arc::clone(&database)],
                 graph_telemetry_handle: database.storage_telemetry_handle().ok(),
                 graph_db_path: layout.graph_db_path.display().to_string(),
@@ -2425,12 +2430,15 @@ mod authority_tests {
             .project_database_arc()
             .expect("project session authority");
 
-        let selected = resolve_lcm_store_for_layout(&fixture.layout, Some(Arc::clone(&retained)));
+        let selected = resolve_lcm_store_for_layout(&fixture.layout, Some(retained.clone()));
 
-        assert!(Arc::ptr_eq(
-            selected.lcm_db.as_ref().expect("retained LCM authority"),
-            &retained,
-        ));
+        assert!(
+            selected
+                .lcm_db
+                .as_ref()
+                .expect("retained LCM authority")
+                .shares_client_with(&retained)
+        );
         assert_eq!(selected.path, retained.db_path().display().to_string());
         assert_ne!(selected.scope, "global");
     }

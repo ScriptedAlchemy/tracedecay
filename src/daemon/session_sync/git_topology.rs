@@ -17,7 +17,7 @@ use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 use tracedecay_store::FactReadControl;
 
 use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 
 use super::{SESSION_SYNC_POLL_INTERVAL, SessionSyncProjectContext, work::SessionSyncInterruption};
 
@@ -48,7 +48,7 @@ impl SessionSyncProjectContext {
         &self,
         request: &tracedecay_application::session_sync::SessionSyncRequestV1,
         shutdown: &tracedecay_usecases::observation::ObservationCancellation,
-        project_sessions: Arc<RegisteredGlobalDb>,
+        project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> GitTopologySyncOutcome {
         let scope = match crate::daemon::project_open_owners::resolved_scope_for_project(
             &self.project_root,
@@ -59,9 +59,10 @@ impl SessionSyncProjectContext {
                 return GitTopologySyncOutcome::Finished(Err(GitTopologySyncFailure::Unavailable));
             }
         };
-        let Some(runtime) = project_sessions.project_graph_runtime().cloned() else {
+        let Some(runtime) = project_sessions.project_graph_runtime() else {
             return GitTopologySyncOutcome::Finished(Err(GitTopologySyncFailure::Unavailable));
         };
+        let runtime: Arc<dyn VerifiedGraphRuntimePortV1> = Arc::new(runtime.clone());
         let scope_sets = match project_sessions.authorized_scope_set_storage() {
             Ok(scope_sets) => scope_sets,
             Err(_) => {

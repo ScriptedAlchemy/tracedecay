@@ -450,12 +450,6 @@ impl ProductionProjectCompositionHarnessV1 {
         worktree_root: impl AsRef<Path>,
         branch: &str,
     ) -> Result<crate::branch::BranchAddOutcome> {
-        let resources = self
-            .resources
-            .as_ref()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "production-composition harness is shut down".to_owned(),
-            })?;
         let canonical_project_root =
             std::fs::canonicalize(project_root.as_ref()).map_err(|error| {
                 TraceDecayError::Config {
@@ -465,64 +459,21 @@ impl ProductionProjectCompositionHarnessV1 {
                     ),
                 }
             })?;
-        let canonical_worktree_root =
-            std::fs::canonicalize(worktree_root.as_ref()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "failed to canonicalize branch worktree '{}': {error}",
-                        worktree_root.as_ref().display()
-                    ),
-                }
-            })?;
-        if !resources
-            .invocation
-            .code_index_schedulers
-            .is_worktree_mounted(&canonical_worktree_root)
-            .await
-        {
-            return Err(TraceDecayError::project_route(
-                "code_index_scheduler_unavailable",
-                true,
-                format!(
-                    "code-index scheduler authority is unavailable for branch worktree '{}' in project '{}'",
-                    canonical_worktree_root.display(),
-                    canonical_project_root.display()
-                ),
-            ));
-        }
-        let serving = resources
-            .invocation
-            .code_index_schedulers
-            .serving_code_scope(&canonical_worktree_root)
-            .await
-            .and_then(|scope| scope.serving_generation)
-            .ok_or_else(|| {
-                TraceDecayError::project_route(
-                    "code_index_activation_unavailable",
-                    true,
-                    format!(
-                        "code-index activation is unavailable for branch worktree '{}'",
-                        canonical_worktree_root.display()
-                    ),
-                )
-            })?;
-        let requested_reference = format!("refs/heads/{branch}");
-        if serving
-            .snapshot()
-            .reference
+        let graph = self.server(&canonical_project_root)?.cg().await;
+        let resources = self
+            .resources
             .as_ref()
-            .map(tracedecay_domain::RefId::as_str)
-            != Some(requested_reference.as_str())
-        {
-            return Err(TraceDecayError::project_route(
-                "code_index_scheduler_identity_mismatch",
-                true,
-                format!(
-                    "mounted code-index scheduler is bound to a different branch than '{branch}'; dynamic worktree activation is unavailable"
-                ),
-            ));
-        }
-        Ok(crate::branch::BranchAddOutcome::AlreadyTracked)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        super::branch_add::track_exact_worktree_branch(
+            &graph,
+            &resources.invocation.code_index_schedulers,
+            &canonical_project_root,
+            worktree_root.as_ref(),
+            branch,
+        )
+        .await
     }
 
     pub async fn sync_tracked_worktree_branch(
@@ -532,12 +483,8 @@ impl ProductionProjectCompositionHarnessV1 {
         branch: &str,
         query: &str,
     ) -> Result<(Option<String>, Option<String>, bool, bool)> {
-        let resources = self
-            .resources
-            .as_ref()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "production-composition harness is shut down".to_owned(),
-            })?;
+        self.track_worktree_branch(project_root.as_ref(), worktree_root.as_ref(), branch)
+            .await?;
         let canonical_project_root =
             std::fs::canonicalize(project_root.as_ref()).map_err(|error| {
                 TraceDecayError::Config {
@@ -556,114 +503,35 @@ impl ProductionProjectCompositionHarnessV1 {
                     ),
                 }
             })?;
-        let schedulers = &resources.invocation.code_index_schedulers;
-        if !schedulers
-            .is_worktree_mounted(&canonical_worktree_root)
-            .await
-        {
-            return Err(TraceDecayError::project_route(
-                "code_index_scheduler_unavailable",
-                true,
-                format!(
-                    "code-index scheduler authority is unavailable for branch worktree '{}' in project '{}'",
-                    canonical_worktree_root.display(),
-                    canonical_project_root.display()
-                ),
-            ));
-        }
-        let requested_reference = format!("refs/heads/{branch}");
-        let serving_generation = schedulers
-            .serving_code_scope(&canonical_worktree_root)
-            .await
-            .and_then(|scope| scope.serving_generation)
-            .ok_or_else(|| {
-                TraceDecayError::project_route(
-                    "code_index_activation_unavailable",
-                    true,
-                    format!(
-                        "code-index activation is unavailable for branch worktree '{}'",
-                        canonical_worktree_root.display()
-                    ),
-                )
-            })?;
-        let serving_reference = serving_generation.snapshot().reference.clone();
-        if serving_reference
+        let graph = self.server(&canonical_project_root)?.cg().await;
+        let resources = self
+            .resources
             .as_ref()
-            .map(tracedecay_domain::RefId::as_str)
-            != Some(requested_reference.as_str())
-        {
-            return Err(TraceDecayError::project_route(
-                "code_index_scheduler_identity_mismatch",
-                true,
-                format!(
-                    "mounted code-index scheduler is bound to a different branch than '{branch}'; dynamic worktree activation is unavailable"
-                ),
-            ));
-        }
-        if !schedulers
-            .notify_hook_overflow(&canonical_worktree_root)
-            .await
-        {
-            return Err(TraceDecayError::project_route(
-                "code_index_scheduler_unavailable",
-                true,
-                format!(
-                    "code-index scheduler rejected refresh for branch worktree '{}'",
-                    canonical_worktree_root.display()
-                ),
-            ));
-        }
-        let prior_generation_id = serving_generation.manifest().generation_id.clone();
-        let prior_contains_query = serving_generation.symbols().symbols.iter().any(|symbol| {
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        let source = super::branch_add::capture_exact_branch_source(
+            &graph,
+            &resources.invocation.code_index_schedulers,
+            &canonical_project_root,
+            &canonical_worktree_root,
+            branch,
+        )
+        .await?;
+        let generation = super::branch_add::await_exact_branch_generation(
+            &resources.invocation.code_index_schedulers,
+            &canonical_worktree_root,
+            &source,
+        )
+        .await?;
+        let contains_query = generation.symbols().symbols.iter().any(|symbol| {
             symbol.simple_name.contains(query) || symbol.qualified_name.contains(query)
         });
-        let generation = timeout(Duration::from_secs(20), async {
-            loop {
-                if let Some(generation) = schedulers
-                    .latest_complete_fresh(&canonical_worktree_root)
-                    .await
-                    .filter(|generation| {
-                        generation
-                            .generation()
-                            .snapshot()
-                            .reference
-                            .as_ref()
-                            .map(tracedecay_domain::RefId::as_str)
-                            == Some(requested_reference.as_str())
-                            && (prior_contains_query
-                                || generation.generation().manifest().generation_id
-                                    != prior_generation_id)
-                    })
-                {
-                    return generation;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .map_err(|_| {
-            TraceDecayError::project_route(
-                "code_index_activation_unavailable",
-                true,
-                format!(
-                    "code-index scheduler did not publish branch '{branch}' for '{}'",
-                    canonical_worktree_root.display()
-                ),
-            )
-        })?;
-        let contains_query = generation
-            .generation()
-            .symbols()
-            .symbols
-            .iter()
-            .any(|symbol| {
-                symbol.simple_name.contains(query) || symbol.qualified_name.contains(query)
-            });
         Ok((
             crate::branch::current_branch(&canonical_worktree_root),
-            serving_reference
-                .as_ref()
-                .and_then(|reference| reference.as_str().strip_prefix("refs/heads/"))
+            source
+                .reference
+                .strip_prefix("refs/heads/")
                 .map(str::to_owned),
             false,
             contains_query,

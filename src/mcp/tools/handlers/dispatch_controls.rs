@@ -4,6 +4,7 @@ use serde_json::Value;
 use tracedecay_application::{CancellationSignal, Deadline};
 
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -42,7 +43,7 @@ pub(super) async fn dispatch_analytics(
         options
             .session_authorities
             .project_registered
-            .map(std::sync::Arc::as_ref),
+            .map(RegisteredGlobalDbLeaseV1::as_ref),
         deadline,
         cancellation,
     )

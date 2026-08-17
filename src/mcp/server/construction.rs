@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 
 use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
@@ -78,13 +78,13 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) profile_root: Option<PathBuf>,
     pub(crate) profile_identity:
         Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    pub(crate) global_db: Option<Arc<RegisteredGlobalDb>>,
-    pub(crate) accounting_db: Option<Arc<RegisteredGlobalDb>>,
-    pub(crate) registry_db: Option<Arc<RegisteredGlobalDb>>,
-    pub(crate) session_db: Option<Arc<RegisteredGlobalDb>>,
-    pub(crate) user_session_db: Option<Arc<RegisteredGlobalDb>>,
-    pub(crate) registered_session_db: Option<Arc<RegisteredGlobalDb>>,
-    pub(crate) registered_user_session_db: Option<Arc<RegisteredGlobalDb>>,
+    pub(crate) global_db: Option<RegisteredGlobalDbLeaseV1>,
+    pub(crate) accounting_db: Option<RegisteredGlobalDbLeaseV1>,
+    pub(crate) registry_db: Option<RegisteredGlobalDbLeaseV1>,
+    pub(crate) session_db: Option<RegisteredGlobalDbLeaseV1>,
+    pub(crate) user_session_db: Option<RegisteredGlobalDbLeaseV1>,
+    pub(crate) registered_session_db: Option<RegisteredGlobalDbLeaseV1>,
+    pub(crate) registered_user_session_db: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) session_sync_service:
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     pub(crate) host_admission_broker:
@@ -140,12 +140,12 @@ pub(crate) struct McpServerWriters {
 }
 
 pub(crate) struct McpServerDaemonDatabases {
-    pub(crate) accounting: Option<Arc<RegisteredGlobalDb>>,
-    pub(crate) registry: Arc<RegisteredGlobalDb>,
-    pub(crate) project_sessions: Arc<RegisteredGlobalDb>,
-    pub(crate) user_sessions: Arc<RegisteredGlobalDb>,
-    pub(crate) registered_project_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
-    pub(crate) registered_user_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
+    pub(crate) accounting: Option<RegisteredGlobalDbLeaseV1>,
+    pub(crate) registry: RegisteredGlobalDbLeaseV1,
+    pub(crate) project_sessions: RegisteredGlobalDbLeaseV1,
+    pub(crate) user_sessions: RegisteredGlobalDbLeaseV1,
+    pub(crate) registered_project_sessions: crate::global_db::RegisteredGlobalDbLeaseV1,
+    pub(crate) registered_user_sessions: crate::global_db::RegisteredGlobalDbLeaseV1,
 }
 
 pub(crate) struct McpServerDaemonAuthority {
@@ -170,8 +170,8 @@ pub(crate) struct McpServerDaemonAuthority {
 
 pub(crate) struct McpServerDaemonCoreAuthority {
     pub(crate) profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
-    pub(crate) accounting: Option<Arc<RegisteredGlobalDb>>,
-    pub(crate) registry: Arc<RegisteredGlobalDb>,
+    pub(crate) accounting: Option<RegisteredGlobalDbLeaseV1>,
+    pub(crate) registry: RegisteredGlobalDbLeaseV1,
     pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) writers: McpServerWriters,
@@ -241,10 +241,10 @@ impl McpServerConstructionContext {
     #[cfg(any(test, feature = "test-transport"))]
     pub(crate) fn with_direct_databases(
         mut self,
-        global_db: Option<Arc<RegisteredGlobalDb>>,
-        registry_db: Option<Arc<RegisteredGlobalDb>>,
-        session_db: Option<Arc<RegisteredGlobalDb>>,
-        user_session_db: Option<Arc<RegisteredGlobalDb>>,
+        global_db: Option<RegisteredGlobalDbLeaseV1>,
+        registry_db: Option<RegisteredGlobalDbLeaseV1>,
+        session_db: Option<RegisteredGlobalDbLeaseV1>,
+        user_session_db: Option<RegisteredGlobalDbLeaseV1>,
     ) -> Self {
         self.global_db = global_db;
         self.accounting_db = self.global_db.clone();
@@ -291,7 +291,7 @@ impl McpServerConstructionContext {
             scope_prefix,
             profile_root: Some(profile_root),
             profile_identity: Some(profile_identity),
-            global_db: Some(Arc::clone(&registry)),
+            global_db: Some(registry.clone()),
             accounting_db: databases.accounting,
             registry_db: Some(registry),
             session_db: Some(databases.project_sessions),
@@ -352,7 +352,7 @@ impl McpServerConstructionContext {
             scope_prefix,
             profile_root: Some(profile_root),
             profile_identity: Some(profile_identity),
-            global_db: Some(Arc::clone(&registry)),
+            global_db: Some(registry.clone()),
             accounting_db: accounting,
             registry_db: Some(registry),
             session_db: None,

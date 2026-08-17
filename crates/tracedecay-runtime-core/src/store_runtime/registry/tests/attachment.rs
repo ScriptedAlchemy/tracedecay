@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use tracedecay_store::{RuntimeMaintenanceStateV1, StoreShardScopeV1};
@@ -49,6 +49,10 @@ impl OperationGate {
 }
 
 struct FakeAttachment {
+    control: Arc<FakeAttachmentControl>,
+}
+
+struct FakeAttachmentControl {
     snapshot: Mutex<PhysicalRuntimeSnapshot>,
     fail_drain: AtomicBool,
     retain_work_after_drain: AtomicBool,
@@ -59,7 +63,7 @@ struct FakeAttachment {
     db: Mutex<Option<DbHandleProxy>>,
 }
 
-impl FakeAttachment {
+impl FakeAttachmentControl {
     fn new(db_drops: Arc<AtomicUsize>) -> Self {
         Self {
             snapshot: Mutex::new(PhysicalRuntimeSnapshot {
@@ -88,7 +92,7 @@ impl FakeAttachment {
 
 impl PhysicalRuntimeAttachment for FakeAttachment {
     fn snapshot(&self) -> PhysicalRuntimeSnapshot {
-        *self.snapshot.lock().unwrap()
+        *self.control.snapshot.lock().unwrap()
     }
 
     fn opened_file_identity(&self) -> Result<u64, String> {
@@ -96,15 +100,15 @@ impl PhysicalRuntimeAttachment for FakeAttachment {
     }
 
     fn drain(&self) -> Result<(), String> {
-        self.drain_calls.fetch_add(1, Ordering::SeqCst);
-        self.drain_gate.wait();
-        if self.fail_drain.load(Ordering::SeqCst) {
+        self.control.drain_calls.fetch_add(1, Ordering::SeqCst);
+        self.control.drain_gate.wait();
+        if self.control.fail_drain.load(Ordering::SeqCst) {
             return Err("injected drain failure".to_owned());
         }
-        if self.retain_work_after_drain.load(Ordering::SeqCst) {
+        if self.control.retain_work_after_drain.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let mut snapshot = self.snapshot.lock().unwrap();
+        let mut snapshot = self.control.snapshot.lock().unwrap();
         snapshot.writer_present = false;
         snapshot.reader_handles = 0;
         snapshot.queued_operations = 0;
@@ -113,9 +117,9 @@ impl PhysicalRuntimeAttachment for FakeAttachment {
     }
 
     fn close_and_join(&self) -> Result<(), String> {
-        self.close_calls.fetch_add(1, Ordering::SeqCst);
-        self.close_gate.wait();
-        self.db.lock().unwrap().take();
+        self.control.close_calls.fetch_add(1, Ordering::SeqCst);
+        self.control.close_gate.wait();
+        self.control.db.lock().unwrap().take();
         Ok(())
     }
 }
@@ -124,12 +128,12 @@ impl PhysicalRuntimeAttachment for FakeAttachment {
 struct AttachmentPublisher {
     calls: AtomicUsize,
     db_drops: Arc<AtomicUsize>,
-    attachments: Mutex<Vec<Weak<FakeAttachment>>>,
+    controls: Mutex<Vec<Arc<FakeAttachmentControl>>>,
 }
 
 impl AttachmentPublisher {
-    fn attachment(&self, index: usize) -> Arc<FakeAttachment> {
-        self.attachments.lock().unwrap()[index].upgrade().unwrap()
+    fn control(&self, index: usize) -> Arc<FakeAttachmentControl> {
+        Arc::clone(&self.controls.lock().unwrap()[index])
     }
 }
 
@@ -141,22 +145,22 @@ impl ShardRuntimePublisher for AttachmentPublisher {
     {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
-            let runtime = Arc::new(ShardRuntime::new(
+            let runtime = ShardRuntime::new(
                 request.binding().clone(),
                 matches!(request.binding().shard_id.scope, StoreShardScopeV1::Profile),
-            ));
+            );
             runtime
                 .transition(RuntimeMaintenanceStateV1::Opening)
                 .unwrap();
             runtime
                 .transition(RuntimeMaintenanceStateV1::Ready)
                 .unwrap();
-            let attachment = Arc::new(FakeAttachment::new(Arc::clone(&self.db_drops)));
-            self.attachments
-                .lock()
-                .unwrap()
-                .push(Arc::downgrade(&attachment));
-            Ok(PublishedShardRuntime::new(runtime, attachment))
+            let control = Arc::new(FakeAttachmentControl::new(Arc::clone(&self.db_drops)));
+            self.controls.lock().unwrap().push(Arc::clone(&control));
+            Ok(PublishedShardRuntime::new(
+                runtime,
+                Box::new(FakeAttachment { control }),
+            ))
         })
     }
 }
@@ -222,15 +226,20 @@ async fn eviction_drains_verifies_closes_once_and_drops_database_proxy() {
     let (registry, publisher) = attachment_registry();
     let pin = profile_pin(&registry).await;
     let first = open_published(&registry, code_request("worktree.attachment-first", &pin)).await;
-    let attachment = publisher.attachment(1);
+    let control = publisher.control(1);
+    let physical = Arc::downgrade(&first.inner.attachment);
     drop(first);
 
     open_published(&registry, code_request("worktree.attachment-second", &pin)).await;
 
-    assert_eq!(attachment.drain_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(attachment.close_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control.drain_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control.close_calls.load(Ordering::SeqCst), 1);
     assert_eq!(publisher.db_drops.load(Ordering::SeqCst), 1);
-    assert!(attachment.snapshot().is_drained());
+    assert!(control.snapshot.lock().unwrap().is_drained());
+    assert!(
+        physical.upgrade().is_none(),
+        "the publisher retains test control only, never the transferred physical attachment"
+    );
 }
 
 #[tokio::test]
@@ -239,8 +248,8 @@ async fn drain_failure_is_terminal_and_retains_evicting_attachment() {
     let pin = profile_pin(&registry).await;
     let first = open_published(&registry, code_request("worktree.attachment-fault", &pin)).await;
     let binding = first.binding().clone();
-    let attachment = publisher.attachment(1);
-    attachment.fail_drain.store(true, Ordering::SeqCst);
+    let control = publisher.control(1);
+    control.fail_drain.store(true, Ordering::SeqCst);
     drop(first);
 
     assert!(matches!(
@@ -250,7 +259,7 @@ async fn drain_failure_is_terminal_and_retains_evicting_attachment() {
             ..
         })
     ));
-    assert_eq!(attachment.close_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(control.close_calls.load(Ordering::SeqCst), 0);
     assert!(matches!(
         registry.lookup(&binding),
         StoreRuntimeLookup::Evicting { .. }
@@ -267,8 +276,8 @@ async fn incomplete_drain_is_verified_before_physical_close() {
     )
     .await;
     let binding = first.binding().clone();
-    let attachment = publisher.attachment(1);
-    attachment
+    let control = publisher.control(1);
+    control
         .retain_work_after_drain
         .store(true, Ordering::SeqCst);
     drop(first);
@@ -279,9 +288,9 @@ async fn incomplete_drain_is_verified_before_physical_close() {
             StoreRuntimeRegistryFailure::PhysicalRuntimeNotDrained { .. }
         )
     ));
-    assert_eq!(attachment.drain_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control.drain_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
-        attachment.close_calls.load(Ordering::SeqCst),
+        control.close_calls.load(Ordering::SeqCst),
         0,
         "close must not run until the registry verifies a complete drain"
     );
@@ -299,8 +308,8 @@ async fn blocking_join_releases_registry_lock_and_reserves_evicted_and_opening_k
     let opening_request = code_request("worktree.blocking-join-second", &pin);
     let first = open_published(&registry, evicted_request.clone()).await;
     let binding = first.binding().clone();
-    let attachment = publisher.attachment(1);
-    attachment.close_gate.block();
+    let control = publisher.control(1);
+    control.close_gate.block();
     drop(first);
 
     let eviction_registry = registry.clone();
@@ -310,7 +319,7 @@ async fn blocking_join_releases_registry_lock_and_reserves_evicted_and_opening_k
         let _runtime = runtime.enter();
         eviction_registry.begin_or_join_open(&eviction_request)
     });
-    wait_for_gate(&attachment.close_gate).await;
+    wait_for_gate(&control.close_gate).await;
 
     let inventory_registry = registry.clone();
     let (inventory_sender, inventory_receiver) = mpsc::channel();
@@ -334,7 +343,7 @@ async fn blocking_join_releases_registry_lock_and_reserves_evicted_and_opening_k
         (evicted_open, duplicate_open, lease)
     });
 
-    attachment.close_gate.release();
+    control.close_gate.release();
     let initial_open = eviction.join().unwrap();
     inventory_thread.join().unwrap();
     let Some((evicted_open, duplicate_open, lease)) = observations else {
@@ -365,9 +374,9 @@ async fn blocking_join_releases_registry_lock_and_reserves_evicted_and_opening_k
     else {
         panic!("reserved open was not published to both joiners");
     };
-    assert!(Arc::ptr_eq(initial.runtime(), duplicate.runtime()));
-    assert_eq!(attachment.drain_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(attachment.close_calls.load(Ordering::SeqCst), 1);
+    assert!(initial.shares_runtime_with(&duplicate));
+    assert_eq!(control.drain_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control.close_calls.load(Ordering::SeqCst), 1);
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
 }
 
@@ -379,9 +388,9 @@ async fn failed_blocking_drain_restores_fault_and_wakes_reserved_open_joiners() 
     let opening_request = code_request("worktree.blocking-drain-second", &pin);
     let first = open_published(&registry, evicted_request.clone()).await;
     let binding = first.binding().clone();
-    let attachment = publisher.attachment(1);
-    attachment.fail_drain.store(true, Ordering::SeqCst);
-    attachment.drain_gate.block();
+    let control = publisher.control(1);
+    control.fail_drain.store(true, Ordering::SeqCst);
+    control.drain_gate.block();
     drop(first);
 
     let eviction_registry = registry.clone();
@@ -391,7 +400,7 @@ async fn failed_blocking_drain_restores_fault_and_wakes_reserved_open_joiners() 
         let _runtime = runtime.enter();
         eviction_registry.begin_or_join_open(&eviction_request)
     });
-    wait_for_gate(&attachment.drain_gate).await;
+    wait_for_gate(&control.drain_gate).await;
 
     let probe_registry = registry.clone();
     let probe_opening_request = opening_request.clone();
@@ -404,7 +413,7 @@ async fn failed_blocking_drain_restores_fault_and_wakes_reserved_open_joiners() 
     });
     let observations = probe_receiver.recv_timeout(Duration::from_secs(1)).ok();
 
-    attachment.drain_gate.release();
+    control.drain_gate.release();
     let initial = eviction.join().unwrap();
     probe.join().unwrap();
     let Some((duplicate, evicted)) = observations else {
@@ -435,7 +444,7 @@ async fn failed_blocking_drain_restores_fault_and_wakes_reserved_open_joiners() 
             ..
         })
     ));
-    assert_eq!(attachment.close_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(control.close_calls.load(Ordering::SeqCst), 0);
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
     assert!(matches!(
         registry.lookup(&binding),

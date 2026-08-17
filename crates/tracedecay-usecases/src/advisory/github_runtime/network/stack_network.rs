@@ -138,7 +138,6 @@ impl GitHubReadOnlyClientV1 {
 mod tests {
     use std::io::Write;
     use std::net::TcpListener;
-    use std::sync::Arc;
 
     use serde_json::json;
     use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
@@ -310,7 +309,7 @@ mod tests {
         .unwrap();
         let database = runtime.project_database_arc().unwrap();
         let anchors =
-            ProjectGitHubStackAnchorAuthorityV1::new(Arc::clone(&database), scope.clone()).unwrap();
+            ProjectGitHubStackAnchorAuthorityV1::new(database.clone(), scope.clone()).unwrap();
         let provider = ProviderId::new("provider.github").unwrap();
         let (_credential_authority, resolution) = registered_fixture_credential(
             "stack-anchor-http",

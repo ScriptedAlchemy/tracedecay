@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 use tracedecay_store::ProjectMemoryFactStore;
 
 use crate::automation::automatic_facts::{
@@ -25,7 +25,7 @@ use crate::ports::project_runtime::TraceDecay;
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_usecases::memory::MemoryApplication;
 
@@ -620,7 +620,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
     dashboard_root: PathBuf,
-    sessions_db: Arc<RegisteredGlobalDb>,
+    sessions_db: RegisteredGlobalDbLeaseV1,
     retrieval: &dyn AutomationSessionRetrieval,
     memory: &MemoryApplication<A>,
     config: &AutomationConfig,
@@ -650,7 +650,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
 #[allow(clippy::too_many_arguments)]
 async fn run_session_reflector_for_store_with_publication<A: ProjectMemoryFactStore>(
     dashboard_root: PathBuf,
-    sessions_db: Arc<RegisteredGlobalDb>,
+    sessions_db: RegisteredGlobalDbLeaseV1,
     retrieval: &dyn AutomationSessionRetrieval,
     memory: &MemoryApplication<A>,
     config: &AutomationConfig,

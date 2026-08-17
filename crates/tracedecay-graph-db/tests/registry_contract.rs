@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry,
-    GraphDbRegistryConfig, GraphDbRegistryStatus, GraphEntity, GraphEntityId, GraphMutation,
+    GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwnerRegistrationV1,
+    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphDbRegistryStatus,
+    GraphDbRetirementOutcome, GraphDbRetirementTarget, GraphEntity, GraphEntityId, GraphMutation,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphRelation, GraphRelationId,
     GraphRelationKind, GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled,
     SourceGeneration, TraversalRequest,
@@ -20,6 +21,7 @@ use tracedecay_runtime_core::store_runtime::resolver::{
 };
 use tracedecay_store::{
     BrainId, CodeShardScopeV1, LocatorDigest, ProjectId, RepositoryId, RetainedGraphStoreLeaseV1,
+    RetainedGraphStoreOwnerAttachmentV1, RetainedGraphStoreOwnerOperationLeaseErrorV1,
     StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
     UserProfileId, VerifiedStoreLocatorV1, WorktreeId, canonical_store_locator_digest,
 };
@@ -43,6 +45,32 @@ impl RetainedGraphStoreLeaseV1 for TestGraphLease {
 
     fn canonical_path(&self) -> &std::path::Path {
         &self.canonical_path
+    }
+}
+
+impl RetainedGraphStoreOwnerAttachmentV1 for TestGraphLease {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &std::path::Path {
+        &self.canonical_path
+    }
+
+    fn issue_operation_lease(
+        &self,
+    ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>
+    {
+        Ok(Arc::new(Self {
+            binding: self.binding.clone(),
+            verified_locator: self.verified_locator.clone(),
+            canonical_path: self.canonical_path.clone(),
+            drop_counter: self.drop_counter.clone(),
+        }))
     }
 }
 
@@ -175,6 +203,40 @@ fn graph_path(root: &std::path::Path) -> std::path::PathBuf {
     root.join("graph.grafeo")
 }
 
+fn owner_registration(registration: GraphDbRegistration) -> GraphDbOwnerRegistrationV1 {
+    let authority_attachment = Box::new(TestGraphLease {
+        binding: registration.authority_lease.binding().clone(),
+        verified_locator: registration.authority_lease.verified_locator().clone(),
+        canonical_path: registration.authority_lease.canonical_path().to_path_buf(),
+        drop_counter: None,
+    });
+    GraphDbOwnerRegistrationV1 {
+        operation: registration,
+        authority_attachment,
+    }
+}
+
+fn mount_and_resolve(
+    registry: &GraphDbRegistry,
+    registration: GraphDbRegistration,
+) -> Result<GraphDbLeaseV1, GraphDbError> {
+    let operation = registration.clone();
+    let owner_attachment = registry.resolve_owner_attachment(owner_registration(registration))?;
+    let lease = registry.resolve(operation)?;
+    drop(owner_attachment);
+    Ok(lease)
+}
+
+fn retirement_target(
+    registry: &GraphDbRegistry,
+    registration: &GraphDbRegistration,
+) -> GraphDbRetirementTarget {
+    registry
+        .resolve_owner_attachment(owner_registration(registration.clone()))
+        .unwrap()
+        .retirement_target()
+}
+
 fn sidecar_wal_path(path: &std::path::Path) -> std::path::PathBuf {
     let mut sidecar = path.as_os_str().to_owned();
     sidecar.push(".wal");
@@ -242,7 +304,7 @@ fn canonical_runtime_resolver_locator_opens_through_graph_registry() {
     };
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
-    let database = registry.resolve(registration).unwrap();
+    let database = mount_and_resolve(&registry, registration).unwrap();
     assert!(database.snapshot().is_ok());
 }
 
@@ -277,10 +339,27 @@ fn exact_project_profile_identity_reuses_one_persistent_handle() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 4 }).unwrap();
     let request = registration(identity("profile-a", "project-a"), temp.path());
 
-    let first = registry.resolve(request.clone()).unwrap();
+    let first = mount_and_resolve(&registry, request.clone()).unwrap();
     let second = registry.resolve(request).unwrap();
 
-    assert!(Arc::ptr_eq(&first, &second));
+    first
+        .apply_unverified(batch(
+            "code",
+            "generation-one",
+            "watermark-one",
+            vec![GraphMutation::UpsertEntity(entity("shared"))],
+        ))
+        .unwrap();
+    assert_eq!(
+        second
+            .entity(
+                &GraphNamespace::new("project").unwrap(),
+                &GraphEntityId::new("shared").unwrap(),
+                Arc::new(NeverCancelled),
+            )
+            .unwrap(),
+        Some(entity("shared"))
+    );
     assert_eq!(
         registry
             .status(&registration(
@@ -308,9 +387,7 @@ fn aliased_ancestor_spelling_reuses_the_canonical_registered_path() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let binding = identity("profile-a", "project-a");
 
-    registry
-        .resolve(registration(binding.clone(), &aliased_store))
-        .unwrap();
+    mount_and_resolve(&registry, registration(binding.clone(), &aliased_store)).unwrap();
 
     assert_eq!(
         registry
@@ -333,20 +410,35 @@ fn profile_sessions_scope_uses_exact_profile_authority() {
     let first_root = TempDir::new().unwrap();
     let second_root = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
-    let first = registry
-        .resolve(registration(
-            profile_sessions_identity("profile-a"),
-            first_root.path(),
-        ))
-        .unwrap();
-    let second = registry
-        .resolve(registration(
-            profile_sessions_identity("profile-b"),
-            second_root.path(),
-        ))
-        .unwrap();
+    let first = mount_and_resolve(
+        &registry,
+        registration(profile_sessions_identity("profile-a"), first_root.path()),
+    )
+    .unwrap();
+    let second = mount_and_resolve(
+        &registry,
+        registration(profile_sessions_identity("profile-b"), second_root.path()),
+    )
+    .unwrap();
 
-    assert!(!Arc::ptr_eq(&first, &second));
+    first
+        .apply_unverified(batch(
+            "sessions",
+            "generation-one",
+            "watermark-one",
+            vec![GraphMutation::UpsertEntity(entity("profile-a"))],
+        ))
+        .unwrap();
+    assert_eq!(
+        second
+            .entity(
+                &GraphNamespace::new("project").unwrap(),
+                &GraphEntityId::new("profile-a").unwrap(),
+                Arc::new(NeverCancelled),
+            )
+            .unwrap(),
+        None
+    );
     assert_eq!(
         registry
             .status(&registration(
@@ -372,20 +464,35 @@ fn profile_memory_scope_uses_exact_profile_authority() {
     let first_root = TempDir::new().unwrap();
     let second_root = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
-    let first = registry
-        .resolve(registration(
-            profile_memory_identity("profile-a"),
-            first_root.path(),
-        ))
-        .unwrap();
-    let second = registry
-        .resolve(registration(
-            profile_memory_identity("profile-b"),
-            second_root.path(),
-        ))
-        .unwrap();
+    let first = mount_and_resolve(
+        &registry,
+        registration(profile_memory_identity("profile-a"), first_root.path()),
+    )
+    .unwrap();
+    let second = mount_and_resolve(
+        &registry,
+        registration(profile_memory_identity("profile-b"), second_root.path()),
+    )
+    .unwrap();
 
-    assert!(!Arc::ptr_eq(&first, &second));
+    first
+        .apply_unverified(batch(
+            "memory",
+            "generation-one",
+            "watermark-one",
+            vec![GraphMutation::UpsertEntity(entity("profile-a"))],
+        ))
+        .unwrap();
+    assert_eq!(
+        second
+            .entity(
+                &GraphNamespace::new("project").unwrap(),
+                &GraphEntityId::new("profile-a").unwrap(),
+                Arc::new(NeverCancelled),
+            )
+            .unwrap(),
+        None
+    );
     assert_eq!(
         registry
             .status(&registration(
@@ -412,10 +519,10 @@ fn broad_profile_scope_is_rejected() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
     assert!(matches!(
-        registry.resolve(registration(
-            broad_profile_identity("profile-a"),
-            root.path(),
-        )),
+        mount_and_resolve(
+            &registry,
+            registration(broad_profile_identity("profile-a"), root.path()),
+        ),
         Err(GraphDbError::InvalidRequest { .. })
     ));
     assert!(!graph_path(root.path()).exists());
@@ -431,19 +538,42 @@ fn project_session_and_code_scopes_keep_distinct_locator_authority() {
     let sessions_binding = project_sessions_identity("profile-a", "project-a");
     let code_binding = code_identity("profile-a", "project-a");
 
-    let project = registry
-        .resolve(registration(project_binding.clone(), project_root.path()))
-        .unwrap();
-    let sessions = registry
-        .resolve(registration(sessions_binding.clone(), sessions_root.path()))
-        .unwrap();
-    let code = registry
-        .resolve(registration(code_binding.clone(), code_root.path()))
-        .unwrap();
+    let project = mount_and_resolve(
+        &registry,
+        registration(project_binding.clone(), project_root.path()),
+    )
+    .unwrap();
+    let sessions = mount_and_resolve(
+        &registry,
+        registration(sessions_binding.clone(), sessions_root.path()),
+    )
+    .unwrap();
+    let code = mount_and_resolve(
+        &registry,
+        registration(code_binding.clone(), code_root.path()),
+    )
+    .unwrap();
 
-    assert!(!Arc::ptr_eq(&project, &sessions));
-    assert!(!Arc::ptr_eq(&project, &code));
-    assert!(!Arc::ptr_eq(&sessions, &code));
+    project
+        .apply_unverified(batch(
+            "project",
+            "generation-one",
+            "watermark-one",
+            vec![GraphMutation::UpsertEntity(entity("project-only"))],
+        ))
+        .unwrap();
+    for lease in [&sessions, &code] {
+        assert_eq!(
+            lease
+                .entity(
+                    &GraphNamespace::new("project").unwrap(),
+                    &GraphEntityId::new("project-only").unwrap(),
+                    Arc::new(NeverCancelled),
+                )
+                .unwrap(),
+            None
+        );
+    }
     assert_eq!(
         registry
             .status(&registration(project_binding, project_root.path()))
@@ -469,6 +599,7 @@ fn concurrent_resolution_singleflights_one_persistent_handle() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 4 }).unwrap();
     let request = registration(identity("profile-a", "project-a"), temp.path());
+    drop(mount_and_resolve(&registry, request.clone()).unwrap());
     let barrier = Arc::new(Barrier::new(3));
     let workers = (0..2)
         .map(|_| {
@@ -488,7 +619,210 @@ fn concurrent_resolution_singleflights_one_persistent_handle() {
         .map(|worker| worker.join().unwrap())
         .collect::<Vec<_>>();
 
-    assert!(Arc::ptr_eq(&handles[0], &handles[1]));
+    handles[0]
+        .apply_unverified(batch(
+            "code",
+            "generation-one",
+            "watermark-one",
+            vec![GraphMutation::UpsertEntity(entity("shared"))],
+        ))
+        .unwrap();
+    assert_eq!(
+        handles[1]
+            .entity(
+                &GraphNamespace::new("project").unwrap(),
+                &GraphEntityId::new("shared").unwrap(),
+                Arc::new(NeverCancelled),
+            )
+            .unwrap(),
+        Some(entity("shared"))
+    );
+}
+
+#[test]
+fn cloned_lease_is_one_client_but_independent_resolves_are_two_clients() {
+    let temporary = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let request = registration(identity("profile-a", "project-a"), temporary.path());
+
+    let first = mount_and_resolve(&registry, request.clone()).unwrap();
+    let clone = first.clone();
+    drop(first);
+    assert_eq!(
+        registry.close(&request).unwrap_err(),
+        GraphDbError::Conflict
+    );
+    drop(clone);
+    assert!(registry.close(&request).unwrap());
+
+    let first = mount_and_resolve(&registry, request.clone()).unwrap();
+    let second = registry.resolve(request.clone()).unwrap();
+    drop(first);
+    assert_eq!(
+        registry.close(&request).unwrap_err(),
+        GraphDbError::Conflict
+    );
+    drop(second);
+    assert!(registry.close(&request).unwrap());
+}
+
+#[test]
+fn retirement_reservation_denies_new_resolves_and_drop_restores_ready_entry() {
+    let temporary = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let request = registration(identity("profile-a", "project-a"), temporary.path());
+    let target = retirement_target(&registry, &request);
+
+    let reservation = registry.reserve_retirement_batch(vec![target]).unwrap();
+    assert_eq!(
+        registry.status(&request).unwrap(),
+        Some(GraphDbRegistryStatus::Closing)
+    );
+    assert!(matches!(
+        registry.resolve(request.clone()),
+        Err(GraphDbError::Conflict)
+    ));
+
+    drop(reservation);
+    assert_eq!(
+        registry.status(&request).unwrap(),
+        Some(GraphDbRegistryStatus::Ready)
+    );
+    assert!(registry.resolve(request).is_ok());
+}
+
+#[test]
+fn retirement_batch_is_all_or_nothing_when_any_exact_entry_has_a_client() {
+    let first_root = TempDir::new().unwrap();
+    let second_root = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
+    let first_request = registration(identity("profile-a", "project-a"), first_root.path());
+    let second_request = registration(identity("profile-a", "project-b"), second_root.path());
+    let first_target = retirement_target(&registry, &first_request);
+    let second_target = retirement_target(&registry, &second_request);
+    let first = registry.resolve(first_request.clone()).unwrap();
+    drop(registry.resolve(second_request.clone()).unwrap());
+    let refusal = match registry
+        .reserve_retirement_batch(vec![first_target.clone(), second_target.clone()])
+    {
+        Err(refusal) => refusal,
+        Ok(_reservation) => panic!("an active client must refuse graph retirement"),
+    };
+    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    let (_, retry_targets) = refusal.into_parts();
+    assert_eq!(retry_targets, vec![first_target, second_target]);
+    assert_eq!(
+        registry.status(&first_request).unwrap(),
+        Some(GraphDbRegistryStatus::Ready)
+    );
+    assert_eq!(
+        registry.status(&second_request).unwrap(),
+        Some(GraphDbRegistryStatus::Ready)
+    );
+    drop(first);
+}
+
+#[test]
+fn retirement_reservation_rejects_foreign_identity_without_transitioning_entry() {
+    let temporary = TempDir::new().unwrap();
+    let foreign_temporary = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let request = registration(identity("profile-a", "project-a"), temporary.path());
+    let foreign_registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let foreign_request =
+        registration(identity("profile-a", "project-a"), foreign_temporary.path());
+    drop(mount_and_resolve(&registry, request.clone()).unwrap());
+    let foreign_target = retirement_target(&foreign_registry, &foreign_request);
+
+    let refusal = match registry.reserve_retirement_batch(vec![foreign_target.clone()]) {
+        Err(refusal) => refusal,
+        Ok(_reservation) => panic!("a foreign graph retirement target must be refused"),
+    };
+    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    let (_, retry_targets) = refusal.into_parts();
+    assert_eq!(retry_targets, vec![foreign_target]);
+    assert_eq!(
+        registry.status(&request).unwrap(),
+        Some(GraphDbRegistryStatus::Ready)
+    );
+}
+
+#[test]
+fn cancelled_retirement_commit_restores_all_preclose_entries() {
+    let first_root = TempDir::new().unwrap();
+    let second_root = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
+    let first_request = registration(identity("profile-a", "project-a"), first_root.path());
+    let second_request = registration(identity("profile-a", "project-b"), second_root.path());
+    let first_target = retirement_target(&registry, &first_request);
+    let second_target = retirement_target(&registry, &second_request);
+    let mut reservation = registry
+        .reserve_retirement_batch(vec![first_target.clone(), second_target.clone()])
+        .unwrap();
+
+    let refusal = reservation
+        .commit(
+            Arc::new(Cancelled),
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap_err();
+    assert_eq!(refusal.error(), &GraphDbError::Cancelled);
+    let (_, retry_targets) = refusal.into_parts();
+    assert_eq!(retry_targets, vec![first_target, second_target]);
+    assert_eq!(
+        registry.status(&first_request).unwrap(),
+        Some(GraphDbRegistryStatus::Ready)
+    );
+    assert_eq!(
+        registry.status(&second_request).unwrap(),
+        Some(GraphDbRegistryStatus::Ready)
+    );
+    let refusal = reservation
+        .commit(
+            Arc::new(NeverCancelled),
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap_err();
+    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    assert!(refusal.targets().is_empty());
+}
+
+#[test]
+fn retirement_commit_reports_every_closed_exact_entry() {
+    let first_root = TempDir::new().unwrap();
+    let second_root = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
+    let first_request = registration(identity("profile-a", "project-a"), first_root.path());
+    let second_request = registration(identity("profile-a", "project-b"), second_root.path());
+    let first_target = retirement_target(&registry, &first_request);
+    let second_target = retirement_target(&registry, &second_request);
+    let mut reservation = registry
+        .reserve_retirement_batch(vec![first_target.clone(), second_target.clone()])
+        .unwrap();
+
+    assert_eq!(
+        reservation
+            .commit(
+                Arc::new(NeverCancelled),
+                std::time::Instant::now() + Duration::from_secs(30),
+            )
+            .unwrap()
+            .outcomes(),
+        &[
+            GraphDbRetirementOutcome::Closed(first_target),
+            GraphDbRetirementOutcome::Closed(second_target),
+        ]
+    );
+    assert_eq!(registry.status(&first_request).unwrap(), None);
+    assert_eq!(registry.status(&second_request).unwrap(), None);
+    let refusal = reservation
+        .commit(
+            Arc::new(NeverCancelled),
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap_err();
+    assert_eq!(refusal.error(), &GraphDbError::Conflict);
+    assert!(refusal.targets().is_empty());
 }
 
 #[test]
@@ -497,9 +831,11 @@ fn identity_and_canonical_path_cannot_be_rebound() {
     let second_root = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 4 }).unwrap();
     let first_identity = identity("profile-a", "project-a");
-    registry
-        .resolve(registration(first_identity.clone(), first_root.path()))
-        .unwrap();
+    mount_and_resolve(
+        &registry,
+        registration(first_identity.clone(), first_root.path()),
+    )
+    .unwrap();
 
     assert_eq!(
         registry
@@ -545,9 +881,8 @@ fn stale_binding_cannot_close_or_rebind_the_registered_store() {
     let registered = identity("profile-a", "project-a");
     let mut stale = registered.clone();
     stale.authority_epoch = StoreAuthorityEpochV1::new(2).unwrap();
-    let handle = registry
-        .resolve(registration(registered.clone(), temp.path()))
-        .unwrap();
+    let handle =
+        mount_and_resolve(&registry, registration(registered.clone(), temp.path())).unwrap();
     drop(handle);
 
     assert_eq!(
@@ -558,7 +893,7 @@ fn stale_binding_cannot_close_or_rebind_the_registered_store() {
     );
     assert_eq!(
         registry
-            .reopen_raw_for_harness(registration(stale, temp.path()))
+            .reopen_for_harness(owner_registration(registration(stale, temp.path())))
             .unwrap_err(),
         GraphDbError::Conflict
     );
@@ -587,7 +922,10 @@ fn symlinked_graph_directory_is_rejected_before_open() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
     assert!(matches!(
-        registry.resolve(registration(identity("profile-a", "project-a"), &alias,)),
+        mount_and_resolve(
+            &registry,
+            registration(identity("profile-a", "project-a"), &alias),
+        ),
         Err(GraphDbError::InvalidRequest { .. })
     ));
     assert!(!graph_path(target.path()).exists());
@@ -606,10 +944,10 @@ fn symlinked_graph_database_file_is_rejected_before_open() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
     assert!(matches!(
-        registry.resolve(registration(
-            identity("profile-a", "project-a"),
-            store.path(),
-        )),
+        mount_and_resolve(
+            &registry,
+            registration(identity("profile-a", "project-a"), store.path()),
+        ),
         Err(GraphDbError::InvalidRequest { .. })
     ));
 }
@@ -620,7 +958,7 @@ fn single_file_reopens_with_identical_traversal() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
     let request = registration(store_identity.clone(), temp.path());
-    let database = registry.resolve(request.clone()).unwrap();
+    let database = mount_and_resolve(&registry, request.clone()).unwrap();
     database
         .apply_unverified(batch(
             "code",
@@ -653,7 +991,9 @@ fn single_file_reopens_with_identical_traversal() {
     assert!(registry.close(&request).unwrap());
     assert!(graph_path(temp.path()).is_file());
     assert!(!sidecar_wal_path(&graph_path(temp.path())).exists());
-    let reopened = registry.reopen_raw_for_harness(request).unwrap();
+    let reopened = registry
+        .reopen_for_harness(owner_registration(request))
+        .unwrap();
     let result = reopened
         .traverse(TraversalRequest {
             namespace: GraphNamespace::new("project").unwrap(),
@@ -687,19 +1027,18 @@ fn close_and_retention_refuse_an_active_handle() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let first_identity = identity("profile-a", "project-a");
     let first_request = registration(first_identity.clone(), first_root.path());
-    let active = registry.resolve(first_request.clone()).unwrap();
+    let active = mount_and_resolve(&registry, first_request.clone()).unwrap();
 
     assert_eq!(
         registry.close(&first_request).unwrap_err(),
         GraphDbError::Conflict
     );
     assert_eq!(
-        registry
-            .resolve(registration(
-                identity("profile-a", "project-b"),
-                second_root.path(),
-            ))
-            .unwrap_err(),
+        mount_and_resolve(
+            &registry,
+            registration(identity("profile-a", "project-b"), second_root.path(),),
+        )
+        .unwrap_err(),
         GraphDbError::budget_exhausted(GraphBudgetKind::Capacity, 1)
     );
     assert!(active.snapshot().is_ok());
@@ -713,7 +1052,7 @@ fn retained_close_uses_exact_registry_identity_after_root_loss() {
     let binding = identity("profile-a", "project-a");
     let request = registration(binding.clone(), temp.path());
     let locator = request.authority_lease.verified_locator().clone();
-    let database = registry.resolve(request).unwrap();
+    let database = mount_and_resolve(&registry, request).unwrap();
     drop(database);
 
     let foreign_binding = StoreRuntimeBindingV1::new(
@@ -739,7 +1078,7 @@ fn snapshot_lease_prevents_close_after_operation_handle_is_dropped() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
     let request = registration(store_identity.clone(), temp.path());
-    let database = registry.resolve(request.clone()).unwrap();
+    let database = mount_and_resolve(&registry, request.clone()).unwrap();
     let snapshot = database.snapshot().unwrap();
     drop(database);
 
@@ -765,9 +1104,11 @@ fn idle_retention_closes_and_evicts_unleased_handles() {
     let second_root = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let first_identity = identity("profile-a", "project-a");
-    let first = registry
-        .resolve(registration(first_identity.clone(), first_root.path()))
-        .unwrap();
+    let first = mount_and_resolve(
+        &registry,
+        registration(first_identity.clone(), first_root.path()),
+    )
+    .unwrap();
     drop(first);
 
     let evicted = registry
@@ -785,12 +1126,11 @@ fn idle_retention_closes_and_evicts_unleased_handles() {
         None
     );
 
-    registry
-        .resolve(registration(
-            identity("profile-a", "project-b"),
-            second_root.path(),
-        ))
-        .unwrap();
+    mount_and_resolve(
+        &registry,
+        registration(identity("profile-a", "project-b"), second_root.path()),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -802,7 +1142,7 @@ fn cancelled_open_does_not_create_or_register_a_store() {
     request.cancellation = Arc::new(Cancelled);
 
     assert_eq!(
-        registry.resolve(request).unwrap_err(),
+        mount_and_resolve(&registry, request).unwrap_err(),
         GraphDbError::Cancelled
     );
     assert_eq!(
@@ -827,7 +1167,7 @@ fn lifecycle_cancellation_before_database_file_creation_is_typed() {
     request.lifecycle_cancellation = cancellation.clone();
 
     assert_eq!(
-        registry.resolve(request).unwrap_err(),
+        mount_and_resolve(&registry, request).unwrap_err(),
         GraphDbError::Cancelled
     );
     assert!(
@@ -851,13 +1191,13 @@ fn expired_deadline_does_not_open_or_close_a_registered_store() {
     let mut expired = registration(store_identity.clone(), temp.path());
     expired.deadline = std::time::Instant::now();
     assert_eq!(
-        registry.resolve(expired).unwrap_err(),
+        mount_and_resolve(&registry, expired).unwrap_err(),
         GraphDbError::DeadlineExceeded
     );
     assert!(!graph_path(temp.path()).exists());
 
     let request = registration(store_identity.clone(), temp.path());
-    let handle = registry.resolve(request.clone()).unwrap();
+    let handle = mount_and_resolve(&registry, request.clone()).unwrap();
     drop(handle);
     let mut expired_close = request;
     expired_close.deadline = std::time::Instant::now();
@@ -881,12 +1221,12 @@ fn cancellation_after_database_file_creation_finishes_format_before_retry() {
     let mut request = registration(store_identity.clone(), temp.path());
     let cancellation = Arc::new(CancelOnPoll {
         polls: AtomicUsize::new(0),
-        cancel_on: 4,
+        cancel_on: 3,
     });
     request.cancellation = cancellation.clone();
 
     assert_eq!(
-        registry.resolve(request).unwrap_err(),
+        mount_and_resolve(&registry, request).unwrap_err(),
         GraphDbError::Cancelled
     );
     assert!(
@@ -901,9 +1241,7 @@ fn cancellation_after_database_file_creation_finishes_format_before_retry() {
     );
     assert!(graph_path(temp.path()).is_file());
     assert!(
-        registry
-            .resolve(registration(store_identity.clone(), temp.path()))
-            .is_ok(),
+        mount_and_resolve(&registry, registration(store_identity.clone(), temp.path()),).is_ok(),
         "retry must open the fully initialized store instead of requiring a reset"
     );
 }
@@ -913,16 +1251,23 @@ fn registry_retains_authority_lease_until_the_graph_is_closed() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
-    let mut request = registration(store_identity.clone(), temp.path());
+    let request = registration(store_identity.clone(), temp.path());
     let dropped = Arc::new(AtomicUsize::new(0));
-    request.authority_lease = Arc::new(TestGraphLease {
+    let authority_attachment = Box::new(TestGraphLease {
         binding: request.authority_lease.binding().clone(),
         verified_locator: request.authority_lease.verified_locator().clone(),
         canonical_path: request.authority_lease.canonical_path().to_path_buf(),
         drop_counter: Some(Arc::clone(&dropped)),
     });
 
+    let owner_attachment = registry
+        .resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+            operation: request.clone(),
+            authority_attachment,
+        })
+        .unwrap();
     let database = registry.resolve(request).unwrap();
+    drop(owner_attachment);
     assert_eq!(dropped.load(Ordering::SeqCst), 0);
     drop(database);
     assert!(
@@ -934,7 +1279,7 @@ fn registry_retains_authority_lease_until_the_graph_is_closed() {
 }
 
 #[test]
-fn reset_required_is_retained_until_an_explicit_reopen() {
+fn reset_required_fault_is_retained_and_cannot_reopen() {
     use grafeo_engine::Config;
     use grafeo_engine::config::StorageFormat;
 
@@ -951,7 +1296,7 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
     let store_identity = identity("profile-a", "project-a");
     let request = registration(store_identity.clone(), temp.path());
     assert!(matches!(
-        registry.resolve(request.clone()),
+        mount_and_resolve(&registry, request.clone()),
         Err(GraphDbError::ResetRequired { .. })
     ));
     assert_eq!(
@@ -962,8 +1307,18 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
     );
 
     std::fs::remove_file(&graph_path).unwrap();
-    let reopened = registry.reopen_raw_for_harness(request).unwrap();
-    assert!(reopened.snapshot().is_ok());
+    assert!(matches!(
+        registry.reopen_for_harness(owner_registration(request.clone())),
+        Err(GraphDbError::ResetRequired { .. })
+    ));
+    assert_eq!(
+        registry.status(&request).unwrap(),
+        Some(GraphDbRegistryStatus::ResetRequired)
+    );
+    assert!(matches!(
+        mount_and_resolve(&registry, request),
+        Err(GraphDbError::ResetRequired { .. })
+    ));
 }
 
 #[test]
@@ -975,7 +1330,7 @@ fn preexisting_empty_graph_file_is_corrupt() {
     let request = registration(identity("profile-a", "project-a"), temp.path());
 
     assert!(matches!(
-        registry.resolve(request),
+        mount_and_resolve(&registry, request),
         Err(GraphDbError::Corrupt { .. })
     ));
 }

@@ -15,7 +15,7 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::{
     AnalyticsEventInsert, ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
-    RegisteredGlobalDb,
+    RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
 };
 
 use crate::event_lane::record_observability;
@@ -163,7 +163,7 @@ struct ProducerWorkerProgress {
 }
 
 pub struct BoundedObservabilityProducerV1 {
-    db: Arc<RegisteredGlobalDb>,
+    db: RegisteredGlobalDbLeaseV1,
     identity: ObservabilityProducerIdentityV1,
     data: mpsc::Sender<QueuedObservation>,
     control: mpsc::Sender<ProducerControl>,
@@ -181,7 +181,7 @@ pub struct BoundedObservabilityProducerV1 {
 
 impl BoundedObservabilityProducerV1 {
     pub fn start(
-        db: Arc<RegisteredGlobalDb>,
+        db: RegisteredGlobalDbLeaseV1,
         identity: ObservabilityProducerIdentityV1,
         capacity: usize,
     ) -> Result<Self, &'static str> {
@@ -194,7 +194,7 @@ impl BoundedObservabilityProducerV1 {
     }
 
     pub fn start_with_deadlines(
-        db: Arc<RegisteredGlobalDb>,
+        db: RegisteredGlobalDbLeaseV1,
         identity: ObservabilityProducerIdentityV1,
         capacity: usize,
         deadlines: ObservabilityProducerDeadlinesV1,
@@ -217,7 +217,7 @@ impl BoundedObservabilityProducerV1 {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| "observability_producer_runtime_unavailable")?;
         let worker = runtime.spawn(run_worker(
-            Arc::clone(&db),
+            db.clone(),
             identity.clone(),
             data_rx,
             control_rx,
@@ -508,7 +508,7 @@ impl BoundedObservabilityProducerV1 {
 }
 
 async fn run_worker(
-    db: Arc<RegisteredGlobalDb>,
+    db: RegisteredGlobalDbLeaseV1,
     identity: ObservabilityProducerIdentityV1,
     mut data: mpsc::Receiver<QueuedObservation>,
     mut control: mpsc::Receiver<ProducerControl>,
@@ -519,7 +519,7 @@ async fn run_worker(
         first_error: None,
         rollup_frontier_initialized: false,
     };
-    let initialization_db = Arc::clone(&db);
+    let initialization_db = db.clone();
     let initialization_scope = identity.authorized_scope_ref.clone();
     let persistence_deadline = state.deadlines.persistence;
     let frontier_initialization = async move {

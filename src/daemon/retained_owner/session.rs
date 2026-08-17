@@ -46,7 +46,7 @@ use crate::daemon::session_retrieval::{
     SessionRetrievalStoreScope, SessionTemporalMetadataView,
 };
 use crate::errors::TraceDecayError;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
 
 mod refresh;
@@ -68,7 +68,7 @@ pub(super) struct ProjectRetainedSessionAuthoritiesV1 {
     pub(super) configuration_digest: ManifestDigest,
     pub(super) refresh: Arc<dyn RetainedSessionRefreshPortV1>,
     pub(super) retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
-    pub(super) session_database: Arc<RegisteredGlobalDb>,
+    pub(super) session_database: RegisteredGlobalDbLeaseV1,
     pub(super) workflow_index: Arc<dyn WorkflowIndexReadPort>,
 }
 

@@ -46,6 +46,10 @@ use tracedecay_usecases::semantic_runtime::{
     SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
 };
 
+use super::registry::{
+    ColdMountOpenEventV1, ServingGenerationInstallationOutcomeV1,
+    ServingGenerationRollbackOutcomeV1,
+};
 use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
     CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1,
@@ -1723,6 +1727,224 @@ async fn existing_path_remount_rejects_foreign_project_identity() {
     registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_same_root_mounts_keep_one_canonical_owner() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(4);
+    let barrier = Arc::new(tokio::sync::Barrier::new(4));
+    let mut tasks = Vec::new();
+    for _ in 0..4 {
+        let registry = registry.clone();
+        let root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            registry
+                .mount_worktree(test_project_id(), &root, store_root, None)
+                .await
+        }));
+    }
+
+    let mut mounted = 0;
+    let mut reused = 0;
+    for task in tasks {
+        match task
+            .await
+            .expect("mount task joins")
+            .expect("mount succeeds")
+        {
+            true => mounted += 1,
+            false => reused += 1,
+        }
+    }
+    assert_eq!(mounted, 1, "one caller must install the canonical owner");
+    assert_eq!(reused, 3, "same-root racers must reuse the canonical owner");
+    assert_eq!(
+        registry.mounted.lock().await.len(),
+        1,
+        "the registry must retain exactly one owner after the mount race"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paused_cold_mount_rejects_a_root_retiring_before_final_commit() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    let root = fixture.path().canonicalize().expect("canonical root");
+    let (cold_commit_entered, release_cold_commit) = registry
+        .pause_next_cold_mount_before_final_commit(root.clone())
+        .await;
+    let cold_registry = registry.clone();
+    let cold_root = fixture.path().to_path_buf();
+    let cold_store = store.path().to_path_buf();
+    let cold_mount = tokio::spawn(async move {
+        cold_registry
+            .mount_worktree(test_project_id(), &cold_root, cold_store, None)
+            .await
+    });
+
+    cold_commit_entered
+        .await
+        .expect("first cold mount must pause before its final owner commit");
+
+    let roots = BTreeSet::from([root.clone()]);
+    assert!(
+        !registry
+            .retire_project_roots_with_deadline(&roots, Duration::from_millis(25))
+            .await,
+        "retirement must wait for the paused exact cold reservation"
+    );
+    assert_eq!(registry.retiring_owner_count().await, 0);
+
+    release_cold_commit
+        .send(())
+        .expect("release paused cold mount final commit");
+    let cold_error = cold_mount
+        .await
+        .expect("paused cold mount joins")
+        .expect_err("a retiring root must reject a stale cold mount final commit");
+    assert!(matches!(
+        cold_error,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("still retiring")
+    ));
+    let retiring = registry.retiring.lock().await;
+    let mounted = registry.mounted.lock().await;
+    assert!(!retiring.contains_key(&root));
+    assert!(!mounted.contains_key(&root));
+    drop(mounted);
+    drop(retiring);
+
+    assert!(
+        registry
+            .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
+            .await,
+        "the completed retired cold reservation must release"
+    );
+    assert_eq!(registry.retiring_owner_count().await, 0);
+    assert!(
+        !registry.mounted.lock().await.contains_key(&root),
+        "the rejected cold mount must not leave a replacement worker"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retirement_parks_the_incumbent_while_a_same_root_remount_waits_on_its_scheduler() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    let root = fixture.path().canonicalize().expect("canonical root");
+    assert!(
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("incumbent mount succeeds")
+    );
+    let scheduler = registry
+        .scheduler_handle(&root)
+        .await
+        .expect("incumbent scheduler");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_scheduler_tx, release_scheduler_rx) = std::sync::mpsc::channel();
+    let held_scheduler = Arc::clone(&scheduler);
+    let lock_thread = std::thread::spawn(move || {
+        let scheduler = held_scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let wake = Arc::clone(&scheduler.wake);
+        held_tx.send(wake).expect("signal held scheduler");
+        release_scheduler_rx.recv().expect("release held scheduler");
+    });
+    let wake = held_rx.recv().expect("scheduler lock must be held");
+    wake.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let reconciling = registry.reconcile_in_progress_for_test(&root).await;
+            if reconciling {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("incumbent worker blocks in its reconcile pass");
+
+    let replacement_entered = registry
+        .observe_next_existing_semantic_schedule_replacement(root.clone())
+        .await;
+    let remount_registry = registry.clone();
+    let remount_root = fixture.path().to_path_buf();
+    let remount_store = store.path().to_path_buf();
+    let remount = tokio::spawn(async move {
+        remount_registry
+            .mount_worktree(test_project_id(), &remount_root, remount_store, None)
+            .await
+    });
+    replacement_entered
+        .await
+        .expect("same-root remount reaches its semantic replacement");
+
+    let roots = BTreeSet::from([root.clone()]);
+    let retirement = registry
+        .retire_project_roots_with_deadline(&roots, Duration::from_millis(25))
+        .await;
+    let parked_before_retry = {
+        let retiring = registry.retiring.lock().await;
+        let mounted = registry.mounted.lock().await;
+        (retiring.contains_key(&root), mounted.contains_key(&root))
+    };
+
+    release_scheduler_tx
+        .send(())
+        .expect("release incumbent scheduler");
+    lock_thread.join().expect("held scheduler thread joins");
+    let remount = remount.await.expect("same-root remount joins");
+    let drained = registry
+        .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
+        .await;
+    let no_owner_remains = {
+        let retiring = registry.retiring.lock().await;
+        let mounted = registry.mounted.lock().await;
+        !retiring.contains_key(&root) && !mounted.contains_key(&root)
+    };
+    registry.shutdown().await;
+
+    assert!(
+        !retirement,
+        "retirement must reach and park the incumbent instead of waiting on the remount's registry locks"
+    );
+    assert!(matches!(
+        remount,
+        Err(super::CodeIndexSchedulerErrorV1::Identity(message))
+            if message.contains("retired while semantic schedule update waited")
+    ));
+    assert_eq!(
+        parked_before_retry,
+        (true, false),
+        "the retiring incumbent stays parked and the stale remount never installs a replacement"
+    );
+    assert!(
+        drained,
+        "the parked incumbent must drain after its scheduler releases"
+    );
+    assert!(
+        no_owner_remains,
+        "the refused remount must not leave a mounted or retiring orphan"
+    );
+}
+
 #[test]
 fn empty_generation_restart_preserves_project_identity() {
     // A file with a compiled language descriptor (so the snapshot has something
@@ -2716,6 +2938,205 @@ async fn serving_arms_still_refuse_a_different_worktree_identity() {
     registry.shutdown().await;
 }
 
+#[tokio::test]
+async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, _scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let original = registry
+        .serving_code_scope(fixture.path())
+        .await
+        .and_then(|scope| scope.serving_generation)
+        .expect("initial retained generation");
+    let original_id = original.manifest().generation_id.clone();
+    let ServingGenerationInstallationOutcomeV1::Installed(original_installation) = registry
+        .install_exact_serving_generation(fixture.path(), &original)
+        .await
+    else {
+        panic!("the initial serving generation must admit one exact owner")
+    };
+
+    fixture.edit(
+        "src/main.rs",
+        "fn main() { refreshed(); }\nfn refreshed() {}\n",
+    );
+    git(fixture.path(), &["add", "src/main.rs"]);
+    git(
+        fixture.path(),
+        &["commit", "-qm", "refresh retained generation"],
+    );
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
+            .await,
+        "the mounted worktree must accept a refresh hint"
+    );
+    let newer = wait_for_generation_change(&registry, fixture.path(), &original_id).await;
+
+    assert_eq!(
+        registry
+            .retire_owned_serving_generation(fixture.path(), original_installation)
+            .await,
+        ServingGenerationRollbackOutcomeV1::NoMatch,
+        "a foreign replacement must invalidate the original installation token"
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(newer.clone())
+    );
+    let newer_generation = registry
+        .serving_code_scope(fixture.path())
+        .await
+        .and_then(|scope| scope.serving_generation)
+        .expect("newer retained generation");
+    let ServingGenerationInstallationOutcomeV1::Installed(newer_installation) = registry
+        .install_exact_serving_generation(fixture.path(), &newer_generation)
+        .await
+    else {
+        panic!("the newer serving generation must admit a fresh owner")
+    };
+    assert_eq!(
+        registry
+            .retire_owned_serving_generation(fixture.path(), newer_installation)
+            .await,
+        ServingGenerationRollbackOutcomeV1::Cleared
+    );
+    assert!(
+        registry
+            .latest_generation_id(fixture.path())
+            .await
+            .is_none(),
+        "the exact failed generation must be retired"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn committed_serving_generation_installation_preserves_the_exact_generation() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, _scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let generation = registry
+        .serving_code_scope(fixture.path())
+        .await
+        .and_then(|scope| scope.serving_generation)
+        .expect("initial retained generation");
+    let generation_id = generation.manifest().generation_id.clone();
+    let ServingGenerationInstallationOutcomeV1::Installed(installation) = registry
+        .install_exact_serving_generation(fixture.path(), &generation)
+        .await
+    else {
+        panic!("the exact serving generation must admit an installation token")
+    };
+    assert_eq!(
+        registry
+            .commit_serving_generation_installation(fixture.path(), installation)
+            .await,
+        ServingGenerationRollbackOutcomeV1::Cleared
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(generation_id),
+        "committing metadata ownership must retain the exact serving generation"
+    );
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn abandoned_serving_generation_installation_releases_the_exact_replay_claim() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, _scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let generation = registry
+        .serving_code_scope(fixture.path())
+        .await
+        .and_then(|scope| scope.serving_generation)
+        .expect("initial retained generation");
+    let generation_id = generation.manifest().generation_id.clone();
+    let ServingGenerationInstallationOutcomeV1::Installed(abandoned) = registry
+        .install_exact_serving_generation(fixture.path(), &generation)
+        .await
+    else {
+        panic!("the initial serving generation must admit one exact owner")
+    };
+
+    drop(abandoned);
+
+    let ServingGenerationInstallationOutcomeV1::Installed(replay) = registry
+        .install_exact_serving_generation(fixture.path(), &generation)
+        .await
+    else {
+        panic!("dropping an unfinished installation must release the replay claim")
+    };
+    assert_eq!(
+        registry
+            .commit_serving_generation_installation(fixture.path(), replay)
+            .await,
+        ServingGenerationRollbackOutcomeV1::Cleared
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(generation_id),
+        "releasing an abandoned claim must never clear the serving generation"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelled_serving_generation_installation_releases_the_exact_replay_claim() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, _scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let generation = registry
+        .serving_code_scope(fixture.path())
+        .await
+        .and_then(|scope| scope.serving_generation)
+        .expect("initial retained generation");
+    let generation_id = generation.manifest().generation_id.clone();
+    let task_registry = registry.clone();
+    let task_root = fixture.path().to_path_buf();
+    let task_generation = Arc::clone(&generation);
+    let (claimed, claimed_observed) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let ServingGenerationInstallationOutcomeV1::Installed(_installation) = task_registry
+            .install_exact_serving_generation(&task_root, &task_generation)
+            .await
+        else {
+            panic!("the initial serving generation must admit one exact owner")
+        };
+        claimed.send(()).expect("publish exact installation claim");
+        std::future::pending::<()>().await;
+        drop(_installation);
+    });
+    claimed_observed
+        .await
+        .expect("installation task must hold the claim before cancellation");
+    task.abort();
+    let _ = task.await;
+
+    let ServingGenerationInstallationOutcomeV1::Installed(replay) = registry
+        .install_exact_serving_generation(fixture.path(), &generation)
+        .await
+    else {
+        panic!("cancelling an installation task must release the exact replay claim")
+    };
+    assert_eq!(
+        registry
+            .commit_serving_generation_installation(fixture.path(), replay)
+            .await,
+        ServingGenerationRollbackOutcomeV1::Cleared
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(generation_id),
+        "cancelling the claim owner must leave its serving generation intact"
+    );
+
+    registry.shutdown().await;
+}
+
 /// The second half of the outage: search resolves its generation without ever
 /// running the freshness ladder, so when both arms came up empty nothing
 /// requested the reconcile that would remedy it — the typed failure repeated
@@ -3433,6 +3854,549 @@ async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() 
         "retry must join the retained owner"
     );
     assert_eq!(registry.retiring_owner_count().await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_cold_mounts_admit_exactly_one_worktree_owner() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn race() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    // Keep both newly-created workers parked at their dequeue point. The test
+    // counts mount admissions before either worker can coalesce its initial
+    // wake, so a duplicate cold owner cannot hide behind worker scheduling.
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(2, 0);
+    let callers = 2;
+    registry.install_cold_mount_admission_barrier(fixture.path(), callers);
+    let start = Arc::new(tokio::sync::Barrier::new(callers + 1));
+    let mounts = (0..callers)
+        .map(|_| {
+            let registry = registry.clone();
+            let project_root = fixture.path().to_path_buf();
+            let store_root = store.path().to_path_buf();
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                registry
+                    .mount_worktree(test_project_id(), &project_root, store_root, None)
+                    .await
+                    .expect("cold mount")
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait().await;
+
+    let mut created_owners = 0;
+    for mount in mounts {
+        if mount.await.expect("mount task joins") {
+            created_owners += 1;
+        }
+    }
+    let mounted_worktrees = registry.memory_stats().await.mounted_worktrees;
+
+    // Close the shared admission and join the retained owner before asserting,
+    // so a failing run cannot leave a detached worker behind the test.
+    registry.shutdown().await;
+
+    assert_eq!(
+        created_owners, 1,
+        "one root must admit one cold owner; a second true result creates a detached runtime"
+    );
+    assert_eq!(
+        mounted_worktrees, 1,
+        "the retained mount table must contain the one owner that was admitted"
+    );
+}
+
+// Each caller begins from the same empty pending slot. Holding the scheduler
+// lock forces every request onto the BusyFollowUp path, where the registry—not
+// the worker's later wake coalescing—is solely responsible for one admission.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coalescing() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("background reconcile admission");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    registry.clear_serving_generation_for_scope(&scope).await;
+    registry.clear_pending_wake_for_scope(&scope).await;
+    let held = scheduler
+        .lock()
+        .expect("hold the scheduler as a rebuild would");
+
+    let callers = 8;
+    registry.install_query_admission_barrier(&scope, callers);
+    let start = Arc::new(tokio::sync::Barrier::new(callers + 1));
+    let requests = (0..callers)
+        .map(|_| {
+            let registry = registry.clone();
+            let scope = scope.clone();
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                registry.request_query_background_reconcile(&scope).await
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait().await;
+
+    let mut admitted = 0;
+    for request in requests {
+        if request.await.expect("query admission task joins") {
+            admitted += 1;
+        }
+    }
+    let stamped = registry
+        .pending_wake_micros_for_scope(&scope)
+        .await
+        .expect("mounted worktree");
+
+    drop(held);
+    registry.shutdown().await;
+    drop(admission);
+
+    assert_ne!(
+        stamped, 0,
+        "the one winning admission records its pending wake"
+    );
+    assert_eq!(
+        admitted, 1,
+        "the registry must atomically claim one query admission before worker wake coalescing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_cold_mount_holds_its_reservation_until_blocking_open_finishes() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn cancel() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+    registry.install_cold_mount_open_gate(fixture.path());
+
+    let leader = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_open_events(fixture.path(), 1)
+        .await;
+
+    let follower = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry.wait_for_cold_mount_follower(fixture.path()).await;
+    leader.abort();
+    assert!(
+        leader.await.is_err(),
+        "caller cancellation joins as cancelled"
+    );
+
+    registry.release_cold_mount_open_gate(fixture.path());
+    assert!(
+        follower
+            .await
+            .expect("follower mount task joins")
+            .expect("follower retries after the detached open settles"),
+        "the follower becomes the one canonical owner after the cancelled caller's open ends"
+    );
+    let events = registry.cold_mount_open_events(fixture.path());
+    let first_finished = events
+        .iter()
+        .position(|event| *event == ColdMountOpenEventV1::Finished)
+        .expect("first blocking open finished");
+    let second_started = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| **event == ColdMountOpenEventV1::Started)
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("retry opens after the detached open settles");
+
+    registry.shutdown().await;
+
+    assert!(
+        first_finished < second_started,
+        "a cancelled caller must retain its reservation until its detached blocking open has finished"
+    );
+}
+
+#[tokio::test]
+async fn failed_cold_mount_releases_its_reservation_for_retry() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retry() {}\n")]);
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let bad_store_root = TempDir::new().expect("bad store root");
+    let bad_store = bad_store_root.path().join("not-a-directory");
+    std::fs::write(&bad_store, "not a directory").expect("write failing store path");
+
+    assert!(
+        registry
+            .mount_worktree(test_project_id(), fixture.path(), bad_store, None)
+            .await
+            .is_err(),
+        "the first cold open fails through the typed scheduler error"
+    );
+    let retry_store = TempDir::new().expect("retry store root");
+    assert!(
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                retry_store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("failed cold mount must release its exact reservation"),
+        "retry owns the root after the failed open finishes"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn distinct_cold_mounts_respect_capacity_before_opening() {
+    let first = GitFixture::new(&[("src/lib.rs", "pub fn first() {}\n")]);
+    let second = GitFixture::new(&[("src/lib.rs", "pub fn second() {}\n")]);
+    let third = GitFixture::new(&[("src/lib.rs", "pub fn third() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(2, 0);
+    registry.install_cold_mount_open_gate(first.path());
+    registry.install_cold_mount_open_gate(second.path());
+    registry.install_cold_mount_open_observer(third.path());
+
+    let first_mount = {
+        let registry = registry.clone();
+        let project_root = first.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_open_events(first.path(), 1)
+        .await;
+    let second_mount = {
+        let registry = registry.clone();
+        let project_root = second.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_open_events(second.path(), 1)
+        .await;
+
+    let capacity = registry
+        .mount_worktree(
+            test_project_id(),
+            third.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect_err("the N+1 distinct root must be refused before opening");
+    registry.release_cold_mount_open_gate(first.path());
+    registry.release_cold_mount_open_gate(second.path());
+    assert!(
+        first_mount
+            .await
+            .expect("first mount task joins")
+            .expect("first mount"),
+        "first reserved root mounts"
+    );
+    assert!(
+        second_mount
+            .await
+            .expect("second mount task joins")
+            .expect("second mount"),
+        "second reserved root mounts"
+    );
+
+    registry.shutdown().await;
+
+    assert!(matches!(
+        capacity,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("capacity is exhausted")
+    ));
+    assert!(
+        registry.cold_mount_open_events(third.path()).is_empty(),
+        "the rejected N+1 root never starts its expensive blocking open"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background worker at its dequeue point");
+    registry.clear_pending_wake_for_scope(&scope).await;
+    registry.install_query_claim_gate(&scope);
+
+    let request = {
+        let registry = registry.clone();
+        let scope = scope.clone();
+        tokio::spawn(async move { registry.request_query_background_reconcile(&scope).await })
+    };
+    registry.wait_for_query_claim(&scope).await;
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
+            .await,
+        "foreign hint wake is accepted for the mounted root"
+    );
+    registry.release_query_claim(&scope);
+    assert!(
+        !request.await.expect("query admission task joins"),
+        "the fresh query declines its own reconcile after the foreign wake arrives"
+    );
+    let stamped = registry
+        .pending_wake_micros_for_scope(&scope)
+        .await
+        .expect("mounted worktree");
+
+    drop(admission);
+    registry.shutdown().await;
+
+    assert_ne!(
+        stamped, 0,
+        "dropping a query-owned claim must not erase a foreign coalesced wake"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreign_wake_arriving_during_query_claim_drop_is_retained() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background worker at its dequeue point");
+    registry.clear_pending_wake_for_scope(&scope).await;
+    registry.install_query_claim_gate(&scope);
+    registry.install_pending_wake_drop_gate(&scope).await;
+
+    let request = {
+        let registry = registry.clone();
+        let scope = scope.clone();
+        tokio::spawn(async move { registry.request_query_background_reconcile(&scope).await })
+    };
+    registry.wait_for_query_claim(&scope).await;
+    registry.release_query_claim(&scope);
+    registry.wait_for_pending_wake_claim_drop(&scope).await;
+
+    let foreign_wake = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let changed_path = fixture.path().join("src/main.rs");
+        tokio::spawn(async move { registry.notify_path(&project_root, changed_path).await })
+    };
+    registry.wait_for_foreign_pending_wake_attempt(&scope).await;
+    registry.release_pending_wake_claim_drop(&scope).await;
+
+    assert!(
+        !request.await.expect("query admission task joins"),
+        "the rejected query releases its own claimed marker"
+    );
+    assert!(
+        foreign_wake.await.expect("foreign wake task joins"),
+        "foreign hint wake is accepted after the claim release"
+    );
+    let stamped = registry
+        .pending_wake_micros_for_scope(&scope)
+        .await
+        .expect("mounted worktree");
+
+    drop(admission);
+    registry.shutdown().await;
+
+    assert_ne!(
+        stamped, 0,
+        "a foreign wake that contended at the former owner/marker gap remains pending"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_after_outer_mount_check_refuses_reservation_before_open() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn shutdown_race() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+    registry.install_cold_mount_post_check_gate(fixture.path());
+    registry.install_cold_mount_open_observer(fixture.path());
+
+    let mount = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_post_check(fixture.path())
+        .await;
+    registry.shutdown().await;
+    registry.release_cold_mount_post_check(fixture.path());
+
+    let error = mount
+        .await
+        .expect("mount task joins")
+        .expect_err("shutdown closes cold-mount admission before reservation");
+    assert!(matches!(
+        error,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("shutting down")
+    ));
+    assert!(
+        registry.cold_mount_open_events(fixture.path()).is_empty(),
+        "a caller paused before reservation never starts an open after shutdown closes admission"
+    );
+    assert_eq!(registry.memory_stats().await.mounted_worktrees, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_waits_for_and_fences_a_cold_mount_open() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn shutdown() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+    registry.install_cold_mount_open_gate(fixture.path());
+    let mount = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_open_events(fixture.path(), 1)
+        .await;
+    let mut cancelled = registry
+        .subscribe_cold_mount_cancellation(fixture.path())
+        .expect("cold mount reservation");
+    let shutdown = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.shutdown().await })
+    };
+    let _ = cancelled.changed().await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown waits for the in-flight blocking open after fencing it"
+    );
+    registry.release_cold_mount_open_gate(fixture.path());
+    let mount_error = mount
+        .await
+        .expect("mount task joins")
+        .expect_err("shutdown fences publication after the open ends");
+    shutdown.await.expect("shutdown task joins");
+
+    assert!(matches!(
+        mount_error,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("shutting down")
+    ));
+    assert_eq!(registry.memory_stats().await.mounted_worktrees, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retirement_waits_for_and_fences_an_exact_cold_mount_open() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retire() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+    registry.install_cold_mount_open_gate(fixture.path());
+    let mount = {
+        let registry = registry.clone();
+        let project_root = fixture.path().to_path_buf();
+        let store_root = store.path().to_path_buf();
+        tokio::spawn(async move {
+            registry
+                .mount_worktree(test_project_id(), &project_root, store_root, None)
+                .await
+        })
+    };
+    registry
+        .wait_for_cold_mount_open_events(fixture.path(), 1)
+        .await;
+    let mut cancelled = registry
+        .subscribe_cold_mount_cancellation(fixture.path())
+        .expect("cold mount reservation");
+    let roots = BTreeSet::from([fixture.path().canonicalize().expect("canonical root")]);
+    let retirement = {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            registry
+                .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
+                .await
+        })
+    };
+    let _ = cancelled.changed().await;
+    registry.release_cold_mount_open_gate(fixture.path());
+    let mount_error = mount
+        .await
+        .expect("mount task joins")
+        .expect_err("retirement fences publication after the open ends");
+    assert!(
+        retirement.await.expect("retirement task joins"),
+        "retirement joins the cancelled cold-open reservation"
+    );
+    assert_eq!(registry.memory_stats().await.mounted_worktrees, 0);
+    assert!(
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("retired reservation is released after its open joins"),
+        "a new owner may mount only after retirement completes"
+    );
+    registry.shutdown().await;
+
+    assert!(matches!(
+        mount_error,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("retiring")
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5635,11 +6599,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     assert_eq!(parsed.len(), 1, "fixture cargo output must parse");
 
     let outcome = {
-        let writer = database
-            .writer_connection("publish compiler diagnostic fixture")
-            .await
-            .expect("diagnostics writer");
-        let store = DiagnosticsStore::new(writer.engine_connection());
+        let store = DiagnosticsStore::new(database.clone());
         publish_compiler_diagnostics_through_code_index_v1(
             fixture.path(),
             Some(&registry as &dyn CodeIndexPublicationIdentityPortV1),
@@ -5669,7 +6629,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     );
 
     let record = {
-        let store = DiagnosticsStore::new(database.conn());
+        let store = DiagnosticsStore::new(database.clone());
         store
             .current_records(&generation)
             .await
@@ -5897,7 +6857,7 @@ async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
     )
     .await
     .expect("open diagnostics database");
-    let store = DiagnosticsStore::new(database.conn());
+    let store = DiagnosticsStore::new(database.clone());
 
     let parsed = crate::diagnose::parse_cargo_output(
         "error[E0308]: mismatched types\n  --> src/lib.rs:1:1\n",

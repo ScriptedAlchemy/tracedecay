@@ -548,7 +548,7 @@ impl StoreAdministration {
 
     pub(super) async fn registered_profile_session_database(
         &self,
-    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
         self.ensure_account_active().await?;
         self.session_runtime_registry()
             .await?
@@ -558,7 +558,7 @@ impl StoreAdministration {
 
     pub(super) async fn registered_profile_database(
         &self,
-    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
         let database = self.raw_registered_profile_database().await?;
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
@@ -577,7 +577,7 @@ impl StoreAdministration {
 
     async fn raw_registered_profile_database(
         &self,
-    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
         self.session_runtime_registry()
             .await?
             .profile_database()
@@ -612,7 +612,7 @@ impl StoreAdministration {
 
     pub(super) async fn mounted_registered_session_databases(
         &self,
-    ) -> Vec<Arc<crate::global_db::RegisteredGlobalDb>> {
+    ) -> Vec<crate::global_db::RegisteredGlobalDbLeaseV1> {
         let Ok(profile_root) = self
             .profile_identity()
             .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
@@ -663,7 +663,7 @@ impl StoreAdministration {
         &self,
         project_root: &Path,
         store_layout: &crate::storage::StoreLayout,
-    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+    ) -> Result<crate::global_db::RegisteredGlobalDbLeaseV1> {
         let project_id = store_layout
             .identity
             .project_id
@@ -729,7 +729,7 @@ impl StoreAdministration {
 
     pub(super) async fn host_admission_broker(
         &self,
-        database: &Arc<crate::global_db::RegisteredGlobalDb>,
+        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
     ) -> Result<tracedecay_usecases::host_admission::SharedHostAdmissionBroker> {
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
@@ -1283,6 +1283,7 @@ impl StoreAdministration {
     /// branch administration against that exact profile-owned store.
     pub(super) async fn execute_branch_admin_for_handshake(
         &self,
+        schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         handshake: &DaemonHandshake,
         action: crate::branch::BranchAdminAction,
     ) -> Result<crate::branch::BranchAdminReport> {
@@ -1327,6 +1328,7 @@ impl StoreAdministration {
         .config
         .sync;
         self.execute_branch_admin_in_layout(
+            schedulers,
             project_root,
             &layout.data_root,
             action,
@@ -1340,6 +1342,7 @@ impl StoreAdministration {
     /// the physical runtime registry's exact path reservation.
     pub(super) async fn execute_branch_admin_in_layout(
         &self,
+        schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         project_root: &Path,
         data_root: &Path,
         action: crate::branch::BranchAdminAction,
@@ -1353,9 +1356,32 @@ impl StoreAdministration {
             branch_gc_days,
             orphan_db_gc_days,
         )?;
+        let retirements = prepared
+            .single_store_retirements()
+            .iter()
+            .filter(|retirement| {
+                super::pr_autotrack::manual_branch_source_owns_artifacts(
+                    data_root,
+                    &retirement.branch,
+                    &retirement.source,
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let lifecycle_leases = acquire_manual_branch_retirement_leases(data_root, &retirements)?;
         let database_paths = canonical_branch_database_paths(prepared.database_paths())?;
         if database_paths.is_empty() {
-            return prepared.finish_without_database_deletion();
+            let lifecycle_leases = cleanup_manual_branch_retirements(
+                project_root,
+                data_root,
+                schedulers,
+                &retirements,
+                lifecycle_leases,
+            )
+            .await?;
+            let report = prepared.finish_without_database_deletion()?;
+            drop(lifecycle_leases);
+            return Ok(report);
         }
 
         {
@@ -1381,6 +1407,23 @@ impl StoreAdministration {
             .await?
             .begin_destructive_code_maintenance(data_root, canonical_paths.iter().cloned())
             .await?;
+        let lifecycle_leases = match cleanup_manual_branch_retirements(
+            project_root,
+            data_root,
+            schedulers,
+            &retirements,
+            lifecycle_leases,
+        )
+        .await
+        {
+            Ok(lifecycle_leases) => lifecycle_leases,
+            Err(error) => {
+                reservation
+                    .abort_preserved()
+                    .map_err(destructive_reservation_error)?;
+                return Err(error);
+            }
+        };
         let report = match prepared.commit_destructive() {
             Ok(report) => report,
             Err(error) => {
@@ -1393,8 +1436,62 @@ impl StoreAdministration {
         reservation
             .finish_deleted()
             .map_err(destructive_reservation_error)?;
+        drop(lifecycle_leases);
         Ok(report)
     }
+}
+
+fn acquire_manual_branch_retirement_leases(
+    data_root: &Path,
+    retirements: &[crate::branch::SingleStoreBranchRetirementV1],
+) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
+    retirements
+        .iter()
+        .map(|retirement| {
+            super::pr_autotrack::try_acquire_manual_branch_lifecycle(data_root, &retirement.branch)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "branch removal for '{}' is contended or unavailable: {error}",
+                        retirement.branch
+                    ),
+                })
+        })
+        .collect()
+}
+
+async fn cleanup_manual_branch_retirements(
+    project_root: &Path,
+    data_root: &Path,
+    schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    retirements: &[crate::branch::SingleStoreBranchRetirementV1],
+    lifecycle_leases: Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>,
+) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
+    if retirements.len() != lifecycle_leases.len() {
+        return Err(TraceDecayError::Config {
+            message: "branch retirement lifecycle ownership did not match metadata selection"
+                .to_owned(),
+        });
+    }
+    let mut retained_leases = Vec::with_capacity(lifecycle_leases.len());
+    for (retirement, lifecycle) in retirements.iter().zip(lifecycle_leases) {
+        let lifecycle = super::pr_autotrack::cleanup_manual_branch_retirement(
+            project_root,
+            data_root,
+            schedulers,
+            &retirement.branch,
+            &retirement.source,
+            lifecycle,
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "branch metadata retained '{}' because exact artifact retirement failed: {error}",
+                retirement.branch
+            ),
+        })?;
+        retained_leases.push(lifecycle);
+    }
+    Ok(retained_leases)
 }
 
 pub(super) struct BranchAdminRequest {

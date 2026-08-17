@@ -39,9 +39,7 @@ use tracedecay_usecases::stack_coordinator::{
     DaemonGitHubStackCoordinatorV1, StackCoordinatorErrorV1,
 };
 
-#[cfg(test)]
-use crate::db::engine::TestConnection;
-use crate::global_db::{RegisteredGlobalDb, VerifiedGraphRuntimePortV1};
+use crate::global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use super::stack_runtime::DaemonGitHubStackRuntimeV1;
@@ -110,27 +108,13 @@ struct NativeIntegrationStoreRegistry {
 impl NativeIntegrationStoreRegistry {
     fn ensure(
         &self,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
     ) -> NativeIntegrationStoreResult<SharedDaemonNativeIntegrationStore> {
         // The registered runtime authority already supplies the canonical
         // database identity; a fresh SQLite shard may not have materialized
         // its path yet, so no filesystem lookup happens here.
         let path = database.db_path().to_path_buf();
         self.ensure_with(path, || DaemonNativeIntegrationStore::open(database))
-    }
-
-    #[cfg(test)]
-    fn ensure_engine_test(
-        &self,
-        path: PathBuf,
-    ) -> NativeIntegrationStoreResult<SharedDaemonNativeIntegrationStore> {
-        let path = path
-            .canonicalize()
-            .map_err(|_| tracedecay_store::NativeIntegrationStoreError::Unavailable)?;
-        let store_path = path.clone();
-        self.ensure_with(path, || {
-            DaemonNativeIntegrationStore::open_engine_test(TestConnection::open(&store_path))
-        })
     }
 
     fn ensure_with<F>(
@@ -318,7 +302,7 @@ impl DaemonNativeIntegrationOwner {
     /// creates a second queue actor or a second background drain task.
     pub(crate) fn mount_github_stack_runtime(
         &self,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
         coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
@@ -391,7 +375,7 @@ impl DaemonNativeIntegrationServiceRegistry {
     /// then durable startup recovery. A failed recovery mounts nothing.
     pub(crate) async fn ensure(
         &self,
-        database: Arc<RegisteredGlobalDb>,
+        database: RegisteredGlobalDbLeaseV1,
         repository_root: PathBuf,
         project_id: ProjectId,
         repository_id: RepositoryId,
@@ -404,7 +388,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             .map_err(|_| NativeIntegrationPortError::Unavailable)?;
         let graph_runtime = database
             .project_graph_runtime()
-            .cloned()
+            .map(|runtime| Arc::new(runtime.clone()) as Arc<dyn VerifiedGraphRuntimePortV1>)
             .ok_or(NativeIntegrationPortError::Unavailable)?;
         let session_shard = &database.binding().shard_id;
         let StoreShardScopeV1::ProjectSessions {
@@ -432,48 +416,6 @@ impl DaemonNativeIntegrationServiceRegistry {
             Some(expected_graph_shard),
             Some(graph_runtime),
             || self.stores.ensure(database),
-        )
-        .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn ensure_engine_test(
-        &self,
-        database_path: PathBuf,
-        repository_root: PathBuf,
-        project_id: ProjectId,
-        repository_id: RepositoryId,
-        policy_digest: ManifestDigest,
-        observed_at: UtcMicros,
-    ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError> {
-        let database_path = database_path
-            .canonicalize()
-            .map_err(|_| NativeIntegrationPortError::Unavailable)?;
-        let database = TestConnection::open(&database_path);
-        let transaction = database
-            .transaction_with_behavior(crate::db::engine::TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| NativeIntegrationPortError::Unavailable)?;
-        crate::global_db::ensure_native_integration_schema(&transaction)
-            .await
-            .map_err(|_| NativeIntegrationPortError::Unavailable)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| NativeIntegrationPortError::Unavailable)?;
-        drop(database);
-        let store_path = database_path.clone();
-        self.ensure_with(
-            database_path,
-            repository_root,
-            project_id,
-            repository_id,
-            policy_digest,
-            observed_at,
-            None,
-            None,
-            None,
-            || self.stores.ensure_engine_test(store_path),
         )
         .await
     }
@@ -714,6 +656,8 @@ mod tests {
     };
 
     use super::DaemonNativeIntegrationServiceRegistry;
+    use crate::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay_usecases::host_admission::HostAdmissionScope;
 
     fn init_repository(root: &Path) {
         for arguments in [
@@ -741,15 +685,23 @@ mod tests {
         let repository_root = directory.path().join("repo");
         std::fs::create_dir_all(&repository_root).expect("repository root");
         init_repository(&repository_root);
-        let database_path = directory.path().join("project-sessions.db");
-        drop(std::fs::File::create(&database_path).expect("database file"));
-
         let registry = DaemonNativeIntegrationServiceRegistry::default();
+        let project_id = ProjectId::new("project.native-owner.fixture").expect("project id");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            directory.path().join("profile"),
+            &repository_root,
+            project_id.clone(),
+        )
+        .await
+        .expect("canonical project test runtime");
+        let database = runtime
+            .registered_database_arc(HostAdmissionScope::Project)
+            .expect("registered project database");
         let owner = registry
-            .ensure_engine_test(
-                database_path.clone(),
+            .ensure(
+                database.clone(),
                 repository_root.clone(),
-                ProjectId::new("project.native-owner.fixture").expect("project id"),
+                project_id.clone(),
                 RepositoryId::new("repository.native-owner.fixture").expect("repository id"),
                 policy_digest(),
                 UtcMicros(1),
@@ -813,10 +765,10 @@ mod tests {
         // A second ensure for the same identity reuses the retained owner
         // instead of composing a second authority for the same database.
         let second = registry
-            .ensure_engine_test(
-                database_path,
+            .ensure(
+                database,
                 repository_root.clone(),
-                ProjectId::new("project.native-owner.fixture").expect("project id"),
+                project_id,
                 RepositoryId::new("repository.native-owner.fixture").expect("repository id"),
                 policy_digest(),
                 UtcMicros(3),

@@ -70,6 +70,8 @@ fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
         truncation_length: 512,
+        inference_batch_size: 8,
+        inference_batch_bytes: 16 * 1024,
         runtime_backend: "fastembed-ort".to_owned(),
         runtime_build_revision: "runtime.maintenance-retention.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,

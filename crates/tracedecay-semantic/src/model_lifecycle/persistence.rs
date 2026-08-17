@@ -1,12 +1,12 @@
 fn set_failed_state(
     root: &Path,
-    inner: &Mutex<LifecycleInner>,
+    inner: &LifecyclePublicationGateV1,
     model: &CatalogedFastEmbedModelV1,
     digest: &str,
     detail: &str,
     retryable: bool,
 ) -> Result<(), ModelLifecycleErrorV1> {
-    let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut guard = inner.writer();
     guard.durable.state = Some(SemanticModelLifecycleStateV1::Failed {
         model_id: model.model_id.clone(),
         revision: model.source.revision.clone(),

@@ -125,6 +125,55 @@ pub(super) async fn wait_for_semantic_generation(
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             }
+            // A serving generation is deliberately available before the
+            // scheduler seals it. Native profile evaluation is stricter: its
+            // snapshot authority accepts only the exact complete-and-fresh
+            // generation. Wait for the public status of that authority rather
+            // than racing an evaluation against publication settlement.
+            let freshness = tool_payload(
+                &harness
+                    .call_tool(
+                        project,
+                        "tracedecay_status",
+                        json!({
+                            "format": "json",
+                            "include_branch_diagnostics": false,
+                            "include_storage_health": false,
+                            "include_session_ingest": false,
+                            "include_staleness": false,
+                        }),
+                    )
+                    .await
+                    .expect("public code-index readiness status"),
+            );
+            if freshness["code_index_freshness"]["status"] != json!("current")
+                || freshness["code_index_freshness"]["worktree"]["latest_generation_id"]
+                    != json!(expected_source)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
+            // Complete status alone is not enough: a sealed generation must
+            // be paired with a live code-index query authority before an
+            // evaluator may consume it. This ordinary public query is the
+            // authority preflight; an unavailable outcome keeps waiting and
+            // is never treated as a successful evaluation precondition.
+            let query_readiness = tool_payload(
+                &harness
+                    .call_tool(
+                        project,
+                        "tracedecay_search",
+                        json!({"query": "fn", "limit": 1, "format": "json"}),
+                    )
+                    .await
+                    .expect("public code-index query-authority readiness"),
+            );
+            if query_readiness["status"] == json!("unavailable")
+                || query_readiness["code_generation"] != json!(expected_source)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
             let vector_id =
                 match tracedecay_usecases::semantic_runtime::project_semantic_application_status(
                     project, None,
@@ -201,18 +250,33 @@ pub(super) fn semantic_candidate(
     // These bound the evaluation execution only. The accepted profile is
     // rebound to the evaluator's exact current/10x observations before it is
     // persisted or becomes activation-eligible.
-    let evaluation_limits = crate::config::SemanticResourceCeilings::default();
+    let configured_limits = crate::config::SemanticResourceCeilings::default();
+    let catalog = crate::semantic_code::production_fastembed_catalog();
+    let cataloged_model = catalog
+        .get(crate::semantic_code::DEFAULT_FASTEMBED_MODEL_ID)
+        .expect("production catalog contains default model");
+    let model_bytes = cataloged_model
+        .members
+        .get("model")
+        .expect("production model member")
+        .length;
+    let tokenizer_bytes = cataloged_model
+        .members
+        .get("tokenizer")
+        .expect("production tokenizer member")
+        .length;
     let vector_generation_id = vector.generation_id().clone();
     let calibration = SemanticCalibrationProfileV1 {
-        calibration_profile_id: CalibrationProfileId::new(
-            "calibration.semantic.native-product-journey.v1",
-        )
-        .expect("calibration profile id"),
+        calibration_profile_id: CalibrationProfileId::new("calibration.semantic.runtime.v1")
+            .expect("calibration profile id"),
         cohort_digest: canonical_sha256(&(
-            "tracedecay.semantic.native-product-journey.cohort.v1",
+            "tracedecay.semantic.evaluation-calibration-cohort.v1",
             code.manifest().generation_id.clone(),
-            vector_generation_id.clone(),
+            vector.source_manifest_digest().clone(),
             code.capability().manifest_digest.clone(),
+            vector.embedding_key().clone(),
+            vector_generation_id.clone(),
+            embedding.model_artifact_digest.clone(),
         ))
         .expect("calibration cohort digest"),
         projection_key: vector.projection_key().clone(),
@@ -248,7 +312,7 @@ pub(super) fn semantic_candidate(
                 implementation_revision: ComponentRevision::new("semantic.fastembed.production.v1")
                     .expect("semantic implementation revision"),
                 fusion_revision: ComponentRevision::new(
-                    "fusion.semantic.native-product-journey.v1",
+                    tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
                 )
                 .expect("fusion revision"),
                 artifact_manifest_digest: embedding.model_artifact_digest.clone(),
@@ -258,14 +322,14 @@ pub(super) fn semantic_candidate(
                 vector_generation_id,
                 calibration,
                 resources: SemanticResourceRequirementV1 {
-                    model_bytes: evaluation_limits.max_model_bytes,
-                    tokenizer_bytes: evaluation_limits.max_tokenizer_bytes,
-                    resident_bytes: evaluation_limits.max_resident_bytes,
-                    threads: evaluation_limits.max_threads,
-                    max_concurrent_sessions: evaluation_limits.max_concurrent_sessions,
-                    batch_size: evaluation_limits.max_batch_size,
-                    sequence_length: evaluation_limits.max_sequence_length,
-                    load_deadline_ms: evaluation_limits.load_deadline_ms,
+                    model_bytes,
+                    tokenizer_bytes,
+                    resident_bytes: configured_limits.max_resident_bytes,
+                    threads: configured_limits.max_threads,
+                    max_concurrent_sessions: configured_limits.max_concurrent_sessions,
+                    batch_size: configured_limits.max_batch_size,
+                    sequence_length: configured_limits.max_sequence_length,
+                    load_deadline_ms: configured_limits.load_deadline_ms,
                 },
             }),
             rerank: None,
@@ -294,6 +358,14 @@ pub(super) async fn evaluate_native_profile(
         )
         .expect("evaluation time"),
     );
+    // Exercise the same identity authority the production client uses. A
+    // vector generation is a `sha256:<hex>` digest, which cannot be embedded
+    // in a daemon request token; doing so truthfully fails at request
+    // validation before the evaluator is reached.
+    let request_id = crate::request_identity::mint_global_request_id(
+        crate::request_identity::GlobalRequestSurface::SemanticEvaluation,
+    )
+    .expect("mint a production semantic-evaluation request id");
     let response = resources
         .invocation
         .service
@@ -304,17 +376,7 @@ pub(super) async fn evaluate_native_profile(
             None,
             None,
             crate::daemon_contract::DaemonInvocationRequest::semantic_evaluate_and_publish(
-                format!(
-                    "semantic-native-evaluation-{}",
-                    candidate
-                        .compatibility
-                        .semantic
-                        .as_ref()
-                        .expect("semantic pins")
-                        .vector_generation_id
-                        .as_digest()
-                        .as_str()
-                ),
+                request_id.as_str(),
                 candidate,
                 observed_at,
                 tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
@@ -496,13 +558,44 @@ async fn search(
     )
 }
 
+/// Proves that semantic execution contributed to the actual source probe,
+/// rather than merely reporting a ready runtime or complete lane.
+pub(super) fn assert_semantic_probe_contribution(
+    payload: &Value,
+    probe_symbol: &str,
+    checkpoint: &str,
+) {
+    let results = payload["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{checkpoint} returned no result list: {payload}"));
+    let probe = results
+        .iter()
+        .find(|result| result["display"]["name"] == json!(probe_symbol))
+        .unwrap_or_else(|| {
+            panic!("{checkpoint} did not return source probe {probe_symbol}: {payload}")
+        });
+    let contributions = probe["candidate"]["contributions"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "{checkpoint} returned probe {probe_symbol} without candidate contributions: {probe}"
+            )
+        });
+    assert!(
+        contributions
+            .iter()
+            .any(|contribution| contribution["retriever"] == json!("semantic")),
+        "{checkpoint} returned probe {probe_symbol} without a semantic contribution: {probe}"
+    );
+}
+
 async fn semantic_runtime_status(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> Value {
     tool_payload(
         &harness
-            .call_tool(project, "tracedecay_runtime", json!({}))
+            .call_tool(project, "tracedecay_runtime", json!({"format": "json"}))
             .await
             .expect("public production runtime status"),
     )["semantic_runtime"]
@@ -665,6 +758,11 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     assert_code_generation_unchanged(&harness, &project, &first_code_id).await;
     let first_query = search(&harness, &project, true).await;
     assert_eq!(first_query["semantic"]["status"], "complete");
+    assert_semantic_probe_contribution(
+        &first_query,
+        "semantic_product_probe",
+        "first semantic activation",
+    );
     assert_eq!(
         first_query["code_generation"],
         json!(first_code.manifest().generation_id)
@@ -746,6 +844,11 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     );
     let second_query = search(&harness, &project, true).await;
     assert_eq!(second_query["semantic"]["status"], "complete");
+    assert_semantic_probe_contribution(
+        &second_query,
+        "semantic_product_probe",
+        "second semantic activation",
+    );
     assert_eq!(
         second_query["code_generation"],
         json!(second_code.manifest().generation_id)
@@ -795,6 +898,11 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     );
     let rolled_back_query = search(&harness, &project, true).await;
     assert_eq!(rolled_back_query["semantic"]["status"], "complete");
+    assert_semantic_probe_contribution(
+        &rolled_back_query,
+        "semantic_product_probe",
+        "semantic rollback",
+    );
     assert_eq!(
         rolled_back_query["code_generation"],
         json!(first_code.manifest().generation_id)
@@ -884,6 +992,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     .await
     .expect("daemon semantic activation recovery did not converge");
     assert_eq!(recovered["semantic"]["status"], "complete");
+    assert_semantic_probe_contribution(&recovered, "semantic_product_probe", "semantic retry");
     assert_eq!(recovered_status["state"], "ready");
     assert_eq!(
         recovered_status["receipt"]["activated_generation"],

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 use super::{RegisteredGlobalDb, registered_error};
@@ -11,7 +9,7 @@ impl RegisteredGlobalDb {
     pub fn bind_session_relation_graph(
         &self,
         scope: SessionRelationScope,
-        graph: Arc<tracedecay_graph_db::GraphDb>,
+        graph: tracedecay_graph_db::GraphDbLeaseV1,
         graph_binding: StoreRuntimeBindingV1,
         graph_verified_locator: VerifiedStoreLocatorV1,
     ) -> tracedecay_runtime_core::errors::Result<()> {
@@ -43,7 +41,7 @@ impl RegisteredGlobalDb {
             self.session_relation_graph.get()
         {
             return if existing_scope == &scope
-                && Arc::ptr_eq(existing_graph, &graph)
+                && existing_graph.shares_runtime_with(&graph)
                 && existing_binding == &graph_binding
                 && existing_locator == &graph_verified_locator
             {
@@ -69,7 +67,7 @@ impl RegisteredGlobalDb {
         &self,
     ) -> tracedecay_runtime_core::errors::Result<(
         &SessionRelationScope,
-        &Arc<tracedecay_graph_db::GraphDb>,
+        &tracedecay_graph_db::GraphDbLeaseV1,
         &StoreRuntimeBindingV1,
         &VerifiedStoreLocatorV1,
     )> {
@@ -97,6 +95,6 @@ impl RegisteredGlobalDb {
     ) -> tracedecay_runtime_core::errors::Result<(&SessionRelationScope, SessionRelationGraphStore)>
     {
         let (scope, graph, _, _) = self.session_relation_graph()?;
-        Ok((scope, SessionRelationGraphStore::new(Arc::clone(graph))))
+        Ok((scope, SessionRelationGraphStore::new(graph.clone())))
     }
 }

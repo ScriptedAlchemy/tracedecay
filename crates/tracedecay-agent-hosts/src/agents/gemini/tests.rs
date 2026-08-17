@@ -64,6 +64,42 @@ fn recorded_invocations(log: &Path) -> Vec<String> {
         .collect()
 }
 
+#[cfg(unix)]
+struct AmbientPathGuard {
+    previous: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(unix)]
+impl AmbientPathGuard {
+    fn set(path: &Path) -> Self {
+        let lock = crate::config::lock_user_data_dir_test_env();
+        let previous = std::env::var_os("PATH");
+        // SAFETY: the shared profile-discovery lock is held for this guard's
+        // lifetime, so sibling tests do not observe the temporary PATH.
+        unsafe {
+            std::env::set_var("PATH", path);
+        }
+        Self {
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for AmbientPathGuard {
+    fn drop(&mut self) {
+        // SAFETY: see `AmbientPathGuard::set`.
+        unsafe {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var("PATH", previous),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+}
+
 fn install_context(home: &Path, tracedecay_bin: &str) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
@@ -353,39 +389,6 @@ fn a_failing_host_command_reports_the_hosts_own_diagnosis() {
 #[cfg(unix)]
 #[test]
 fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
-    struct AmbientPathGuard {
-        previous: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl AmbientPathGuard {
-        fn set(path: &Path) -> Self {
-            let lock = crate::config::lock_user_data_dir_test_env();
-            let previous = std::env::var_os("PATH");
-            // SAFETY: the shared profile-discovery lock is held for this
-            // guard's lifetime, so sibling tests do not observe the empty PATH.
-            unsafe {
-                std::env::set_var("PATH", path);
-            }
-            Self {
-                previous,
-                _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for AmbientPathGuard {
-        fn drop(&mut self) {
-            // SAFETY: see `AmbientPathGuard::set`.
-            unsafe {
-                match self.previous.take() {
-                    Some(previous) => std::env::set_var("PATH", previous),
-                    None => std::env::remove_var("PATH"),
-                }
-            }
-        }
-    }
-
     let home = tempfile::tempdir().unwrap();
     let settings = settings_path(home.path());
     std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
@@ -401,13 +404,11 @@ fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
         .prepare_non_interactive_install(&install_context(home.path(), "/bin/tracedecay"))
         .expect_err("an absent host binary is a hard requirement failure");
 
-    let TraceDecayError::Config { message } = error else {
-        panic!("host CLI absence must surface as a config error");
+    let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
+        panic!("host CLI absence must surface as a typed requirement");
     };
-    assert!(
-        message.contains("`gemini` binary required for gemini extension lifecycle"),
-        "the refusal must name the binary and what it was needed for: {message}"
-    );
+    assert_eq!(program, "gemini");
+    assert_eq!(lifecycle, "gemini extension lifecycle");
     assert_eq!(
         std::fs::read(&settings).unwrap(),
         original,
@@ -557,6 +558,52 @@ fn doctor_warns_when_nothing_is_staged_or_installed() {
 
     assert_eq!(dc.issues, 0);
     assert_eq!(dc.warnings, 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_only_treats_an_absent_gemini_cli_as_unobserved_state() {
+    let home = tempfile::tempdir().unwrap();
+    let empty_path_dir = tempfile::tempdir().unwrap();
+    let _path = AmbientPathGuard::set(empty_path_dir.path());
+
+    assert!(
+        host_reported_extensions(home.path())
+            .expect("an absent Gemini binary is the one optional host-report state")
+            .is_none()
+    );
+
+    let mut dc = DoctorCounters::new();
+    doctor_check_host_reported_extensions(&mut dc, home.path());
+
+    assert_eq!(dc.issues, 0);
+    assert_eq!(dc.warnings, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_fails_when_a_present_gemini_cli_is_not_executable() {
+    let home = tempfile::tempdir().unwrap();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let candidate = bin_dir.path().join("gemini");
+    std::fs::write(&candidate, b"not executable").unwrap();
+    let _path = AmbientPathGuard::set(bin_dir.path());
+
+    let error = host_reported_extensions(home.path())
+        .expect_err("a present unusable Gemini candidate is not an absent CLI");
+    let TraceDecayError::Config { message } = error else {
+        panic!("a present unusable Gemini candidate must preserve its typed failure: {error}");
+    };
+    assert!(
+        message.contains(&candidate.display().to_string()),
+        "the typed failure must identify the unusable Gemini candidate: {message}"
+    );
+
+    let mut dc = DoctorCounters::new();
+    doctor_check_host_reported_extensions(&mut dc, home.path());
+
+    assert_eq!(dc.issues, 1);
+    assert_eq!(dc.warnings, 0);
 }
 
 /// `update_plugin` refreshes only the TraceDecay-owned source and says so:

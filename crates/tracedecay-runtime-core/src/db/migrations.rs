@@ -6,7 +6,8 @@
 //! integer built into `SQLite`; a store carrying any other value was written by
 //! an incompatible binary and is refused at open with a fresh-start remedy.
 
-use crate::db::engine::{Connection, Executor, QueryExecutor, Transaction};
+use crate::db::connection::DatabaseEngineWriteConnection;
+use crate::db::engine::{Connection, Executor, QueryExecutor};
 use crate::errors::{Result, TraceDecayError};
 
 mod final_shape;
@@ -41,7 +42,7 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// canonical `memory_v2_*` tables; derived vectors are re-created from that
 /// content. A current-stamped store containing a retired projection fails
 /// closed before interpretation.
-pub const SCHEMA_VERSION: u32 = 33;
+pub const SCHEMA_VERSION: u32 = 34;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &impl QueryExecutor) -> Result<u32> {
@@ -98,7 +99,38 @@ pub async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &str) -> 
 /// existence: there is no stepwise path to this shape.
 pub async fn create_schema(database: &crate::db::Database) -> Result<()> {
     let writer = database.writer_connection("create schema").await?;
-    create_schema_connection(writer.engine_connection()).await
+    let connection = writer.engine_connection();
+    create_schema_engine_connection(&connection).await
+}
+
+async fn create_schema_engine_connection(conn: &DatabaseEngineWriteConnection) -> Result<()> {
+    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("create_schema: failed to configure fresh auto_vacuum: {error}"),
+            operation: "create_schema".to_owned(),
+        })?;
+    let transaction = conn
+        .authorized_long_lease_transaction()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to acquire fresh-schema writer lock: {error}"),
+            operation: "create_schema".to_owned(),
+        })?;
+    let result = create_schema_transaction(&transaction).await;
+    match result {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to commit fresh schema: {error}"),
+                operation: "create_schema".to_owned(),
+            }),
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            Err(error)
+        }
+    }
 }
 
 /// Creates the schema on an already-open connection. This is the door the
@@ -130,7 +162,7 @@ pub async fn create_schema_connection(conn: &Connection) -> Result<()> {
     }
 }
 
-async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
+async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> {
     conn.execute_batch(ROOT_SCHEMA)
         .await
         .map_err(|e| TraceDecayError::Database {
@@ -151,6 +183,12 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
         .await
         .map_err(|e| TraceDecayError::Database {
             message: format!("failed to create semantic vector staging schema: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
+    conn.execute_batch(tracedecay_rusqlite_runtime::handoff::HANDOFF_OPEN_SCHEMA_V1)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create handoff-open schema: {e}"),
             operation: "create_schema".to_string(),
         })?;
     final_shape::require_exact_final_shape(conn).await?;
@@ -260,7 +298,18 @@ fn unsupported_schema_version(current: u32) -> TraceDecayError {
 /// refused with the fresh-start remedy rather than stepped forward.
 pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()> {
     let writer = database.writer_connection("ensure schema current").await?;
-    ensure_schema_current_connection(writer.engine_connection()).await
+    let connection = writer.engine_connection();
+    ensure_schema_current_engine_connection(&connection).await
+}
+
+async fn ensure_schema_current_engine_connection(
+    conn: &DatabaseEngineWriteConnection,
+) -> Result<()> {
+    let current = get_version(conn).await?;
+    if current == 0 && !store_has_objects(conn).await? {
+        return create_schema_engine_connection(conn).await;
+    }
+    verify_final_schema_connection(conn).await
 }
 
 /// Verifies that an already-existing store has the one exact final shape this
@@ -285,6 +334,7 @@ pub(crate) async fn verify_final_schema_connection(conn: &impl QueryExecutor) ->
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Result<()> {
     let current = get_version(conn).await?;
     if current == 0 && !store_has_objects(conn).await? {

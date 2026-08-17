@@ -7,7 +7,7 @@ use super::*;
 #[test]
 fn omits_vectors_and_recovers_only_persisted_native_rows() {
     let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
     let identity = projection("metadata", "vectors");
     let mut vector_manifest = manifest(identity, "vector-g1", "secret-marker", vec![], vec![]);
@@ -122,7 +122,7 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
     assert!(registered.close().unwrap());
     drop(registered);
 
-    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let recovered = registered
         .registry
         .recover_verified_snapshot(
@@ -138,7 +138,7 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
 #[test]
 fn incomplete_pending_generation_cannot_advance_verified_head() {
     let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
     let identity = projection("metadata", "partial");
     let mut candidate = manifest(identity, "partial-g1", "node-1", vec![], vec![]);

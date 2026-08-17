@@ -6,29 +6,34 @@ use super::{
     ContractFixture, key, manifest, project_id, projection, reconcile_through_trait,
     snapshot_through_trait,
 };
-use crate::global_db::VerifiedGraphRuntimePortV1;
 
 fn reconcile_pair(
-    port: Arc<dyn VerifiedGraphRuntimePortV1>,
+    database: Arc<crate::db::Database>,
     left: GraphGenerationManifest,
     right: GraphGenerationManifest,
     publication_key: &str,
 ) -> [Result<VerifiedGraphSnapshot, GraphDbError>; 2] {
     std::thread::scope(|scope| {
         let barrier = Arc::new(Barrier::new(3));
-        let left_port = Arc::clone(&port);
+        let left_database = Arc::clone(&database);
         let left_barrier = Arc::clone(&barrier);
         let left_key = publication_key.to_owned();
         let left = scope.spawn(move || {
             left_barrier.wait();
-            reconcile_through_trait(left_port.as_ref(), &left, key(&left_key))
+            let operation = left_database
+                .issue_memory_graph_runtime_operation()
+                .expect("mounted left graph operation");
+            reconcile_through_trait(operation.runtime(), &left, key(&left_key))
         });
-        let right_port = Arc::clone(&port);
+        let right_database = Arc::clone(&database);
         let right_barrier = Arc::clone(&barrier);
         let right_key = publication_key.to_owned();
         let right = scope.spawn(move || {
             right_barrier.wait();
-            reconcile_through_trait(right_port.as_ref(), &right, key(&right_key))
+            let operation = right_database
+                .issue_memory_graph_runtime_operation()
+                .expect("mounted right graph operation");
+            reconcile_through_trait(operation.runtime(), &right, key(&right_key))
         });
         barrier.wait();
         [
@@ -38,14 +43,11 @@ fn reconcile_pair(
     })
 }
 
-fn assert_concurrent_replay_and_conflict(
-    port: Arc<dyn VerifiedGraphRuntimePortV1>,
-    scope_label: &str,
-) {
+fn assert_concurrent_replay_and_conflict(database: Arc<crate::db::Database>, scope_label: &str) {
     let replay_projection = projection(&format!("{scope_label}-concurrent-replay"));
     let replay_manifest = manifest(&replay_projection, "concurrent-replay", "1");
     let [first, second] = reconcile_pair(
-        Arc::clone(&port),
+        Arc::clone(&database),
         replay_manifest.clone(),
         replay_manifest,
         &format!("{scope_label}-concurrent-replay"),
@@ -58,7 +60,7 @@ fn assert_concurrent_replay_and_conflict(
     let left_manifest = manifest(&conflict_projection, "concurrent-conflict", "left");
     let right_manifest = manifest(&conflict_projection, "concurrent-conflict", "right");
     let results = reconcile_pair(
-        Arc::clone(&port),
+        Arc::clone(&database),
         left_manifest,
         right_manifest,
         &format!("{scope_label}-concurrent-conflict"),
@@ -73,7 +75,10 @@ fn assert_concurrent_replay_and_conflict(
         .count();
     assert_eq!(winners.len(), 1, "exactly one changed input must win");
     assert_eq!(conflicts, 1, "the losing changed input must conflict");
-    let retained = snapshot_through_trait(port.as_ref(), &conflict_projection)
+    let operation = database
+        .issue_memory_graph_runtime_operation()
+        .expect("mounted graph snapshot operation");
+    let retained = snapshot_through_trait(operation.runtime(), &conflict_projection)
         .expect("snapshot after concurrent changed-input conflict")
         .expect("winning concurrent verified head");
     assert_eq!(retained.verified_head(), winners[0].verified_head());
@@ -83,16 +88,12 @@ fn assert_concurrent_replay_and_conflict(
 async fn project_and_profile_ports_serialize_exact_replay_and_changed_input_conflicts() {
     let fixture = ContractFixture::new("concurrent-publication").await;
     let project_id = project_id("concurrent-publication");
-    let (_, _, project_port) = fixture.bind(&project_id).await;
+    let (project_database, _sessions) = fixture.mount_unbound(&project_id).await;
     let profile_database = fixture
         .registry
         .profile_memory()
         .await
         .expect("profile memory database");
-    let profile_port = profile_database
-        .memory_graph_runtime()
-        .expect("profile memory graph runtime");
-
-    assert_concurrent_replay_and_conflict(project_port, "project");
-    assert_concurrent_replay_and_conflict(profile_port, "profile");
+    assert_concurrent_replay_and_conflict(project_database, "project");
+    assert_concurrent_replay_and_conflict(profile_database, "profile");
 }

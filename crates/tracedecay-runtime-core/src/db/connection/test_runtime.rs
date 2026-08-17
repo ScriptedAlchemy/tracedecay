@@ -3,19 +3,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{BrainId, RepositoryId, UserProfileId, WorktreeId};
+use tracedecay_domain::{BrainId, BrainNodeId, RepositoryId, UserProfileId, WorktreeId};
 use tracedecay_store::{
-    CodeShardScopeV1, LocatorDigest, ProjectId, StoreIncarnationV1, StoreShardIdV1,
-    VerifiedStoreLocatorV1,
+    CodeShardScopeV1, LocatorDigest, ProjectId, StoreIncarnationV1, StoreRuntimeBindingV1,
+    StoreShardIdV1, VerifiedStoreLocatorV1,
 };
 
-use super::{Database, DatabaseAccessMode, DatabaseAuthority, database_slot};
+use super::{
+    Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1, StoreRuntimeClientLease,
+};
 use crate::errors::{Result, TraceDecayError};
 use crate::store_runtime::registry::{
     LifecycleShardRuntimePublisher, ProfileAuthorityPinResult, ResolvedStoreLocator,
     StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
-    StoreRuntimeResolver,
+    StoreRuntimeResolver, StoreRuntimeRetirementTarget,
 };
 
 #[doc(hidden)]
@@ -33,8 +35,108 @@ pub enum TestDatabaseRuntimeMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TestDatabaseRuntimeScope {
     Profile,
+    ProfileMemory,
     ProfileSessions,
+    Project { project_id: ProjectId },
     ProjectSessions { project_id: ProjectId },
+    RemoteNode,
+}
+
+/// Test-only control for retiring and reopening one exact registered fixture
+/// through the registry that originally published it.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+pub struct RegisteredTestRuntimeRetirementControlV1 {
+    registry: StoreRuntimeRegistry,
+    authority: DatabaseAuthority,
+    binding: StoreRuntimeBindingV1,
+    locator: VerifiedStoreLocatorV1,
+}
+
+impl RegisteredTestRuntimeRetirementControlV1 {
+    #[must_use]
+    pub fn registry(&self) -> &StoreRuntimeRegistry {
+        &self.registry
+    }
+
+    #[must_use]
+    pub fn retirement_target(&self) -> StoreRuntimeRetirementTarget {
+        StoreRuntimeRetirementTarget::new(self.binding.clone(), self.authority.clone())
+    }
+
+    #[must_use]
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.locator
+    }
+
+    /// Reopens the exact retired fixture binding through its original resolver.
+    pub async fn reopen(&self) -> Result<StoreRuntimeClientLease> {
+        let target_shard = self.binding.shard_id.clone();
+        let profile_shard = StoreShardIdV1::profile(
+            target_shard.brain_id.clone(),
+            target_shard.profile_id.clone(),
+        );
+        let profile_pin = if target_shard == profile_shard {
+            None
+        } else {
+            match self.registry.profile_authority_pin(&profile_shard) {
+                ProfileAuthorityPinResult::Pinned(pin) => Some(pin),
+                outcome => {
+                    return Err(test_runtime_error(
+                        "pin reopened registered test runtime profile",
+                        format!("{outcome:?}"),
+                    ));
+                }
+            }
+        };
+        let request = StoreRuntimeOpenRequest::new_authorized(
+            target_shard,
+            self.binding.incarnation.clone(),
+            profile_pin,
+            self.authority.clone(),
+        );
+        match self.registry.open(request).await {
+            StoreRuntimeOpenResult::Published(runtime) => Ok(runtime),
+            StoreRuntimeOpenResult::Failed(failure) => Err(test_runtime_open_failure(
+                "reopen registered test runtime",
+                failure,
+            )),
+        }
+    }
+}
+
+/// Published registered fixture plus its exact retirement control.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+pub struct RegisteredTestRuntimeFixtureV1 {
+    owner: DatabaseOwnerV1,
+    runtime: StoreRuntimeClientLease,
+    retirement: RegisteredTestRuntimeRetirementControlV1,
+}
+
+impl RegisteredTestRuntimeFixtureV1 {
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        DatabaseOwnerV1,
+        StoreRuntimeClientLease,
+        RegisteredTestRuntimeRetirementControlV1,
+    ) {
+        (self.owner, self.runtime, self.retirement)
+    }
+}
+
+pub(super) struct FixtureRuntimePublication {
+    pub(super) owner: DatabaseOwnerV1,
+    runtime: StoreRuntimeClientLease,
+    registry: StoreRuntimeRegistry,
+    authority: DatabaseAuthority,
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -108,6 +210,26 @@ impl StoreRuntimeResolver for ExactTestRuntimeResolver {
             }
         })
     }
+
+    fn resolve_graph<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+    ) -> StoreRuntimeRegistryFuture<
+        'a,
+        std::result::Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>,
+    > {
+        Box::pin(async move {
+            let locator = self.locators.get(key).ok_or_else(|| {
+                StoreRuntimeRegistryFailure::ResolverFailed {
+                    message: "test graph resolver received the wrong typed shard".to_owned(),
+                }
+            })?;
+            Ok(ResolvedStoreLocator::new(
+                locator.verified.clone(),
+                locator.path.clone(),
+            ))
+        })
+    }
 }
 
 impl Database {
@@ -173,6 +295,48 @@ impl Database {
         Self::publish_fixture_runtime(db_path, authority, mode, test_registered_shard(scope)?).await
     }
 
+    /// Publishes a fresh registered fixture while retaining only the exact
+    /// registry control required to test typed client-lease retirement.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    pub async fn publish_registered_test_runtime_with_retirement_control(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        scope: TestDatabaseRuntimeScope,
+    ) -> Result<RegisteredTestRuntimeFixtureV1> {
+        if authority.role() != super::DatabaseAuthorityRole::Test {
+            return Err(TraceDecayError::Database {
+                message: "registered test runtime requires explicit test authority".to_owned(),
+                operation: "publish registered test runtime".to_owned(),
+            });
+        }
+        let FixtureRuntimePublication {
+            owner,
+            runtime,
+            registry,
+            authority,
+        } = Self::publish_fixture_runtime_publication(
+            db_path,
+            authority,
+            mode,
+            test_registered_shard(scope)?,
+        )
+        .await?;
+        let binding = runtime.binding().clone();
+        let locator = runtime.locator().verified().clone();
+        Ok(RegisteredTestRuntimeFixtureV1 {
+            owner,
+            runtime,
+            retirement: RegisteredTestRuntimeRetirementControlV1 {
+                registry,
+                authority,
+                binding,
+                locator,
+            },
+        })
+    }
+
     /// Publishes an isolated integration-test fixture with the retained
     /// exclusive-maintenance authority whose scope the test controls.
     ///
@@ -214,20 +378,26 @@ impl Database {
         mode: TestDatabaseRuntimeMode,
         target_shard: StoreShardIdV1,
     ) -> Result<(Self, bool)> {
+        let FixtureRuntimePublication { owner, .. } =
+            Self::publish_fixture_runtime_publication(db_path, authority, mode, target_shard)
+                .await?;
+        let database = owner.issue_lease().map_err(|error| {
+            test_runtime_error("issue test database client lease", format!("{error:?}"))
+        })?;
+        Ok((database, false))
+    }
+
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    pub(super) async fn publish_fixture_runtime_publication(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        target_shard: StoreShardIdV1,
+    ) -> Result<FixtureRuntimePublication> {
         let graph_shard_check = target_shard == test_code_shard()?;
         let authority = authority.hold_for(db_path, "publish test database runtime")?;
         authority.require_active_write_scope("publish test database runtime")?;
         let path = authority.canonical_database_path().to_path_buf();
-        let existing_slot = database_slot(authority.database_identity_key());
-        if let Some(inner) = existing_slot.lock().await.upgrade() {
-            if mode == TestDatabaseRuntimeMode::ReadOnly {
-                let database =
-                    Self::publish_runtime(inner._runtime.clone(), DatabaseAccessMode::ReadOnly)
-                        .await?;
-                return Ok((database, false));
-            }
-            return Ok((Self { inner }, false));
-        }
         let profile_shard = StoreShardIdV1::profile(
             target_shard.brain_id.clone(),
             target_shard.profile_id.clone(),
@@ -338,7 +508,8 @@ impl Database {
         } else {
             DatabaseAccessMode::ReadWrite
         };
-        let database = Self::publish_runtime(runtime, access).await?;
+        let retained_runtime = runtime.clone();
+        let owner = Self::publish_runtime(runtime, access).await?;
         // Writable GRAPH test runtimes assert the store already carries the
         // schema this binary creates; there is no ladder to step, so nothing
         // is ever reported as migrated. Registered (global/session) shards are
@@ -350,11 +521,22 @@ impl Database {
             TestDatabaseRuntimeMode::Initialize | TestDatabaseRuntimeMode::Existing
                 if graph_shard =>
             {
+                let database = owner.issue_lease().map_err(|error| {
+                    test_runtime_error(
+                        "issue schema test database client lease",
+                        format!("{error:?}"),
+                    )
+                })?;
                 crate::db::migrations::ensure_schema_current(&database).await?;
             }
             _ => {}
         }
-        Ok((database, false))
+        Ok(FixtureRuntimePublication {
+            owner,
+            runtime: retained_runtime,
+            registry,
+            authority,
+        })
     }
 }
 
@@ -422,12 +604,25 @@ fn test_registered_shard(scope: TestDatabaseRuntimeScope) -> Result<StoreShardId
     let (brain_id, profile_id) = test_runtime_identity()?;
     let shard = match scope {
         TestDatabaseRuntimeScope::Profile => StoreShardIdV1::profile(brain_id, profile_id),
+        TestDatabaseRuntimeScope::ProfileMemory => {
+            StoreShardIdV1::profile_memory(brain_id, profile_id)
+        }
         TestDatabaseRuntimeScope::ProfileSessions => {
             StoreShardIdV1::profile_sessions(brain_id, profile_id)
+        }
+        TestDatabaseRuntimeScope::Project { project_id } => {
+            StoreShardIdV1::project(brain_id, profile_id, project_id)
         }
         TestDatabaseRuntimeScope::ProjectSessions { project_id } => {
             StoreShardIdV1::project_sessions(brain_id, profile_id, project_id)
         }
+        TestDatabaseRuntimeScope::RemoteNode => StoreShardIdV1::remote_node(
+            brain_id,
+            profile_id,
+            BrainNodeId::try_from("node.test-runtime".to_owned()).map_err(|error| {
+                test_runtime_error("construct test remote-node identity", error.to_string())
+            })?,
+        ),
     };
     Ok(shard)
 }

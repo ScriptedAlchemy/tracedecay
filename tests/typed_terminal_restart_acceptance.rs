@@ -58,11 +58,26 @@ use common::{
 
 const TOOL_DEADLINE_ENV: &str = "TRACEDECAY_TOOL_DEADLINE_MS";
 const FACT_COMMIT_BARRIER_DIR_ENV: &str = "TRACEDECAY_TEST_FACT_COMMIT_BARRIER_DIR";
+const MAX_MARKER_TOKEN_BYTES: usize = 36;
 /// Request budget for the parked add. It must comfortably outlive a cold
 /// dispatch so the worker reaches the commit boundary while the budget is still
 /// live; the barrier — not this number — decides when settlement happens.
 const PARTIAL_EFFECT_DEADLINE: Duration = Duration::from_secs(8);
 const BARRIER_ARRIVAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Fails loudly if a marker could be refused by memory hygiene instead of
+/// committing, so a future marker edit cannot silently invalidate the
+/// barrier-backed partial-effect journey.
+fn assert_marker_is_storable(marker: &str) {
+    for token in marker.split_whitespace() {
+        assert!(
+            token.len() < MAX_MARKER_TOKEN_BYTES,
+            "marker token '{token}' is {} bytes; memory hygiene may refuse it as \\
+             a high-entropy secret instead of committing the fact this journey parks",
+            token.len()
+        );
+    }
+}
 
 fn initialize_project(home: &Path, project: &Path, marker: &str) {
     std::fs::create_dir_all(project.join("src")).expect("project source directory");
@@ -182,16 +197,30 @@ fn add_fact_settling_after_its_deadline(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let sent_at = Instant::now();
-    let child = command.spawn().expect("spawn the parked fact_store add");
+    let mut child = command.spawn().expect("spawn the parked fact_store add");
 
     let arrived = barrier_dir.join("arrived");
     while !matches!(arrived.try_exists(), Ok(true)) {
+        assert!(
+            child
+                .try_wait()
+                .expect("inspect the parked fact_store add")
+                .is_none(),
+            "the fact_store add settled without ever reaching the durable commit boundary"
+        );
         assert!(
             sent_at.elapsed() < BARRIER_ARRIVAL_TIMEOUT,
             "the fact_store add never reached the durable commit boundary within {BARRIER_ARRIVAL_TIMEOUT:?}"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+    assert!(
+        child
+            .try_wait()
+            .expect("inspect the parked fact_store add")
+            .is_none(),
+        "the fact_store add settled before the durable commit boundary could be attributed to it"
+    );
     let arrived_at = Instant::now();
 
     // The effect is durable now and the operation is not settled. Hold it here
@@ -270,8 +299,7 @@ fn spawn_daemon_with_commit_barrier(home: &Path, barrier_dir: &PathBuf) -> commo
 
 #[test]
 fn partial_effect_survives_physical_daemon_restart_via_cli() {
-    const PARTIAL_EFFECT_MARKER: &str =
-        "typed-terminal-restart-acceptance-partial-effect-marker-9f3c2a";
+    const PARTIAL_EFFECT_MARKER: &str = "cli-partial-9f3c2a";
 
     let home = tempfile::TempDir::new().expect("isolated home");
     let home_path = canonical_existing_path(home.path());
@@ -285,6 +313,7 @@ fn partial_effect_survives_physical_daemon_restart_via_cli() {
     // barrier is not armed yet, so initialization commits freely.
     let mut daemon = spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     initialize_project(&home_path, &partial_project_path, "partial-effect-fixture");
+    assert_marker_is_storable(PARTIAL_EFFECT_MARKER);
 
     // Induce a genuine, production PartialEffect: the fact commits durably and
     // the request's own deadline expires before the effect settles, so the

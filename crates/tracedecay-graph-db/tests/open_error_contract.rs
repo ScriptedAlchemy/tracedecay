@@ -17,7 +17,7 @@ fn foreign_grafeo_store_without_marker_is_reset_required() {
     )
     .unwrap();
     raw.close().unwrap();
-    let error = RegisteredGraph::open_raw(temp.path()).err().unwrap();
+    let error = RegisteredGraph::open_lease(temp.path()).err().unwrap();
     assert!(
         matches!(error, GraphDbError::ResetRequired { .. }),
         "unexpected error: {error:?}"
@@ -63,7 +63,7 @@ fn persisted_scalar_identity_mismatch_is_corrupt_on_point_read() {
         .unwrap();
     session.commit().unwrap();
     raw.close().unwrap();
-    let (_, db) = RegisteredGraph::open_raw(temp.path()).unwrap();
+    let (_, db) = RegisteredGraph::open_lease(temp.path()).unwrap();
     assert!(matches!(
         db.entity(
             &GraphNamespace::new("workspace").unwrap(),

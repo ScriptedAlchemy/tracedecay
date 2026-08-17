@@ -6,15 +6,13 @@
 //! refuses a non-ProjectSessions shard scope before a read snapshot exists;
 //! nothing here reaches past that gate to build a reader itself.
 
-use std::sync::Arc;
-
 use tracedecay_sessions::{
     WorkflowIndexReadPort, WorkflowIndexState, WorkflowReadError, WorkflowRunDetail,
     WorkflowRunDetailFuture, WorkflowRunDetailOutcome, WorkflowRunDetailRequest,
     WorkflowRunListFuture, WorkflowRunListOutcome, WorkflowRunListRequest, WorkflowRunScope,
 };
 
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::store::GlobalDbWorkflowStore;
 use tracedecay_sessions::runtime::git_correlation::{GitCorrelationError, GitScopeFilter};
 use tracedecay_sessions::runtime::workflow_index::{
@@ -31,11 +29,11 @@ fn workflow_error(err: WorkflowIndexError) -> WorkflowReadError {
 pub(crate) struct DaemonWorkflowIndexReadService {
     /// The active project's retained `ProjectSessions` authority. Reads borrow
     /// this handle and never discover or open another store.
-    database: Arc<RegisteredGlobalDb>,
+    database: RegisteredGlobalDbLeaseV1,
 }
 
 impl DaemonWorkflowIndexReadService {
-    pub(crate) const fn new(database: Arc<RegisteredGlobalDb>) -> Self {
+    pub(crate) const fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self { database }
     }
 

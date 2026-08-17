@@ -1,7 +1,7 @@
 use super::{
-    Connection, Database, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
-    DatabaseMemoryTransaction, DatabaseWriteTransaction, DatabaseWriterConnection, ReadSnapshot,
-    Result, TraceDecayError, TransactionBehavior, database_query_error, integrity,
+    Connection, Database, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot,
+    DatabaseMemoryTransaction, DatabaseWriteTransaction, DatabaseWriterConnection, Result,
+    TraceDecayError, TransactionBehavior, database_query_error, integrity,
 };
 
 impl Database {
@@ -59,9 +59,10 @@ impl Database {
         self.query_scalar(operation, sql, (value,)).await
     }
 
-    pub fn engine_conn(&self) -> DatabaseEngineConnection {
-        DatabaseEngineConnection {
-            conn: self.inner.conn.clone(),
+    pub fn read_connection(&self) -> DatabaseEngineReadConnection {
+        DatabaseEngineReadConnection {
+            conn: self.inner.conn.read_only(),
+            _client_guard: self.client_guard(),
         }
     }
 
@@ -113,6 +114,53 @@ impl Database {
         transaction.commit().await
     }
 
+    /// Executes one authority-revalidated schema or bulk-maintenance batch
+    /// through the canonical long-lease writer path.
+    ///
+    /// The retained client guard stays alive for the entire transaction, and
+    /// the exact write authority is checked before writer admission and again
+    /// continuously by the runtime's authority-revalidated batch execution.
+    pub async fn execute_authority_revalidated_batch(
+        &self,
+        operation: &str,
+        sql: &str,
+    ) -> Result<()> {
+        let writer = self.writer_connection(operation).await?;
+        let connection = writer.engine_connection();
+        let transaction = connection
+            .authorized_long_lease_transaction()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to begin authority-revalidated writer batch: {error}"),
+                operation: operation.to_owned(),
+            })?;
+        match transaction.execute_authority_revalidated_batch(sql).await {
+            Ok(()) => transaction
+                .commit()
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!(
+                        "failed to commit authority-revalidated writer batch: {error}"
+                    ),
+                    operation: operation.to_owned(),
+                }),
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(TraceDecayError::Database {
+                    message: format!(
+                        "failed to execute authority-revalidated writer batch: {error}"
+                    ),
+                    operation: operation.to_owned(),
+                }),
+                Err(rollback_error) => Err(TraceDecayError::Database {
+                    message: format!(
+                        "authority-revalidated writer batch failed: {error}; rollback also failed: {rollback_error}"
+                    ),
+                    operation: operation.to_owned(),
+                }),
+            },
+        }
+    }
+
     /// Acquires the process-local writer lane for this canonical database.
     ///
     /// Writable handles opened for the same database share one `DatabaseInner`,
@@ -122,7 +170,7 @@ impl Database {
     }
 
     pub(super) fn require_active_write_scope(&self, operation: &str) -> Result<()> {
-        if !self.inner.writable {
+        if !self.client.is_writable() {
             return Err(integrity::read_only_upgrade_error(
                 self.canonical_database_path(),
                 operation,
@@ -156,6 +204,7 @@ impl Database {
         Ok(DatabaseWriterConnection {
             _guard: guard,
             conn,
+            _client_guard: self.client_guard(),
         })
     }
 
@@ -164,24 +213,27 @@ impl Database {
     pub(crate) async fn begin_isolated_read_snapshot(
         &self,
         operation: &str,
-    ) -> Result<ReadSnapshot> {
-        self.inner
-            .conn
-            .read_snapshot()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to begin isolated read snapshot: {error}"),
-                operation: operation.to_string(),
-            })
+    ) -> Result<DatabaseEngineReadSnapshot> {
+        let snapshot =
+            self.inner
+                .conn
+                .read_snapshot()
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to begin isolated read snapshot: {error}"),
+                    operation: operation.to_string(),
+                })?;
+        Ok(DatabaseEngineReadSnapshot {
+            snapshot,
+            _client_guard: self.client_guard(),
+        })
     }
 
     pub async fn begin_engine_read_snapshot(
         &self,
         operation: &str,
     ) -> Result<DatabaseEngineReadSnapshot> {
-        self.begin_isolated_read_snapshot(operation)
-            .await
-            .map(|snapshot| DatabaseEngineReadSnapshot { snapshot })
+        self.begin_isolated_read_snapshot(operation).await
     }
 
     pub async fn begin_memory_read_transaction(
@@ -208,7 +260,11 @@ impl Database {
                 message: format!("failed to begin isolated writer transaction: {error}"),
                 operation: operation.to_string(),
             })?;
-        Ok(DatabaseWriteTransaction { transaction, guard })
+        Ok(DatabaseWriteTransaction {
+            transaction,
+            guard,
+            _client_guard: self.client_guard(),
+        })
     }
 
     /// Starts an atomic bulk-replacement transaction on the canonical writer.
@@ -231,7 +287,11 @@ impl Database {
                 message: format!("failed to begin bulk writer transaction: {error}"),
                 operation: operation.to_string(),
             })?;
-        Ok(DatabaseWriteTransaction { transaction, guard })
+        Ok(DatabaseWriteTransaction {
+            transaction,
+            guard,
+            _client_guard: self.client_guard(),
+        })
     }
 
     pub async fn begin_memory_write_transaction(

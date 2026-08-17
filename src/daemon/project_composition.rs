@@ -178,10 +178,10 @@ pub(super) async fn production_project_server(
             })?;
     let registered_profile_db = store_administration.registered_profile_database().await?;
     let graph_runtime = store_administration.registered_runtime_registry().await?;
-    let registry_db = Arc::clone(&registered_profile_db);
+    let registry_db = registered_profile_db.clone();
     let profile_identity = store_administration.profile_identity()?.clone();
     let accounting_db =
-        crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registered_profile_db));
+        crate::global_db::global_accounting_enabled().then(|| registered_profile_db.clone());
     let ProjectCodeIndexAuthorities {
         publication_identity: code_index_publication_identity,
         project_id: code_search_project_id,
@@ -271,7 +271,7 @@ pub(super) async fn production_project_server(
         crate::mcp::server::McpServerDaemonCoreAuthority {
             profile_identity: profile_identity.clone(),
             accounting: accounting_db.clone(),
-            registry: Arc::clone(&registry_db),
+            registry: registry_db.clone(),
             database_owner_reconciler: Arc::clone(&database_owner_reconciler),
             project_routes: store_administration.project_routes(),
             writers: crate::mcp::server::McpServerWriters::daemon_owned(
@@ -331,21 +331,36 @@ pub(super) async fn production_project_server(
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open owners require an authoritative project identity".to_owned(),
         })?;
-    let resolution = store_administration
-        .project_servers()
-        .lock()
-        .await
-        .bind_or_insert_route_bounded(
+    // Retirement admission precedes the owner registry. Once bounded eviction
+    // removes an idle server, its exact Arc crosses only the synchronous
+    // `spawn_and_track` handoff below; no caller cancellation can drop it
+    // between registry removal and canonical shutdown ownership.
+    let mut retirement_admission = store_administration
+        .acquire_project_server_retirement_admission()
+        .await;
+    let resolution = {
+        let mut servers = store_administration.project_servers().lock().await;
+        servers.bind_or_insert_route_bounded(
             route,
             key.clone(),
             core_candidate,
             MAX_CACHED_PROJECT_SERVERS,
             |server| Arc::strong_count(server) > 1,
-        );
-    let Some((mut resolved, inserted)) = resolution else {
+        )
+    };
+    let Some((mut resolved, inserted, retired)) = resolution else {
         route_registered.store(false, Ordering::Release);
         return Err(project_server_capacity_error());
     };
+    for (retired_key, retired_server) in retired {
+        retirement_admission.spawn_and_track(
+            retired_key.owner,
+            super::project_server_lifecycle::retire_project_servers(vec![retired_server], None),
+        );
+    }
+    // The owner registry guard was dropped before the synchronous retirement
+    // handoff. Release admission before the remaining project-open awaits.
+    drop(retirement_admission);
     if !inserted {
         route_registered.store(false, Ordering::Release);
     } else {
@@ -461,13 +476,13 @@ pub(super) async fn production_project_server(
                 project_sessions_elapsed,
                 profile_sessions_elapsed,
             );
-            let session_db = Arc::clone(&registered_project_session_db);
-            let user_session_db = Arc::clone(&registered_user_session_db);
+            let session_db = registered_project_session_db.clone();
+            let user_session_db = registered_user_session_db.clone();
             invocation
                 .service
                 .mount_session_holder_databases([
-                    Arc::clone(&registered_profile_db),
-                    Arc::clone(&user_session_db),
+                    registered_profile_db.clone(),
+                    user_session_db.clone(),
                 ])
                 .await;
             let delivery_access = project_open_owners::daemon_owned_project_source_access_at(
@@ -482,7 +497,7 @@ pub(super) async fn production_project_server(
             project_delivery_mount::ensure_project_delivery_settlement(
                 invocation,
                 canonical_project_path,
-                Arc::clone(&session_db),
+                session_db.clone(),
                 &code_search_scope,
                 &delivery_access,
             )
@@ -496,10 +511,10 @@ pub(super) async fn production_project_server(
                 .session_temporal_refresh_schedulers()
                 .ensure_project_with_history(
                     key.owner.clone(),
-                    Arc::clone(&session_db),
+                    session_db.clone(),
                     Arc::new(
                         session_temporal_refresh_scheduler::ProjectSessionHistoricalIngestor::new(
-                            Arc::clone(&session_db),
+                            session_db.clone(),
                             profile_identity.clone(),
                             canonical_project_path.to_path_buf(),
                             code_search_project_id.clone(),
@@ -512,11 +527,11 @@ pub(super) async fn production_project_server(
                 .session_temporal_refresh_schedulers()
                 .ensure_profile_with_history(
                     user_session_db.db_path().to_path_buf(),
-                    Arc::clone(&user_session_db),
+                    user_session_db.clone(),
                     Arc::new(
                         session_temporal_refresh_scheduler::ProfileSessionHistoricalIngestor::new(
-                            Arc::clone(&user_session_db),
-                            Arc::clone(&registry_db),
+                            user_session_db.clone(),
+                            registry_db.clone(),
                             profile_identity.clone(),
                             transcript_source_home.clone(),
                         ),
@@ -532,9 +547,9 @@ pub(super) async fn production_project_server(
                     profile_root: profile_identity.profile_root().to_path_buf(),
                     project_root: canonical_project_path.to_path_buf(),
                     transcript_source_home: transcript_source_home.clone(),
-                    project_sessions: Arc::clone(&session_db),
-                    user_sessions: Arc::clone(&user_session_db),
-                    registry: Arc::clone(&registry_db),
+                    project_sessions: session_db.clone(),
+                    user_sessions: user_session_db.clone(),
+                    registry: registry_db.clone(),
                     startup_import: cg.get_config().sync.session_start_sync,
                     project_refresh: project_session_refresh_wake.clone(),
                     user_refresh: user_session_refresh_wake.clone(),
@@ -560,9 +575,9 @@ pub(super) async fn production_project_server(
                 code_search_project_id.clone(),
                 cg.store_layout().clone(),
                 cg.db().clone(),
-                Arc::clone(&registry_db),
-                Arc::clone(&user_session_db),
-                Arc::clone(&session_db),
+                registry_db.clone(),
+                user_session_db.clone(),
+                session_db.clone(),
                 profile_identity.profile_root().to_path_buf(),
                 transcript_source_home.clone(),
                 tracedecay_application::RemoteOperationalReadV1::Unavailable,
@@ -585,7 +600,7 @@ pub(super) async fn production_project_server(
                         registry: registry_db,
                         project_sessions: session_db,
                         user_sessions: user_session_db,
-                        registered_project_sessions: Arc::clone(&registered_project_session_db),
+                        registered_project_sessions: registered_project_session_db.clone(),
                         registered_user_sessions: registered_user_session_db,
                     },
                     host_admission_broker,
@@ -710,7 +725,7 @@ pub(super) async fn production_project_server(
                 log_full_setup_phase("source_edit_preview_ready");
                 ensure_git_index_transactions_for_mutation_owners(
                     store_administration,
-                    Arc::clone(&registered_project_session_db),
+                    registered_project_session_db.clone(),
                     canonical_project_path,
                     key.owner.project_id.as_deref(),
                 )

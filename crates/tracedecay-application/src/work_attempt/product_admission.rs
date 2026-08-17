@@ -472,6 +472,14 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
             "application.work-attempt.product-version-conflict",
             "The canonical Work product graph changed before attempt admission.",
         ),
+        WorkProductApplicationErrorV1::EvidenceContinuationStale => {
+            ApplicationProblem::stale(crate::SafeDiagnostic {
+                code: "application.work-attempt.product-evidence-continuation-stale".to_owned(),
+                message:
+                    "The Work evidence continuation was superseded; refresh the evidence read."
+                        .to_owned(),
+            })
+        }
         WorkProductApplicationErrorV1::IdempotencyConflict => conflict_problem(
             "application.work-attempt.product-idempotency-conflict",
             "The canonical Work product admission identity conflicts.",
@@ -503,6 +511,33 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
                 message: "The canonical Work product graph authority is unavailable.".to_owned(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod product_problem_tests {
+    use crate::{
+        ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic,
+        WorkProductApplicationErrorV1,
+    };
+
+    use super::product_problem;
+
+    #[test]
+    fn evidence_continuation_stale_requires_refresh() {
+        assert_eq!(
+            product_problem(WorkProductApplicationErrorV1::EvidenceContinuationStale),
+            ApplicationProblem::Stale {
+                diagnostic: SafeDiagnostic {
+                    code: "application.work-attempt.product-evidence-continuation-stale".to_owned(),
+                    message:
+                        "The Work evidence continuation was superseded; refresh the evidence read."
+                            .to_owned(),
+                },
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+            }
+        );
     }
 }
 

@@ -447,7 +447,7 @@ fn stage_manifest(
 #[test]
 fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes() {
     let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
     let identity = projection("retirement", "restart");
     let sealed_generation = CodeGenerationId::new("code-generation.retired").unwrap();
@@ -564,7 +564,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
     authority.cancel_after_retire = None;
     assert!(registered.close().unwrap());
     drop(registered);
-    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     assert_eq!(
@@ -628,7 +628,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
 #[test]
 fn verified_generations_keep_old_reads_dependencies_and_leases_stable() {
     let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -807,7 +807,7 @@ fn verified_generations_keep_old_reads_dependencies_and_leases_stable() {
 #[test]
 fn restart_reverification_installs_once_and_steady_reads_need_no_authority() {
     let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -851,6 +851,7 @@ fn restart_reverification_installs_once_and_steady_reads_need_no_authority() {
         )
         .unwrap();
     assert!(registered.close().unwrap());
+    registered.mount().unwrap();
     registered
         .registry
         .recover_verified_snapshot(
@@ -919,7 +920,7 @@ fn restart_reverification_installs_once_and_steady_reads_need_no_authority() {
 #[test]
 fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
     let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -997,7 +998,7 @@ fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
 #[test]
 fn labeled_byte_record_entities_reach_a_verified_head() {
     let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     let mut authority = RelationalAuthority::default();

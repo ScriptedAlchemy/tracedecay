@@ -79,7 +79,7 @@ pub(super) struct DaemonEngine {
 /// database is rejected by the registry.
 pub(super) async fn ensure_git_index_transactions_for_mutation_owners(
     store_administration: &StoreAdministration,
-    session_db: Arc<crate::global_db::RegisteredGlobalDb>,
+    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
     project_root: &Path,
     project_id: Option<&str>,
 ) -> Result<()> {
@@ -207,7 +207,11 @@ impl DaemonEngine {
         action: crate::branch::BranchAdminAction,
     ) -> Result<crate::branch::BranchAdminReport> {
         self.store_administration
-            .execute_branch_admin_for_handshake(handshake, action)
+            .execute_branch_admin_for_handshake(
+                &self.invocation.code_index_schedulers,
+                handshake,
+                action,
+            )
             .await
     }
 

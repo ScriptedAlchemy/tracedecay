@@ -13,13 +13,17 @@ use tracedecay_runtime_core::db::{
     Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
 };
 
+use crate::tests::harness::open_registered_test_database_fixture;
+
 async fn open_global_db(db_path: &Path) -> tracedecay_runtime_core::errors::Result<TestConnection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let connection = TestConnection::open(db_path);
-    crate::ensure_registered_schema(&connection).await?;
-    Ok(connection)
+    drop(
+        open_registered_test_database_fixture(db_path, TestDatabaseRuntimeScope::ProfileSessions)
+            .await?,
+    );
+    Ok(TestConnection::open(db_path))
 }
 
 async fn open_read_only_global_db(

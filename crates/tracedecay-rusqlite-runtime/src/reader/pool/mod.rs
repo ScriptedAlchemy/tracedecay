@@ -128,6 +128,8 @@ pub(super) struct PoolState {
     /// a full lane with waiters is the saturation users report.
     pub(super) waiting_general: u16,
     pub(super) waiting_health: u16,
+    /// Successful exact-SQL snapshot admissions across both lanes.
+    snapshot_admissions: u64,
 }
 
 impl PoolState {
@@ -349,6 +351,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 limbo_health: 0,
                 waiting_general: 0,
                 waiting_health: 0,
+                snapshot_admissions: 0,
             }),
             capacity_changed: Condvar::new(),
         });
@@ -408,6 +411,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         lease.begin_exact_sql_snapshot()?;
+        self.record_snapshot_admission();
         Ok(ExactSqlReadSnapshot::new(move |statement| {
             lease.execute_active_exact_sql_query(statement)
         }))
@@ -426,6 +430,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         lease.retire_after_snapshot();
         lease.begin_exact_sql_snapshot()?;
+        self.record_snapshot_admission();
         Ok(ExactSqlReadSnapshot::new(move |statement| {
             lease.execute_active_exact_sql_query(statement)
         }))
@@ -481,7 +486,17 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             limbo_health: state.limbo_health,
             waiting_general: state.waiting_general,
             waiting_health: state.waiting_health,
+            snapshot_admissions: state.snapshot_admissions,
         }
+    }
+
+    fn record_snapshot_admission(&self) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.snapshot_admissions = state.snapshot_admissions.saturating_add(1);
     }
 
     /// Stop general admission and wake every waiter. Already-leased workers

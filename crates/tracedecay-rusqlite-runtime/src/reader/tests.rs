@@ -611,6 +611,31 @@ fn deferred_snapshot_excludes_uncommitted_and_later_committed_rows() {
 }
 
 #[test]
+fn snapshot_admissions_count_only_successful_exact_sql_snapshot_starts() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let before = pool.snapshot().snapshot_admissions;
+
+    let first = pool
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .expect("first snapshot admission");
+    let second = pool
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .expect("second snapshot admission");
+    assert!(matches!(
+        pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO),
+        Err(crate::exact_sql::ExactSqlError::ReaderUnavailable(_))
+    ));
+
+    assert_eq!(
+        pool.snapshot().snapshot_admissions,
+        before + 2,
+        "a rejected reader lease is not a snapshot admission"
+    );
+    drop((first, second));
+}
+
+#[test]
 fn saturated_general_lane_does_not_consume_reserved_health_reader() {
     let store = TestStore::new();
     let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();

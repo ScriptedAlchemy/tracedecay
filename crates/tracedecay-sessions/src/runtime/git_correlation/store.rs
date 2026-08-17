@@ -14,7 +14,7 @@ use tracedecay_graph_db::{
     GraphWatermark, SourceGeneration, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::{
-    db::engine::{Executor, QueryExecutor, ReadSnapshot},
+    db::engine::{Executor, QueryExecutor},
     store_runtime::VerifiedGraphRuntimePortV1,
 };
 use tracedecay_store::FactReadControl;
@@ -135,6 +135,11 @@ pub trait GitCorrelationWriteTxn: QueryExecutor + Executor + Sized + Send {
 ///
 /// SQL methods exist only for session activity and bounded-history receipts.
 pub trait GitCorrelationSessionStore: Sync {
+    /// A read view whose lifetime retains the exact client authority that
+    /// issued it. Production stores use a guarded database-engine snapshot;
+    /// standalone engine snapshots are confined to test stores.
+    type ReadSnapshot: QueryExecutor + Send + Sync;
+
     type WriteTxn<'txn>: GitCorrelationWriteTxn
     where
         Self: 'txn;
@@ -143,7 +148,7 @@ pub trait GitCorrelationSessionStore: Sync {
 
     fn read_snapshot(
         &self,
-    ) -> impl Future<Output = Result<ReadSnapshot, GitCorrelationError>> + Send;
+    ) -> impl Future<Output = Result<Self::ReadSnapshot, GitCorrelationError>> + Send;
 
     fn open_write_transaction(
         &self,

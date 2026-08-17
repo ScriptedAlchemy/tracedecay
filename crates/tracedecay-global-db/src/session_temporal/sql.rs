@@ -1,10 +1,10 @@
-use tracedecay_runtime_core::db::engine;
+use tracedecay_runtime_core::db::{DatabaseEngineReadSnapshot, engine};
 
 #[derive(Clone, Copy)]
 pub(super) enum TemporalSqlRead<'a> {
     #[cfg(test)]
     EngineConnection(&'a engine::Connection),
-    Registered(&'a engine::ReadSnapshot),
+    Registered(&'a DatabaseEngineReadSnapshot),
 }
 
 impl<'a> TemporalSqlRead<'a> {
@@ -13,7 +13,7 @@ impl<'a> TemporalSqlRead<'a> {
         Self::EngineConnection(read)
     }
 
-    pub(super) const fn registered(read: &'a engine::ReadSnapshot) -> Self {
+    pub(super) const fn registered(read: &'a DatabaseEngineReadSnapshot) -> Self {
         Self::Registered(read)
     }
 

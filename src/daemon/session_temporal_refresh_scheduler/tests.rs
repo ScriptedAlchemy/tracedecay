@@ -28,7 +28,7 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use tracedecay_usecases::host_admission::HostAdmissionScope;
@@ -143,7 +143,7 @@ async fn admit_canonical_effect(
     ordinal: u64,
     text: &str,
 ) {
-    let store = crate::store::GlobalDbObservationStore::with_runtime(db.runtime(), db.authority());
+    let store = db.observation_store();
     store
         .persist_observation(anchored_write(canonical_observation(
             session_id, ordinal, text,
@@ -219,7 +219,7 @@ fn empty_projection_effect(recovery: &SessionRefreshRecoveryV1) -> SessionTempor
 
 struct EmptyProjector {
     calls: std::sync::atomic::AtomicUsize,
-    database: std::sync::Mutex<Option<usize>>,
+    database: std::sync::Mutex<Option<RegisteredGlobalDbLeaseV1>>,
 }
 
 impl EmptyProjector {
@@ -234,11 +234,11 @@ impl EmptyProjector {
 impl SessionTemporalRefreshProjector for EmptyProjector {
     fn project<'a>(
         &'a self,
-        database: &'a Arc<RegisteredGlobalDb>,
+        database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         self.calls.fetch_add(1, Ordering::AcqRel);
-        *self.database.lock().unwrap() = Some(Arc::as_ptr(database) as usize);
+        *self.database.lock().unwrap() = Some(database.clone());
         Box::pin(async move { Ok(empty_projection_effect(&recovery)) })
     }
 }
@@ -579,9 +579,13 @@ async fn restart_resumes_each_committed_boundary_without_writer_fallback() {
         .await;
     assert_eq!(first.projected_batches, 1);
     assert_eq!(projector.calls.load(Ordering::Acquire), 1);
-    assert_eq!(
-        *projector.database.lock().unwrap(),
-        Some(authority.database_identity())
+    assert!(
+        projector
+            .database
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|database| database.shares_client_with(&authority.database))
     );
 
     let restarted_state = Arc::new(SessionTemporalRefreshWakeState::default());
@@ -610,7 +614,7 @@ struct PrematureFailureProjector {
 impl SessionTemporalRefreshProjector for PrematureFailureProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         self.calls.fetch_add(1, Ordering::AcqRel);
@@ -669,7 +673,7 @@ struct TerminalProjector;
 impl SessionTemporalRefreshProjector for TerminalProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async move {
@@ -760,7 +764,7 @@ struct BlockingProjector {
 impl SessionTemporalRefreshProjector for BlockingProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         let started = Arc::clone(&self.started);
@@ -838,7 +842,7 @@ impl RecordingDeferredProjector {
 impl SessionTemporalRefreshProjector for RecordingDeferredProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         self.sessions
@@ -924,7 +928,7 @@ struct PanicOnceProjector {
 impl SessionTemporalRefreshProjector for PanicOnceProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         let should_panic = !self.panicked.swap(true, Ordering::AcqRel);
@@ -992,7 +996,7 @@ struct PendingProjector;
 impl SessionTemporalRefreshProjector for PendingProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         _recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(std::future::pending())
@@ -1004,7 +1008,7 @@ struct TerminalErrorProjector;
 impl SessionTemporalRefreshProjector for TerminalErrorProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         _recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async {
@@ -1053,7 +1057,7 @@ struct NonCanonicalTerminalProjector;
 impl SessionTemporalRefreshProjector for NonCanonicalTerminalProjector {
     fn project<'a>(
         &'a self,
-        _database: &'a Arc<RegisteredGlobalDb>,
+        _database: &'a RegisteredGlobalDbLeaseV1,
         _recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async {

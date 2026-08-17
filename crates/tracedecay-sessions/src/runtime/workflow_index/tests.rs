@@ -294,9 +294,9 @@ async fn registered_snapshot_preserves_workflow_query_semantics() {
     )
     .await
     .unwrap();
-    let reader = RegisteredWorkflowIndexSnapshot {
-        snapshot: conn.read_snapshot().await.unwrap(),
-    };
+    let reader = RegisteredWorkflowIndexSnapshot::from_engine_test_snapshot(
+        conn.read_snapshot().await.unwrap(),
+    );
 
     let runs = reader.runs_for_session("sess-branch", 10).await.unwrap();
     assert_eq!(
@@ -321,5 +321,45 @@ async fn registered_snapshot_preserves_workflow_query_semantics() {
             .map(|run| run.run_id.as_str())
             .collect::<Vec<_>>(),
         vec!["wf_new", "wf_old"]
+    );
+}
+
+#[tokio::test]
+async fn registered_snapshot_isolated_from_later_workflow_writes() {
+    let (_directory, conn) = test_conn();
+    ensure_workflow_index_schema(&conn).await.unwrap();
+    upsert_run(&conn, &sample_run("wf_before_snapshot", "sess-1"))
+        .await
+        .unwrap();
+
+    let snapshot = RegisteredWorkflowIndexSnapshot::from_engine_test_snapshot(
+        conn.read_snapshot().await.unwrap(),
+    );
+    upsert_run(&conn, &sample_run("wf_after_snapshot", "sess-1"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        snapshot
+            .runs_for_session("sess-1", MAX_WORKFLOW_LIMIT)
+            .await
+            .unwrap()
+            .iter()
+            .map(|run| run.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["wf_before_snapshot"]
+    );
+    let fresh = RegisteredWorkflowIndexSnapshot::from_engine_test_snapshot(
+        conn.read_snapshot().await.unwrap(),
+    );
+    assert_eq!(
+        fresh
+            .runs_for_session("sess-1", MAX_WORKFLOW_LIMIT)
+            .await
+            .unwrap()
+            .iter()
+            .map(|run| run.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["wf_after_snapshot", "wf_before_snapshot"]
     );
 }

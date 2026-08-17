@@ -1,7 +1,5 @@
 //! `SQLite` persistence behind the final configuration control plane.
 
-use std::sync::Arc;
-
 use super::contracts::{
     ActivationDriftV1, AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT,
     ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
@@ -15,7 +13,7 @@ use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
 use super::schema::ConfigurationSchemaError;
 #[cfg(test)]
 use super::schema::ensure_configuration_schema;
-use crate::RegisteredGlobalDb;
+use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CandidateDispositionV1, ChangePlanId,
@@ -631,30 +629,32 @@ pub struct OwnedGlobalDbConfigurationControlStore {
     /// The exact daemon-registered project-runtime database handle. Production
     /// composition always supplies it at construction; no later attachment,
     /// path reopen, or authority substitution is available.
-    db: Arc<RegisteredGlobalDb>,
+    db: RegisteredGlobalDbLeaseV1,
 }
 
 impl OwnedGlobalDbConfigurationControlStore {
-    pub fn from_registered_project_runtime_db(db: Arc<RegisteredGlobalDb>) -> Self {
+    pub fn from_registered_project_runtime_db(db: RegisteredGlobalDbLeaseV1) -> Self {
         Self { db }
     }
 
-    fn database(&self) -> Arc<RegisteredGlobalDb> {
-        Arc::clone(&self.db)
+    fn database(&self) -> RegisteredGlobalDbLeaseV1 {
+        self.db.clone()
     }
 
-    /// Revalidate the current daemon/maintenance scope before any mutation.
-    ///
-    /// The retained registered database may outlive its admission scope. Use
-    /// the runtime-core authority check against the exact database path rather
-    /// than opening or shadowing another database handle.
-    fn require_active_mutation_scope(db: &RegisteredGlobalDb) -> Result<(), ConfigurationError> {
-        tracedecay_runtime_core::db::DatabaseAuthority::for_owned_runtime(
-            db.db_path(),
-            "configuration control mutation",
-        )
-        .map(|_| ())
-        .map_err(|_| ConfigurationError::Unavailable)
+    /// Revalidate mutation access by acquiring the exact guarded writer
+    /// transaction. The capability carries the client-bound authority, so no
+    /// path-derived authority can be substituted here.
+    async fn require_active_mutation_scope(
+        db: &RegisteredGlobalDb,
+    ) -> Result<(), ConfigurationError> {
+        let transaction = db
+            .begin_write_transaction()
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?;
+        transaction
+            .rollback()
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)
     }
 
     pub fn record_component_activation(
@@ -666,7 +666,7 @@ impl OwnedGlobalDbConfigurationControlStore {
     ) -> ConfigurationOperationFuture<'_, ()> {
         let db = self.database();
         Box::pin(async move {
-            Self::require_active_mutation_scope(db.as_ref())?;
+            Self::require_active_mutation_scope(db.as_ref()).await?;
             let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store
                 .record_component_activation(
@@ -691,7 +691,8 @@ macro_rules! forward_to_registered {
         let db = $self.database();
         $(let $owned = $owned.clone();)*
         Box::pin(async move {
-            OwnedGlobalDbConfigurationControlStore::require_active_mutation_scope(db.as_ref())?;
+            OwnedGlobalDbConfigurationControlStore::require_active_mutation_scope(db.as_ref())
+                .await?;
             let $store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             $call.await
         })

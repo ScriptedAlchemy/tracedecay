@@ -3,7 +3,7 @@ use super::{
 };
 use crate::config::PinnedUserDataDir;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::RegisteredGlobalDbLeaseV1;
 use crate::tracedecay::TraceDecay;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -37,7 +37,7 @@ impl FreshnessRuntime {
         }
     }
 
-    async fn profile_database(&self) -> Arc<RegisteredGlobalDb> {
+    async fn profile_database(&self) -> RegisteredGlobalDbLeaseV1 {
         self.registry
             .profile_database()
             .await

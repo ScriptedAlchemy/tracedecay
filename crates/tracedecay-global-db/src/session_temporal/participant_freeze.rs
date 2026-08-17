@@ -305,8 +305,10 @@ struct FrozenWatermarksWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::harness::open_registered_test_database_fixture;
     use tempfile::tempdir;
     use tracedecay_domain::{RetrievalGrainV1, TemporalModeV1};
+    use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
     use tracedecay_temporal_query::context::ContextBudget;
     use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
@@ -360,10 +362,16 @@ mod tests {
     #[tokio::test]
     async fn participant_freeze_rejects_an_active_generation_without_its_applied_graph_receipt() {
         let directory = tempdir().expect("temporary directory");
-        let connection = TestConnection::open(&directory.path().join("sessions.db"));
-        crate::ensure_registered_schema(&connection)
+        let database_path = directory.path().join("sessions.db");
+        drop(
+            open_registered_test_database_fixture(
+                &database_path,
+                TestDatabaseRuntimeScope::ProfileSessions,
+            )
             .await
-            .expect("registered schema");
+            .expect("registered schema"),
+        );
+        let connection = TestConnection::open(&database_path);
         connection
             .execute_batch(
                 // Generations are walked through their real lifecycle rather

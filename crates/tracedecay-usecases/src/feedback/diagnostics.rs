@@ -12,7 +12,7 @@ use tracedecay_application::diagnostics::{
 };
 use tracedecay_domain::{CodeGenerationId, GenerationDiagnosticV1, RetrievalAnchorId};
 use tracedecay_store::{
-    DiagnosticPublicationReceiptV1, DiagnosticStore, DiagnosticStoreError, DiagnosticStoreResult,
+    DiagnosticPublicationReceiptV1, DiagnosticStore, DiagnosticStoreResult,
     SanitizedCleanDiagnosticSnapshotV1,
 };
 
@@ -42,7 +42,7 @@ impl LspFeedbackDiagnosticRecordPort for DatabaseDiagnosticStore {
     > {
         let database = self.database.clone();
         Box::pin(async move {
-            DiagnosticsStore::new(database.conn())
+            DiagnosticsStore::new(database)
                 .diagnostic_by_anchor(&anchor)
                 .await
                 .map_err(|_| {
@@ -57,15 +57,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         &self,
         snapshot: SanitizedCleanDiagnosticSnapshotV1,
     ) -> DiagnosticStoreResult<DiagnosticPublicationReceiptV1> {
-        let writer = self
-            .database
-            .writer_connection("publish clean diagnostics")
-            .await
-            .map_err(|source| DiagnosticStoreError::Storage {
-                operation: "publish clean diagnostics",
-                source: Box::new(source),
-            })?;
-        DiagnosticsStore::new(writer.engine_connection())
+        DiagnosticsStore::new(self.database.clone())
             .publish_clean_diagnostics(snapshot)
             .await
     }
@@ -73,7 +65,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
     async fn current_diagnostic_generation(
         &self,
     ) -> DiagnosticStoreResult<Option<CodeGenerationId>> {
-        DiagnosticsStore::new(self.database.conn())
+        DiagnosticsStore::new(self.database.clone())
             .current_diagnostic_generation()
             .await
     }
@@ -82,7 +74,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         &self,
         generation: &CodeGenerationId,
     ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.conn())
+        DiagnosticsStore::new(self.database.clone())
             .diagnostics_for_generation(generation)
             .await
     }
@@ -91,7 +83,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         &self,
         generation: &CodeGenerationId,
     ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.conn())
+        DiagnosticsStore::new(self.database.clone())
             .current_diagnostics(generation)
             .await
     }
@@ -101,7 +93,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         generation: &CodeGenerationId,
         file_occurrence_id: &tracedecay_domain::FileOccurrenceId,
     ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.conn())
+        DiagnosticsStore::new(self.database.clone())
             .current_diagnostics_for_file(generation, file_occurrence_id)
             .await
     }
@@ -110,7 +102,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         &self,
         generation: &CodeGenerationId,
     ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.conn())
+        DiagnosticsStore::new(self.database.clone())
             .stale_diagnostics(generation)
             .await
     }
@@ -119,7 +111,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         &self,
         anchor: &RetrievalAnchorId,
     ) -> DiagnosticStoreResult<Option<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.conn())
+        DiagnosticsStore::new(self.database.clone())
             .diagnostic_by_anchor(anchor)
             .await
     }
@@ -128,7 +120,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         &self,
         anchor: &RetrievalAnchorId,
     ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        DiagnosticsStore::new(self.database.conn())
+        DiagnosticsStore::new(self.database.clone())
             .diagnostic_supersession_chain(anchor)
             .await
     }
@@ -138,15 +130,7 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         prior_generation: &CodeGenerationId,
         successor_generation: &CodeGenerationId,
     ) -> DiagnosticStoreResult<u64> {
-        let writer = self
-            .database
-            .writer_connection("supersede diagnostic generation")
-            .await
-            .map_err(|source| DiagnosticStoreError::Storage {
-                operation: "supersede diagnostic generation",
-                source: Box::new(source),
-            })?;
-        DiagnosticsStore::new(writer.engine_connection())
+        DiagnosticsStore::new(self.database.clone())
             .supersede_diagnostic_generation(prior_generation, successor_generation)
             .await
     }

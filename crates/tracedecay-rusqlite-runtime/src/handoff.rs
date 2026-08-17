@@ -17,7 +17,9 @@ use crate::exact_sql::{
     ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
     ExactSqlValue,
 };
-const HANDOFF_OPEN_SCHEMA_V1: &str = "
+use crate::repository::RetainedExactSqlCapability;
+
+pub const HANDOFF_OPEN_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS handoff_open_grants_v1 (
     token_digest TEXT NOT NULL PRIMARY KEY,
     issued_request_id TEXT NOT NULL UNIQUE,
@@ -41,19 +43,20 @@ CREATE TABLE IF NOT EXISTS handoff_open_grants_v1 (
 
 #[derive(Clone)]
 pub struct HandoffOpenSqliteAuthority {
-    handle: ExactSqlHandle,
+    retained: RetainedExactSqlCapability,
 }
 
 impl HandoffOpenSqliteAuthority {
-    pub fn from_registered(
-        handle: ExactSqlHandle,
+    pub fn from_retained_exact_sql(
+        retained: RetainedExactSqlCapability,
     ) -> Result<Self, HandoffOpenSqliteAuthorityBuildError> {
-        let authority = Self { handle };
-        authority
-            .handle
-            .execute_batch(HANDOFF_OPEN_SCHEMA_V1.to_owned())
-            .map_err(|_| HandoffOpenSqliteAuthorityBuildError::Unavailable)?;
+        let authority = Self { retained };
+        require_handoff_open_schema(authority.handle())?;
         Ok(authority)
+    }
+
+    fn handle(&self) -> &ExactSqlHandle {
+        self.retained.handle()
     }
 }
 
@@ -80,6 +83,22 @@ fn query_handle(
     params: Vec<ExactSqlValue>,
 ) -> Result<ExactSqlRows, ExactSqlError> {
     handle.query(statement(sql, params)?, Duration::from_secs(5))
+}
+
+fn require_handoff_open_schema(
+    handle: &ExactSqlHandle,
+) -> Result<(), HandoffOpenSqliteAuthorityBuildError> {
+    let rows = query_handle(
+        handle,
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        vec![ExactSqlValue::Text("handoff_open_grants_v1".to_owned())],
+    )
+    .map_err(|_| HandoffOpenSqliteAuthorityBuildError::Unavailable)?;
+    if rows.rows.len() == 1 {
+        Ok(())
+    } else {
+        Err(HandoffOpenSqliteAuthorityBuildError::Unavailable)
+    }
 }
 
 fn query_tx(
@@ -127,7 +146,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         grant: &HandoffOpenGrantV1,
     ) -> Result<HandoffOpenGrantV1, HandoffOpenAuthorityError> {
         let payload = encode(grant)?;
-        let transaction = self.handle.begin_immediate().map_err(unavailable)?;
+        let transaction = self.handle().begin_immediate().map_err(unavailable)?;
         let existing = query_tx(
             &transaction,
             "SELECT grant_payload FROM handoff_open_grants_v1
@@ -185,7 +204,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         // to refuse redemption, not to erase history.
         let ceiling = i64::from(limit).saturating_add(1);
         let rows = query_handle(
-            &self.handle,
+            self.handle(),
             "SELECT grant_payload, consumption_payload
              FROM handoff_open_grants_v1
              ORDER BY issued_at DESC, token_digest ASC
@@ -224,7 +243,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         observed_at: UtcMicros,
     ) -> Result<Option<HandoffOpenGrantV1>, HandoffOpenAuthorityError> {
         let rows = query_handle(
-            &self.handle,
+            self.handle(),
             "SELECT grant_payload FROM handoff_open_grants_v1 WHERE token_digest = ?1",
             vec![ExactSqlValue::Text(token_digest.as_str().to_owned())],
         )
@@ -248,7 +267,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         input_digest: &ManifestDigest,
         consumed_at: UtcMicros,
     ) -> Result<HandoffOpenConsumeOutcomeV1, HandoffOpenAuthorityError> {
-        let transaction = self.handle.begin_immediate().map_err(unavailable)?;
+        let transaction = self.handle().begin_immediate().map_err(unavailable)?;
         let rows = query_tx(
             &transaction,
             "SELECT grant_payload, consumed_request_id, consumed_input_digest,

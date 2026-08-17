@@ -1300,6 +1300,9 @@ pub(super) struct SemanticEvaluationCodeSnapshotV1 {
     pub source_generation: CodeGenerationId,
     pub source_manifest_digest: ManifestDigest,
     pub snapshot_digest: ManifestDigest,
+    /// The sealed capability authority that calibrates the live semantic
+    /// evaluation target; it is not inferred from an accepted profile.
+    pub capability_manifest_digest: ManifestDigest,
 }
 
 /// Production exact/lexical/graph owners bound to one immutable published
@@ -1386,6 +1389,7 @@ impl LatestCompleteCodeIndexV1 {
                 .manifest_digest
                 .clone(),
             snapshot_digest: self.generation.manifest().snapshot_digest.clone(),
+            capability_manifest_digest: self.generation.capability().manifest_digest.clone(),
         }
     }
 
@@ -2848,5 +2852,8 @@ pub(in crate::daemon) use ignored_dependencies::{
 };
 pub(crate) use registry::CodeIndexSchedulerRegistryV1;
 pub(in crate::daemon) use registry::watch_ingress::GitStateChangeRequestV1;
+pub(in crate::daemon) use registry::{
+    ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
+};
 pub(crate) type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
 pub(crate) type CodeIndexSchedulerMemoryStatsV1 = registry::CodeIndexSchedulerMemoryStatsV1;

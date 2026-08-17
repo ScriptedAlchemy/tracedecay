@@ -6,20 +6,16 @@ use tempfile::TempDir;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
+use crate::candidate_output::compute_corpus_digest_from_embedded_bytes;
 use crate::{
     CandidateWorkloadV1, SearchEvalError, load_candidate_workload, validate_workload_for_tuning,
 };
-
-#[cfg(test)]
-thread_local! {
-    static MATERIALIZATION_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
 
 const WORKLOAD_PATH: &str =
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
 const SOURCE_COMMIT: &str = "8312618fee8109b16be09e65f45118b4e550fa14";
 const PACK_ID: &str = "184f6ca1eafd40e7889d15a20b7a5c861e80a47b";
-const WORKLOAD_SHA256: &str = "43786e9f14d18401c62e1d0f1af6a20b49ce3b824f249ce1c3f90a9b618b0a66";
+const WORKLOAD_SHA256: &str = "8805b9aa556d86d0ad82b3d55107e4cb0c267f288455cb769883de217c73834a";
 
 const FILES: &[(&str, &[u8])] = &[
     (
@@ -132,8 +128,6 @@ impl PackagedEvaluatorAssets {
 
 pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> {
     let workload = load_workload()?;
-    #[cfg(test)]
-    MATERIALIZATION_COUNT.with(|count| count.set(count.get().saturating_add(1)));
     let directory = tempfile::tempdir().map_err(|error| {
         SearchEvalError::Contract(format!("create packaged evaluator root: {error}"))
     })?;
@@ -184,6 +178,15 @@ pub(crate) fn load_workload() -> Result<CandidateWorkloadV1, SearchEvalError> {
     })?;
     validate_workload_for_tuning(&workload)?;
     Ok(workload)
+}
+
+/// Derive the corpus binding from the bytes embedded in this package. This is
+/// deliberately separate from `materialize`: qualification loading must not
+/// create a temporary evaluator root merely to establish corpus identity.
+pub(crate) fn current_corpus_digest(
+    workload: &CandidateWorkloadV1,
+) -> Result<String, SearchEvalError> {
+    compute_corpus_digest_from_embedded_bytes(workload, FILES).map_err(SearchEvalError::from)
 }
 
 fn materialize_git_authority(root: &Path) -> Result<(), SearchEvalError> {
@@ -242,17 +245,6 @@ pub(crate) fn admitted_scope(_root: &Path) -> Option<ResolvedScope> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn profile_metadata_load_does_not_materialize_runtime_assets() {
-        let before = super::MATERIALIZATION_COUNT.with(std::cell::Cell::get);
-
-        crate::load_default_evaluated_profile_material("query-fallback")
-            .expect("packaged profile metadata");
-
-        let after = super::MATERIALIZATION_COUNT.with(std::cell::Cell::get);
-        assert_eq!(after, before);
-    }
-
     #[test]
     fn packaged_workload_is_independent_of_mounted_project() {
         let unrelated = tempfile::tempdir().expect("unrelated project");

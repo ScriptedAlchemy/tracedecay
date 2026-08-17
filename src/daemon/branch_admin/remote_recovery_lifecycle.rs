@@ -220,7 +220,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
     pub(in crate::daemon) async fn quiesce(
         &self,
         project_id: &ProjectId,
-        database: &Arc<crate::global_db::RegisteredGlobalDb>,
+        database: &crate::global_db::RegisteredGlobalDbLeaseV1,
     ) -> Result<RemoteRecoveryProjectQuiescenceV1> {
         let shard = &database.binding().shard_id;
         if shard.brain_id != self.brain_id
@@ -404,7 +404,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
 }
 
 pub(super) async fn project_roots(
-    database: &Arc<crate::global_db::RegisteredGlobalDb>,
+    database: &crate::global_db::RegisteredGlobalDbLeaseV1,
     project_servers: &tokio::sync::Mutex<DatabaseOwnerRegistry>,
     profile_root: &Path,
     project_id: &str,

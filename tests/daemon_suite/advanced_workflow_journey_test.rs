@@ -2,6 +2,8 @@
 //! cancellation, synthesis, and a single-use host handoff.
 
 use std::collections::BTreeSet;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -66,6 +68,10 @@ use daemon_fixture::{
 
 const DAEMON_ACTOR: &str = "actor.tracedecay-daemon.project-open";
 const PROVIDER_SESSION_ID: &str = "session.advanced-workflow-provider";
+const PROVIDER_TRANSCRIPT_USER_MESSAGE_ID: &str = "advanced-workflow-provider-user";
+const PROVIDER_TRANSCRIPT_ASSISTANT_MESSAGE_ID: &str = "message.advanced-workflow-provider";
+const PROVIDER_TRANSCRIPT_REFRESH_MESSAGE_ID: &str =
+    "message.advanced-workflow-provider-participant-refresh";
 
 fn id<T>(value: &str) -> T
 where
@@ -261,23 +267,53 @@ fn attempt_status(
     }
 }
 
-fn write_provider_transcript(home: &Path, project: &Path, identity: &WorkAttemptIdentityV1) {
-    let directory = home.join(".claude/projects/advanced-workflow-provider");
-    std::fs::create_dir_all(&directory).expect("provider transcript directory");
-    let query = format!(
-        "{} {}:{} claude {}",
+fn provider_transcript_path(home: &Path) -> PathBuf {
+    home.join(".claude/projects/advanced-workflow-provider")
+        .join(format!("{PROVIDER_SESSION_ID}.jsonl"))
+}
+
+fn provider_transcript_query(identity: &WorkAttemptIdentityV1) -> String {
+    format!(
+        "{PROVIDER_TRANSCRIPT_USER_MESSAGE_ID}: {} {}:{} claude {}",
         identity.task_id().as_str(),
         identity.run_id().as_str(),
         identity.attempt_id().as_str(),
         PROVIDER_SESSION_ID,
-    );
+    )
+}
+
+fn provider_transcript_assistant_text(identity: &WorkAttemptIdentityV1) -> String {
+    format!(
+        "{PROVIDER_TRANSCRIPT_ASSISTANT_MESSAGE_ID}: {} completed through the typed SDK provider session",
+        provider_transcript_query(identity),
+    )
+}
+
+pub(super) fn seeded_provider_transcript_contents(
+    identity: &WorkAttemptIdentityV1,
+) -> [Vec<u8>; 2] {
+    let assistant = serde_json::to_string(&serde_json::json!([{
+        "type": "text",
+        "text": provider_transcript_assistant_text(identity),
+    }]))
+    .expect("serialize seeded assistant transcript content");
+    [
+        provider_transcript_query(identity).into_bytes(),
+        assistant.into_bytes(),
+    ]
+}
+
+fn write_provider_transcript(home: &Path, project: &Path, identity: &WorkAttemptIdentityV1) {
+    let directory = home.join(".claude/projects/advanced-workflow-provider");
+    std::fs::create_dir_all(&directory).expect("provider transcript directory");
+    let query = provider_transcript_query(identity);
     let cwd = project.to_string_lossy();
     let records = [
         serde_json::json!({
             "type": "user",
             "cwd": cwd,
             "sessionId": PROVIDER_SESSION_ID,
-            "uuid": "advanced-workflow-provider-user",
+            "uuid": PROVIDER_TRANSCRIPT_USER_MESSAGE_ID,
             "timestamp": "2026-08-09T12:00:00.000Z",
             "message": {"role": "user", "content": query},
         }),
@@ -288,12 +324,10 @@ fn write_provider_transcript(home: &Path, project: &Path, identity: &WorkAttempt
             "uuid": "advanced-workflow-provider-assistant",
             "timestamp": "2026-08-09T12:00:01.000Z",
             "message": {
-                "id": "message.advanced-workflow-provider",
+                "id": PROVIDER_TRANSCRIPT_ASSISTANT_MESSAGE_ID,
                 "role": "assistant",
                 "model": "fixture-model",
-                "content": [{"type": "text", "text": format!(
-                    "{query} completed through the typed SDK provider session"
-                )}],
+                "content": [{"type": "text", "text": provider_transcript_assistant_text(identity)}],
             },
         }),
     ];
@@ -302,11 +336,50 @@ fn write_provider_transcript(home: &Path, project: &Path, identity: &WorkAttempt
         .map(|record| record.to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(
-        directory.join(format!("{PROVIDER_SESSION_ID}.jsonl")),
-        format!("{contents}\n"),
-    )
-    .expect("provider transcript");
+    std::fs::write(provider_transcript_path(home), format!("{contents}\n"))
+        .expect("provider transcript");
+}
+
+/// Advances the real imported participant generation through the public
+/// transcript-ingest command. The previous TaskSession continuation must then
+/// be rejected against the manifest newly frozen from this source.
+pub(super) fn advance_provider_transcript_participant_generation(
+    home: &Path,
+    project: &Path,
+    identity: &WorkAttemptIdentityV1,
+) {
+    let record = serde_json::json!({
+        "type": "assistant",
+        "cwd": project.to_string_lossy(),
+        "sessionId": PROVIDER_SESSION_ID,
+        "uuid": "advanced-workflow-provider-participant-refresh",
+        "timestamp": "2026-08-09T12:00:02.000Z",
+        "message": {
+            "id": PROVIDER_TRANSCRIPT_REFRESH_MESSAGE_ID,
+            "role": "assistant",
+            "model": "fixture-model",
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "{PROVIDER_TRANSCRIPT_REFRESH_MESSAGE_ID}: {} refreshed through the public sessions import authority",
+                    provider_transcript_query(identity),
+                ),
+            }],
+        },
+    });
+    let mut transcript = OpenOptions::new()
+        .append(true)
+        .open(provider_transcript_path(home))
+        .expect("open provider transcript for participant refresh");
+    writeln!(transcript, "{record}").expect("append provider transcript participant refresh");
+    drop(transcript);
+    run(
+        common::tracedecay_command_with_home(home)
+            .args(["sessions", "import", "--project-path"])
+            .arg(project)
+            .current_dir(project),
+        "tracedecay sessions import participant refresh",
+    );
 }
 
 fn initialize_project(home: &Path, project: &Path) -> (String, CommitId) {
@@ -948,11 +1021,13 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let client = sdk_client(&home, project_id.as_str());
     let _ = wait_for_application_mount(&client);
     wait_for_work_mount(&client);
-    task_session::wait_for_semantic_current(&home, &project);
-    let _task_session = task_session::assert_available_over_sdk_and_mcp(
+    task_session::wait_for_evaluated_semantic_profile_current(&home, &project, &client);
+    let dashboard = task_session::DashboardProcess::start(&home, &project);
+    let _task_session = task_session::assert_available_over_sdk_mcp_and_dashboard(
         &home,
         &project,
         &client,
+        &dashboard,
         &product_selection,
         &synthesis_task,
         restored_entry.verified_version(),

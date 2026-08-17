@@ -138,7 +138,7 @@ impl ContractFixture {
 
     pub fn new_with_embedding_dimensions(dimensions: u32) -> Self {
         let root = TempDir::new().unwrap();
-        let graph = RegisteredGraph::new(root.path()).unwrap();
+        let graph = RegisteredGraph::new_mounted(root.path()).unwrap();
         let path = root.path().join("semantic-vector-authority.sqlite3");
         drop(rusqlite::Connection::open(&path).unwrap());
         let path = path.canonicalize().unwrap();
@@ -1276,6 +1276,8 @@ fn admitted_embedding_with_dimensions(dimensions: u32) -> AdmittedEmbeddingProje
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
         truncation_length: 512,
+        inference_batch_size: 8,
+        inference_batch_bytes: 16 * 1024,
         runtime_backend: "fixture-runtime".to_owned(),
         runtime_build_revision: "fixture-runtime.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,

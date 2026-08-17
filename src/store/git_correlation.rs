@@ -12,9 +12,10 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tracedecay_graph_db::GraphNamespace;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::db::engine::ReadSnapshot;
+use crate::db::DatabaseEngineReadSnapshot;
 use crate::global_db::{
     RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, VerifiedGraphRuntimePortV1,
+    VerifiedGraphRuntimeWeakProxyV1,
 };
 use tracedecay_sessions::runtime::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats,
@@ -35,7 +36,7 @@ static GIT_EVIDENCE_PUBLICATION_LOCKS: OnceLock<
 > = OnceLock::new();
 
 fn shared_git_evidence_publication_lock(
-    runtime: &Arc<dyn VerifiedGraphRuntimePortV1>,
+    runtime: &VerifiedGraphRuntimeWeakProxyV1,
 ) -> Result<Arc<GitEvidencePublicationLock>, String> {
     let identity = serde_json::to_string(&(
         runtime.relational_binding(),
@@ -63,7 +64,7 @@ fn shared_git_evidence_publication_lock_for_identity(
 
 /// Adapter over an already-open project-sessions database.
 ///
-/// The holder `D` is generic so callers that own an `Arc<RegisteredGlobalDb>`
+/// The holder `D` is generic so callers that own a `RegisteredGlobalDbLeaseV1`
 /// can build a lifetime-free (`'static`) adapter. A borrowed adapter makes the
 /// `GitCorrelationSessionStore` impl apply only "for some specific lifetime",
 /// so any future that holds one across an await and must then prove `Send`
@@ -73,7 +74,7 @@ fn shared_git_evidence_publication_lock_for_identity(
 /// cross such a boundary.
 pub struct GlobalDbGitCorrelationStore<D> {
     db: D,
-    graph_runtime: Option<Arc<dyn VerifiedGraphRuntimePortV1>>,
+    graph_runtime: Option<VerifiedGraphRuntimeWeakProxyV1>,
     graph_publication_lock: Option<Result<Arc<GitEvidencePublicationLock>, String>>,
 }
 
@@ -110,7 +111,9 @@ where
         }
     }
 
-    pub(crate) async fn read_snapshot(&self) -> Result<ReadSnapshot, GitCorrelationError> {
+    pub(crate) async fn read_snapshot(
+        &self,
+    ) -> Result<DatabaseEngineReadSnapshot, GitCorrelationError> {
         self.db()
             .read_snapshot()
             .await
@@ -287,6 +290,8 @@ impl<D> GitCorrelationSessionStore for GlobalDbGitCorrelationStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
+    type ReadSnapshot = DatabaseEngineReadSnapshot;
+
     type WriteTxn<'txn>
         = RegisteredGlobalDbWriteTransaction<'txn>
     where
@@ -296,7 +301,7 @@ where
         GlobalDbGitCorrelationStore::require_project_sessions_authority(self)
     }
 
-    async fn read_snapshot(&self) -> Result<ReadSnapshot, GitCorrelationError> {
+    async fn read_snapshot(&self) -> Result<Self::ReadSnapshot, GitCorrelationError> {
         GlobalDbGitCorrelationStore::read_snapshot(self).await
     }
 
@@ -315,10 +320,13 @@ where
     }
 
     fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError> {
-        self.graph_runtime.as_deref().ok_or_else(|| {
-            GitCorrelationError::Unavailable(
-                "registered project graph runtime is not mounted".to_owned(),
-            )
-        })
+        self.graph_runtime
+            .as_ref()
+            .map(|runtime| runtime as &dyn VerifiedGraphRuntimePortV1)
+            .ok_or_else(|| {
+                GitCorrelationError::Unavailable(
+                    "registered project graph runtime is not mounted".to_owned(),
+                )
+            })
     }
 }
