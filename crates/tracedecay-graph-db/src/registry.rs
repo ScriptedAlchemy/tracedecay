@@ -1220,7 +1220,7 @@ impl GraphDbRegistry {
         registration: &GraphDbRegistration,
     ) -> Result<Option<GraphDbRegistryStatus>, GraphDbError> {
         validate_registration(registration)?;
-        canonical_graph_database_file(registration.canonical_path())?;
+        let canonical_path = canonical_graph_database_file(registration.canonical_path())?;
         let state = self.state_lock()?;
         let Some(entry) = state.entries.get(&registration.binding().shard_id) else {
             return Ok(None);
@@ -1230,7 +1230,7 @@ impl GraphDbRegistry {
             (
                 registration.binding(),
                 registration.verified_locator(),
-                registration.canonical_path(),
+                &canonical_path,
                 GraphFormatVersion::current(),
             ),
         )?;

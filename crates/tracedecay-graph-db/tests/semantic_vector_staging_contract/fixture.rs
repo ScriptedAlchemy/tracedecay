@@ -138,7 +138,7 @@ impl ContractFixture {
 
     pub fn new_with_embedding_dimensions(dimensions: u32) -> Self {
         let root = TempDir::new().unwrap();
-        let graph = RegisteredGraph::new(root.path()).unwrap();
+        let graph = RegisteredGraph::new_mounted(root.path()).unwrap();
         let path = root.path().join("semantic-vector-authority.sqlite3");
         drop(rusqlite::Connection::open(&path).unwrap());
         let path = path.canonicalize().unwrap();

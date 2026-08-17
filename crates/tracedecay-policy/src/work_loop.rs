@@ -514,23 +514,11 @@ impl WorkProposalEvaluatorV1 {
     /// deterministic-fallback flag on, never off.
     fn planned_decision(
         &self,
-        input: &WorkProposalPolicyInputV1,
-        disposition: WorkProposalDispositionV1,
-        recommended_action: Option<WorkProposalActionV1>,
-        deterministic_fallback: bool,
-        mut ordered_reason_codes: Vec<WorkProposalReasonV1>,
-        frontier_comparison: WorkFrontierComparisonV1,
+        mut decision: WorkProposalDecisionV1,
         plan: WorkPlannerOutcome,
     ) -> WorkProposalDecisionV1 {
-        ordered_reason_codes.extend(plan.reasons);
-        let mut decision = self.decision(
-            input,
-            disposition,
-            recommended_action,
-            deterministic_fallback || plan.deterministic_fallback,
-            ordered_reason_codes,
-            frontier_comparison,
-        );
+        decision.ordered_reason_codes.extend(plan.reasons);
+        decision.deterministic_fallback |= plan.deterministic_fallback;
         decision.shape = Some(plan.shape);
         decision.sizing = plan.sizing;
         decision.decomposition = plan.decomposition;
@@ -1025,12 +1013,14 @@ impl WorkProposalEvaluator for WorkProposalEvaluatorV1 {
             // frontiers are preserved verbatim; neither substitutes for the
             // other, and no baseline is invented from a merged view.
             return self.planned_decision(
-                input,
-                WorkProposalDispositionV1::Abstain,
-                None,
-                false,
-                reasons,
-                comparison,
+                self.decision(
+                    input,
+                    WorkProposalDispositionV1::Abstain,
+                    None,
+                    false,
+                    reasons,
+                    comparison,
+                ),
                 plan,
             );
         }
@@ -1038,58 +1028,68 @@ impl WorkProposalEvaluator for WorkProposalEvaluatorV1 {
             if terminal_attempt_count > 0 {
                 reasons.push(WorkProposalReasonV1::TerminalEvidenceObserved);
                 return self.planned_decision(
-                    input,
-                    WorkProposalDispositionV1::Allow,
-                    Some(WorkProposalActionV1::Replan),
-                    false,
-                    reasons,
-                    comparison,
+                    self.decision(
+                        input,
+                        WorkProposalDispositionV1::Allow,
+                        Some(WorkProposalActionV1::Replan),
+                        false,
+                        reasons,
+                        comparison,
+                    ),
                     plan,
                 );
             }
             reasons.push(WorkProposalReasonV1::ExecutionInFlight);
             return self.planned_decision(
-                input,
-                WorkProposalDispositionV1::Abstain,
-                None,
-                false,
-                reasons,
-                comparison,
+                self.decision(
+                    input,
+                    WorkProposalDispositionV1::Abstain,
+                    None,
+                    false,
+                    reasons,
+                    comparison,
+                ),
                 plan,
             );
         }
         if input.accepted_proposal_present {
             reasons.push(WorkProposalReasonV1::ProposalAccepted);
             return self.planned_decision(
-                input,
-                WorkProposalDispositionV1::Allow,
-                Some(WorkProposalActionV1::AdmitExecution),
-                false,
-                reasons,
-                comparison,
+                self.decision(
+                    input,
+                    WorkProposalDispositionV1::Allow,
+                    Some(WorkProposalActionV1::AdmitExecution),
+                    false,
+                    reasons,
+                    comparison,
+                ),
                 plan,
             );
         }
         if input.unresolved_dependency_count > 0 {
             reasons.push(WorkProposalReasonV1::DependenciesUnresolved);
             return self.planned_decision(
-                input,
-                WorkProposalDispositionV1::Allow,
-                Some(WorkProposalActionV1::HoldForDependencies),
-                true,
-                reasons,
-                comparison,
+                self.decision(
+                    input,
+                    WorkProposalDispositionV1::Allow,
+                    Some(WorkProposalActionV1::HoldForDependencies),
+                    true,
+                    reasons,
+                    comparison,
+                ),
                 plan,
             );
         }
         reasons.push(WorkProposalReasonV1::Ready);
         self.planned_decision(
-            input,
-            WorkProposalDispositionV1::Allow,
-            Some(WorkProposalActionV1::ProceedToAcceptance),
-            false,
-            reasons,
-            comparison,
+            self.decision(
+                input,
+                WorkProposalDispositionV1::Allow,
+                Some(WorkProposalActionV1::ProceedToAcceptance),
+                false,
+                reasons,
+                comparison,
+            ),
             plan,
         )
     }

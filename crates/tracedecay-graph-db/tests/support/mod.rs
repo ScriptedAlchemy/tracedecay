@@ -89,15 +89,26 @@ impl RegisteredGraph {
         })
     }
 
+    pub fn new_mounted(root: &Path) -> Result<Self, GraphDbError> {
+        let registered = Self::new(root)?;
+        registered.mount()?;
+        Ok(registered)
+    }
+
+    pub fn mount(&self) -> Result<(), GraphDbError> {
+        let registration = registration(self.binding.clone(), &self.root);
+        let owner_attachment = self
+            .registry
+            .resolve_owner_attachment(owner_registration(registration))?;
+        drop(owner_attachment);
+        Ok(())
+    }
+
     #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
     pub fn open_lease(root: &Path) -> Result<(Self, GraphDbLeaseV1), GraphDbError> {
-        let registered = Self::new(root)?;
+        let registered = Self::new_mounted(root)?;
         let registration = registration(registered.binding.clone(), root);
-        let owner_attachment = registered
-            .registry
-            .resolve_owner_attachment(owner_registration(registration.clone()))?;
         let database = registered.registry.resolve(registration)?;
-        drop(owner_attachment);
         Ok((registered, database))
     }
 
@@ -109,11 +120,8 @@ impl RegisteredGraph {
     #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
     pub fn reopen_lease(&self) -> Result<GraphDbLeaseV1, GraphDbError> {
         let registration = registration(self.binding.clone(), &self.root);
-        let owner_attachment = self
-            .registry
-            .resolve_owner_attachment(owner_registration(registration.clone()))?;
+        self.mount()?;
         let lease = self.registry.resolve(registration)?;
-        drop(owner_attachment);
         Ok(lease)
     }
 }

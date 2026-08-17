@@ -112,18 +112,42 @@ pub struct ProjectMemoryFactV1 {
     telemetry: ProjectMemoryFactTelemetryV1,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectMemoryFactSnapshotV1 {
+    active_assertion_id: FactAssertionId,
+    last_event_id: FactEventId,
+    projected_as_of: UtcMicros,
+}
+
+impl ProjectMemoryFactSnapshotV1 {
+    pub fn new(
+        active_assertion_id: FactAssertionId,
+        last_event_id: FactEventId,
+        projected_as_of: UtcMicros,
+    ) -> Self {
+        Self {
+            active_assertion_id,
+            last_event_id,
+            projected_as_of,
+        }
+    }
+}
+
 impl ProjectMemoryFactV1 {
     pub fn new(
         fact_id: FactId,
         owner: FactOwnerV1,
         payload: FactPayloadV1,
         trust: Confidence,
-        active_assertion_id: FactAssertionId,
-        last_event_id: FactEventId,
-        projected_as_of: UtcMicros,
+        snapshot: ProjectMemoryFactSnapshotV1,
         source: FactIdentitySourceV1,
         telemetry: ProjectMemoryFactTelemetryV1,
     ) -> FactStoreResult<Self> {
+        let ProjectMemoryFactSnapshotV1 {
+            active_assertion_id,
+            last_event_id,
+            projected_as_of,
+        } = snapshot;
         owner.validate()?;
         if payload.receipt().disposition() != SanitizerDispositionV1::Accepted {
             return Err(FactStoreError::PayloadAccessMismatch);

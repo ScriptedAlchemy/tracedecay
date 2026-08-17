@@ -376,7 +376,7 @@ fn write_non_final_shape(path: &std::path::Path) {
 #[test]
 fn torn_durable_store_faults_reopen_and_never_advances_the_verified_head() {
     let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -418,6 +418,7 @@ fn torn_durable_store_faults_reopen_and_never_advances_the_verified_head() {
     // single file and the relational head is untouched.
     std::fs::create_dir_all(&sidecar).unwrap();
     std::fs::write(sidecar.join("000001.wal"), vec![0xAB_u8; 4096]).unwrap();
+    registered.mount().unwrap();
     let after_foreign_sidecar = registered
         .registry
         .recover_verified_snapshot(
@@ -445,15 +446,7 @@ fn torn_durable_store_faults_reopen_and_never_advances_the_verified_head() {
     std::fs::write(&path, &bytes[..bytes.len() / 3]).unwrap();
 
     let cas_attempts_before = authority.cas_attempts;
-    let error = registered
-        .registry
-        .recover_verified_snapshot(
-            registration(registered.binding.clone(), temp.path()),
-            &mut authority,
-            &context,
-            &projection_key,
-        )
-        .unwrap_err();
+    let error = registered.mount().unwrap_err();
     // `map_open_error` types malformed IO on a preexisting store as `Corrupt`
     // (crates/tracedecay-graph-db/src/recovery.rs), never as a silent reopen.
     assert!(
@@ -505,7 +498,7 @@ fn torn_durable_store_faults_reopen_and_never_advances_the_verified_head() {
 #[test]
 fn interrupted_convergence_serves_the_prior_snapshot_and_replays_identically() {
     let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -566,6 +559,7 @@ fn interrupted_convergence_serves_the_prior_snapshot_and_replays_identically() {
 
     // The prior verified snapshot still serves after restart; the interrupted
     // generation is not visible through the verified surface.
+    registered.mount().unwrap();
     let recovered = registered
         .registry
         .recover_verified_snapshot(
@@ -650,15 +644,7 @@ fn reset_required_shape_is_recreated_fresh_and_republished_from_the_manifest() {
     let record = stage_manifest(&mut authority, &stale.binding, &g1, "publish:g1", None, 'a');
     let projection_key = record.publication.key.projection.clone();
 
-    let error = stale
-        .registry
-        .publish_verified(
-            registration(stale.binding.clone(), temp.path()),
-            &mut authority,
-            &context,
-            &record.publication.key,
-        )
-        .unwrap_err();
+    let error = stale.mount().unwrap_err();
     assert!(
         matches!(error, GraphDbError::ResetRequired { .. }),
         "a foreign non-final store shape must be typed ResetRequired, got {error:?}"
@@ -670,7 +656,7 @@ fn reset_required_shape_is_recreated_fresh_and_republished_from_the_manifest() {
     // profile-local runtime opens onto the same canonical path.
     std::fs::remove_file(&path).unwrap();
     let _ = std::fs::remove_dir_all(sidecar_wal_path(&path));
-    let fresh = RegisteredGraph::new(temp.path()).unwrap();
+    let fresh = RegisteredGraph::new_mounted(temp.path()).unwrap();
 
     let commit = fresh
         .registry

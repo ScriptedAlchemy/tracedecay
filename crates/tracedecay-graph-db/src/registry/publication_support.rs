@@ -10,6 +10,7 @@ use tracedecay_store::runtime::{
 };
 use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
+use super::path::canonical_graph_database_file;
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::lease::{GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot};
 use crate::{
@@ -144,36 +145,57 @@ impl GraphDbRegistry {
         &self,
         registration: &GraphDbRegistration,
     ) -> Result<GraphDbLeaseV1, GraphDbError> {
+        let canonical_path = canonical_graph_database_file(registration.canonical_path())?;
         let mut state = self.state_lock()?;
         let entry = state
             .entries
             .get_mut(&registration.binding().shard_id)
             .ok_or_else(|| GraphDbError::unavailable("graph runtime is not registered"))?;
-        let super::RegistryEntry::Ready {
-            binding,
-            verified_locator,
-            path,
-            expected_format,
-            owner,
-            last_used,
-            ..
-        } = entry
-        else {
-            return Err(GraphDbError::unavailable(
+        match entry {
+            super::RegistryEntry::Ready {
+                binding,
+                verified_locator,
+                path,
+                expected_format,
+                owner,
+                last_used,
+                ..
+            } => {
+                super::require_binding(
+                    (binding, verified_locator, path, *expected_format),
+                    (
+                        registration.binding(),
+                        registration.verified_locator(),
+                        &canonical_path,
+                        crate::GraphFormatVersion::current(),
+                    ),
+                )?;
+                *last_used = std::time::Instant::now();
+                owner.issue_registered_lease(registration)
+            }
+            super::RegistryEntry::Faulted {
+                binding,
+                verified_locator,
+                path,
+                expected_format,
+                error,
+                ..
+            } => {
+                super::require_binding(
+                    (binding, verified_locator, path, *expected_format),
+                    (
+                        registration.binding(),
+                        registration.verified_locator(),
+                        &canonical_path,
+                        crate::GraphFormatVersion::current(),
+                    ),
+                )?;
+                Err(error.clone())
+            }
+            _ => Err(GraphDbError::unavailable(
                 "graph runtime is not ready for verified reads",
-            ));
-        };
-        super::require_binding(
-            (binding, verified_locator, path, *expected_format),
-            (
-                registration.binding(),
-                registration.verified_locator(),
-                registration.canonical_path(),
-                crate::GraphFormatVersion::current(),
-            ),
-        )?;
-        *last_used = std::time::Instant::now();
-        owner.issue_registered_lease(registration)
+            )),
+        }
     }
 
     pub fn verified_snapshot(

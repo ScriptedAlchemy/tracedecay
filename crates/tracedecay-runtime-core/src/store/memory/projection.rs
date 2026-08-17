@@ -11,8 +11,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     FactReadControl, FactStoreError, FactStoreResult, ProjectMemoryFactProjectionV1,
-    ProjectMemoryFactStatusV1, ProjectMemoryFactTelemetryV1, ProjectMemoryFactUnavailableV1,
-    ProjectMemoryFactV1,
+    ProjectMemoryFactSnapshotV1, ProjectMemoryFactStatusV1, ProjectMemoryFactTelemetryV1,
+    ProjectMemoryFactUnavailableV1, ProjectMemoryFactV1,
 };
 
 use super::primitives::{
@@ -311,9 +311,11 @@ async fn load_project_memory_projections_inner_tx(
                         "current fact trust score is unexpectedly null",
                     )
                 })?)?,
-                active_assertion_id,
-                FactEventId::new(row_string(&row, 6, QUERY_OPERATION)?)?,
-                UtcMicros(row_i64(&row, 2, QUERY_OPERATION)?),
+                ProjectMemoryFactSnapshotV1::new(
+                    active_assertion_id,
+                    FactEventId::new(row_string(&row, 6, QUERY_OPERATION)?)?,
+                    UtcMicros(row_i64(&row, 2, QUERY_OPERATION)?),
+                ),
                 identity.source().clone(),
                 telemetry,
             )?;

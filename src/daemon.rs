@@ -160,7 +160,6 @@ use connection_serving::{
 };
 mod core_admission;
 mod engine;
-#[cfg(unix)]
 use engine::DaemonEngine;
 use engine::{
     ensure_context_scout_owner_before_advertising,
@@ -328,7 +327,6 @@ use project_server_lifecycle::{
 pub(crate) mod lcm_effects;
 mod lcm_summarization;
 mod query_mcp_admission;
-#[cfg(unix)]
 mod scheduler;
 pub(crate) use scheduler::automation_observation::{
     project_run_observation_producer as project_automation_observation_producer,

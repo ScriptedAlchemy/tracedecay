@@ -222,8 +222,7 @@ pub fn derive_project_memory_fact_curation_child_operation_id(
         operation_index,
         kind.as_str(),
     ))?;
-    ProvenanceId::new(format!("memory-curation-child.{digest}"))
-        .map_err(|error| FactStoreError::Contract(error))
+    ProvenanceId::new(format!("memory-curation-child.{digest}")).map_err(FactStoreError::Contract)
 }
 
 impl ProjectMemoryFactCurationOperationV1 {

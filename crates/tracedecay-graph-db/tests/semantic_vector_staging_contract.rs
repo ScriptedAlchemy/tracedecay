@@ -941,6 +941,7 @@ fn ready_and_published_cancel_preserve_heads_and_historical_snapshot_bytes() {
     drop(first_commit);
     drop(second_commit);
     assert!(fixture.graph.close().unwrap());
+    fixture.graph.mount().unwrap();
 
     let mut restarted_authority = fixture.authority();
     with_context("preserve-first.lookup-after-restart", |context| {
