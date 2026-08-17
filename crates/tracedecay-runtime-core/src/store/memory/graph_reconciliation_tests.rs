@@ -1268,7 +1268,7 @@ async fn retired_lifecycle_refuses_new_reconciliation_work() {
 }
 
 #[tokio::test]
-async fn reconciliation_owner_uses_a_weak_bound_runtime_after_database_drop() {
+async fn reconciliation_owner_does_not_retain_the_weak_bound_runtime() {
     let (_directory, database) = database("weak-owner-runtime").await;
     let runtime = bind_runtime(&database);
     let runtime_weak = Arc::downgrade(&runtime);
@@ -1278,14 +1278,10 @@ async fn reconciliation_owner_uses_a_weak_bound_runtime_after_database_drop() {
 
     drop(runtime);
     assert!(
-        runtime_weak.upgrade().is_some(),
-        "the bound database owns its live graph runtime"
+        runtime_weak.upgrade().is_none(),
+        "neither the database nor its reconciliation owner may retain the bound graph runtime"
     );
     drop(database);
-    assert!(
-        runtime_weak.upgrade().is_none(),
-        "the reconciliation owner must not retain the bound graph runtime"
-    );
     assert_eq!(
         owner.cancel(),
         Err(MemoryGraphReconciliationCancelErrorV1::RuntimeUnavailable)
@@ -1310,7 +1306,7 @@ async fn retirement_reservation_reports_a_distinct_schedule_outcome_and_drops_cl
     drop(reservation);
 
     assert_eq!(
-        super::schedule_project_memory_graph_reconciliation(database),
+        super::schedule_project_memory_graph_reconciliation(database.clone()),
         ProjectMemoryGraphReconciliationScheduleV1::Scheduled
     );
     wait_for_reconciliation(&runtime).await;

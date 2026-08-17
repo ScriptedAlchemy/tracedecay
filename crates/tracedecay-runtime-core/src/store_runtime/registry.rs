@@ -203,21 +203,18 @@ struct StoreRuntimeLeaseSource {
     next_database_attachment_reservation_id: AtomicU64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DatabaseAttachmentState {
     Active {
         client_token: u64,
+        client_lifetime: super::shard::ShardRuntimeClientLifetimeWeakLease,
     },
     OwnerReserved {
         client_token: u64,
+        client_lifetime: super::shard::ShardRuntimeClientLifetimeWeakLease,
         owner_id: DatabaseRuntimeOwnerIdentityV1,
         reservation_id: DatabaseRuntimeAttachmentReservationIdV1,
     },
-    Committed {
-        client_token: u64,
-        owner_id: DatabaseRuntimeOwnerIdentityV1,
-        reservation_id: DatabaseRuntimeAttachmentReservationIdV1,
-    },
+    Committed,
 }
 
 impl StoreRuntimeLeaseSource {
@@ -298,6 +295,7 @@ impl StoreRuntimeLeaseSource {
     fn register_database_attachment(
         &self,
         client_token: u64,
+        client_lifetime: super::shard::ShardRuntimeClientLifetimeWeakLease,
     ) -> Result<DatabaseRuntimeAttachmentIdV1, StoreRuntimeRegistryFailure> {
         let id = DatabaseRuntimeAttachmentIdV1(allocate_database_attachment_counter(
             &self.next_database_attachment_id,
@@ -306,7 +304,13 @@ impl StoreRuntimeLeaseSource {
             .database_attachments
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id, DatabaseAttachmentState::Active { client_token });
+            .insert(
+                id,
+                DatabaseAttachmentState::Active {
+                    client_token,
+                    client_lifetime,
+                },
+            );
         if previous.is_some() {
             return Err(StoreRuntimeRegistryFailure::DatabaseAttachmentIdentityConflict);
         }
@@ -340,16 +344,20 @@ impl StoreRuntimeLeaseSource {
             });
         };
         match state {
-            DatabaseAttachmentState::Active { client_token } => {
+            DatabaseAttachmentState::Active {
+                client_token,
+                client_lifetime,
+            } => {
                 let client_token = *client_token;
+                let client_lifetime = client_lifetime.clone();
                 *state = DatabaseAttachmentState::OwnerReserved {
                     client_token,
+                    client_lifetime,
                     owner_id,
                     reservation_id,
                 };
             }
-            DatabaseAttachmentState::OwnerReserved { .. }
-            | DatabaseAttachmentState::Committed { .. } => {
+            DatabaseAttachmentState::OwnerReserved { .. } | DatabaseAttachmentState::Committed => {
                 return Err(
                     StoreRuntimeRegistryFailure::DatabaseAttachmentAlreadyReserved {
                         attachment_id: attachment_id.0,
@@ -393,6 +401,7 @@ impl StoreRuntimeLeaseSource {
         };
         if let DatabaseAttachmentState::OwnerReserved {
             client_token,
+            client_lifetime,
             owner_id,
             reservation_id,
         } = state
@@ -400,7 +409,11 @@ impl StoreRuntimeLeaseSource {
             && *reservation_id == reservation.reservation_id
         {
             let client_token = *client_token;
-            *state = DatabaseAttachmentState::Active { client_token };
+            let client_lifetime = client_lifetime.clone();
+            *state = DatabaseAttachmentState::Active {
+                client_token,
+                client_lifetime,
+            };
             return match attachments.get(&reservation.attachment_id) {
                 Some(DatabaseAttachmentState::Active { .. }) => Ok(()),
                 _ => Err(
@@ -432,27 +445,36 @@ impl StoreRuntimeLeaseSource {
                 },
             );
         };
-        match state {
+        let client_lifetime = match state {
             DatabaseAttachmentState::OwnerReserved {
-                client_token,
+                client_token: _,
+                client_lifetime,
                 owner_id,
                 reservation_id,
             } if *owner_id == reservation.owner_id
                 && *reservation_id == reservation.reservation_id =>
             {
-                let client_token = *client_token;
-                *state = DatabaseAttachmentState::Committed {
-                    client_token,
-                    owner_id: reservation.owner_id,
-                    reservation_id: reservation.reservation_id,
-                };
-                Ok(())
+                let client_lifetime = client_lifetime.clone();
+                *state = DatabaseAttachmentState::Committed;
+                client_lifetime
             }
-            _ => Err(
+            _ => {
+                return Err(
+                    StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost {
+                        attachment_id: reservation.attachment_id.0,
+                    },
+                );
+            }
+        };
+        drop(attachments);
+        if client_lifetime.release() {
+            Ok(())
+        } else {
+            Err(
                 StoreRuntimeRegistryFailure::DatabaseAttachmentReservationLost {
                     attachment_id: reservation.attachment_id.0,
                 },
-            ),
+            )
         }
     }
 
@@ -472,6 +494,7 @@ impl StoreRuntimeLeaseSource {
                 client_token: _,
                 owner_id,
                 reservation_id,
+                ..
             }) if *owner_id == reservation.owner_id
                 && *reservation_id == reservation.reservation_id =>
             {
@@ -517,10 +540,12 @@ impl StoreRuntimeLeaseSource {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .map(|(_, state)| match state {
-                DatabaseAttachmentState::Active { client_token }
-                | DatabaseAttachmentState::OwnerReserved { client_token, .. }
-                | DatabaseAttachmentState::Committed { client_token, .. } => *client_token,
+            .filter_map(|(_, state)| match state {
+                DatabaseAttachmentState::Active { client_token, .. }
+                | DatabaseAttachmentState::OwnerReserved { client_token, .. } => {
+                    Some(*client_token)
+                }
+                DatabaseAttachmentState::Committed => None,
             })
             .collect::<BTreeSet<_>>();
         client_tokens
@@ -581,6 +606,7 @@ impl DatabaseRuntimeOwnerAttachmentReservationIdentityV1 {
         };
         if let DatabaseAttachmentState::OwnerReserved {
             client_token,
+            client_lifetime,
             owner_id,
             reservation_id,
         } = state
@@ -588,7 +614,11 @@ impl DatabaseRuntimeOwnerAttachmentReservationIdentityV1 {
             && *reservation_id == self.reservation_id
         {
             let client_token = *client_token;
-            *state = DatabaseAttachmentState::Active { client_token };
+            let client_lifetime = client_lifetime.clone();
+            *state = DatabaseAttachmentState::Active {
+                client_token,
+                client_lifetime,
+            };
         }
     }
 }
@@ -653,9 +683,10 @@ impl StoreRuntimeClientLease {
     pub(crate) fn into_database_attachment(
         self,
     ) -> Result<DatabaseRuntimeAttachment, StoreRuntimeRegistryFailure> {
-        let id = self
-            .inner
-            .register_database_attachment(self.inner._lifetime.token())?;
+        let id = self.inner.register_database_attachment(
+            self.inner._lifetime.token(),
+            self.inner._lifetime.downgrade(),
+        )?;
         Ok(DatabaseRuntimeAttachment { client: self, id })
     }
 }

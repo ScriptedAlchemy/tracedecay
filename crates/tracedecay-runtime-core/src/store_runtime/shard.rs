@@ -5,6 +5,7 @@
 //! lifecycle and writer-presence guard.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -490,6 +491,7 @@ impl ShardRuntime {
                 runtime,
                 token,
                 resource: ShardRuntimeResource::Client,
+                active: AtomicBool::new(true),
             }),
         })
     }
@@ -503,6 +505,7 @@ impl ShardRuntime {
                 runtime,
                 token,
                 resource: ShardRuntimeResource::Operation,
+                active: AtomicBool::new(true),
             }),
         })
     }
@@ -857,12 +860,23 @@ struct ShardRuntimeLifetimeLeaseToken {
     runtime: std::sync::Arc<ShardRuntime>,
     token: u64,
     resource: ShardRuntimeResource,
+    active: AtomicBool,
+}
+
+impl ShardRuntimeLifetimeLeaseToken {
+    fn release(&self) -> bool {
+        if !self.active.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        self.runtime
+            .release_lifetime_lease(self.resource, self.token);
+        true
+    }
 }
 
 impl Drop for ShardRuntimeLifetimeLeaseToken {
     fn drop(&mut self) {
-        self.runtime
-            .release_lifetime_lease(self.resource, self.token);
+        self.release();
     }
 }
 
@@ -881,6 +895,25 @@ impl ShardRuntimeClientLifetimeLease {
         &self,
     ) -> Result<ShardRuntimeOperationLifetimeLease, ShardRuntimeError> {
         ShardRuntime::issue_operation_lifetime_lease(std::sync::Arc::clone(&self.inner.runtime))
+    }
+
+    pub(super) fn downgrade(&self) -> ShardRuntimeClientLifetimeWeakLease {
+        ShardRuntimeClientLifetimeWeakLease {
+            inner: std::sync::Arc::downgrade(&self.inner),
+        }
+    }
+}
+
+/// Non-retaining authority to release one exact client token when its
+/// database-owner attachment crosses the irreversible retirement fence.
+#[derive(Clone)]
+pub(super) struct ShardRuntimeClientLifetimeWeakLease {
+    inner: std::sync::Weak<ShardRuntimeLifetimeLeaseToken>,
+}
+
+impl ShardRuntimeClientLifetimeWeakLease {
+    pub(super) fn release(&self) -> bool {
+        self.inner.upgrade().is_some_and(|inner| inner.release())
     }
 }
 

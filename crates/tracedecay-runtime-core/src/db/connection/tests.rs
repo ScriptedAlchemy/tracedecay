@@ -78,6 +78,7 @@ macro_rules! assert_retained_purpose_adapter_blocks_one_client {
                 ..
             }
         )));
+        drop(refusal);
 
         drop(adapter_clone);
         drop($adapter);
@@ -749,12 +750,12 @@ async fn retained_database_guard_keeps_authority_alive_for_query_connection() {
     ));
     raw.query("SELECT 1", ()).await.unwrap();
 
+    drop(raw);
     drop(guard);
     assert_eq!(
         crate::db::probe_writer_owner(&path).unwrap(),
         crate::db::WriterOwnership::Idle
     );
-    drop(raw);
 }
 
 #[tokio::test]
@@ -1033,6 +1034,7 @@ async fn owner_issued_database_clones_share_one_external_client_blocker() {
             ..
         }
     )));
+    drop(refusal);
     drop(issued_clone);
     drop(issued);
     assert!(owner.issue_lease().is_ok());
@@ -1079,6 +1081,7 @@ async fn derived_connection_snapshot_and_telemetry_retain_the_one_client_blocker
             ..
         }
     )));
+    drop(refusal);
 
     drop(engine);
     drop(background);
@@ -1158,6 +1161,7 @@ async fn independently_issued_runtime_clients_are_separate_retirement_blockers()
             ..
         }
     )));
+    drop(refusal);
 
     drop(first_runtime);
     drop(second_runtime);
@@ -1229,7 +1233,7 @@ async fn authorized_scope_set_storage_retains_one_issuing_client_until_all_clone
 }
 
 #[tokio::test]
-async fn handoff_open_storage_is_mounted_before_factory_and_retains_one_client() {
+async fn handoff_open_storage_validates_mounted_schema_and_retains_one_client() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("registered.db");
     let authority = DatabaseAuthority::acquire_test(&path, "handoff storage guard").unwrap();
@@ -1245,6 +1249,13 @@ async fn handoff_open_storage_is_mounted_before_factory_and_retains_one_client()
     drop(runtime);
 
     let database = owner.issue_lease().unwrap();
+    database
+        .execute_write_batch(
+            "install handoff-open purpose test schema",
+            tracedecay_rusqlite_runtime::handoff::HANDOFF_OPEN_SCHEMA_V1,
+        )
+        .await
+        .unwrap();
     let mut rows = database
         .read_connection()
         .query(
@@ -1326,6 +1337,7 @@ async fn graph_publication_storage_retains_the_issuing_client_token() {
             ..
         }
     )));
+    drop(refusal);
 
     drop(storage);
     assert!(owner.issue_lease().is_ok());
@@ -1370,6 +1382,7 @@ async fn semantic_vector_staging_retains_the_issuing_client_token() {
             ..
         }
     )));
+    drop(refusal);
 
     drop(storage);
     assert!(owner.issue_lease().is_ok());
@@ -1920,6 +1933,7 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
             ..
         }
     )));
+    drop(refusal);
 
     drop(operation);
     drop(external_clone);
@@ -1934,10 +1948,14 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
         panic!("releasing external client tokens must permit exact retirement");
     };
     let commit = reservation.commit().unwrap();
-    assert!(matches!(
-        commit.outcomes(),
-        [crate::store_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }]
-    ));
+    assert!(
+        matches!(
+            commit.outcomes(),
+            [crate::store_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }]
+        ),
+        "unexpected retirement outcomes: {:?}",
+        commit.outcomes()
+    );
     assert!(matches!(
         owner.issue_lease(),
         Err(DatabaseOwnerErrorV1::RetirementTerminal)

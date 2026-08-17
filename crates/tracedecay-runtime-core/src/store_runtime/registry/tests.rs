@@ -292,7 +292,9 @@ async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
     ));
     assert!(matches!(
         registry.lookup(&leased_binding),
-        StoreRuntimeLookup::Ready(handle) if handle.health_snapshot().client_leases == 1
+        // The lookup itself is one client token and the explicit registry
+        // lease is the second retirement-visible lifetime.
+        StoreRuntimeLookup::Ready(handle) if handle.health_snapshot().client_leases == 2
     ));
 
     let held_binding = held.binding().clone();
