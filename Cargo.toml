@@ -94,7 +94,6 @@ include = [
     "/tests/fixtures/transcript_golden/cline_like/**",
     "/benchmarks/queries/default.toml",
     "/benchmarks/claude-observation/**",
-    "/benchmarks/pr7-memory/**",
     "/benchmarks/session-temporal/**",
     "/benchmarks/query-code-index/**",
     "/benchmarks/search-quality/query-fallback-report-v1.json",
