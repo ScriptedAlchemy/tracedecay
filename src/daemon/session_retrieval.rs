@@ -3,7 +3,6 @@
 //! describe/expand execution, and result filtering for application-admitted
 //! retrieval.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -28,10 +27,13 @@ use tracedecay_usecases::session::{
 };
 
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
-use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use crate::global_db::session_temporal::{
+    RegisteredGlobalDbSessionTemporalExecution, SessionPageReconstruction,
+    SessionPageReconstructionRequest,
+};
 use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use crate::tracedecay::TraceDecay;
-use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionRecord};
+use tracedecay_sessions::runtime::SessionMessageSearchResult;
 use tracedecay_temporal_query::context::{TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::ports::{ExecutionLimits, TemporalExecutionSnapshot};
 use tracedecay_temporal_query::ranking::RankedCandidate;
@@ -479,8 +481,10 @@ impl DaemonSessionRetrievalService {
     ) -> SessionRetrievalServiceOutcome {
         match outcome {
             SessionRetrievalOutcome::Complete { items, freshness } => {
-                let (page, skipped, _) = self.page(items).await;
-                complete_page_outcome(page, freshness, skipped)
+                match self.page(items).await {
+                    Ok((page, skipped, _)) => complete_page_outcome(page, freshness, skipped),
+                    Err(error) => self.rendering_error(error),
+                }
             }
             SessionRetrievalOutcome::CompleteZero { freshness } => {
                 SessionRetrievalServiceOutcome::CompleteZero {
@@ -496,14 +500,14 @@ impl DaemonSessionRetrievalService {
                 items,
                 freshness,
                 omitted,
-            } => {
-                let (page, _, rendering_omitted) = self.page(items).await;
-                SessionRetrievalServiceOutcome::Partial {
+            } => match self.page(items).await {
+                Ok((page, _, rendering_omitted)) => SessionRetrievalServiceOutcome::Partial {
                     page,
                     freshness,
                     omitted: omitted.saturating_add(rendering_omitted),
-                }
-            }
+                },
+                Err(error) => self.rendering_error(error),
+            },
             SessionRetrievalOutcome::WrongScope => SessionRetrievalServiceOutcome::WrongScope,
             SessionRetrievalOutcome::Locked => SessionRetrievalServiceOutcome::Locked,
             SessionRetrievalOutcome::Redacted => SessionRetrievalServiceOutcome::Redacted,
@@ -542,7 +546,52 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    async fn page(&self, items: Vec<TemporalKernelResult>) -> (SessionRetrievalPageView, u64, u64) {
+    fn rendering_error(
+        &self,
+        error: SessionTemporalExecutionError,
+    ) -> SessionRetrievalServiceOutcome {
+        match error {
+            SessionTemporalExecutionError::WrongScope => SessionRetrievalServiceOutcome::WrongScope,
+            SessionTemporalExecutionError::Locked => SessionRetrievalServiceOutcome::Locked,
+            SessionTemporalExecutionError::Redacted => SessionRetrievalServiceOutcome::Redacted,
+            SessionTemporalExecutionError::Deleted => SessionRetrievalServiceOutcome::Deleted,
+            SessionTemporalExecutionError::Denied => SessionRetrievalServiceOutcome::Denied,
+            SessionTemporalExecutionError::ResetRequired => {
+                SessionRetrievalServiceOutcome::ResetRequired {
+                    store_scope: self.root.store_scope,
+                }
+            }
+            SessionTemporalExecutionError::BudgetExhausted => {
+                SessionRetrievalServiceOutcome::BudgetExhausted
+            }
+            SessionTemporalExecutionError::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
+            SessionTemporalExecutionError::Stale { generation_lag } => {
+                SessionRetrievalServiceOutcome::Stale {
+                    temporal: self.empty_temporal(),
+                    freshness: SessionDataFreshness::Stored { generation_lag },
+                }
+            }
+            SessionTemporalExecutionError::Empty { freshness } => {
+                SessionRetrievalServiceOutcome::CompleteZero {
+                    temporal: self.empty_temporal(),
+                    freshness,
+                }
+            }
+            SessionTemporalExecutionError::Unavailable
+            | SessionTemporalExecutionError::Kernel(_) => {
+                SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(
+                        SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+                    ),
+                )
+            }
+        }
+    }
+
+    async fn page(
+        &self,
+        items: Vec<TemporalKernelResult>,
+    ) -> Result<(SessionRetrievalPageView, u64, u64), SessionTemporalExecutionError> {
         let mut results = Vec::new();
         let mut anchors = Vec::new();
         let mut explanations = Vec::new();
@@ -553,8 +602,9 @@ impl DaemonSessionRetrievalService {
         let mut cursor = None;
         let mut skipped = 0u64;
         let mut rendering_omitted = 0u64;
-        let mut sessions = PageSessionCache::default();
-        for item in items {
+        let mut batch = SessionPageReconstructionInputs::default();
+        let mut queued_reconstruction = Vec::with_capacity(items.len());
+        for item in &items {
             let item_watermarks = item.snapshot.watermarks();
             watermarks.generation = watermarks.generation.max(item_watermarks.generation);
             watermarks.source = watermarks.source.max(item_watermarks.source);
@@ -571,6 +621,25 @@ impl DaemonSessionRetrievalService {
             if item.next_cursor.is_some() {
                 cursor = item.next_cursor.clone();
             }
+            let mut queued = Vec::with_capacity(item.ranked.len());
+            for (rank, ranked) in item.ranked.iter().enumerate() {
+                let queued_for_batch = page_hydration_slot(rank, ranked, &item.hydrated)
+                    .ok()
+                    .is_some_and(|hydrated| batch.push(&item.snapshot, ranked, hydrated));
+                queued.push(queued_for_batch);
+            }
+            queued_reconstruction.push(queued);
+        }
+        let reconstructed = if batch.is_empty() {
+            Vec::new()
+        } else {
+            let execution = self.registered_execution()?;
+            execution
+                .reconstruct_session_page(batch.into_requests())
+                .await?
+        };
+        let mut reconstructed = reconstructed.into_iter();
+        for (item, queued) in items.iter().zip(queued_reconstruction) {
             for (rank, ranked) in item.ranked.iter().enumerate() {
                 let hydrated = match page_hydration_slot(rank, ranked, &item.hydrated) {
                     Ok(hydrated) => hydrated,
@@ -580,19 +649,35 @@ impl DaemonSessionRetrievalService {
                         continue;
                     }
                 };
-                let Some(result) = self
-                    .hydrate_result(&item.snapshot, ranked, hydrated, &mut sessions)
-                    .await
-                else {
-                    skipped = skipped.saturating_add(1);
-                    rendering_omitted = rendering_omitted.saturating_add(1);
-                    coverage.unknown = coverage.unknown.saturating_add(1);
-                    omissions.push(SessionRetrievalOmissionView {
-                        rank: hydrated.rank(),
-                        anchor: ranked.anchor_id.clone(),
-                        reason: HydrationStateV1::RetainedButUnavailable,
-                    });
-                    continue;
+                let reconstruction = if queued.get(rank).copied().unwrap_or(false) {
+                    Some(
+                        reconstructed
+                            .next()
+                            .ok_or(SessionTemporalExecutionError::Unavailable)?,
+                    )
+                } else {
+                    None
+                };
+                let rendering = if ranked.evidence_role.as_deref() == Some("summary") {
+                    self.hydrate_summary_result(ranked, hydrated, reconstruction)?
+                } else if let Some(reconstruction) = reconstruction {
+                    self.hydrate_non_summary_result(ranked, reconstruction)?
+                } else {
+                    PageRenderingResult::Omitted(HydrationStateV1::RetainedButUnavailable)
+                };
+                let result = match rendering {
+                    PageRenderingResult::Rendered(result) => result,
+                    PageRenderingResult::Omitted(reason) => {
+                        skipped = skipped.saturating_add(1);
+                        rendering_omitted = rendering_omitted.saturating_add(1);
+                        coverage.unknown = coverage.unknown.saturating_add(1);
+                        omissions.push(SessionRetrievalOmissionView {
+                            rank: hydrated.rank(),
+                            anchor: ranked.anchor_id.clone(),
+                            reason,
+                        });
+                        continue;
+                    }
                 };
                 anchors.push(ranked.anchor_id.clone());
                 explanations.push(SessionRetrievalExplanationView {
@@ -605,9 +690,12 @@ impl DaemonSessionRetrievalService {
                 results.push(result);
             }
         }
+        if reconstructed.next().is_some() {
+            return Err(SessionTemporalExecutionError::Unavailable);
+        }
         source_coverage.sort_by(|left, right| left.source_id().cmp(right.source_id()));
         source_coverage.dedup_by(|left, right| left.source_id() == right.source_id());
-        (
+        Ok((
             SessionRetrievalPageView {
                 results,
                 temporal: SessionTemporalMetadataView {
@@ -623,98 +711,170 @@ impl DaemonSessionRetrievalService {
             },
             skipped,
             rendering_omitted,
-        )
+        ))
     }
 
-    async fn hydrate_result(
+    fn hydrate_summary_result(
         &self,
-        snapshot: &TemporalExecutionSnapshot,
         ranked: &tracedecay_temporal_query::ranking::RankedCandidate,
         hydrated: &TemporalHydratedResult,
-        sessions: &mut PageSessionCache,
-    ) -> Option<SessionMessageSearchResult> {
-        let content = hydrated.content()?;
-        let authorized_project_key = snapshot.request().authorized_root()?.project_key();
-        if ranked.evidence_role.as_deref() == Some("summary") {
-            let provider = ranked.source.as_deref()?;
-            let session_id = ranked.session.as_deref()?;
-            let summary_id = ranked
-                .contributions
-                .iter()
-                .find(|contribution| {
-                    contribution.channel
-                        == tracedecay_temporal_query::candidates::CandidateChannel::Summary
-                })?
-                .retriever_record_id
-                .clone();
-            let text = std::str::from_utf8(content).ok()?.to_string();
-            let session = sessions
-                .resolve(
-                    self.database.as_ref(),
-                    authorized_project_key,
-                    provider,
-                    session_id,
-                )
-                .await?;
-            return Some(SessionMessageSearchResult {
-                session,
-                message: tracedecay_sessions::runtime::SessionMessageRecord {
-                    provider: provider.to_string(),
-                    message_id: summary_id,
-                    session_id: session_id.to_string(),
-                    role: "summary".to_string(),
-                    timestamp: Some(ranked.knowledge_at_micros),
-                    ordinal: 0,
-                    text,
-                    kind: Some("summary".to_string()),
-                    model: None,
-                    tool_names: None,
-                    source_path: None,
-                    source_offset: None,
-                    metadata_json: Some(
-                        json!({
-                            "retrieval_anchor_id": ranked.anchor_id,
-                            "retrieval_kind": "summary_node",
-                        })
-                        .to_string(),
-                    ),
-                },
-                score: ranked.normalized_score_micros as f64 / 1_000_000.0,
-            });
-        }
-        let provider = ranked.source.as_deref()?;
-        let session_id = ranked.session.as_deref()?;
-        let message = self
-            .registered_execution()
-            .ok()?
-            .session_message_from_hydrated_occurrence(
+        reconstruction: Option<Result<SessionPageReconstruction, SessionTemporalExecutionError>>,
+    ) -> Result<PageRenderingResult, SessionTemporalExecutionError> {
+        let Some(content) = hydrated.content() else {
+            return Ok(PageRenderingResult::Omitted(
+                HydrationStateV1::RetainedButUnavailable,
+            ));
+        };
+        let Some(reconstruction) = reconstruction else {
+            return Ok(PageRenderingResult::Omitted(
+                HydrationStateV1::RetainedButUnavailable,
+            ));
+        };
+        let reconstruction = match reconstruction_or_omission(reconstruction)? {
+            Ok(reconstruction) => reconstruction,
+            Err(reason) => return Ok(PageRenderingResult::Omitted(reason)),
+        };
+        let SessionPageReconstruction::Summary { session } = reconstruction else {
+            return Err(SessionTemporalExecutionError::Unavailable);
+        };
+        let Some(summary_id) = ranked
+            .contributions
+            .iter()
+            .find(|contribution| {
+                contribution.channel
+                    == tracedecay_temporal_query::candidates::CandidateChannel::Summary
+            })
+            .map(|contribution| contribution.retriever_record_id.clone())
+        else {
+            return Ok(PageRenderingResult::Omitted(
+                HydrationStateV1::RetainedButUnavailable,
+            ));
+        };
+        let Ok(text) = std::str::from_utf8(content).map(str::to_owned) else {
+            return Ok(PageRenderingResult::Omitted(
+                HydrationStateV1::RetainedButUnavailable,
+            ));
+        };
+        let Some(provider) = ranked.source.clone() else {
+            return Ok(PageRenderingResult::Omitted(
+                HydrationStateV1::RetainedButUnavailable,
+            ));
+        };
+        let Some(session_id) = ranked.session.clone() else {
+            return Ok(PageRenderingResult::Omitted(
+                HydrationStateV1::RetainedButUnavailable,
+            ));
+        };
+        Ok(PageRenderingResult::Rendered(SessionMessageSearchResult {
+            session,
+            message: tracedecay_sessions::runtime::SessionMessageRecord {
+                provider,
+                message_id: summary_id,
+                session_id,
+                role: "summary".to_string(),
+                timestamp: Some(ranked.knowledge_at_micros),
+                ordinal: 0,
+                text,
+                kind: Some("summary".to_string()),
+                model: None,
+                tool_names: None,
+                source_path: None,
+                source_offset: None,
+                metadata_json: Some(
+                    json!({
+                        "retrieval_anchor_id": ranked.anchor_id,
+                        "retrieval_kind": "summary_node",
+                    })
+                    .to_string(),
+                ),
+            },
+            score: ranked.normalized_score_micros as f64 / 1_000_000.0,
+        }))
+    }
+
+    fn hydrate_non_summary_result(
+        &self,
+        ranked: &tracedecay_temporal_query::ranking::RankedCandidate,
+        reconstruction: Result<SessionPageReconstruction, SessionTemporalExecutionError>,
+    ) -> Result<PageRenderingResult, SessionTemporalExecutionError> {
+        let reconstruction = match reconstruction_or_omission(reconstruction)? {
+            Ok(reconstruction) => reconstruction,
+            Err(reason) => return Ok(PageRenderingResult::Omitted(reason)),
+        };
+        let SessionPageReconstruction::Occurrence { session, message } = reconstruction else {
+            return Err(SessionTemporalExecutionError::Unavailable);
+        };
+        Ok(PageRenderingResult::Rendered(SessionMessageSearchResult {
+            session,
+            message,
+            score: ranked.normalized_score_micros as f64 / 1_000_000.0,
+        }))
+    }
+}
+
+enum PageRenderingResult {
+    Rendered(SessionMessageSearchResult),
+    Omitted(HydrationStateV1),
+}
+
+#[derive(Default)]
+struct SessionPageReconstructionInputs<'a> {
+    requests: Vec<SessionPageReconstructionRequest<'a>>,
+}
+
+impl<'a> SessionPageReconstructionInputs<'a> {
+    fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+
+    fn push(
+        &mut self,
+        snapshot: &'a TemporalExecutionSnapshot,
+        ranked: &'a RankedCandidate,
+        hydrated: &'a TemporalHydratedResult,
+    ) -> bool {
+        let Some(content) = hydrated.content() else {
+            return false;
+        };
+        let Some(provider) = ranked.source.as_deref() else {
+            return false;
+        };
+        let Some(session_id) = ranked.session.as_deref() else {
+            return false;
+        };
+        let request = if ranked.evidence_role.as_deref() == Some("summary") {
+            SessionPageReconstructionRequest::summary(snapshot, provider, session_id)
+        } else {
+            SessionPageReconstructionRequest::occurrence(
                 snapshot,
                 &ranked.anchor_id,
                 provider,
                 session_id,
                 content,
             )
-            .await
-            .ok()?;
-        let session = sessions
-            .resolve(
-                self.database.as_ref(),
-                authorized_project_key,
-                provider,
-                session_id,
-            )
-            .await?;
-        if message.provider != provider
-            || message.session_id != session_id
-            || session.project_key != authorized_project_key
-        {
-            return None;
+        };
+        self.requests.push(request);
+        true
+    }
+
+    fn into_requests(self) -> Vec<SessionPageReconstructionRequest<'a>> {
+        self.requests
+    }
+}
+
+fn reconstruction_or_omission(
+    reconstruction: Result<SessionPageReconstruction, SessionTemporalExecutionError>,
+) -> Result<Result<SessionPageReconstruction, HydrationStateV1>, SessionTemporalExecutionError> {
+    match reconstruction {
+        Ok(reconstruction) => Ok(Ok(reconstruction)),
+        Err(SessionTemporalExecutionError::Unavailable) => {
+            Ok(Err(HydrationStateV1::RetainedButUnavailable))
         }
-        Some(SessionMessageSearchResult {
-            session,
-            message,
-            score: ranked.normalized_score_micros as f64 / 1_000_000.0,
-        })
+        Err(SessionTemporalExecutionError::Locked) => Ok(Err(HydrationStateV1::Locked)),
+        Err(SessionTemporalExecutionError::Redacted) => Ok(Err(HydrationStateV1::Redacted)),
+        Err(SessionTemporalExecutionError::Deleted) => Ok(Err(HydrationStateV1::Deleted)),
+        Err(SessionTemporalExecutionError::Denied) => Ok(Err(HydrationStateV1::Unauthorized)),
+        Err(error) => Err(error),
     }
 }
 
@@ -801,77 +961,6 @@ fn page_hydration_slot<'a>(
         });
     }
     Ok(hydrated)
-}
-
-/// Session records already read while rendering the current page.
-///
-/// One page routinely ranks many results out of the same session, and every
-/// unique lookup costs its own read snapshot, so the record is read once per
-/// distinct authorized identity instead of once per rendered result. A lookup
-/// that finds nothing is remembered too: repeating it cannot turn an absent
-/// session into a present one, and re-reading would only let one page render
-/// the same session inconsistently.
-#[derive(Default)]
-struct PageSessionCache {
-    sessions: HashMap<(String, String, String), Option<SessionRecord>>,
-}
-
-impl PageSessionCache {
-    async fn resolve(
-        &mut self,
-        database: &RegisteredGlobalDb,
-        project_key: &str,
-        provider: &str,
-        session_id: &str,
-    ) -> Option<SessionRecord> {
-        let key = (
-            project_key.to_string(),
-            provider.to_string(),
-            session_id.to_string(),
-        );
-        if let Some(cached) = self.sessions.get(&key) {
-            return cached.clone();
-        }
-        let session = registered_session(database, project_key, provider, session_id).await;
-        self.sessions.insert(key, session.clone());
-        session
-    }
-}
-
-async fn registered_session(
-    database: &RegisteredGlobalDb,
-    project_key: &str,
-    provider: &str,
-    session_id: &str,
-) -> Option<SessionRecord> {
-    let snapshot = database.read_snapshot().await.ok()?;
-    let mut rows = snapshot
-        .query(
-            "SELECT provider, session_id, project_key, project_path, title, started_at,
-                    ended_at, transcript_path, metadata_json, parent_session_id,
-                    is_subagent, agent_id, parent_tool_use_id
-             FROM sessions
-             WHERE project_key = ?1 AND provider = ?2 AND session_id = ?3",
-            crate::db::engine::params![project_key, provider, session_id],
-        )
-        .await
-        .ok()?;
-    let row = rows.next().await.ok()??;
-    Some(SessionRecord {
-        provider: row.get(0).ok()?,
-        session_id: row.get(1).ok()?,
-        project_key: row.get(2).ok()?,
-        project_path: row.get(3).ok()?,
-        title: row.get(4).ok(),
-        started_at: row.get(5).ok(),
-        ended_at: row.get(6).ok(),
-        transcript_path: row.get(7).ok(),
-        metadata_json: row.get(8).ok(),
-        parent_session_id: row.get(9).ok(),
-        is_subagent: row.get::<i64>(10).unwrap_or_default() != 0,
-        agent_id: row.get(11).ok(),
-        parent_tool_use_id: row.get(12).ok(),
-    })
 }
 
 #[cfg(test)]

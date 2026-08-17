@@ -4,13 +4,153 @@ pub struct SemanticModelLifecycleOwnerV1 {
     catalog: FastEmbedModelCatalogV1,
     source: Arc<dyn ModelMemberSourceV1>,
     artifact_store: ModelArtifactStore,
-    inner: Arc<Mutex<LifecycleInner>>,
+    inner: Arc<LifecyclePublicationGateV1>,
     worker: Mutex<AcquisitionWorkerStateV1>,
     acquisition: Arc<AcquisitionControlV1>,
     verified_ready: watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
 }
 struct LifecycleInner {
     durable: DurableLifecycleV1,
+    evaluation_publication_readers: usize,
+    evaluation_publication_writers_waiting: usize,
+}
+
+/// Exact lifecycle identity that a semantic evaluation may pin through its
+/// durable publication. The owner alone mints it from the lifecycle state and
+/// verified-ready event, preventing callers from constructing a lookalike.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticModelLifecyclePublicationIdentityV1 {
+    state: SemanticModelLifecycleStateV1,
+    verified_ready_epoch: u64,
+    verified_ready_artifact_digest: String,
+}
+
+impl SemanticModelLifecyclePublicationIdentityV1 {
+    pub fn state(&self) -> &SemanticModelLifecycleStateV1 {
+        &self.state
+    }
+}
+
+/// A Send-safe read lease over the canonical lifecycle state. Dropping the
+/// lease releases state-changing selection, install, and remediation work.
+pub struct SemanticModelLifecycleEvaluationPublicationLeaseV1 {
+    gate: Arc<LifecyclePublicationGateV1>,
+}
+
+impl Drop for SemanticModelLifecycleEvaluationPublicationLeaseV1 {
+    fn drop(&mut self) {
+        let mut guard = self.gate.read();
+        let Some(readers) = guard.evaluation_publication_readers.checked_sub(1) else {
+            return;
+        };
+        guard.evaluation_publication_readers = readers;
+        if guard.evaluation_publication_readers == 0 {
+            self.gate.readers_released.notify_all();
+        }
+    }
+}
+
+/// One lifecycle mutex also serves as the reader/writer publication gate. A
+/// lease owns only an `Arc`, never a thread-affine mutex guard, so it remains
+/// safe to carry through asynchronous daemon publication.
+struct LifecyclePublicationGateV1 {
+    inner: Mutex<LifecycleInner>,
+    readers_released: Condvar,
+}
+
+impl LifecyclePublicationGateV1 {
+    fn new(durable: DurableLifecycleV1) -> Self {
+        Self {
+            inner: Mutex::new(LifecycleInner {
+                durable,
+                evaluation_publication_readers: 0,
+                evaluation_publication_writers_waiting: 0,
+            }),
+            readers_released: Condvar::new(),
+        }
+    }
+
+    fn read(&self) -> MutexGuard<'_, LifecycleInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn writer(&self) -> LifecycleWriteGuardV1<'_> {
+        let mut guard = self.read();
+        guard.evaluation_publication_writers_waiting = guard
+            .evaluation_publication_writers_waiting
+            .saturating_add(1);
+        while guard.evaluation_publication_readers != 0 {
+            guard = self
+                .readers_released
+                .wait(guard)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        guard.evaluation_publication_writers_waiting = guard
+            .evaluation_publication_writers_waiting
+            .saturating_sub(1);
+        LifecycleWriteGuardV1 { guard }
+    }
+
+    fn try_acquire_reader(
+        self: &Arc<Self>,
+        expected: &SemanticModelLifecyclePublicationIdentityV1,
+        verified_ready: &watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
+    ) -> Result<SemanticModelLifecycleEvaluationPublicationLeaseV1, ModelLifecycleErrorV1> {
+        let mut guard = self.read();
+        if guard.evaluation_publication_writers_waiting != 0
+            || lifecycle_publication_identity(&guard, verified_ready)? != expected.clone()
+        {
+            return Err(ModelLifecycleErrorV1::Rejected);
+        }
+        guard.evaluation_publication_readers = guard
+            .evaluation_publication_readers
+            .checked_add(1)
+            .ok_or(ModelLifecycleErrorV1::Rejected)?;
+        Ok(SemanticModelLifecycleEvaluationPublicationLeaseV1 {
+            gate: Arc::clone(self),
+        })
+    }
+}
+
+struct LifecycleWriteGuardV1<'a> {
+    guard: MutexGuard<'a, LifecycleInner>,
+}
+
+impl std::ops::Deref for LifecycleWriteGuardV1<'_> {
+    type Target = LifecycleInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for LifecycleWriteGuardV1<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+fn lifecycle_publication_identity(
+    guard: &LifecycleInner,
+    verified_ready: &watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
+) -> Result<SemanticModelLifecyclePublicationIdentityV1, ModelLifecycleErrorV1> {
+    let state = guard
+        .durable
+        .state
+        .clone()
+        .ok_or(ModelLifecycleErrorV1::Rejected)?;
+    let ready = verified_ready.borrow().clone();
+    let artifact_digest = ready
+        .artifact_digest
+        .ok_or(ModelLifecycleErrorV1::Rejected)?;
+    if artifact_digest != state.artifact_digest() {
+        return Err(ModelLifecycleErrorV1::Rejected);
+    }
+    Ok(SemanticModelLifecyclePublicationIdentityV1 {
+        state,
+        verified_ready_epoch: ready.epoch,
+        verified_ready_artifact_digest: artifact_digest,
+    })
 }
 
 fn verified_ready_artifact_digest(state: &SemanticModelLifecycleStateV1) -> Option<String> {
@@ -27,11 +167,9 @@ fn verified_ready_artifact_digest(state: &SemanticModelLifecycleStateV1) -> Opti
 
 fn publish_verified_ready_event(
     events: &watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
-    inner: &Mutex<LifecycleInner>,
+    guard: &LifecycleInner,
 ) {
-    let artifact_digest = inner
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+    let artifact_digest = guard
         .durable
         .state
         .as_ref()
@@ -107,17 +245,12 @@ impl SemanticModelLifecycleOwnerV1 {
             catalog,
             source,
             artifact_store,
-            inner: Arc::new(Mutex::new(LifecycleInner { durable })),
+            inner: Arc::new(LifecyclePublicationGateV1::new(durable)),
             worker: Mutex::new(AcquisitionWorkerStateV1::default()),
             acquisition: Arc::new(AcquisitionControlV1::default()),
             verified_ready,
         };
-        let durable = owner
-            .inner
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .durable
-            .clone();
+        let durable = owner.inner.read().durable.clone();
         owner.reconcile_embedding_artifact_leases(&durable, current_unix_seconds()?)?;
         Ok(owner)
     }
@@ -136,6 +269,37 @@ impl SemanticModelLifecycleOwnerV1 {
 
     pub fn verified_ready_events(&self) -> watch::Receiver<SemanticLifecycleVerifiedReadyEventV1> {
         self.verified_ready.subscribe()
+    }
+
+    /// Mint the exact lifecycle identity that a semantic evaluation may retain
+    /// through its final configuration publication.
+    pub fn verified_evaluation_publication_identity(
+        &self,
+    ) -> Result<SemanticModelLifecyclePublicationIdentityV1, ModelLifecycleErrorV1> {
+        let guard = self.inner.read();
+        lifecycle_publication_identity(&guard, &self.verified_ready)
+    }
+
+    /// Acquire the canonical lifecycle read side after checking the same
+    /// identity that was observed for evaluation. State-changing lifecycle
+    /// operations take the matching writer side and therefore cannot pass this
+    /// point until the returned lease is dropped.
+    pub async fn acquire_verified_evaluation_publication_lease(
+        &self,
+        expected: &SemanticModelLifecyclePublicationIdentityV1,
+        cancellation: Arc<dyn crate::SemanticEvaluationCancellationV1>,
+    ) -> Result<SemanticModelLifecycleEvaluationPublicationLeaseV1, ModelLifecycleErrorV1> {
+        if crate::SemanticExecutionAuthority::interruption(cancellation.as_ref()).is_some() {
+            return Err(ModelLifecycleErrorV1::Cancelled);
+        }
+        let lease = self
+            .inner
+            .try_acquire_reader(expected, &self.verified_ready)?;
+        if crate::SemanticExecutionAuthority::interruption(cancellation.as_ref()).is_some() {
+            drop(lease);
+            return Err(ModelLifecycleErrorV1::Cancelled);
+        }
+        Ok(lease)
     }
 
     /// Re-admit the independently evaluated reranker selected by exact
@@ -337,7 +501,7 @@ impl SemanticModelLifecycleOwnerV1 {
         record: ArtifactInventoryRecordV1,
         now_unix: u64,
     ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.inner.writer();
         let prior_durable = guard.durable.clone();
         self.artifact_store.activate_artifact_with_rollback(
             &record.artifact_digest,
@@ -365,12 +529,13 @@ impl SemanticModelLifecycleOwnerV1 {
             self.reconcile_embedding_artifact_leases(&prior_durable, now_unix)?;
             return Err(error);
         }
+        publish_verified_ready_event(&self.verified_ready, &guard);
         drop(guard);
         Ok(self.status())
     }
 
     pub fn status(&self) -> SemanticModelLifecycleStatusV1 {
-        let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let guard = self.inner.read();
         let mut remediation = guard.durable.state.as_ref().map_or(
             SemanticModelRemediationV1 {
                 retry: false,
@@ -419,7 +584,7 @@ impl SemanticModelLifecycleOwnerV1 {
         let mut worker = self.worker.lock().unwrap_or_else(PoisonError::into_inner);
         self.cancel_background_acquisition();
         let _ = worker.reap_finished();
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.inner.writer();
         guard.durable.auto_download = auto_download;
         match selected {
             None => {
@@ -449,6 +614,7 @@ impl SemanticModelLifecycleOwnerV1 {
             }
         }
         persist_durable(&self.root, &guard.durable)?;
+        publish_verified_ready_event(&self.verified_ready, &guard);
         drop(guard);
         drop(worker);
         Ok(self.status())
@@ -459,7 +625,7 @@ impl SemanticModelLifecycleOwnerV1 {
         model: &CatalogedFastEmbedModelV1,
     ) -> Result<Option<SemanticModelLifecycleStateV1>, ModelLifecycleErrorV1> {
         let state = {
-            let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            let guard = self.inner.read();
             guard.durable.state.clone()
         };
         let (was_ready, artifact_digest) = match state {
@@ -571,10 +737,8 @@ impl SemanticModelLifecycleOwnerV1 {
             .state
             .as_ref()
             .and_then(verified_ready_artifact_digest)
-            .is_some()
+            .is_none()
         {
-            publish_verified_ready_event(&self.verified_ready, &self.inner);
-        } else {
             let _ = self.spawn_acquire(false, Some(&model_id));
         }
         Ok(self.status())
@@ -587,7 +751,7 @@ impl SemanticModelLifecycleOwnerV1 {
         }
         self.cancel_and_join_background_acquisition()?;
         {
-            let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut guard = self.inner.writer();
             let prior = guard.durable.clone();
             guard.durable.state = None;
             if let Err(error) = persist_durable(&self.root, &guard.durable) {
@@ -677,7 +841,7 @@ impl SemanticModelLifecycleOwnerV1 {
     pub fn rollback_to_previous(
         &self,
     ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.inner.writer();
         let previous = guard
             .durable
             .previous_ready
@@ -711,6 +875,7 @@ impl SemanticModelLifecycleOwnerV1 {
             self.reconcile_embedding_artifact_leases(&prior_durable, current_unix_seconds()?)?;
             return Err(error);
         }
+        publish_verified_ready_event(&self.verified_ready, &guard);
         drop(guard);
         Ok(self.status())
     }
@@ -731,7 +896,7 @@ impl SemanticModelLifecycleOwnerV1 {
         completed_units: u64,
         total_units: u64,
     ) -> Result<(), ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.inner.writer();
         let Some(state) = guard.durable.state.clone() else {
             return Err(ModelLifecycleErrorV1::Rejected);
         };
@@ -778,7 +943,7 @@ impl SemanticModelLifecycleOwnerV1 {
     }
 
     pub fn mark_ready(&self) -> Result<(), ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.inner.writer();
         let Some(state) = guard.durable.state.clone() else {
             return Err(ModelLifecycleErrorV1::Rejected);
         };
@@ -817,7 +982,9 @@ impl SemanticModelLifecycleOwnerV1 {
             guard.durable.previous_ready = Some(previous);
         }
         guard.durable.state = Some(ready);
-        persist_durable(&self.root, &guard.durable)
+        persist_durable(&self.root, &guard.durable)?;
+        publish_verified_ready_event(&self.verified_ready, &guard);
+        Ok(())
     }
 
     pub fn mark_runtime_failed(
@@ -825,7 +992,7 @@ impl SemanticModelLifecycleOwnerV1 {
         detail: impl Into<String>,
         retryable: bool,
     ) -> Result<(), ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.inner.writer();
         let Some(state) = guard.durable.state.clone() else {
             return Err(ModelLifecycleErrorV1::Rejected);
         };
@@ -870,7 +1037,7 @@ impl SemanticModelLifecycleOwnerV1 {
         &self,
         build: impl FnOnce(String, String, String, PathBuf) -> SemanticModelLifecycleStateV1,
     ) -> Result<(), ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.inner.writer();
         let Some(state) = guard.durable.state.clone() else {
             return Err(ModelLifecycleErrorV1::Rejected);
         };
@@ -919,7 +1086,7 @@ impl SemanticModelLifecycleOwnerV1 {
         let source = Arc::clone(&self.source);
         let inner = Arc::clone(&self.inner);
         let selected = {
-            let guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
+            let guard = inner.read();
             if require_auto_download && !guard.durable.auto_download {
                 return false;
             }
@@ -957,10 +1124,8 @@ impl SemanticModelLifecycleOwnerV1 {
                     &worker_model_id,
                     &epoch,
                     &worker_inner,
+                    &verified_ready,
                 );
-                if result.is_ok() {
-                    publish_verified_ready_event(&verified_ready, &worker_inner);
-                }
                 result
             });
         match handle {
@@ -998,6 +1163,7 @@ impl SemanticModelLifecycleOwnerV1 {
             &model_id,
             &epoch,
             &self.inner,
+            &self.verified_ready,
         )
     }
 }

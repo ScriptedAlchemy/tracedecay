@@ -168,7 +168,7 @@ async fn wait_for_project_server_request_drains(servers: &[Arc<crate::mcp::McpSe
     }
 }
 
-async fn retire_project_servers(
+pub(in crate::daemon) async fn retire_project_servers(
     servers: Vec<Arc<crate::mcp::McpServer>>,
     route_registered: Option<Arc<AtomicBool>>,
 ) {
@@ -220,10 +220,10 @@ pub(super) async fn schedule_project_server_retirement(
     servers: Vec<Arc<crate::mcp::McpServer>>,
     route_registered: Option<Arc<AtomicBool>>,
 ) {
-    let retirement = tokio::spawn(retire_project_servers(servers, route_registered));
-    store_administration
-        .track_project_server_retirement(owner, retirement)
+    let mut admission = store_administration
+        .acquire_project_server_retirement_admission()
         .await;
+    admission.spawn_and_track(owner, retire_project_servers(servers, route_registered));
 }
 
 /// Kick coalesced per-profile replay without awaiting a pass (handshake-safe).

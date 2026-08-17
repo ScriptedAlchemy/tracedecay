@@ -17,18 +17,17 @@ use serde_json::{Value, json};
 
 use super::journey_test_support::{git, tool_payload};
 use super::semantic_activation_journey_test::{
-    evaluate_native_profile, installed_selection_material, seed_distribution_fixture, selection,
-    semantic_candidate, set_semantic_profile, wait_for_semantic_generation,
+    assert_semantic_probe_contribution, evaluate_native_profile, installed_selection_material,
+    seed_distribution_fixture, selection, semantic_candidate, set_semantic_profile,
+    wait_for_semantic_generation,
 };
 use super::*;
 
 const PROBE_SYMBOL: &str = "semantic_availability_probe";
 const SESSION_ID: &str = "semantic-availability-journey-session";
 
-/// A retrieval mode "answered" when the transport carried a typed payload the
-/// caller can act on. A JSON-RPC error is the one outcome that means the mode
-/// was blocked rather than degraded.
-async fn answered(
+/// One tool call, decoded to the payload the transport actually carried.
+async fn called(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     tool: &str,
@@ -45,6 +44,43 @@ async fn answered(
     tool_payload(&response)
 }
 
+/// A retrieval mode "answered" when the transport carried a typed payload the
+/// caller can act on. A JSON-RPC error is the one outcome that means the mode
+/// was blocked rather than degraded.
+///
+/// A payload larger than the MCP response cap is carried as a preview plus a
+/// local response handle. That is reversible transport framing, not a
+/// degraded lane, so resolve it through the public retrieve tool before
+/// comparing a response.
+async fn answered(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    tool: &str,
+    arguments: Value,
+) -> Value {
+    let payload = called(harness, project, tool, arguments).await;
+    if payload["truncated"] != json!(true) {
+        return payload;
+    }
+    let handle = payload["handle"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{tool} truncated its answer without a handle: {payload}"))
+        .to_owned();
+    let retrieved = called(
+        harness,
+        project,
+        "tracedecay_retrieve",
+        json!({"handle": handle, "format": "json"}),
+    )
+    .await;
+    let content = retrieved["content"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{tool} response handle carried no content: {retrieved}"));
+    serde_json::from_str(content).unwrap_or_else(|error| {
+        panic!("{tool} response handle content is not JSON: {error}; content={content}")
+    })
+}
+
 async fn search(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
@@ -59,6 +95,20 @@ async fn search(
         arguments["semantic_mode"] = json!("strict_semantic");
     }
     answered(harness, project, "tracedecay_search", arguments).await
+}
+
+/// The tool-owned result inside a retained evidence envelope.
+///
+/// Ordinary session retrieval is a retained application tool, so it returns a
+/// versioned retained envelope rather than its bare payload. A problem
+/// envelope is a refusal and must not become a synthetic empty result.
+fn retained_payload(tool: &str, envelope: &Value) -> Value {
+    assert_eq!(
+        envelope["outcome"]["outcome"],
+        json!("evidence"),
+        "{tool} must answer with retained evidence, not a refusal: {envelope}"
+    );
+    envelope["outcome"]["value"]["payload"].clone()
 }
 
 /// The three generation-bound non-semantic lanes plus ordinary session
@@ -83,13 +133,16 @@ async fn non_semantic_answers(
         json!({"symbol": PROBE_SYMBOL, "format": "json"}),
     )
     .await;
-    let session = answered(
-        harness,
-        project,
+    let session = retained_payload(
         "tracedecay_message_search",
-        json!({"query": PROBE_SYMBOL, "limit": 5, "format": "json"}),
-    )
-    .await;
+        &answered(
+            harness,
+            project,
+            "tracedecay_message_search",
+            json!({"query": PROBE_SYMBOL, "limit": 5, "format": "json"}),
+        )
+        .await,
+    );
     json!({
         "lexical": {
             "results": lexical["results"],
@@ -106,22 +159,51 @@ async fn non_semantic_answers(
     })
 }
 
+/// Wait until the mount-woken historical transcript pass makes the seeded
+/// Claude transcript visible to ordinary session retrieval. The baseline is
+/// captured only after the non-semantic lane has actually answered.
+async fn wait_for_session_lane(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let answers = non_semantic_answers(harness, project).await;
+            if answers["session"]["count"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the seeded session transcript never reached ordinary session retrieval");
+}
+
+/// The runtime tool renders markdown unless JSON is requested explicitly.
 async fn semantic_runtime_state(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> Value {
-    answered(harness, project, "tracedecay_runtime", json!({})).await["semantic_runtime"].clone()
+    answered(
+        harness,
+        project,
+        "tracedecay_runtime",
+        json!({"format": "json"}),
+    )
+    .await["semantic_runtime"]
+        .clone()
 }
 
-/// Writes one real Claude transcript into the composition's own transcript
-/// source home so ordinary session retrieval has a genuine message to find.
-/// Without this the session lane would answer emptily and prove nothing.
+/// Writes one real Claude transcript into the harness-owned source home so
+/// ordinary session retrieval has a genuine message to find. The recorded
+/// cwd uses canonical project identity, which transcript ingestion matches.
 fn seed_session_transcript(isolation_root: &Path, project: &Path) {
     let home = ProductionProjectCompositionHarnessV1::transcript_source_home(isolation_root)
-        .expect("composition transcript source home");
+        .expect("composed transcript source home");
     let directory = home.join(".claude/projects/semantic-availability-journey");
     std::fs::create_dir_all(&directory).expect("session transcript directory");
-    let cwd = project.to_string_lossy();
+    let canonical_project = std::fs::canonicalize(project).expect("canonical journey project");
+    let cwd = canonical_project.to_string_lossy();
     let records = [
         json!({
             "type": "user",
@@ -315,6 +397,7 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         "a typed strict-semantic refusal must preserve the canonical core query bytes"
     );
 
+    wait_for_session_lane(&harness, &project).await;
     let answers_before = non_semantic_answers(&harness, &project).await;
     assert!(
         answers_before["lexical"]["match_count"]
@@ -372,6 +455,11 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
     .await
     .expect("activated semantic retrieval did not begin answering");
     assert_eq!(activated["semantic"]["status"], json!("complete"));
+    assert_semantic_probe_contribution(
+        &activated,
+        PROBE_SYMBOL,
+        "semantic availability activation",
+    );
     assert_eq!(activated_state["state"], json!("ready"));
     assert_eq!(
         activated_state["receipt"]["activated_generation"],
@@ -384,6 +472,11 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         core_after["semantic"]["status"],
         json!("complete"),
         "semantic retrieval must answer once activation completes: {core_after}"
+    );
+    assert_semantic_probe_contribution(
+        &core_after,
+        PROBE_SYMBOL,
+        "semantic availability fallback search after activation",
     );
     assert_eq!(
         core_after["coverage"]["recall"],

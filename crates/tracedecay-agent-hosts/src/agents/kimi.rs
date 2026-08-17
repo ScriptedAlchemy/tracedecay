@@ -162,6 +162,10 @@ impl AgentIntegration for KimiIntegration {
         doctor_check_plugin(dc, &ctx.home, &kimi_code_home(&ctx.home));
     }
 
+    fn reports_absence_to_doctor(&self) -> bool {
+        true
+    }
+
     fn host_component_registration(
         &self,
         component: super::host_bundle_v2::HostBundleComponentV1,

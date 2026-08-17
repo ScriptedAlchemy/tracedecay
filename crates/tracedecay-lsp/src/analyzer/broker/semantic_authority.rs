@@ -12,7 +12,7 @@ use super::super::error::{
 };
 use crate::{
     AdmittedRoot, AnalyzerEvent, AnalyzerState, AnalyzerSupervisor, LspRequestId, LspRuntimeFuture,
-    LspSemanticOperationOutcome, LspSemanticRequestAuthority,
+    LspSemanticOperationOutcome, LspSemanticRequestAuthority, UpstreamCapabilities,
 };
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -91,6 +91,44 @@ impl StdioLspSemanticAuthority {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Starts the retained client once and returns the typed capabilities from
+    /// its successful standard initialize response.
+    pub async fn upstream_capabilities(
+        &self,
+    ) -> std::result::Result<UpstreamCapabilities, TraceDecayError> {
+        let mut slot = self.inner.client.lock().await;
+        if let Some(client) = slot.as_ref() {
+            return Ok(client.upstream_capabilities());
+        }
+        if analyzer_terminal_outcome(&self.inner).is_some() {
+            return Err(TraceDecayError::Unavailable);
+        }
+
+        let root = AdmittedRoot::new(self.inner.root_uri.clone());
+        if !begin_analyzer_start(&self.inner, &root) {
+            return Err(TraceDecayError::Unavailable);
+        }
+        match StdioLspClient::start_with_timeouts(
+            &self.inner.command,
+            &self.inner.args,
+            &self.inner.project_root,
+            self.inner.timeouts,
+        )
+        .await
+        {
+            Ok(client) => {
+                let capabilities = client.upstream_capabilities();
+                mark_analyzer_ready(&self.inner, &root);
+                *slot = Some(client);
+                Ok(capabilities)
+            }
+            Err(error) => {
+                record_analyzer_event(&self.inner, &root, AnalyzerEvent::StartupFailed);
+                Err(error)
+            }
+        }
     }
 
     fn terminal_outcome(&self) -> Option<LspSemanticOperationOutcome> {
@@ -173,8 +211,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     let client = if let Some(client) = slot.take() {
                         mark_analyzer_ready(&inner, &analyzer_root);
                         Ok(Some(client))
-                    } else {
-                        begin_analyzer_start(&inner, &analyzer_root);
+                    } else if begin_analyzer_start(&inner, &analyzer_root) {
                         tokio::select! {
                             () = cancellation.cancelled() => Ok(None),
                             client = StdioLspClient::start_with_timeouts(
@@ -184,6 +221,9 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                 inner.timeouts,
                             ) => client.map(Some),
                         }
+                    } else {
+                        inner.operations.lock().await.remove(&key);
+                        return LspSemanticOperationOutcome::Unavailable;
                     };
                     match client {
                         Ok(Some(mut client)) => {
@@ -272,7 +312,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
     }
 }
 
-fn begin_analyzer_start(inner: &StdioLspSemanticAuthorityInner, root: &AdmittedRoot) {
+fn begin_analyzer_start(inner: &StdioLspSemanticAuthorityInner, root: &AdmittedRoot) -> bool {
     let mut supervisor = inner
         .supervisor
         .lock()
@@ -284,8 +324,11 @@ fn begin_analyzer_start(inner: &StdioLspSemanticAuthorityInner, root: &AdmittedR
         supervisor.state(),
         AnalyzerState::AwaitingStart | AnalyzerState::RestartBackoff
     ) {
-        let _ = supervisor.apply(root, AnalyzerEvent::StartRequested);
+        return supervisor
+            .apply(root, AnalyzerEvent::StartRequested)
+            .is_ok_and(|state| state == AnalyzerState::Starting);
     }
+    false
 }
 
 fn analyzer_terminal_outcome(
@@ -362,5 +405,39 @@ pub(crate) fn semantic_operation_outcome(
             eprintln!("[tracedecay] event=analyzer_semantic_request_failed error={error}");
             analyzer_event_outcome(error.analyzer_event())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::MAX_ANALYZER_RESTARTS;
+
+    #[tokio::test]
+    async fn exhausted_supervisor_rejects_capability_initialization_without_respawning() {
+        let authority = StdioLspSemanticAuthority::new(
+            "tracedecay-must-not-spawn",
+            Vec::new(),
+            std::env::temp_dir(),
+            "file:///project",
+            LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
+        );
+        let root = AdmittedRoot::new("file:///project");
+        for _ in 0..MAX_ANALYZER_RESTARTS {
+            begin_analyzer_start(&authority.inner, &root);
+            record_analyzer_event(&authority.inner, &root, AnalyzerEvent::StartupFailed);
+        }
+        let before = authority.analyzer_readiness();
+        assert_eq!(before.state(), AnalyzerState::Exhausted);
+
+        let result = authority.upstream_capabilities().await;
+
+        assert_eq!(result, Err(TraceDecayError::Unavailable));
+        let after = authority.analyzer_readiness();
+        assert_eq!(after.state(), before.state());
+        assert_eq!(after.restart_attempts(), before.restart_attempts());
+        assert_eq!(after.last_failure(), before.last_failure());
     }
 }

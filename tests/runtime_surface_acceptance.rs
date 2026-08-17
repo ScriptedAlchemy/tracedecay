@@ -1248,19 +1248,19 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         .expect("authenticate fixture symbol");
     assert_eq!(authenticate["symbols"][0]["file"], "src/auth/login.rs");
 
-    let create_session = assert_application_transport_parity(
+    let credentials_are_valid = assert_application_transport_parity(
         &fixture,
-        "qualified-name-create-session",
+        "qualified-name-credentials-are-valid",
         ApplicationSurfaceOperation::QualifiedName,
         serde_json::json!({
-            "qualified_name": "src/auth/session.rs::create_session",
+            "qualified_name": "src/auth/login.rs::credentials_are_valid",
             "page": { "page_size": 10, "cursor": null },
         }),
     )
     .await;
-    let create_session_id = create_session["symbols"][0]["node_id"]
+    let credentials_are_valid_id = credentials_are_valid["symbols"][0]["node_id"]
         .as_str()
-        .expect("create_session fixture symbol");
+        .expect("credentials_are_valid fixture symbol");
 
     let call_chain = assert_application_transport_parity(
         &fixture,
@@ -1268,19 +1268,27 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         ApplicationSurfaceOperation::CallChain,
         serde_json::json!({
             "from_node_id": authenticate_id,
-            "to_node_id": create_session_id,
+            "to_node_id": credentials_are_valid_id,
             "maximum_depth": 8,
         }),
     )
     .await;
     assert_eq!(call_chain["node_ids"][0], authenticate_id);
     assert_eq!(
+        call_chain["edge_kinds"],
+        serde_json::json!(["calls"]),
+        "the code-index extractor publishes exact same-file call edges; \
+         the authenticated fixture path must retain its Calls evidence: {call_chain:?}"
+    );
+    assert_eq!(
         call_chain["node_ids"]
             .as_array()
             .expect("call-chain nodes")
             .last()
             .and_then(Value::as_str),
-        Some(create_session_id)
+        Some(credentials_are_valid_id),
+        "`authenticate` calls `credentials_are_valid` in the same source file, \
+         so the exact graph path must terminate at it: {call_chain:?}"
     );
 
     let dependents = assert_application_transport_parity(
@@ -1941,6 +1949,18 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         initialized["result"]["capabilities"]["positionEncoding"], "utf-16",
         "unexpected initialize response: {initialized}"
     );
+    assert_eq!(
+        initialized["result"]["capabilities"]["documentSymbolProvider"], true,
+        "a routed analyzer must negotiate the declared document-symbol capability: {initialized}"
+    );
+    assert_eq!(
+        initialized["result"]["capabilities"]["hoverProvider"], true,
+        "a routed analyzer must negotiate the declared hover capability: {initialized}"
+    );
+    assert!(
+        initialized["result"]["capabilities"]["definitionProvider"].is_null(),
+        "an undeclared standard method must remain absent from the negotiated surface: {initialized}"
+    );
     let negotiated = &initialized["result"]["capabilities"]["experimental"]["tracedecay"];
     assert_eq!(negotiated["revision"], TRACEDECAY_CONTEXT_REVISION);
     assert_eq!(negotiated["opaqueExpansion"], true);
@@ -2098,12 +2118,32 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": 405,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": document_uri },
+                "position": { "line": 0, "character": 0 },
+            },
+        }),
+    )
+    .await;
+    let undeclared_standard_method = poll_lsp_response(&mut session, 405).await;
+    assert_eq!(undeclared_standard_method["error"]["code"], -32601);
+    assert_eq!(
+        undeclared_standard_method["error"]["data"]["reason"], "capabilityNotNegotiated",
+        "a standard method the client did not negotiate must stay denied: {undeclared_standard_method}"
+    );
+
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 406,
             "method": "tracedecay/arbitrary",
             "params": {},
         }),
     )
     .await;
-    let arbitrary_method = poll_lsp_response(&mut session, 405).await;
+    let arbitrary_method = poll_lsp_response(&mut session, 406).await;
     assert_eq!(arbitrary_method["error"]["code"], -32601);
     assert_eq!(
         arbitrary_method["error"]["data"]["reason"],
@@ -2114,7 +2154,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         &mut session,
         serde_json::json!({
             "jsonrpc": "2.0",
-            "id": 406,
+            "id": 407,
             "method": "tracedecay/context",
             "params": {
                 "kind": "diagnostics",
@@ -2123,7 +2163,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         }),
     )
     .await;
-    let arbitrary_payload = poll_lsp_response(&mut session, 406).await;
+    let arbitrary_payload = poll_lsp_response(&mut session, 407).await;
     assert_eq!(arbitrary_payload["error"]["code"], -32602);
 
     let mut related_lsp_handles = Vec::new();

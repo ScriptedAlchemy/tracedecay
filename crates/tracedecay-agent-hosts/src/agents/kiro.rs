@@ -160,6 +160,99 @@ fn workspace_mcp_config_path(project_path: &Path) -> PathBuf {
     project_path.join(".kiro/settings/mcp.json")
 }
 
+enum KiroDoctorInstallationState {
+    HostAbsent,
+    TraceDecayAbsent,
+    Installed,
+}
+
+fn kiro_doctor_installation_state(home: &Path) -> Result<KiroDoctorInstallationState> {
+    let host_home = kiro_home(home);
+    match std::fs::metadata(&host_home) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(TraceDecayError::Config {
+                message: format!("Kiro home {} is not a directory", host_home.display()),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(KiroDoctorInstallationState::HostAbsent);
+        }
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect Kiro home {}: {error}",
+                    host_home.display()
+                ),
+            });
+        }
+    }
+
+    let mcp_path = mcp_config_path(home);
+    match std::fs::metadata(&mcp_path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return Err(TraceDecayError::Config {
+                message: format!("Kiro MCP config {} is not a file", mcp_path.display()),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(KiroDoctorInstallationState::TraceDecayAbsent);
+        }
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect Kiro MCP config {}: {error}",
+                    mcp_path.display()
+                ),
+            });
+        }
+    }
+
+    let contents = std::fs::read_to_string(&mcp_path).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to read Kiro MCP config {}: {error}",
+            mcp_path.display()
+        ),
+    })?;
+    if contents.trim().is_empty() {
+        return Err(TraceDecayError::Config {
+            message: format!("Kiro MCP config {} is empty", mcp_path.display()),
+        });
+    }
+    let config: serde_json::Value =
+        serde_json::from_str(&contents).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to parse Kiro MCP config {}: {error}",
+                mcp_path.display()
+            ),
+        })?;
+    let Some(config) = config.as_object() else {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "Kiro MCP config {} is not a JSON object",
+                mcp_path.display()
+            ),
+        });
+    };
+    let Some(servers) = config.get("mcpServers") else {
+        return Ok(KiroDoctorInstallationState::TraceDecayAbsent);
+    };
+    let Some(servers) = servers.as_object() else {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "Kiro MCP config {} has a non-object mcpServers value",
+                mcp_path.display()
+            ),
+        });
+    };
+    if servers.contains_key(KIRO_MCP_SERVER_NAME) {
+        Ok(KiroDoctorInstallationState::Installed)
+    } else {
+        Ok(KiroDoctorInstallationState::TraceDecayAbsent)
+    }
+}
+
 impl AgentIntegration for KiroIntegration {
     fn name(&self) -> &'static str {
         "Kiro"
@@ -276,6 +369,28 @@ impl AgentIntegration for KiroIntegration {
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKiro integration\x1b[0m");
+        let host_home = kiro_home(&ctx.home);
+        match kiro_doctor_installation_state(&ctx.home) {
+            Ok(KiroDoctorInstallationState::HostAbsent) => {
+                dc.warn(&format!(
+                    "Kiro is not detected at {} — run `tracedecay install --agent kiro` if you use Kiro",
+                    host_home.display()
+                ));
+                return;
+            }
+            Ok(KiroDoctorInstallationState::TraceDecayAbsent) => {
+                dc.warn(&format!(
+                    "Kiro is detected at {}, but TraceDecay is not installed — run `tracedecay install --agent kiro` if you use Kiro",
+                    host_home.display()
+                ));
+                return;
+            }
+            Ok(KiroDoctorInstallationState::Installed) => {}
+            Err(error) => {
+                dc.fail(&format!("Kiro installation state is unreadable: {error}"));
+                return;
+            }
+        }
         let global_server = doctor_check_mcp_config(dc, &ctx.home);
         doctor_check_workspace_mcp_override(
             dc,
@@ -286,6 +401,10 @@ impl AgentIntegration for KiroIntegration {
         doctor_check_steering(dc, &ctx.home);
         doctor_check_managed_agent(dc, &ctx.home);
         doctor_check_default_agent(dc, &ctx.home);
+    }
+
+    fn reports_absence_to_doctor(&self) -> bool {
+        true
     }
 
     fn host_component_registration(

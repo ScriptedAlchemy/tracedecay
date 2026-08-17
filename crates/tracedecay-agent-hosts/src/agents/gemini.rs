@@ -434,12 +434,21 @@ fn report_manifest_server(dc: &mut DoctorCounters, manifest: &serde_json::Value,
 /// was not observed rather than inferring adoption from TraceDecay's own
 /// staged files.
 fn doctor_check_host_reported_extensions(dc: &mut DoctorCounters, home: &Path) {
-    let Some(outcome) = host_reported_extensions(home) else {
-        dc.info(
-            "`gemini` is not on PATH — could not ask Gemini CLI which extensions it has \
-             (the extension lifecycle requires that binary)",
-        );
-        return;
+    let outcome = match host_reported_extensions(home) {
+        Ok(Some(outcome)) => outcome,
+        Ok(None) => {
+            dc.info(
+                "`gemini` is not on PATH — could not ask Gemini CLI which extensions it has \
+                 (the extension lifecycle requires that binary)",
+            );
+            return;
+        }
+        Err(error) => {
+            dc.fail(&format!(
+                "could not inspect Gemini CLI extension state: {error}"
+            ));
+            return;
+        }
     };
     if !outcome.succeeded() {
         dc.warn(&format!(

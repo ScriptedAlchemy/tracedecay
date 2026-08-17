@@ -26,7 +26,9 @@ pub enum ReaderPoolState {
 ///
 /// Serializable because live saturation is only diagnosable from outside the
 /// process: `available + leased + limbo` per lane says where the workers went,
-/// and `waiting_*` says whether anyone is being turned away.
+/// and `waiting_*` says whether anyone is being turned away. The cumulative
+/// snapshot count distinguishes snapshot-heavy workloads from ordinary
+/// one-query reads without retaining request content or identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReaderPoolSnapshot {
     pub state: ReaderPoolState,
@@ -43,6 +45,12 @@ pub struct ReaderPoolSnapshot {
     /// Acquisitions blocked waiting for capacity in each lane.
     pub waiting_general: u16,
     pub waiting_health: u16,
+    /// Successfully admitted exact-SQL snapshots since this pool attached.
+    ///
+    /// Saturates at `u64::MAX`; telemetry must never wrap a long-running
+    /// process back to a smaller apparent workload.
+    #[serde(default)]
+    pub snapshot_admissions: u64,
 }
 
 #[derive(Debug)]

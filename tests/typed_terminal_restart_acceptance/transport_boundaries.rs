@@ -104,8 +104,56 @@ fn http_mount(home: &Path) -> HttpMount {
     }
 }
 
-fn project_id(project: &Path) -> String {
-    tracedecay::storage::default_profile_project_id(project)
+/// Opens the exact project through the same daemon-owned route as a production
+/// CLI client and returns the identity the daemon admitted. HTTP cannot infer
+/// this identity locally: its route accepts only the daemon's public ID.
+fn admitted_project_id(home: &Path, project: &Path) -> String {
+    let project_arg = project.to_string_lossy().into_owned();
+    let output = tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "storage_status",
+            "--args",
+            r#"{"include_details":false}"#,
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("read daemon-admitted project identity");
+    assert!(
+        output.status.success(),
+        "storage_status failed while admitting the fixture project\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: Value =
+        serde_json::from_slice(&output.stdout).expect("storage status application envelope");
+    assert!(
+        envelope["problem"].is_null() && !envelope["outcome"].is_null(),
+        "storage_status must complete before the typed-terminal journey starts: {envelope}"
+    );
+    assert_eq!(
+        envelope["outcome"]["outcome"], "evidence",
+        "storage_status must return retained storage evidence: {envelope}"
+    );
+    assert_eq!(
+        envelope["outcome"]["value"]["payload"]["status"], "ok",
+        "storage_status must report an admitted healthy store: {envelope}"
+    );
+    let project_id = envelope["scope"]["project_id"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("storage status omitted the daemon-admitted project identity: {envelope}")
+        })
+        .to_owned();
+    assert_eq!(
+        envelope["outcome"]["value"]["payload"]["project_id"], project_id,
+        "storage evidence must belong to the daemon-admitted project: {envelope}"
+    );
+    project_id
 }
 
 fn now_micros() -> i64 {
@@ -328,6 +376,34 @@ fn fact_add_body(content: &str) -> Value {
     json!({ "content": content, "category": "general" })
 }
 
+/// Longest whitespace-separated token a fact this journey stores may carry.
+///
+/// Production memory hygiene refuses secret-like content *before* it reaches
+/// the store (`detect_secret_like` ->
+/// `crates/tracedecay-runtime-core/src/privacy/detector_kernel.rs::looks_high_entropy_token`),
+/// and one of its rules is a Shannon-entropy test over any single token of at
+/// least 36 bytes. A long hyphenated marker ending in hex is exactly the shape
+/// that rule exists to catch: the first cut of this journey used 50-byte
+/// markers and the daemon answered the Rust SDK leg with a truthful
+/// `secret_rejected` — a *completed* effect that never commits, so the parked
+/// request settled without ever reaching the commit boundary the barrier
+/// guards. Tokens below this bound cannot reach that rule at all, so the
+/// journey induces the partial effect it is actually about.
+const MAX_MARKER_TOKEN_BYTES: usize = 36;
+
+/// Fails loudly if a marker could be refused by memory hygiene instead of
+/// committing, so a future marker edit cannot silently re-open the same hole.
+fn assert_marker_is_storable(marker: &str) {
+    for token in marker.split_whitespace() {
+        assert!(
+            token.len() < MAX_MARKER_TOKEN_BYTES,
+            "marker token '{token}' is {} bytes; memory hygiene may refuse it as \
+             a high-entropy secret instead of committing the fact this journey parks",
+            token.len()
+        );
+    }
+}
+
 /// Asserts the SDK surfaced a typed terminal rather than a success or a
 /// transport failure, and returns its canonical envelope.
 fn sdk_problem(error: ClientError, context: &str) -> (String, Value) {
@@ -366,7 +442,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
 
     let mut daemon = crate::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     crate::initialize_project(&home_path, &project_path, "partial-effect-boundaries");
-    let identity = project_id(&project_path);
+    let identity = admitted_project_id(&home_path, &project_path);
     let mount = http_mount(&home_path);
 
     // HTTP: the daemon's own bound application mount, over real TCP, with the
@@ -462,6 +538,11 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
         "restart reused the physical daemon process"
     );
     let mount = http_mount(&home_path);
+    assert_eq!(
+        admitted_project_id(&home_path, &project_path),
+        identity,
+        "the post-restart daemon must re-admit the same physical project identity"
+    );
 
     // Every committed part of every partial effect is still durably present:
     // the committed half of each committed_receipt outlived the process that
@@ -521,7 +602,7 @@ fn reset_required_survives_http_mcp_and_rust_sdk_across_restart() {
 
     let mut daemon = crate::spawn_daemon_with_commit_barrier(&home_path, &barrier_path);
     crate::initialize_project(&home_path, &project_path, "reset-required-boundaries");
-    let identity = project_id(&project_path);
+    let identity = admitted_project_id(&home_path, &project_path);
 
     // Tamper the store. `tracedecay init` is daemon-owned, so this daemon holds
     // a verified handle already; the refused shape is what the *next* process

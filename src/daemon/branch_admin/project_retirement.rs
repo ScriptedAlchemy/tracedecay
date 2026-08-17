@@ -10,6 +10,30 @@ pub(super) struct ProjectServerRetirement {
     _fence: Option<std::sync::Arc<ProjectRetirementFenceV1>>,
 }
 
+/// Owned admission to the canonical project-server retirement tracker.
+///
+/// Project-open cache replacement takes this admission before the owner
+/// registry. That order is deliberate: a cancelled waiter cannot remove an
+/// idle server until it owns the synchronous handoff that tracks its
+/// retirement. No caller may await this admission while holding the owner
+/// registry, and shutdown never holds the owner registry while joining it.
+pub(crate) struct ProjectServerRetirementAdmission<'a> {
+    retirements: tokio::sync::MutexGuard<'a, Vec<ProjectServerRetirement>>,
+}
+
+impl ProjectServerRetirementAdmission<'_> {
+    /// Spawn and record one retirement with no cancellation point between the
+    /// two transitions. Consuming the exact evicted server here means its
+    /// shutdown and join ownership cannot be detached from the caller.
+    pub(crate) fn spawn_and_track<Task>(&mut self, owner: StoreOwnerKey, retirement: Task)
+    where
+        Task: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let task = tokio::spawn(retirement);
+        track_project_server_retirement_after_admission(&mut self.retirements, owner, task, false);
+    }
+}
+
 pub(in crate::daemon) struct ProjectRetirementFenceV1 {
     // Field order is lifecycle order: reopen roots before releasing the store
     // writer gate so a deletion owner can never have its permanent fence
@@ -86,13 +110,12 @@ async fn wait_for_project_server_retirement(
     }
 }
 
-async fn track_project_server_retirement(
-    retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
+fn track_project_server_retirement_after_admission(
+    retirements: &mut Vec<ProjectServerRetirement>,
     owner: StoreOwnerKey,
     task: tokio::task::JoinHandle<()>,
     cancelled_is_clean: bool,
 ) {
-    let mut retirements = retirements.lock().await;
     retirements.retain(|retirement| {
         !matches!(
             &*retirement.completion.borrow(),
@@ -121,6 +144,21 @@ async fn track_project_server_retirement(
         _task: task,
         _fence: None,
     });
+}
+
+async fn track_project_server_retirement(
+    retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
+    owner: StoreOwnerKey,
+    task: tokio::task::JoinHandle<()>,
+    cancelled_is_clean: bool,
+) {
+    let mut retirements = retirements.lock().await;
+    track_project_server_retirement_after_admission(
+        &mut retirements,
+        owner,
+        task,
+        cancelled_is_clean,
+    );
 }
 
 pub(super) async fn attach_project_retirement_fence(
@@ -204,6 +242,19 @@ pub(super) async fn settle_project_retirements(
 }
 
 impl StoreAdministration {
+    /// Acquires the canonical retirement handoff before an upstream mutation.
+    ///
+    /// The caller must take this before the owner registry whenever it may
+    /// evict or replace a live server, then call
+    /// [`ProjectServerRetirementAdmission::spawn_and_track`] without awaiting.
+    pub(crate) async fn acquire_project_server_retirement_admission(
+        &self,
+    ) -> ProjectServerRetirementAdmission<'_> {
+        ProjectServerRetirementAdmission {
+            retirements: self.project_server_retirements.lock().await,
+        }
+    }
+
     // pub(crate): project_server_lifecycle registers retirements from outside
     // branch_admin when a project server shuts down.
     pub(crate) async fn track_project_server_retirement(
@@ -295,8 +346,10 @@ impl StoreAdministration {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+    use crate::daemon::project_server_lifecycle;
     use crate::daemon::store_writer_gate::{StoreWriterClass, WriterScope};
 
     fn owner(project_id: &str) -> StoreOwnerKey {
@@ -438,5 +491,214 @@ mod tests {
         .await;
         assert!(matches!(receipt.status(), ShutdownTaskStatus::Failed(_)));
         assert_eq!(retirements.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_admitted_retirement_caller_keeps_shutdown_join_ownership() {
+        let administration = StoreAdministration::default();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let caller_administration = administration.clone();
+        let caller = tokio::spawn({
+            let release = Arc::clone(&release);
+            async move {
+                let mut admission = caller_administration
+                    .acquire_project_server_retirement_admission()
+                    .await;
+                admission.spawn_and_track(owner("project-a"), async move {
+                    let _ = started_tx.send(());
+                    release.notified().await;
+                });
+                drop(admission);
+                std::future::pending::<()>().await;
+            }
+        });
+        started_rx
+            .await
+            .expect("the tracked retirement must start before caller cancellation");
+        caller.abort();
+        assert!(
+            caller
+                .await
+                .expect_err("caller cancellation must surface")
+                .is_cancelled(),
+            "the caller must be cancelled after retirement admission"
+        );
+
+        let mut shutdown = Box::pin(administration.join_project_server_retirements());
+        std::future::poll_fn(|context| {
+            assert!(
+                shutdown.as_mut().poll(context).is_pending(),
+                "daemon shutdown must retain and join the admitted retirement"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        release.notify_one();
+        shutdown.await;
+        assert!(
+            administration
+                .project_server_retirements
+                .lock()
+                .await
+                .is_empty(),
+            "joined retirement ownership must be released after clean completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_eviction_admission_preserves_owner_then_shutdown_joins_retirement()
+    {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let projects = tempfile::tempdir().expect("project roots");
+        let idle_project = projects.path().join("idle");
+        let replacement_project = projects.path().join("replacement");
+        std::fs::create_dir_all(&idle_project).expect("idle project root");
+        std::fs::create_dir_all(&replacement_project).expect("replacement project root");
+        let (idle_graph, _idle_runtime) =
+            crate::tracedecay::TraceDecay::init_test_fixture_with_registered_runtime(
+                &idle_project,
+                "project.retirement-idle",
+            )
+            .await
+            .expect("registered idle graph");
+        let idle_server = crate::mcp::McpServer::new(idle_graph, None).await;
+        let idle_lifecycle = idle_server.project_server_response_lifecycle();
+        let idle_witness = Arc::downgrade(&idle_server);
+        let (replacement_graph, _replacement_runtime) =
+            crate::tracedecay::TraceDecay::init_test_fixture_with_registered_runtime(
+                &replacement_project,
+                "project.retirement-replacement",
+            )
+            .await
+            .expect("registered replacement graph");
+        let replacement_server = crate::mcp::McpServer::new(replacement_graph, None).await;
+        let administration = StoreAdministration::default();
+        let idle_key = crate::daemon::ProjectServerKey {
+            owner: owner("project-idle"),
+            project_root: idle_project.clone(),
+            scope_prefix: None,
+        };
+        let idle_route = crate::daemon::ProjectRouteKey {
+            profile_root: idle_key.owner.profile_root.clone(),
+            global_db_path: idle_key.owner.global_db_path.clone(),
+            project_path: idle_project,
+            scope_prefix: None,
+        };
+        {
+            let mut servers = administration.project_servers().lock().await;
+            servers.insert_pending_route(idle_route.clone(), idle_key.clone(), idle_server);
+            assert!(servers.mark_ready(&idle_key));
+        }
+
+        let admission_blocker = administration
+            .acquire_project_server_retirement_admission()
+            .await;
+        let attempted_admission = Arc::new(AtomicBool::new(false));
+        let cancelled_administration = administration.clone();
+        let cancelled_attempt = Arc::clone(&attempted_admission);
+        let cancelled = tokio::spawn(async move {
+            cancelled_attempt.store(true, Ordering::Release);
+            let _admission = cancelled_administration
+                .acquire_project_server_retirement_admission()
+                .await;
+            panic!("cancelled open reached owner mutation without admission contention");
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            attempted_admission.load(Ordering::Acquire),
+            "the cancelled caller must contend on retirement admission before mutation"
+        );
+        cancelled.abort();
+        assert!(
+            cancelled
+                .await
+                .expect_err("cancelled admission caller must stop")
+                .is_cancelled()
+        );
+        assert!(
+            Arc::ptr_eq(
+                administration
+                    .project_servers()
+                    .lock()
+                    .await
+                    .get(&idle_key)
+                    .expect("cancelled caller must preserve idle owner"),
+                &idle_witness
+                    .upgrade()
+                    .expect("registered owner must remain alive after cancellation"),
+            ),
+            "cancellation before admission must not evict the victim"
+        );
+        drop(admission_blocker);
+
+        let replacement_key = crate::daemon::ProjectServerKey {
+            owner: owner("project-replacement"),
+            project_root: replacement_project.clone(),
+            scope_prefix: None,
+        };
+        let replacement_route = crate::daemon::ProjectRouteKey {
+            profile_root: replacement_key.owner.profile_root.clone(),
+            global_db_path: replacement_key.owner.global_db_path.clone(),
+            project_path: replacement_project,
+            scope_prefix: None,
+        };
+        let mut admission = administration
+            .acquire_project_server_retirement_admission()
+            .await;
+        let (replacement, inserted, retired) = {
+            let mut servers = administration.project_servers().lock().await;
+            servers
+                .bind_or_insert_route_bounded(
+                    replacement_route,
+                    replacement_key,
+                    replacement_server,
+                    1,
+                    |server| Arc::strong_count(server) > 1,
+                )
+                .expect("admitted replacement must evict the idle owner")
+        };
+        assert!(inserted);
+        assert_eq!(retired.len(), 1);
+        assert_eq!(&retired[0].0, &idle_key);
+        let request = Arc::clone(idle_lifecycle.response_gate())
+            .read_owned()
+            .await;
+        for (retired_key, retired_server) in retired {
+            admission.spawn_and_track(
+                retired_key.owner,
+                project_server_lifecycle::retire_project_servers(vec![retired_server], None),
+            );
+        }
+        drop(admission);
+        drop(replacement);
+
+        let mut shutdown = Box::pin(project_server_lifecycle::shutdown_project_servers(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            &administration,
+        ));
+        std::future::poll_fn(|context| {
+            assert!(
+                shutdown.as_mut().poll(context).is_pending(),
+                "daemon shutdown must join the admitted eviction retirement"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(request);
+        let receipt = shutdown.await;
+        assert!(receipt.is_clean());
+        assert!(
+            receipt.outcomes.iter().any(|outcome| {
+                outcome.owner == "project_server_retirement[project-idle]"
+                    && outcome.status == ShutdownTaskStatus::Clean
+            }),
+            "shutdown must report the exact evicted owner through its retirement receipt"
+        );
+        assert!(
+            idle_witness.upgrade().is_none(),
+            "joined retirement must release the exact evicted server"
+        );
     }
 }

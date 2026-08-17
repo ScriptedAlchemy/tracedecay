@@ -331,21 +331,36 @@ pub(super) async fn production_project_server(
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open owners require an authoritative project identity".to_owned(),
         })?;
-    let resolution = store_administration
-        .project_servers()
-        .lock()
-        .await
-        .bind_or_insert_route_bounded(
+    // Retirement admission precedes the owner registry. Once bounded eviction
+    // removes an idle server, its exact Arc crosses only the synchronous
+    // `spawn_and_track` handoff below; no caller cancellation can drop it
+    // between registry removal and canonical shutdown ownership.
+    let mut retirement_admission = store_administration
+        .acquire_project_server_retirement_admission()
+        .await;
+    let resolution = {
+        let mut servers = store_administration.project_servers().lock().await;
+        servers.bind_or_insert_route_bounded(
             route,
             key.clone(),
             core_candidate,
             MAX_CACHED_PROJECT_SERVERS,
             |server| Arc::strong_count(server) > 1,
-        );
-    let Some((mut resolved, inserted)) = resolution else {
+        )
+    };
+    let Some((mut resolved, inserted, retired)) = resolution else {
         route_registered.store(false, Ordering::Release);
         return Err(project_server_capacity_error());
     };
+    for (retired_key, retired_server) in retired {
+        retirement_admission.spawn_and_track(
+            retired_key.owner,
+            super::project_server_lifecycle::retire_project_servers(vec![retired_server], None),
+        );
+    }
+    // The owner registry guard was dropped before the synchronous retirement
+    // handoff. Release admission before the remaining project-open awaits.
+    drop(retirement_admission);
     if !inserted {
         route_registered.store(false, Ordering::Release);
     } else {

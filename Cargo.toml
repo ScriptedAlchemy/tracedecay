@@ -325,6 +325,7 @@ clap = { version = "4.6", features = ["derive"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 toml = "1"
 ureq = { version = "3", features = ["json"] }
 url = "2"

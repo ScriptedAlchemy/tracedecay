@@ -410,13 +410,11 @@ fn a_missing_kiro_binary_refuses_instead_of_editing_host_owned_state() {
         crate::agents::host_cli::require_host_cli("kiro-cli-definitely-absent", KIRO_CLI_LIFECYCLE)
             .expect_err("an absent host binary is a hard requirement failure");
 
-    let TraceDecayError::Config { message } = error else {
-        panic!("host CLI absence must surface as a config error");
+    let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
+        panic!("host CLI absence must surface as a typed requirement");
     };
-    assert!(
-        message.contains("binary required for kiro MCP registry lifecycle"),
-        "the refusal must name the binary and what it was needed for: {message}"
-    );
+    assert_eq!(program, "kiro-cli-definitely-absent");
+    assert_eq!(lifecycle, KIRO_CLI_LIFECYCLE);
     assert_eq!(
         std::fs::read(&mcp_path).unwrap(),
         operator_owned,
@@ -426,6 +424,82 @@ fn a_missing_kiro_binary_refuses_instead_of_editing_host_owned_state() {
         !config_backup_path(&mcp_path).exists(),
         "a refused lifecycle must not have staged a backup of host-owned registry state"
     );
+}
+
+#[test]
+fn detected_kiro_without_a_tracedecay_server_is_a_single_optional_warning() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mcp_path,
+        br#"{"mcpServers":{"operator":{"command":"other","args":[]}}}"#,
+    )
+    .unwrap();
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.warnings, 1);
+}
+
+#[test]
+fn malformed_kiro_mcp_config_remains_a_doctor_failure() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(&mcp_path, "{ not valid JSON").unwrap();
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(counters.issues, 1);
+    assert_eq!(counters.warnings, 0);
+}
+
+#[test]
+fn an_empty_kiro_mcp_config_is_a_doctor_failure() {
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(&mcp_path, b"").unwrap();
+
+    let error = match kiro_doctor_installation_state(home.path()) {
+        Err(error) => error,
+        Ok(_) => panic!("an existing empty Kiro MCP config is malformed persisted state"),
+    };
+    let TraceDecayError::Config { message } = error else {
+        panic!("an empty Kiro MCP config must not become TraceDecayAbsent: {error}");
+    };
+    assert!(
+        message.contains("empty"),
+        "the persisted-config failure must explain the malformed empty file: {message}"
+    );
+
+    let mut counters = DoctorCounters::new();
+    KiroIntegration.healthcheck(
+        &mut counters,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: home.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(counters.issues, 1);
+    assert_eq!(counters.warnings, 0);
 }
 
 #[test]

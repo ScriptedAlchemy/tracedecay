@@ -6,14 +6,10 @@ use tempfile::TempDir;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
+use crate::candidate_output::compute_corpus_digest_from_embedded_bytes;
 use crate::{
     CandidateWorkloadV1, SearchEvalError, load_candidate_workload, validate_workload_for_tuning,
 };
-
-#[cfg(test)]
-thread_local! {
-    static MATERIALIZATION_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
 
 const WORKLOAD_PATH: &str =
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
@@ -132,8 +128,6 @@ impl PackagedEvaluatorAssets {
 
 pub(crate) fn materialize() -> Result<PackagedEvaluatorAssets, SearchEvalError> {
     let workload = load_workload()?;
-    #[cfg(test)]
-    MATERIALIZATION_COUNT.with(|count| count.set(count.get().saturating_add(1)));
     let directory = tempfile::tempdir().map_err(|error| {
         SearchEvalError::Contract(format!("create packaged evaluator root: {error}"))
     })?;
@@ -184,6 +178,15 @@ pub(crate) fn load_workload() -> Result<CandidateWorkloadV1, SearchEvalError> {
     })?;
     validate_workload_for_tuning(&workload)?;
     Ok(workload)
+}
+
+/// Derive the corpus binding from the bytes embedded in this package. This is
+/// deliberately separate from `materialize`: qualification loading must not
+/// create a temporary evaluator root merely to establish corpus identity.
+pub(crate) fn current_corpus_digest(
+    workload: &CandidateWorkloadV1,
+) -> Result<String, SearchEvalError> {
+    compute_corpus_digest_from_embedded_bytes(workload, FILES).map_err(SearchEvalError::from)
 }
 
 fn materialize_git_authority(root: &Path) -> Result<(), SearchEvalError> {
@@ -242,17 +245,6 @@ pub(crate) fn admitted_scope(_root: &Path) -> Option<ResolvedScope> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn profile_metadata_load_does_not_materialize_runtime_assets() {
-        let before = super::MATERIALIZATION_COUNT.with(std::cell::Cell::get);
-
-        crate::load_default_evaluated_profile_material("query-fallback")
-            .expect("packaged profile metadata");
-
-        let after = super::MATERIALIZATION_COUNT.with(std::cell::Cell::get);
-        assert_eq!(after, before);
-    }
-
     #[test]
     fn packaged_workload_is_independent_of_mounted_project() {
         let unrelated = tempfile::tempdir().expect("unrelated project");

@@ -244,7 +244,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         candidate: Server,
         capacity: usize,
         mut is_leased: F,
-    ) -> Option<(Server, bool)>
+    ) -> Option<(Server, bool, Vec<(ProjectServerKey, Server)>)>
     where
         Server: Clone,
         F: FnMut(&Server) -> bool,
@@ -256,13 +256,14 @@ impl<Server> DatabaseOwnerRegistry<Server> {
             {
                 let server = existing.server.clone();
                 self.bind_route(route, key);
-                return Some((server, false));
+                return Some((server, false, Vec::new()));
             }
             existing.server = candidate.clone();
             existing.last_used = Instant::now();
             self.aliases.insert(route, key);
-            return Some((candidate, true));
+            return Some((candidate, true, Vec::new()));
         }
+        let mut retired = Vec::new();
         while self.servers.len() >= capacity {
             let evict = self
                 .servers
@@ -270,11 +271,12 @@ impl<Server> DatabaseOwnerRegistry<Server> {
                 .filter(|(_, entry)| !is_leased(&entry.server))
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(key, _)| key.clone())?;
-            self.servers.remove(&evict);
+            let (evicted_key, evicted) = self.servers.remove_entry(&evict)?;
             self.aliases.retain(|_, key| key != &evict);
+            retired.push((evicted_key, evicted.server));
         }
         self.insert_pending_route(route, key, candidate.clone());
-        Some((candidate, true))
+        Some((candidate, true, retired))
     }
 
     pub(super) fn rekey(&mut self, old: &ProjectServerKey, new: &ProjectServerKey) -> bool {

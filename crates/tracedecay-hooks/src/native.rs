@@ -991,6 +991,28 @@ mod tests {
     }
 
     #[test]
+    fn codex_native_event_without_event_identity_is_rejected() {
+        let mut payload = serde_json::from_slice::<Value>(include_bytes!(
+            "../fixtures/host_events/codex/stop.json"
+        ))
+        .unwrap();
+        assert!(
+            payload
+                .as_object_mut()
+                .and_then(|fields| fields.remove("hook_event_name"))
+                .is_some()
+        );
+
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::Codex,
+                &serde_json::to_vec(&payload).unwrap(),
+            ),
+            Err(NativeHookDecodeError::MalformedPayload)
+        );
+    }
+
+    #[test]
     fn authentic_cursor_saved_edit_capture_is_typed() {
         assert!(matches!(
             decode_native_hook_event(

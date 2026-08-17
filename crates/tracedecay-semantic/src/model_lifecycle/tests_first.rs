@@ -1,4 +1,8 @@
     use super::*;
+    use crate::{
+        SemanticEvaluationCancellationV1, SemanticExecutionAuthority,
+        SemanticExecutionInterruptionV1,
+    };
     use std::collections::BTreeMap;
     #[cfg(feature = "semantic-fastembed")]
     use std::net::{TcpListener, TcpStream};

@@ -36,7 +36,7 @@ use super::error::{
 };
 use crate::{
     AnalyzerEvent, AsyncContentLengthError, ConnectionLocalRequestSequence, ContentLengthCodec,
-    FramePoll, read_content_length_frame_until,
+    FramePoll, UpstreamCapabilities, read_content_length_frame_until,
 };
 
 const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -277,6 +277,7 @@ pub async fn collect_document_diagnostics_with_timeouts(
 
 pub struct StdioLspClient {
     command: String,
+    upstream_capabilities: UpstreamCapabilities,
     document_versions: BTreeMap<String, i32>,
     next_request_id: ConnectionLocalRequestSequence,
     stdin: FramedWrite<tokio::process::ChildStdin, ContentLengthCodec>,
@@ -382,13 +383,16 @@ impl StdioLspClient {
             }
             Err(err) => Err(err),
         };
-        if let Err(err) = initialize_result {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            let _ = stderr_task.await;
-            let stderr = captured_stderr(&stderr_capture).await;
-            return Err(enrich_start_error(command, err, &stderr));
-        }
+        let initialize_response = match initialize_result {
+            Ok(response) => response,
+            Err(error) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                let _ = stderr_task.await;
+                let stderr = captured_stderr(&stderr_capture).await;
+                return Err(enrich_start_error(command, error, &stderr));
+            }
+        };
         write_message_with_timeout(
             &mut stdin,
             json!({
@@ -402,6 +406,9 @@ impl StdioLspClient {
 
         Ok(Self {
             command: command.to_string(),
+            upstream_capabilities: UpstreamCapabilities::from_initialize_response(
+                &initialize_response,
+            ),
             document_versions: BTreeMap::new(),
             next_request_id: ConnectionLocalRequestSequence::starting_at(2),
             stdin,
@@ -409,6 +416,10 @@ impl StdioLspClient {
             child,
             stderr_task,
         })
+    }
+
+    pub(crate) fn upstream_capabilities(&self) -> UpstreamCapabilities {
+        self.upstream_capabilities.clone()
     }
 
     /// Sends one standard semantic request and returns its standard JSON
@@ -906,7 +917,7 @@ async fn wait_for_initialize(
     deadline: tokio::time::Instant,
     command: &str,
     timeout: Duration,
-) -> Result<()> {
+) -> Result<Value> {
     loop {
         let frame = match read_content_length_frame_until(reader, deadline).await {
             Ok(FramePoll::Frame(frame)) => frame,
@@ -927,7 +938,18 @@ async fn wait_for_initialize(
         };
         let message = decode_message(&frame)?;
         if message.id == Some(json!(1)) {
-            return Ok(());
+            if let Some(error) = message.error {
+                let error = LspSemanticRequestError::Remote {
+                    code: error.code,
+                    message: error.message,
+                };
+                return Err(TraceDecayError::Config {
+                    message: format!("LSP server '{command}' rejected initialize: {error}"),
+                });
+            }
+            return message.result.ok_or_else(|| TraceDecayError::Config {
+                message: format!("LSP server '{command}' initialize response omitted result"),
+            });
         }
     }
 }
@@ -1213,6 +1235,26 @@ mod tests {
                 "analyzer-invalid-response"
             );
         }
+    }
+
+    #[test]
+    fn remote_errors_render_present_and_missing_codes_unambiguously() {
+        assert_eq!(
+            LspSemanticRequestError::Remote {
+                code: Some(-32603),
+                message: "server failed".to_owned(),
+            }
+            .to_string(),
+            "analyzer returned error -32603: server failed"
+        );
+        assert_eq!(
+            LspSemanticRequestError::Remote {
+                code: None,
+                message: "server failed".to_owned(),
+            }
+            .to_string(),
+            "analyzer returned an error: server failed"
+        );
     }
 
     #[test]

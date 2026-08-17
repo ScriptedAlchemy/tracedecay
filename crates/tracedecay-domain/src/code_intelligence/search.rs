@@ -989,6 +989,14 @@ pub struct EmbeddingProjectionKeyV1 {
     pub pooling: EmbeddingPoolingV1,
     pub truncation_side: EmbeddingTruncationSideV1,
     pub truncation_length: u32,
+    /// Exact number of documents in every full inference tensor. The final
+    /// tensor may be shorter. This is projection identity because changing
+    /// the padded tensor shape can change floating-point vector bytes.
+    pub inference_batch_size: u32,
+    /// Exact sanitized-text byte ceiling for every inference group. This is
+    /// projection identity because it can split a count-valid group and alter
+    /// the native runtime's tensor boundaries.
+    pub inference_batch_bytes: u32,
     pub runtime_backend: String,
     pub runtime_build_revision: String,
     pub device_class: EmbeddingDeviceClassV1,
@@ -1070,6 +1078,16 @@ impl EmbeddingProjectionKeyV1 {
         if self.truncation_length == 0 {
             return Err(DomainError::Empty {
                 field: "embedding truncation length",
+            });
+        }
+        if self.inference_batch_size == 0 {
+            return Err(DomainError::Empty {
+                field: "embedding inference batch size",
+            });
+        }
+        if self.inference_batch_bytes == 0 {
+            return Err(DomainError::Empty {
+                field: "embedding inference batch byte ceiling",
             });
         }
         if self.dimensions == 0 {

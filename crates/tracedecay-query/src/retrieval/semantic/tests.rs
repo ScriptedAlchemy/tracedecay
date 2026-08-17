@@ -55,6 +55,8 @@ fn projection() -> AdmittedEmbeddingProjectionKeyV1 {
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
         truncation_length: 128,
+        inference_batch_size: 8,
+        inference_batch_bytes: 4 * 1024,
         runtime_backend: "onnx.cpu".to_owned(),
         runtime_build_revision: "runtime.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,

@@ -39,7 +39,7 @@ mod work_evidence;
 #[path = "work_route_exposure_conformance/work_task_session.rs"]
 mod work_task_session;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
@@ -57,7 +57,10 @@ use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::DaemonInvocationClient;
 use tracedecay::storage::PrivateStoreIo;
-use tracedecay_application::work_executable_binding_registry;
+use tracedecay_application::{
+    EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1, EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1,
+    work_executable_binding_registry,
+};
 use tracedecay_domain::ProjectId;
 use tracedecay_tool_catalog::RouteExposureV1;
 use tracedecay_usecases::operation_stream::OperationEventAuthority;
@@ -973,6 +976,344 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
             "{label} must not alias product graph tasks into executor topology: {body}"
         );
     }
+}
+
+#[test]
+fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
+    let mut fixture = ProductionDaemon::start();
+    let registry =
+        work_executable_binding_registry().expect("canonical application binding registry");
+    let topology_metrics = registry
+        .iter()
+        .filter_map(|availability| availability.binding())
+        .find(|binding| binding.operation_id().as_str() == "operation.work.topology_metrics")
+        .expect("canonical topology metrics executable binding");
+    let RouteExposureV1::Public {
+        binding_id,
+        route_path,
+    } = topology_metrics.exposure()
+    else {
+        panic!("topology metrics binding must have a public route exposure");
+    };
+    assert_eq!(
+        binding_id.as_str(),
+        "binding.http.work.topology_metrics",
+        "the topology metrics route must retain its canonical public binding ID"
+    );
+    assert_eq!(
+        route_path, "/application/work/topology-metrics",
+        "the canonical topology metrics binding must retain its route path"
+    );
+    // This pre-project horizon is intentionally outside every observation the
+    // daemon can create. A historical empty read must name absence for every
+    // descriptor rather than turn it into an all-zero success.
+    let request = serde_json::json!({
+        "horizon": { "since_micros": 1, "until_micros": 2 },
+        "max_events": 10_000,
+    });
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .into();
+    let route = fixture.external_url(route_path);
+    let expected_metric_names = EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
+        .iter()
+        .map(|(metric, _, _)| (*metric).to_owned())
+        .collect::<Vec<_>>();
+    let expected_metric_name_set = expected_metric_names
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let assert_dimension_cells = |metrics: &Value| {
+        let measurements = metrics["measurements"]
+            .as_array()
+            .expect("topology metrics measurements array");
+        let dimensional_measurement_count = measurements
+            .iter()
+            .filter(|measurement| {
+                measurement["dimensions"]
+                    .as_array()
+                    .is_some_and(|dimensions| !dimensions.is_empty())
+            })
+            .count();
+        assert!(
+            dimensional_measurement_count > 0,
+            "an empty authorized horizon must retain dimensional topology metric cells: {metrics}"
+        );
+        for (metric, unit, denominator, dimensions) in [
+            (
+                "work_duplicate_effort_total",
+                "microseconds",
+                "adjudicated_duplicate_relations",
+                serde_json::json!([
+                    { "dimension": "duplicate_kind", "value": "exact_duplicate" },
+                    { "dimension": "unit", "value": "wall_micros" },
+                ]),
+            ),
+            (
+                "work_execution_concurrency_width",
+                "microseconds",
+                "duration_weighted_topology_samples",
+                serde_json::json!([
+                    { "dimension": "concurrency_phase", "value": "requested" },
+                ]),
+            ),
+        ] {
+            assert!(
+                measurements.iter().any(|measurement| {
+                    measurement["value"]["metric"] == metric
+                        && measurement["value"]["unit"] == unit
+                        && measurement["value"]["denominator"] == denominator
+                        && measurement["dimensions"] == dimensions
+                }),
+                "an empty authorized horizon must retain the representative dimensional {metric} cell: {metrics}"
+            );
+        }
+    };
+    let assert_dimensionless_family_absences = |metrics: &Value| {
+        let measurements = metrics["measurements"]
+            .as_array()
+            .expect("topology metrics measurements array");
+        let known_empty_coverage = serde_json::json!({
+            "eligible": 0,
+            "observed": 0,
+            "completed": 0,
+            "censored": 0,
+            "unknown": 0,
+            "excluded": 0,
+            "state": "known",
+        });
+        for (metric, unit, denominator) in [
+            (
+                "work_merge_success_ratio",
+                "ratio",
+                "observed_native_integrations",
+            ),
+            (
+                "work_blocked_cause_seconds",
+                "seconds",
+                "closed_blocked_intervals",
+            ),
+            ("work_rerun_rate", "ratio", "eligible_original_attempts"),
+            (
+                "work_delivery_duplicate_ratio",
+                "ratio",
+                "attempted_deliveries",
+            ),
+        ] {
+            let matching = measurements
+                .iter()
+                .filter(|measurement| {
+                    measurement["value"]["metric"] == metric
+                        && measurement["dimensions"] == serde_json::json!([])
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "an empty authorized horizon must retain one dimensionless {metric} absence: {metrics}"
+            );
+            let measurement = matching[0];
+            assert_eq!(measurement["dimensions"], serde_json::json!([]));
+            assert_eq!(
+                measurement["value"]["descriptor_revision"],
+                EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1
+            );
+            assert_eq!(measurement["value"]["unit"], unit);
+            assert_eq!(measurement["value"]["denominator"], denominator);
+            assert_eq!(measurement["value"]["denominator_value"], 0);
+            assert_eq!(measurement["value"]["coverage"], known_empty_coverage);
+            assert!(measurement["value"]["value"].is_null());
+            assert_eq!(measurement["unavailable"], "no_eligible_evidence");
+            assert_eq!(
+                measurement["value"]["unavailable_reason"],
+                "no_eligible_evidence"
+            );
+        }
+    };
+    let descriptor_identities = |metrics: &Value| {
+        let measurements = metrics["measurements"]
+            .as_array()
+            .expect("topology metrics measurements array");
+        let reported = measurements
+            .iter()
+            .map(|measurement| {
+                (
+                    measurement["value"]["descriptor_revision"]
+                        .as_str()
+                        .expect("measurement descriptor revision")
+                        .to_owned(),
+                    measurement["value"]["metric"]
+                        .as_str()
+                        .expect("measurement descriptor name")
+                        .to_owned(),
+                    measurement["value"]["unit"]
+                        .as_str()
+                        .expect("measurement descriptor unit")
+                        .to_owned(),
+                    measurement["value"]["denominator"]
+                        .as_str()
+                        .expect("measurement descriptor denominator")
+                        .to_owned(),
+                    serde_json::to_string(&measurement["dimensions"])
+                        .expect("serializable measurement dimensions"),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let metric_names = reported
+            .iter()
+            .map(|(_, metric, _, _, _)| metric.clone())
+            .collect::<BTreeSet<_>>();
+        let stable = expected_metric_names
+            .iter()
+            .filter(|metric| metric_names.contains(*metric))
+            .cloned()
+            .collect::<Vec<_>>();
+        (measurements.len(), reported, metric_names, stable)
+    };
+
+    let anonymous = agent
+        .post(&route)
+        .header("origin", &fixture.origin)
+        .content_type("application/json")
+        .send(request.to_string())
+        .expect("anonymous operation.work.topology_metrics response");
+    assert_eq!(
+        anonymous.status().as_u16(),
+        StatusCode::UNAUTHORIZED.as_u16(),
+        "the topology metrics route must reject an uncredentialed read"
+    );
+
+    let (status, initial) = poll_past_warming("operation.work.topology_metrics", &mut || {
+        post_envelope(&agent, &route, &fixture, &request)
+    });
+    assert_canonical_envelope("operation.work.topology_metrics", status, &initial);
+    assert_eq!(
+        initial["value"]["outcome"]["outcome"], "evidence",
+        "{initial}"
+    );
+    let initial_metrics = &initial["value"]["outcome"]["value"]["payload"];
+    assert_eq!(
+        initial_metrics["authorized_scope_ref"], fixture.project_id,
+        "{initial_metrics}"
+    );
+    assert_eq!(
+        initial_metrics["horizon"], request["horizon"],
+        "{initial_metrics}"
+    );
+    let (
+        initial_measurement_count,
+        initial_reported_cell_identities,
+        initial_metric_names,
+        initial_canonical_metric_names,
+    ) = descriptor_identities(initial_metrics);
+    assert_eq!(
+        initial_measurement_count,
+        initial_reported_cell_identities.len(),
+        "an empty authorized horizon must not emit duplicate topology metric cells: {initial_metrics}"
+    );
+    assert_eq!(
+        initial_metric_names, expected_metric_name_set,
+        "an empty authorized horizon must not emit an unknown topology metric descriptor family: {initial_metrics}"
+    );
+    assert!(
+        initial_reported_cell_identities.len() > expected_metric_names.len(),
+        "an empty authorized horizon must retain dimensional topology metric identities: {initial_metrics}"
+    );
+    assert_dimension_cells(initial_metrics);
+    assert_dimensionless_family_absences(initial_metrics);
+    assert_eq!(
+        initial_canonical_metric_names, expected_metric_names,
+        "an empty authorized horizon must retain every canonical topology metric family in catalog order: {initial_metrics}"
+    );
+    assert!(
+        initial_metrics["measurements"]
+            .as_array()
+            .is_some_and(|measurements| {
+                !measurements.is_empty()
+                    && measurements.iter().all(|measurement| {
+                        measurement["value"]["value"].is_null()
+                            && measurement["unavailable"] == "no_eligible_evidence"
+                            && measurement["value"]["unavailable_reason"] == "no_eligible_evidence"
+                    })
+            }),
+        "an empty authorized horizon must carry typed no-eligible-evidence descriptors: {initial_metrics}"
+    );
+
+    fixture.restart();
+    let restored_route = fixture.external_url(route_path);
+    let anonymous_after_restart = agent
+        .post(&restored_route)
+        .header("origin", &fixture.origin)
+        .content_type("application/json")
+        .send(request.to_string())
+        .expect("anonymous restarted operation.work.topology_metrics response");
+    assert_eq!(
+        anonymous_after_restart.status().as_u16(),
+        StatusCode::UNAUTHORIZED.as_u16(),
+        "a restarted topology metrics route must still reject an uncredentialed read"
+    );
+    let (status, restored) =
+        poll_past_warming("operation.work.topology_metrics after restart", &mut || {
+            post_envelope(&agent, &restored_route, &fixture, &request)
+        });
+    assert_canonical_envelope(
+        "operation.work.topology_metrics after restart",
+        status,
+        &restored,
+    );
+    let restored_metrics = &restored["value"]["outcome"]["value"]["payload"];
+    assert_eq!(
+        restored_metrics["authorized_scope_ref"], fixture.project_id,
+        "{restored_metrics}"
+    );
+    assert_eq!(
+        restored_metrics["horizon"], request["horizon"],
+        "{restored_metrics}"
+    );
+    let (
+        restored_measurement_count,
+        restored_reported_cell_identities,
+        restored_metric_names,
+        restored_canonical_metric_names,
+    ) = descriptor_identities(restored_metrics);
+    assert_eq!(
+        restored_measurement_count,
+        restored_reported_cell_identities.len(),
+        "a restarted topology metrics route must not emit duplicate metric cells: {restored_metrics}"
+    );
+    assert_eq!(
+        restored_metric_names, expected_metric_name_set,
+        "a restarted topology metrics route must not emit an unknown metric descriptor family: {restored_metrics}"
+    );
+    assert!(
+        restored_reported_cell_identities.len() > expected_metric_names.len(),
+        "a restarted topology metrics route must retain dimensional metric identities: {restored_metrics}"
+    );
+    assert_dimension_cells(restored_metrics);
+    assert_dimensionless_family_absences(restored_metrics);
+    assert_eq!(
+        restored_canonical_metric_names, expected_metric_names,
+        "a restarted topology metrics route must retain every canonical metric family in catalog order: {restored_metrics}"
+    );
+    assert_eq!(
+        restored_reported_cell_identities, initial_reported_cell_identities,
+        "a physical restart must preserve every topology metric cell identity: {restored_metrics}"
+    );
+    assert!(
+        restored_metrics["measurements"]
+            .as_array()
+            .is_some_and(|measurements| {
+                !measurements.is_empty()
+                    && measurements.iter().all(|measurement| {
+                        measurement["value"]["value"].is_null()
+                            && measurement["unavailable"] == "no_eligible_evidence"
+                            && measurement["value"]["unavailable_reason"] == "no_eligible_evidence"
+                    })
+            }),
+        "a restart must preserve typed absence instead of fabricating topology evidence: {restored_metrics}"
+    );
 }
 
 /// The dashboard Work journey past its verified task root.

@@ -11,7 +11,7 @@ use crate::candidate_output::{
     compute_workload_digest,
 };
 use crate::semantic_native::{SemanticNativeStageResultV1, native_profile_requirements};
-use crate::{DirectEvaluationStatusV1, SearchEvalError, evaluate_generated_outputs};
+use crate::{DirectEvaluationStatusV1, SearchEvalError, evaluate_generated_outputs_against_corpus};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -136,6 +136,19 @@ impl DirectEvaluationReportV1 {
         repo_root: &std::path::Path,
         workload: &CandidateWorkloadV1,
     ) -> Result<(), SearchEvalError> {
+        let corpus_digest = compute_corpus_digest(repo_root, workload)?;
+        self.validate_against_authoritative_corpus(workload, &corpus_digest)
+    }
+
+    /// Reconstruct this report against the independently loaded workload and
+    /// its already-verified corpus binding. This retains every normal report
+    /// validation while allowing packaged qualification to avoid materializing
+    /// a temporary evaluator fixture.
+    pub(crate) fn validate_against_authoritative_corpus(
+        &self,
+        workload: &CandidateWorkloadV1,
+        corpus_digest: &str,
+    ) -> Result<(), SearchEvalError> {
         if self.command != "compare" {
             return Err(SearchEvalError::Contract(
                 "direct evaluation report has an unsupported command".to_owned(),
@@ -147,7 +160,6 @@ impl DirectEvaluationReportV1 {
                 "direct evaluation report does not bind the checked-in workload".to_owned(),
             ));
         }
-        let corpus_digest = compute_corpus_digest(repo_root, workload)?;
         if self.corpus_digest != corpus_digest {
             return Err(SearchEvalError::Contract(
                 "direct evaluation report does not bind the byte-exact corpus".to_owned(),
@@ -179,13 +191,13 @@ impl DirectEvaluationReportV1 {
                     .to_owned(),
             ));
         }
-        let reconstructed = evaluate_generated_outputs(
-            repo_root,
+        let reconstructed = evaluate_generated_outputs_against_corpus(
             workload,
             &GenerateCandidateOutputsResultV1 {
                 workload_digest,
                 outputs: self.raw_outputs.clone(),
             },
+            corpus_digest,
         )?;
         if self != &reconstructed {
             return Err(SearchEvalError::Contract(
@@ -204,6 +216,28 @@ impl DirectEvaluationReportV1 {
         workload: &CandidateWorkloadV1,
     ) -> Result<(), SearchEvalError> {
         self.validate_against(repo_root, workload)?;
+        self.validate_native_evidence(workload, NativeVectorGenerationEvidence::Recorded)
+    }
+
+    /// Validate a redacted portable-qualification report. This is crate-local
+    /// because an ordinary evaluator report must retain the actual local
+    /// vector-generation provenance it observed.
+    pub(crate) fn validate_portable_qualification_against_authoritative_corpus(
+        &self,
+        workload: &CandidateWorkloadV1,
+        corpus_digest: &str,
+    ) -> Result<(), PortableNativeQualificationValidationErrorV1> {
+        self.validate_against_authoritative_corpus(workload, corpus_digest)
+            .map_err(|_| PortableNativeQualificationValidationErrorV1::Report)?;
+        self.validate_native_evidence(workload, NativeVectorGenerationEvidence::Redacted)
+            .map_err(|_| PortableNativeQualificationValidationErrorV1::NativeEvidence)
+    }
+
+    fn validate_native_evidence(
+        &self,
+        workload: &CandidateWorkloadV1,
+        vector_generation_evidence: NativeVectorGenerationEvidence,
+    ) -> Result<(), SearchEvalError> {
         if self.status != DirectEvaluationStatusV1::Pass {
             return Err(SearchEvalError::Contract(
                 "only a passing direct evaluation report can activate semantics".to_owned(),
@@ -246,17 +280,20 @@ impl DirectEvaluationReportV1 {
                     || sample.measured_queries != output.queries.len() as u64
                     || sample
                         .provenance
-                        .vector_generation_id
-                        .as_deref()
-                        .is_none_or(str::is_empty)
-                    || sample
-                        .provenance
                         .artifact_digest
                         .as_deref()
                         .is_none_or(str::is_empty)
                 {
                     return Err(SearchEvalError::Contract(format!(
                         "{}:{} native {scale} resource provenance is incomplete or unbound",
+                        output.profile_id, output.partition
+                    )));
+                }
+                if !vector_generation_evidence
+                    .accepts(sample.provenance.vector_generation_id.as_deref())
+                {
+                    return Err(SearchEvalError::Contract(format!(
+                        "{}:{} native {scale} vector-generation provenance has the wrong retention state",
                         output.profile_id, output.partition
                     )));
                 }
@@ -422,6 +459,29 @@ impl DirectEvaluationReportV1 {
             sequence_length,
             load_deadline_ms,
         })
+    }
+}
+
+/// Fail-closed classification for the single reconstruction performed while
+/// accepting portable native qualification evidence. Aggregate mismatches and
+/// missing native evidence intentionally retain distinct package denials.
+pub(crate) enum PortableNativeQualificationValidationErrorV1 {
+    Report,
+    NativeEvidence,
+}
+
+#[derive(Clone, Copy)]
+enum NativeVectorGenerationEvidence {
+    Recorded,
+    Redacted,
+}
+
+impl NativeVectorGenerationEvidence {
+    fn accepts(self, value: Option<&str>) -> bool {
+        match self {
+            Self::Recorded => value.is_some_and(|value| !value.is_empty()),
+            Self::Redacted => value.is_none(),
+        }
     }
 }
 

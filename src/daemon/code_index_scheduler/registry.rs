@@ -16,6 +16,9 @@ use std::{
     },
 };
 
+#[cfg(test)]
+use std::sync::Condvar;
+
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
@@ -41,6 +44,34 @@ use self::ignored_dependencies::exact_activated_serving_generation;
 pub(super) use scope_identity::{latest_matches_scope, latest_matches_scope_identity};
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
+
+#[cfg(test)]
+struct ColdMountFinalCommitGateV1 {
+    project_root: PathBuf,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+fn cold_mount_final_commit_gate() -> &'static Mutex<Option<ColdMountFinalCommitGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<Option<ColdMountFinalCommitGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+struct ExistingSemanticScheduleReplacementGateV1 {
+    project_root: PathBuf,
+    entered: tokio::sync::oneshot::Sender<()>,
+}
+
+#[cfg(test)]
+fn existing_semantic_schedule_replacement_gate()
+-> &'static Mutex<Option<ExistingSemanticScheduleReplacementGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<Option<ExistingSemanticScheduleReplacementGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(None))
+}
 
 mod resident_memory;
 pub(super) mod watch_ingress;
@@ -76,6 +107,139 @@ fn bounded_daemon_admission_permits() -> usize {
     })
 }
 
+#[cfg(test)]
+fn cold_mount_admission_barriers() -> &'static Mutex<BTreeMap<PathBuf, Arc<tokio::sync::Barrier>>> {
+    static BARRIERS: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, Arc<tokio::sync::Barrier>>>> =
+        std::sync::OnceLock::new();
+    BARRIERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+struct ColdMountPostCheckTestControlV1 {
+    reached: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+fn cold_mount_post_check_controls()
+-> &'static Mutex<BTreeMap<PathBuf, Arc<ColdMountPostCheckTestControlV1>>> {
+    static CONTROLS: std::sync::OnceLock<
+        Mutex<BTreeMap<PathBuf, Arc<ColdMountPostCheckTestControlV1>>>,
+    > = std::sync::OnceLock::new();
+    CONTROLS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ColdMountOpenEventV1 {
+    Started,
+    Finished,
+}
+
+#[cfg(test)]
+struct ColdMountOpenTestControlV1 {
+    blocks_open: bool,
+    released: Mutex<bool>,
+    release: Condvar,
+    events: Mutex<Vec<ColdMountOpenEventV1>>,
+    changed: tokio::sync::watch::Sender<usize>,
+    followers: AtomicUsize,
+}
+
+#[cfg(test)]
+impl ColdMountOpenTestControlV1 {
+    fn new(blocks_open: bool) -> Self {
+        let (changed, _) = tokio::sync::watch::channel(0);
+        Self {
+            blocks_open,
+            released: Mutex::new(false),
+            release: Condvar::new(),
+            events: Mutex::new(Vec::new()),
+            changed,
+            followers: AtomicUsize::new(0),
+        }
+    }
+
+    fn record(&self, event: ColdMountOpenEventV1) {
+        let count = {
+            let mut events = self
+                .events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            events.push(event);
+            events.len()
+        };
+        self.changed.send_replace(count);
+    }
+
+    fn record_follower(&self) {
+        self.followers.fetch_add(1, Ordering::AcqRel);
+        let count = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        self.changed.send_replace(count);
+    }
+}
+
+#[cfg(test)]
+fn cold_mount_open_controls() -> &'static Mutex<BTreeMap<PathBuf, Arc<ColdMountOpenTestControlV1>>>
+{
+    static CONTROLS: std::sync::OnceLock<
+        Mutex<BTreeMap<PathBuf, Arc<ColdMountOpenTestControlV1>>>,
+    > = std::sync::OnceLock::new();
+    CONTROLS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+struct QueryAdmissionTestControlV1 {
+    lookup_gate: tokio::sync::Mutex<()>,
+    rendezvous: tokio::sync::Barrier,
+    pauses_after_claim: AtomicBool,
+    claim_reached: AtomicBool,
+    claim_entered: tokio::sync::Notify,
+    claim_release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+fn query_admission_controls()
+-> &'static Mutex<BTreeMap<WorktreeId, Arc<QueryAdmissionTestControlV1>>> {
+    static CONTROLS: std::sync::OnceLock<
+        Mutex<BTreeMap<WorktreeId, Arc<QueryAdmissionTestControlV1>>>,
+    > = std::sync::OnceLock::new();
+    CONTROLS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Deterministically holds a cancelling query's wake claim while it owns the
+/// canonical wake state. A foreign producer announces before it contends on
+/// that state lock, which exercises the old split-CAS interleaving without a
+/// timing race.
+#[cfg(test)]
+struct PendingWakeDropGateTestV1 {
+    drop_reached: AtomicBool,
+    drop_entered: tokio::sync::Notify,
+    drop_released: Mutex<bool>,
+    drop_release: Condvar,
+    foreign_attempted: AtomicBool,
+    foreign_entered: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl PendingWakeDropGateTestV1 {
+    fn new() -> Self {
+        Self {
+            drop_reached: AtomicBool::new(false),
+            drop_entered: tokio::sync::Notify::new(),
+            drop_released: Mutex::new(false),
+            drop_release: Condvar::new(),
+            foreign_attempted: AtomicBool::new(false),
+            foreign_entered: tokio::sync::Notify::new(),
+        }
+    }
+}
+
 /// One mounted worktree's code scope identity and serving generation, read
 /// without touching the scheduler mutex.
 pub(in crate::daemon) struct CodeIndexServingScopeV1 {
@@ -83,6 +247,52 @@ pub(in crate::daemon) struct CodeIndexServingScopeV1 {
     pub(in crate::daemon) worktree_id: WorktreeId,
     pub(in crate::daemon) shutting_down: Arc<AtomicBool>,
     pub(in crate::daemon) serving_generation: Option<Arc<CodeIndexPublishedGenerationV1>>,
+}
+
+/// Outcome of retiring the retained generation from a failed branch
+/// publication. A no-match preserves a newer generation that won the race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::daemon) enum ServingGenerationRollbackOutcomeV1 {
+    Cleared,
+    NoMatch,
+}
+
+/// Slot-local claim kept independently from its RAII lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServingGenerationInstallationClaimV1 {
+    token: u64,
+    serving_epoch: u64,
+    generation_id: CodeGenerationId,
+}
+
+/// Non-clone ownership of one exact serving-slot installation. Dropping an
+/// unfinished lease releases only its matching claim; it never clears or
+/// mutates the serving generation, so cancellation cannot strand a later
+/// exact replay behind an abandoned same-epoch claim.
+#[derive(Debug)]
+#[must_use = "an installation lease must be committed, retired, or dropped"]
+pub(in crate::daemon) struct ServingGenerationInstallationV1 {
+    claim: ServingGenerationInstallationClaimV1,
+    active_installation: Arc<Mutex<Option<ServingGenerationInstallationClaimV1>>>,
+}
+
+impl Drop for ServingGenerationInstallationV1 {
+    fn drop(&mut self) {
+        let mut active = self
+            .active_installation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.as_ref() == Some(&self.claim) {
+            *active = None;
+        }
+    }
+}
+
+/// Result of claiming one exact serving generation for a branch publication.
+#[derive(Debug)]
+pub(in crate::daemon) enum ServingGenerationInstallationOutcomeV1 {
+    Installed(ServingGenerationInstallationV1),
+    NoMatch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,6 +338,12 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
         Option<Arc<dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1>>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    /// Monotonic replacement epoch for the serving slot. It invalidates a
+    /// branch-publication token even if a future worker re-seats an equal id.
+    serving_generation_epoch: Arc<AtomicU64>,
+    /// One in-flight branch publication may own a serving-slot installation.
+    /// It is paired with `serving_generation_epoch` under the slot CAS.
+    serving_generation_installation: Arc<Mutex<Option<ServingGenerationInstallationClaimV1>>>,
     graph_activation: CodeGraphActivationAuthorityV1,
     ignored_dependency_admissions: Arc<
         Mutex<
@@ -140,10 +356,10 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     hints: Arc<Mutex<PendingHintsV1>>,
     wake: Arc<tokio::sync::Notify>,
     epoch: Arc<AtomicU64>,
-    /// Unix micros of the earliest pending wake not yet consumed by a receipt.
-    pending_wake_micros: Arc<AtomicU64>,
-    /// Packed [`CodeIndexCadenceTriggerV1`] for the pending wake.
-    pending_wake_trigger: Arc<AtomicU64>,
+    /// The exact pending wake state. Its one lock linearizes ownership, arrival
+    /// timestamp, and trigger so a cancelling query cannot erase a coalesced
+    /// foreign wake between independent atomic updates.
+    pending_wake: Arc<PendingWakeV1>,
     shutting_down: Arc<AtomicBool>,
     /// Count of in-flight owner passes; nonzero means activation or reconcile
     /// work is running for this worktree.
@@ -157,6 +373,213 @@ pub(in crate::daemon) struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
+/// A cold-mount reservation publishes no runtime. Its sole authority is to
+/// make one caller open a canonical root while followers wait to re-read the
+/// mounted runtime that caller may publish.
+struct ColdMountReservationSlotV1 {
+    completion: tokio::sync::watch::Sender<()>,
+    cancellation: tokio::sync::watch::Sender<()>,
+    cancelled: AtomicBool,
+    retired: AtomicBool,
+    completed: AtomicBool,
+}
+
+impl ColdMountReservationSlotV1 {
+    fn cancel(&self, retiring: bool) {
+        if retiring {
+            self.retired.store(true, Ordering::Release);
+        }
+        if !self.cancelled.swap(true, Ordering::AcqRel) {
+            self.cancellation.send_replace(());
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+}
+
+struct ColdMountReservationV1 {
+    project_root: PathBuf,
+    slot: Arc<ColdMountReservationSlotV1>,
+    reservations: Arc<Mutex<BTreeMap<PathBuf, Arc<ColdMountReservationSlotV1>>>>,
+}
+
+impl Drop for ColdMountReservationV1 {
+    fn drop(&mut self) {
+        let mut reservations = self
+            .reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owns_reservation = reservations
+            .get(&self.project_root)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.slot));
+        if owns_reservation {
+            if !self.slot.is_retired() {
+                reservations.remove(&self.project_root);
+            }
+            self.slot.completed.store(true, Ordering::Release);
+            self.slot.completion.send_replace(());
+        }
+    }
+}
+
+enum ColdMountAdmissionV1 {
+    Owner(ColdMountReservationV1),
+    Follower(tokio::sync::watch::Receiver<()>),
+}
+
+/// One exact worktree's pending worker wake. `micros == 0` means no pending
+/// arrival, and every nonzero arrival is held by one nonzero owner token.
+struct PendingWakeStateV1 {
+    micros: u64,
+    trigger: u64,
+    owner: u64,
+    next_owner: u64,
+}
+
+/// The single synchronization authority for one worktree's coalesced wake.
+/// The state lock makes timestamp, trigger, and claim ownership one
+/// linearizable transition: no producer can arrive between a claim's owner
+/// release and its marker release.
+struct PendingWakeV1 {
+    state: Mutex<PendingWakeStateV1>,
+    #[cfg(test)]
+    drop_gate: Mutex<Option<Arc<PendingWakeDropGateTestV1>>>,
+}
+
+impl Default for PendingWakeV1 {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(PendingWakeStateV1::default()),
+            #[cfg(test)]
+            drop_gate: Mutex::new(None),
+        }
+    }
+}
+
+impl PendingWakeV1 {
+    #[cfg(test)]
+    fn note_foreign_wake_attempt_for_test(&self) {
+        let gate = self
+            .drop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate
+            && gate.drop_reached.load(Ordering::Acquire)
+        {
+            gate.foreign_attempted.store(true, Ordering::Release);
+            gate.foreign_entered.notify_waiters();
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_claim_drop_for_test(&self) {
+        let gate = self
+            .drop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            gate.drop_reached.store(true, Ordering::Release);
+            gate.drop_entered.notify_waiters();
+            let mut released = gate
+                .drop_released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = gate
+                    .drop_release
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+    }
+}
+
+impl Default for PendingWakeStateV1 {
+    fn default() -> Self {
+        Self {
+            micros: 0,
+            trigger: 0,
+            owner: 0,
+            next_owner: 1,
+        }
+    }
+}
+
+impl PendingWakeStateV1 {
+    fn next_owner(&mut self) -> u64 {
+        let owner = self.next_owner;
+        self.next_owner = self.next_owner.wrapping_add(1);
+        if self.next_owner == 0 {
+            self.next_owner = 1;
+        }
+        owner
+    }
+}
+
+/// Owns one exact pending wake marker until worker dispatch succeeds or the
+/// request is cancelled/rejected. Dropping a claim releases its owner and
+/// marker under the same state lock, so it cannot erase a foreign wake.
+struct PendingWakeClaimV1 {
+    pending_wake: Arc<PendingWakeV1>,
+    claimed_micros: u64,
+    owner: u64,
+    settled: bool,
+}
+
+impl PendingWakeClaimV1 {
+    fn claim(pending_wake: Arc<PendingWakeV1>) -> Option<Self> {
+        let mut state = pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.micros != 0 {
+            return None;
+        }
+        let claimed_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
+        let owner = state.next_owner();
+        state.micros = claimed_micros;
+        state.owner = owner;
+        drop(state);
+        Some(Self {
+            pending_wake,
+            claimed_micros,
+            owner,
+            settled: false,
+        })
+    }
+
+    fn settle(mut self) {
+        self.settled = true;
+    }
+}
+
+impl Drop for PendingWakeClaimV1 {
+    fn drop(&mut self) {
+        if !self.settled {
+            let mut state = self
+                .pending_wake
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            #[cfg(test)]
+            self.pending_wake.pause_claim_drop_for_test();
+            if state.owner == self.owner && state.micros == self.claimed_micros {
+                state.micros = 0;
+                state.trigger = 0;
+                state.owner = 0;
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
@@ -167,7 +590,11 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
     /// reconcile task has not finished draining. A root parked here must never
     /// re-mount: a fresh owner would race the dying one over the same store.
     pub(super) retiring: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
+    /// Exact roots currently opening a scheduler. This contains no runtime;
+    /// followers wake and resolve through `mounted` after the owner settles.
+    cold_mount_reservations: Arc<Mutex<BTreeMap<PathBuf, Arc<ColdMountReservationSlotV1>>>>,
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
+    serving_generation_installation_tokens: Arc<AtomicU64>,
     generation_publications: tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
     activations: Arc<Mutex<BTreeMap<ManifestDigest, Weak<super::CodeIndexActivationV1>>>>,
@@ -251,6 +678,84 @@ impl CodeIndexSchedulerRegistryV1 {
             .len()
     }
 
+    #[cfg(test)]
+    pub(super) async fn pause_next_cold_mount_before_final_commit(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let (released, release) = tokio::sync::oneshot::channel();
+        let mut gate = cold_mount_final_commit_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            gate.is_none(),
+            "only one cold mount final-commit gate may be armed at a time"
+        );
+        *gate = Some(ColdMountFinalCommitGateV1 {
+            project_root,
+            entered,
+            release,
+        });
+        (entered_observed, released)
+    }
+
+    #[cfg(test)]
+    async fn wait_for_cold_mount_final_commit_gate(project_root: &Path) {
+        let gate = {
+            let mut armed = cold_mount_final_commit_gate()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let matches_root = armed
+                .as_ref()
+                .is_some_and(|gate| gate.project_root == project_root);
+            if matches_root { armed.take() } else { None }
+        };
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn observe_next_existing_semantic_schedule_replacement(
+        &self,
+        project_root: PathBuf,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let mut gate = existing_semantic_schedule_replacement_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            gate.is_none(),
+            "only one existing semantic schedule replacement gate may be armed at a time"
+        );
+        *gate = Some(ExistingSemanticScheduleReplacementGateV1 {
+            project_root,
+            entered,
+        });
+        entered_observed
+    }
+
+    #[cfg(test)]
+    fn observe_existing_semantic_schedule_replacement(project_root: &Path) {
+        let gate = {
+            let mut armed = existing_semantic_schedule_replacement_gate()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let matches_root = armed
+                .as_ref()
+                .is_some_and(|gate| gate.project_root == project_root);
+            if matches_root { armed.take() } else { None }
+        };
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+        }
+    }
+
     /// Construct a registry with an explicit background-reconcile permit count so
     /// tests can deterministically exercise the bounded-admission behavior
     /// (parallelism across distinct stores vs. serialization at a bound of one)
@@ -269,6 +774,533 @@ impl CodeIndexSchedulerRegistryV1 {
         Arc::clone(&self.background_reconcile_admission)
     }
 
+    /// Test-only observation of an exact mounted worktree's active owner pass.
+    #[cfg(test)]
+    pub(super) async fn reconcile_in_progress_for_test(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let reconcile_in_progress = self
+            .mounted
+            .lock()
+            .await
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.reconcile_in_progress));
+        reconcile_in_progress
+            .is_some_and(|reconcile_in_progress| reconcile_in_progress.load(Ordering::Acquire) != 0)
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_cold_mount_admission_barrier(&self, project_root: &Path, callers: usize) {
+        let project_root = project_root
+            .canonicalize()
+            .expect("canonical test project root");
+        let barrier = Arc::new(tokio::sync::Barrier::new(callers));
+        let replaced = cold_mount_admission_barriers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root, barrier);
+        assert!(replaced.is_none(), "cold-mount barrier already installed");
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_cold_mount_post_check_gate(&self, project_root: &Path) {
+        let project_root = project_root
+            .canonicalize()
+            .expect("canonical test project root");
+        let replaced = cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root,
+                Arc::new(ColdMountPostCheckTestControlV1 {
+                    reached: AtomicBool::new(false),
+                    entered: tokio::sync::Notify::new(),
+                    release: tokio::sync::Notify::new(),
+                }),
+            );
+        assert!(
+            replaced.is_none(),
+            "cold-mount post-check gate already installed"
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_cold_mount_post_check(&self, project_root: &Path) {
+        let project_root = project_root
+            .canonicalize()
+            .expect("canonical test project root");
+        let control = cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&project_root)
+            .cloned()
+            .expect("cold-mount post-check gate");
+        let entered = control.entered.notified();
+        if !control.reached.load(Ordering::Acquire) {
+            entered.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn release_cold_mount_post_check(&self, project_root: &Path) {
+        let project_root = project_root
+            .canonicalize()
+            .expect("canonical test project root");
+        cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&project_root)
+            .expect("cold-mount post-check gate")
+            .release
+            .notify_one();
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_cold_mount_open_gate(&self, project_root: &Path) {
+        Self::install_cold_mount_open_control(project_root, true);
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_cold_mount_open_observer(&self, project_root: &Path) {
+        Self::install_cold_mount_open_control(project_root, false);
+    }
+
+    #[cfg(test)]
+    fn install_cold_mount_open_control(project_root: &Path, blocks_open: bool) {
+        let project_root = project_root
+            .canonicalize()
+            .expect("canonical test project root");
+        let replaced = cold_mount_open_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root,
+                Arc::new(ColdMountOpenTestControlV1::new(blocks_open)),
+            );
+        assert!(
+            replaced.is_none(),
+            "cold-mount open control already installed"
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_cold_mount_open_events(&self, project_root: &Path, events: usize) {
+        let control =
+            Self::cold_mount_open_control_for_test(project_root).expect("cold-mount open control");
+        let mut changed = control.changed.subscribe();
+        loop {
+            let observed = control
+                .events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len();
+            if observed >= events {
+                return;
+            }
+            let _ = changed.changed().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_cold_mount_follower(&self, project_root: &Path) {
+        let control =
+            Self::cold_mount_open_control_for_test(project_root).expect("cold-mount open control");
+        let mut changed = control.changed.subscribe();
+        loop {
+            if control.followers.load(Ordering::Acquire) != 0 {
+                return;
+            }
+            let _ = changed.changed().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn release_cold_mount_open_gate(&self, project_root: &Path) {
+        let control =
+            Self::cold_mount_open_control_for_test(project_root).expect("cold-mount open control");
+        let mut released = control
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *released = true;
+        control.release.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(super) fn cold_mount_open_events(&self, project_root: &Path) -> Vec<ColdMountOpenEventV1> {
+        Self::cold_mount_open_control_for_test(project_root)
+            .expect("cold-mount open control")
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn subscribe_cold_mount_cancellation(
+        &self,
+        project_root: &Path,
+    ) -> Option<tokio::sync::watch::Receiver<()>> {
+        let project_root = project_root.canonicalize().ok()?;
+        self.cold_mount_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&project_root)
+            .map(|slot| slot.cancellation.subscribe())
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_query_admission_barrier(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+        callers: usize,
+    ) {
+        let control = Arc::new(QueryAdmissionTestControlV1 {
+            lookup_gate: tokio::sync::Mutex::new(()),
+            rendezvous: tokio::sync::Barrier::new(callers),
+            pauses_after_claim: AtomicBool::new(false),
+            claim_reached: AtomicBool::new(false),
+            claim_entered: tokio::sync::Notify::new(),
+            claim_release: tokio::sync::Notify::new(),
+        });
+        let replaced = query_admission_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(scope.worktree_id.clone(), control);
+        assert!(
+            replaced.is_none(),
+            "query-admission barrier already installed"
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_query_claim_gate(&self, scope: &tracedecay_application::ResolvedScope) {
+        let control = Arc::new(QueryAdmissionTestControlV1 {
+            lookup_gate: tokio::sync::Mutex::new(()),
+            rendezvous: tokio::sync::Barrier::new(1),
+            pauses_after_claim: AtomicBool::new(true),
+            claim_reached: AtomicBool::new(false),
+            claim_entered: tokio::sync::Notify::new(),
+            claim_release: tokio::sync::Notify::new(),
+        });
+        let replaced = query_admission_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(scope.worktree_id.clone(), control);
+        assert!(replaced.is_none(), "query-claim gate already installed");
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_query_claim(&self, scope: &tracedecay_application::ResolvedScope) {
+        let control = Self::query_admission_control_for_test(scope).expect("query-claim gate");
+        let entered = control.claim_entered.notified();
+        if !control.claim_reached.load(Ordering::Acquire) {
+            entered.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn release_query_claim(&self, scope: &tracedecay_application::ResolvedScope) {
+        Self::query_admission_control_for_test(scope)
+            .expect("query-claim gate")
+            .claim_release
+            .notify_one();
+    }
+
+    /// Reserve one cold open for an exact canonical root. A follower must
+    /// re-resolve `mounted` after completion because a failed or cancelled
+    /// owner publishes no runtime.
+    fn admit_cold_mount(
+        &self,
+        project_root: &Path,
+        mounted_worktrees: usize,
+    ) -> Result<ColdMountAdmissionV1, CodeIndexSchedulerErrorV1> {
+        let mut reservations = self
+            .cold_mount_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Shutdown closes this same semaphore before it waits for outstanding
+        // reservations. Checking while the reservation lock is held is the
+        // admission linearization point: no caller that observed it open
+        // earlier can reserve a new cold open after close.
+        if self.background_reconcile_admission.is_closed() {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler is shutting down".to_owned(),
+            ));
+        }
+        if let Some(slot) = reservations.get(project_root) {
+            return if slot.is_retired() {
+                Err(CodeIndexSchedulerErrorV1::Identity(
+                    "code-index scheduler owner is still retiring".to_owned(),
+                ))
+            } else {
+                Ok(ColdMountAdmissionV1::Follower(slot.completion.subscribe()))
+            };
+        }
+        if mounted_worktrees.saturating_add(reservations.len()) >= self.max_worktrees {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler capacity is exhausted".to_owned(),
+            ));
+        }
+        let (completion, _) = tokio::sync::watch::channel(());
+        let (cancellation, _) = tokio::sync::watch::channel(());
+        let slot = Arc::new(ColdMountReservationSlotV1 {
+            completion,
+            cancellation,
+            cancelled: AtomicBool::new(false),
+            retired: AtomicBool::new(false),
+            completed: AtomicBool::new(false),
+        });
+        reservations.insert(project_root.to_path_buf(), Arc::clone(&slot));
+        Ok(ColdMountAdmissionV1::Owner(ColdMountReservationV1 {
+            project_root: project_root.to_path_buf(),
+            slot,
+            reservations: Arc::clone(&self.cold_mount_reservations),
+        }))
+    }
+
+    fn cancel_cold_mount_reservations(&self) {
+        let reservations = self
+            .cold_mount_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for slot in reservations.values() {
+            slot.cancel(false);
+        }
+    }
+
+    fn cold_mount_reservation_completions(&self) -> Vec<tokio::sync::watch::Receiver<()>> {
+        self.cold_mount_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|slot| !slot.completed.load(Ordering::Acquire))
+            .map(|slot| slot.completion.subscribe())
+            .collect()
+    }
+
+    fn retire_cold_mount_reservations(
+        &self,
+        project_roots: &BTreeSet<PathBuf>,
+    ) -> (
+        Vec<(PathBuf, tokio::sync::watch::Receiver<()>)>,
+        BTreeSet<PathBuf>,
+    ) {
+        let reservations = self
+            .cold_mount_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut waiting = Vec::new();
+        let mut completed = BTreeSet::new();
+        for root in project_roots {
+            let Some(slot) = reservations.get(root) else {
+                continue;
+            };
+            slot.cancel(true);
+            if slot.completed.load(Ordering::Acquire) {
+                completed.insert(root.clone());
+            } else {
+                waiting.push((root.clone(), slot.completion.subscribe()));
+            }
+        }
+        (waiting, completed)
+    }
+
+    fn release_completed_retired_cold_mount_reservations(&self, project_roots: &BTreeSet<PathBuf>) {
+        let mut reservations = self
+            .cold_mount_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reservations.retain(|root, slot| {
+            !project_roots.contains(root)
+                || !slot.is_retired()
+                || !slot.completed.load(Ordering::Acquire)
+        });
+    }
+
+    #[cfg(test)]
+    async fn pause_cold_mount_admission_for_test(project_root: &Path) {
+        let barrier = cold_mount_admission_barriers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .cloned();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_cold_mount_after_outer_check_for_test(project_root: &Path) {
+        let control = cold_mount_post_check_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .cloned();
+        let Some(control) = control else {
+            return;
+        };
+        control.reached.store(true, Ordering::Release);
+        control.entered.notify_waiters();
+        control.release.notified().await;
+    }
+
+    #[cfg(test)]
+    fn cold_mount_open_control_for_test(
+        project_root: &Path,
+    ) -> Option<Arc<ColdMountOpenTestControlV1>> {
+        let project_root = project_root.canonicalize().ok()?;
+        cold_mount_open_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&project_root)
+            .cloned()
+    }
+
+    #[cfg(test)]
+    fn pause_cold_mount_open_for_test(project_root: &Path) {
+        let Some(control) = Self::cold_mount_open_control_for_test(project_root) else {
+            return;
+        };
+        control.record(ColdMountOpenEventV1::Started);
+        if control.blocks_open {
+            let mut released = control
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = control
+                    .release
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn finish_cold_mount_open_for_test(project_root: &Path) {
+        if let Some(control) = Self::cold_mount_open_control_for_test(project_root) {
+            control.record(ColdMountOpenEventV1::Finished);
+        }
+    }
+
+    #[cfg(test)]
+    fn note_cold_mount_follower_for_test(project_root: &Path) {
+        if let Some(control) = Self::cold_mount_open_control_for_test(project_root) {
+            control.record_follower();
+        }
+    }
+
+    #[cfg(test)]
+    fn query_admission_control_for_test(
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<Arc<QueryAdmissionTestControlV1>> {
+        query_admission_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&scope.worktree_id)
+            .cloned()
+    }
+
+    #[cfg(test)]
+    async fn pending_wake_for_scope_for_test(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<Arc<PendingWakeV1>> {
+        let mounted = self.mounted.lock().await;
+        {
+            let mut matched = mounted.values().filter(|worktree| {
+                worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+            });
+            let pending_wake = matched
+                .next()
+                .map(|worktree| Arc::clone(&worktree.pending_wake))?;
+            matched.next().is_none().then_some(pending_wake)
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn install_pending_wake_drop_gate(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) {
+        let mounted = self.mounted.lock().await;
+        let pending_wake = mounted
+            .values()
+            .find(|worktree| {
+                worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+            })
+            .map(|worktree| Arc::clone(&worktree.pending_wake))
+            .expect("mounted worktree");
+        let replaced = pending_wake
+            .drop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(Arc::new(PendingWakeDropGateTestV1::new()));
+        assert!(
+            replaced.is_none(),
+            "pending-wake drop gate already installed"
+        );
+    }
+
+    #[cfg(test)]
+    async fn pending_wake_drop_gate_for_test(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Arc<PendingWakeDropGateTestV1> {
+        let pending_wake = self
+            .pending_wake_for_scope_for_test(scope)
+            .await
+            .expect("mounted worktree");
+        pending_wake
+            .drop_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("pending-wake drop gate")
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_pending_wake_claim_drop(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) {
+        let gate = self.pending_wake_drop_gate_for_test(scope).await;
+        let entered = gate.drop_entered.notified();
+        if !gate.drop_reached.load(Ordering::Acquire) {
+            entered.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_foreign_pending_wake_attempt(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) {
+        let gate = self.pending_wake_drop_gate_for_test(scope).await;
+        let entered = gate.foreign_entered.notified();
+        if !gate.foreign_attempted.load(Ordering::Acquire) {
+            entered.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn release_pending_wake_claim_drop(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) {
+        let gate = self.pending_wake_drop_gate_for_test(scope).await;
+        let mut released = gate
+            .drop_released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *released = true;
+        gate.drop_release.notify_all();
+    }
+
     /// The pending-wake slot for one exact scope's worktree, in unix micros;
     /// `0` means no wake is outstanding.
     #[cfg(test)]
@@ -283,7 +1315,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.repository_id == scope.repository_id
                     && worktree.worktree_id == scope.worktree_id
             })
-            .map(|worktree| worktree.pending_wake_micros.load(Ordering::Acquire))
+            .map(|worktree| {
+                worktree
+                    .pending_wake
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .micros
+            })
     }
 
     /// Clear the pending-wake slot so a test starts from a known due window.
@@ -297,7 +1336,14 @@ impl CodeIndexSchedulerRegistryV1 {
             if worktree.repository_id == scope.repository_id
                 && worktree.worktree_id == scope.worktree_id
             {
-                worktree.pending_wake_micros.store(0, Ordering::Release);
+                let mut pending_wake = worktree
+                    .pending_wake
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                pending_wake.micros = 0;
+                pending_wake.owner = 0;
+                pending_wake.trigger = 0;
             }
         }
     }
@@ -314,12 +1360,146 @@ impl CodeIndexSchedulerRegistryV1 {
             if worktree.repository_id == scope.repository_id
                 && worktree.worktree_id == scope.worktree_id
             {
-                *worktree
+                let mut serving = worktree
                     .serving_generation
                     .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *serving = None;
+                worktree
+                    .serving_generation_epoch
+                    .fetch_add(1, Ordering::AcqRel);
             }
         }
+    }
+
+    /// Atomically marks the exact current serving generation as owned by one
+    /// branch publication. A subsequent serving-slot replacement invalidates
+    /// this token before rollback can observe it.
+    pub(in crate::daemon) async fn install_exact_serving_generation(
+        &self,
+        project_root: &Path,
+        expected: &Arc<CodeIndexPublishedGenerationV1>,
+    ) -> ServingGenerationInstallationOutcomeV1 {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return ServingGenerationInstallationOutcomeV1::NoMatch;
+        };
+        let (serving_generation, serving_epoch, installation_slot) = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return ServingGenerationInstallationOutcomeV1::NoMatch;
+            };
+            (
+                Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.serving_generation_epoch),
+                Arc::clone(&worktree.serving_generation_installation),
+            )
+        };
+        let serving = serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(current) = serving.as_ref() else {
+            return ServingGenerationInstallationOutcomeV1::NoMatch;
+        };
+        if !Arc::ptr_eq(&current.generation, expected) {
+            return ServingGenerationInstallationOutcomeV1::NoMatch;
+        }
+        let serving_epoch = serving_epoch.load(Ordering::Acquire);
+        let token = match self.serving_generation_installation_tokens.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| current.checked_add(1),
+        ) {
+            Ok(token) => token,
+            Err(_) => return ServingGenerationInstallationOutcomeV1::NoMatch,
+        };
+        let claim = ServingGenerationInstallationClaimV1 {
+            token,
+            serving_epoch,
+            generation_id: current.generation().manifest().generation_id.clone(),
+        };
+        let mut active_installation = installation_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active_installation
+            .as_ref()
+            .is_some_and(|existing| existing.serving_epoch == serving_epoch)
+        {
+            return ServingGenerationInstallationOutcomeV1::NoMatch;
+        }
+        *active_installation = Some(claim.clone());
+        drop(active_installation);
+        ServingGenerationInstallationOutcomeV1::Installed(ServingGenerationInstallationV1 {
+            claim,
+            active_installation: installation_slot,
+        })
+    }
+
+    /// Completes an exact serving-slot installation after its matching branch
+    /// metadata CAS commits. A no-match means a foreign publication replaced
+    /// the slot, so the caller must roll its metadata back without clearing
+    /// the foreign serving generation.
+    pub(in crate::daemon) async fn commit_serving_generation_installation(
+        &self,
+        project_root: &Path,
+        installation: ServingGenerationInstallationV1,
+    ) -> ServingGenerationRollbackOutcomeV1 {
+        self.resolve_serving_generation_installation(project_root, &installation.claim, false)
+            .await
+    }
+
+    /// Retires the serving generation only when this operation's metadata
+    /// rollback succeeded and its exact installation token is still current.
+    pub(in crate::daemon) async fn retire_owned_serving_generation(
+        &self,
+        project_root: &Path,
+        installation: ServingGenerationInstallationV1,
+    ) -> ServingGenerationRollbackOutcomeV1 {
+        self.resolve_serving_generation_installation(project_root, &installation.claim, true)
+            .await
+    }
+
+    async fn resolve_serving_generation_installation(
+        &self,
+        project_root: &Path,
+        installation: &ServingGenerationInstallationClaimV1,
+        retire: bool,
+    ) -> ServingGenerationRollbackOutcomeV1 {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return ServingGenerationRollbackOutcomeV1::NoMatch;
+        };
+        let (serving_generation, serving_epoch, active_installation) = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return ServingGenerationRollbackOutcomeV1::NoMatch;
+            };
+            (
+                Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.serving_generation_epoch),
+                Arc::clone(&worktree.serving_generation_installation),
+            )
+        };
+        let mut serving = serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if serving_epoch.load(Ordering::Acquire) != installation.serving_epoch
+            || serving.as_ref().is_none_or(|current| {
+                current.generation().manifest().generation_id != installation.generation_id
+            })
+        {
+            return ServingGenerationRollbackOutcomeV1::NoMatch;
+        }
+        let mut active_installation = active_installation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active_installation.as_ref() != Some(installation) {
+            return ServingGenerationRollbackOutcomeV1::NoMatch;
+        }
+        *active_installation = None;
+        if retire {
+            *serving = None;
+            serving_epoch.fetch_add(1, Ordering::AcqRel);
+        }
+        ServingGenerationRollbackOutcomeV1::Cleared
     }
 
     fn pack_trigger(trigger: CodeIndexCadenceTriggerV1) -> u64 {
@@ -345,19 +1525,23 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     fn note_wake(
-        pending_wake_micros: &AtomicU64,
-        pending_wake_trigger: &AtomicU64,
+        pending_wake: &PendingWakeV1,
         wake: &tokio::sync::Notify,
         trigger: CodeIndexCadenceTriggerV1,
     ) {
         let wake_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
-        let _ = pending_wake_micros.compare_exchange(
-            0,
-            wake_micros,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        pending_wake_trigger.store(Self::pack_trigger(trigger), Ordering::Release);
+        #[cfg(test)]
+        pending_wake.note_foreign_wake_attempt_for_test();
+        let mut state = pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.owner = state.next_owner();
+        if state.micros == 0 {
+            state.micros = wake_micros;
+        }
+        state.trigger = Self::pack_trigger(trigger);
+        drop(state);
         wake.notify_one();
     }
 
@@ -369,15 +1553,25 @@ impl CodeIndexSchedulerRegistryV1 {
     /// dequeue or terminal instant instead would publish a fabricated zero queue
     /// delay, so the absence stays typed.
     fn take_pending_arrival(
-        pending_wake_micros: &AtomicU64,
-        pending_wake_trigger: &AtomicU64,
+        pending_wake: &PendingWakeV1,
         default_trigger: CodeIndexCadenceTriggerV1,
     ) -> (CodeIndexArrivalV1, CodeIndexCadenceTriggerV1) {
-        let wake_micros = pending_wake_micros.swap(0, Ordering::AcqRel);
+        let (wake_micros, packed_trigger) = {
+            let mut state = pending_wake
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let wake_micros = state.micros;
+            let packed_trigger = state.trigger;
+            state.micros = 0;
+            state.trigger = 0;
+            state.owner = 0;
+            (wake_micros, packed_trigger)
+        };
         if wake_micros == 0 {
             return (CodeIndexArrivalV1::Unavailable, default_trigger);
         }
-        let trigger = Self::unpack_trigger(pending_wake_trigger.load(Ordering::Acquire));
+        let trigger = Self::unpack_trigger(packed_trigger);
         match i64::try_from(wake_micros) {
             Ok(wake_micros) => (CodeIndexArrivalV1::Observed { wake_micros }, trigger),
             // An out-of-range clock reading is an unobserved arrival, not an
@@ -390,8 +1584,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// no receipt, keeping the earliest pending arrival so the wait a wake
     /// really took is never shortened by a failed attempt.
     fn restore_pending_arrival(
-        pending_wake_micros: &AtomicU64,
-        pending_wake_trigger: &AtomicU64,
+        pending_wake: &PendingWakeV1,
         arrival: CodeIndexArrivalV1,
         trigger: CodeIndexCadenceTriggerV1,
     ) {
@@ -401,24 +1594,18 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(wake_micros) = u64::try_from(wake_micros) else {
             return;
         };
-        let mut observed = pending_wake_micros.load(Ordering::Acquire);
-        loop {
-            // A wake that arrived while this pass ran is newer, so the restored
-            // arrival remains the earliest and stays authoritative.
-            if observed != 0 && observed <= wake_micros {
-                return;
-            }
-            match pending_wake_micros.compare_exchange_weak(
-                observed,
-                wake_micros,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(current) => observed = current,
-            }
+        let mut state = pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A wake that arrived while this pass ran is newer, so the restored
+        // arrival remains the earliest and stays authoritative.
+        if state.micros != 0 && state.micros <= wake_micros {
+            return;
         }
-        pending_wake_trigger.store(Self::pack_trigger(trigger), Ordering::Release);
+        state.owner = state.next_owner();
+        state.micros = wake_micros;
+        state.trigger = Self::pack_trigger(trigger);
     }
 
     fn record_reconcile_receipt(
@@ -658,6 +1845,63 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
     }
 
+    async fn replace_existing_semantic_schedule(
+        &self,
+        project_root: &Path,
+        scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+        serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+        project_id: ProjectId,
+        semantic_schedule: Option<
+            tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
+        >,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        // Reconcile holds this mutex; wait in the blocking pool so remount
+        // never parks a runtime worker or admission for other lanes.
+        let incumbent = Arc::clone(&scheduler);
+        tokio::task::spawn_blocking(move || {
+            let mut scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if scheduler.project_id() != &project_id {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "mounted worktree belongs to a different project identity".to_owned(),
+                ));
+            }
+            scheduler.replace_semantic_schedule_hook(semantic_schedule);
+            if let Some(latest) = serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                let _ = scheduler.schedule_semantic_generation(latest.generation());
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_error| {
+            CodeIndexSchedulerErrorV1::SemanticSchedule("hook task failed".to_owned())
+        })??;
+
+        let retiring = self.retiring.lock().await;
+        if retiring.contains_key(project_root) {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler owner was retired while semantic schedule update waited; remount must retry"
+                    .to_owned(),
+            ));
+        }
+        let mounted = self.mounted.lock().await;
+        if !mounted
+            .get(project_root)
+            .is_some_and(|current| Arc::ptr_eq(&current.scheduler, &incumbent))
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler owner changed while semantic schedule update waited; remount must retry"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn mount_worktree_inner(
         &self,
         project_id: ProjectId,
@@ -669,70 +1913,75 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_activation: CodeGraphActivationAuthorityV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
-        // A retiring owner still holds the store: admitting a fresh mount here
-        // would race the dying reconcile task over the same physical shard.
-        // Upstream took this check after mount admission; that permit no longer
-        // exists at this tip, so the guard sits at the head of the mount path.
-        let retiring = self.retiring.lock().await;
-        if retiring.contains_key(&project_root) {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler owner is still retiring".to_owned(),
-            ));
-        }
-        let mounted = self.mounted.lock().await;
-        if let Some(existing) = mounted.get(&project_root) {
-            let scheduler = Arc::clone(&existing.scheduler);
-            let serving_generation = Arc::clone(&existing.serving_generation);
+        #[cfg(test)]
+        Self::pause_cold_mount_admission_for_test(&project_root).await;
+        let cold_mount_reservation = loop {
+            if self.background_reconcile_admission.is_closed() {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "code-index scheduler is shutting down".to_owned(),
+                ));
+            }
+            #[cfg(test)]
+            Self::pause_cold_mount_after_outer_check_for_test(&project_root).await;
+            // A retiring owner still holds the store: admitting a fresh mount
+            // here would race the dying reconcile task over the same physical
+            // shard.
+            let retiring = self.retiring.lock().await;
+            if retiring.contains_key(&project_root) {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "code-index scheduler owner is still retiring".to_owned(),
+                ));
+            }
+            let mounted = self.mounted.lock().await;
+            if let Some(existing) = mounted.get(&project_root) {
+                let scheduler = Arc::clone(&existing.scheduler);
+                let serving_generation = Arc::clone(&existing.serving_generation);
+                drop(mounted);
+                drop(retiring);
+                #[cfg(test)]
+                Self::observe_existing_semantic_schedule_replacement(&project_root);
+                self.replace_existing_semantic_schedule(
+                    &project_root,
+                    scheduler,
+                    serving_generation,
+                    project_id,
+                    semantic_schedule,
+                )
+                .await?;
+                return Ok(false);
+            }
+            let admission = self.admit_cold_mount(&project_root, mounted.len())?;
             drop(mounted);
             drop(retiring);
-            // Reconcile holds this mutex; wait in the blocking pool so remount
-            // never parks a runtime worker or admission for other lanes.
-            tokio::task::spawn_blocking(move || {
-                let mut scheduler = scheduler
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if scheduler.project_id() != &project_id {
-                    return Err(CodeIndexSchedulerErrorV1::Identity(
-                        "mounted worktree belongs to a different project identity".to_owned(),
-                    ));
+            match admission {
+                ColdMountAdmissionV1::Owner(reservation) => break reservation,
+                ColdMountAdmissionV1::Follower(mut completion) => {
+                    #[cfg(test)]
+                    Self::note_cold_mount_follower_for_test(&project_root);
+                    let _ = completion.changed().await;
                 }
-                scheduler.replace_semantic_schedule_hook(semantic_schedule);
-                if let Some(latest) = serving_generation
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                {
-                    let _ = scheduler.schedule_semantic_generation(latest.generation());
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|_error| {
-                CodeIndexSchedulerErrorV1::SemanticSchedule("hook task failed".to_owned())
-            })??;
-            return Ok(false);
-        }
-        if mounted.len() >= self.max_worktrees {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler capacity is exhausted".to_owned(),
-            ));
-        }
-        drop(mounted);
-        drop(retiring);
+            }
+        };
         // Keep CPU-bound cold-open identity setup off runtime workers.
         let scoped_store_root = super::scoped_code_index_store_root(&store_root, &project_root);
         let open_project_id = project_id.clone();
         let open_project_root = project_root.clone();
         let open_byte_pool = Arc::clone(&self.byte_pool);
-        let opened = tokio::task::spawn_blocking(move || {
-            let mut opened = CodeIndexWorktreeSchedulerV1::open(
+        let open_semantic_schedule = semantic_schedule.clone();
+        let (opened, cold_mount_reservation) = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            Self::pause_cold_mount_open_for_test(&open_project_root);
+            let opened = CodeIndexWorktreeSchedulerV1::open(
                 open_project_id,
                 &open_project_root,
                 scoped_store_root,
                 open_byte_pool,
-            )?;
-            opened.replace_semantic_schedule_hook(semantic_schedule);
-            Ok::<_, CodeIndexSchedulerErrorV1>(opened)
+            );
+            #[cfg(test)]
+            Self::finish_cold_mount_open_for_test(&open_project_root);
+            let mut opened = opened?;
+            opened.replace_semantic_schedule_hook(open_semantic_schedule);
+            Ok::<_, CodeIndexSchedulerErrorV1>((opened, cold_mount_reservation))
         })
         .await
         .map_err(|error| {
@@ -746,6 +1995,8 @@ impl CodeIndexSchedulerRegistryV1 {
         // complete identity-valid generation as stale serving before refresh
         // claims freshness; missing Git authority still leaves this empty.
         let serving_generation = Arc::new(RwLock::new(None));
+        let serving_generation_epoch = Arc::new(AtomicU64::new(0));
+        let serving_generation_installation = Arc::new(Mutex::new(None));
         let hints = Arc::clone(&opened.hints);
         let wake = Arc::clone(&opened.wake);
         let epoch = Arc::clone(&opened.epoch);
@@ -753,14 +2004,13 @@ impl CodeIndexSchedulerRegistryV1 {
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
         let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
-        let pending_wake_micros = Arc::new(AtomicU64::new(0));
-        let pending_wake_trigger = Arc::new(AtomicU64::new(0));
+        let pending_wake = Arc::new(PendingWakeV1::default());
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
+        let worker_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let worker_wake = Arc::clone(&wake);
-        let worker_pending_wake_micros = Arc::clone(&pending_wake_micros);
-        let worker_pending_wake_trigger = Arc::clone(&pending_wake_trigger);
+        let worker_pending_wake = Arc::clone(&pending_wake);
         let worker_cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let worker_shutting_down = Arc::clone(&shutting_down);
         let worker_semantic_evaluation_publication_gate =
@@ -773,6 +2023,63 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_repository_id = repository_id.clone();
         let worker_worktree_id = worktree_id.clone();
         let worker_graph_activation = graph_activation.clone();
+        #[cfg(test)]
+        Self::wait_for_cold_mount_final_commit_gate(&project_root).await;
+        // Reacquire the lifecycle fences before publication. Once acquired,
+        // worker spawn and insertion contain no await point, so cancellation
+        // cannot leave a detached worker that was never made canonical.
+        let retiring = self.retiring.lock().await;
+        let mut mounted = self.mounted.lock().await;
+        if retiring.contains_key(&project_root) || cold_mount_reservation.slot.is_retired() {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler owner is still retiring".to_owned(),
+            ));
+        }
+        if self.background_reconcile_admission.is_closed()
+            || cold_mount_reservation.slot.is_cancelled()
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler is shutting down".to_owned(),
+            ));
+        }
+        if let Some(existing) = mounted.get(&project_root) {
+            // The scheduler Arc is the mounted owner's exact identity. It is
+            // rechecked after the asynchronous update so a retirement or
+            // replacement cannot turn this remount into a success for a
+            // detached worker.
+            let scheduler = Arc::clone(&existing.scheduler);
+            let serving_generation = Arc::clone(&existing.serving_generation);
+            drop(mounted);
+            drop(retiring);
+            #[cfg(test)]
+            Self::observe_existing_semantic_schedule_replacement(&project_root);
+            self.replace_existing_semantic_schedule(
+                &project_root,
+                scheduler,
+                serving_generation,
+                worker_project_id,
+                semantic_schedule,
+            )
+            .await?;
+            return Ok(false);
+        }
+        let at_capacity = mounted.len() >= self.max_worktrees;
+        let entry = match mounted.entry(project_root) {
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "code-index scheduler owner changed before final mount commit; remount must retry"
+                        .to_owned(),
+                ));
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                if at_capacity {
+                    return Err(CodeIndexSchedulerErrorV1::Identity(
+                        "code-index scheduler capacity is exhausted".to_owned(),
+                    ));
+                }
+                entry
+            }
+        };
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;
@@ -793,6 +2100,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 let scheduler = Arc::clone(&worker_scheduler);
                 let serving_generation = Arc::clone(&worker_serving_generation);
+                let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
                 // Cover wake claim through failed-arrival restoration so admission
                 // never misreads in-flight owner work as plain unavailability.
                 let _reconcile_pass =
@@ -800,8 +2108,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // Admission is held: queue wait ends and service time begins.
                 let started_micros = now_micros().0;
                 let (arrival, trigger) = Self::take_pending_arrival(
-                    &worker_pending_wake_micros,
-                    &worker_pending_wake_trigger,
+                    &worker_pending_wake,
                     CodeIndexCadenceTriggerV1::Mount,
                 );
                 // Serve-during-refresh: seat the last complete compatible
@@ -851,6 +2158,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         } else {
                             let swap_scheduler = Arc::clone(&scheduler);
                             let swap_serving = Arc::clone(&serving_generation);
+                            let swap_serving_epoch = Arc::clone(&serving_generation_epoch);
                             let _ = tokio::task::spawn_blocking(move || {
                                 let scheduler = swap_scheduler
                                     .lock()
@@ -859,10 +2167,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                     .active_publication_matches(&retained)
                                     .unwrap_or(false)
                                 {
-                                    *swap_serving
+                                    let mut serving = swap_serving
                                         .write()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                        Some(retained.clone());
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    *serving = Some(retained.clone());
+                                    swap_serving_epoch.fetch_add(1, Ordering::AcqRel);
+                                    drop(serving);
                                     let _ = scheduler
                                         .schedule_semantic_generation(retained.generation());
                                 }
@@ -916,6 +2226,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 if let Ok((Ok(_), Some(latest), _)) = &result {
                     let scheduler = Arc::clone(&worker_scheduler);
                     let serving_generation = Arc::clone(&worker_serving_generation);
+                    let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
                     let latest = latest.clone();
                     let serving_swap = tokio::task::spawn_blocking(move || {
                         let scheduler = scheduler
@@ -927,10 +2238,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                     .to_owned(),
                             ));
                         }
-                        *serving_generation
+                        let mut serving = serving_generation
                             .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(latest.clone());
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        *serving = Some(latest.clone());
+                        serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+                        drop(serving);
                         let _ = scheduler.schedule_semantic_generation(latest.generation());
                         Ok::<_, CodeIndexSchedulerErrorV1>(())
                     })
@@ -983,12 +2296,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         Ok((Ok(_), _, _)) => {}
                     }
                     // Restore arrival so the next pass measures this wake's full queue wait.
-                    Self::restore_pending_arrival(
-                        &worker_pending_wake_micros,
-                        &worker_pending_wake_trigger,
-                        arrival,
-                        trigger,
-                    );
+                    Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
                 }
                 if worker_shutting_down.load(Ordering::Acquire) {
                     return;
@@ -997,49 +2305,36 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _ = result;
             }
         });
-        let mut mounted = self.mounted.lock().await;
-        if mounted.len() >= self.max_worktrees {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "code-index scheduler capacity is exhausted".to_owned(),
-            ));
-        }
-        mounted.insert(
-            project_root,
-            MountedCodeIndexWorktreeV1 {
-                repository_id,
-                worktree_id,
-                query_authority: None,
-                semantic_query_authority: None,
-                query_activation_revision: None,
-                query_activation_epoch: None,
-                query_activation_transition_digest: None,
-                query_activation_attempt: 0,
-                query_activation_redundancy: None,
-                semantic_vector_graph_provider: None,
-                scheduler,
-                serving_generation,
-                graph_activation,
-                ignored_dependency_admissions,
-                hints,
-                wake: Arc::clone(&wake),
-                epoch,
-                pending_wake_micros: Arc::clone(&pending_wake_micros),
-                pending_wake_trigger: Arc::clone(&pending_wake_trigger),
-                shutting_down,
-                reconcile_in_progress,
-                active_generation_encoded_bytes,
-                semantic_evaluation_publication_gate,
-                task,
-            },
-        );
+        entry.insert(MountedCodeIndexWorktreeV1 {
+            repository_id,
+            worktree_id,
+            query_authority: None,
+            semantic_query_authority: None,
+            query_activation_revision: None,
+            query_activation_epoch: None,
+            query_activation_transition_digest: None,
+            query_activation_attempt: 0,
+            query_activation_redundancy: None,
+            semantic_vector_graph_provider: None,
+            scheduler,
+            serving_generation,
+            serving_generation_epoch,
+            serving_generation_installation,
+            graph_activation,
+            ignored_dependency_admissions,
+            hints,
+            wake: Arc::clone(&wake),
+            epoch,
+            pending_wake: Arc::clone(&pending_wake),
+            shutting_down,
+            reconcile_in_progress,
+            active_generation_encoded_bytes,
+            semantic_evaluation_publication_gate,
+            task,
+        });
         // Until retained decode/truth verification completes, reads see warming
         // instead of serving unproven bytes.
-        Self::note_wake(
-            &pending_wake_micros,
-            &pending_wake_trigger,
-            &wake,
-            CodeIndexCadenceTriggerV1::Mount,
-        );
+        Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Mount);
         Ok(true)
     }
 
@@ -1451,7 +2746,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let (hints, wake, epoch, pending_wake_micros, pending_wake_trigger) = {
+        let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
@@ -1460,8 +2755,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.epoch),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         hints
@@ -1469,12 +2763,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .path(path);
         DaemonCodeIndexControlV1::advance(&epoch);
-        Self::note_wake(
-            &pending_wake_micros,
-            &pending_wake_trigger,
-            &wake,
-            CodeIndexCadenceTriggerV1::HookHint,
-        );
+        Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::HookHint);
         true
     }
 
@@ -1486,7 +2775,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let (hints, wake, epoch, pending_wake_micros, pending_wake_trigger) = {
+        let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
@@ -1495,8 +2784,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.epoch),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         let absolute = rel_paths
@@ -1512,12 +2800,7 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         }
         DaemonCodeIndexControlV1::advance(&epoch);
-        Self::note_wake(
-            &pending_wake_micros,
-            &pending_wake_trigger,
-            &wake,
-            CodeIndexCadenceTriggerV1::HookHint,
-        );
+        Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::HookHint);
         true
     }
 
@@ -1528,7 +2811,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let (hints, wake, epoch, pending_wake_micros, pending_wake_trigger) = {
+        let (hints, wake, epoch, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
@@ -1537,8 +2820,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.epoch),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         hints
@@ -1546,12 +2828,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .overflow();
         DaemonCodeIndexControlV1::advance(&epoch);
-        Self::note_wake(
-            &pending_wake_micros,
-            &pending_wake_trigger,
-            &wake,
-            CodeIndexCadenceTriggerV1::Overflow,
-        );
+        Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Overflow);
         true
     }
 
@@ -1570,7 +2847,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let (hints, wake, pending_wake_micros, pending_wake_trigger) = {
+        let (hints, wake, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
@@ -1578,20 +2855,14 @@ impl CodeIndexSchedulerRegistryV1 {
             (
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         hints
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .overflow();
-        Self::note_wake(
-            &pending_wake_micros,
-            &pending_wake_trigger,
-            &wake,
-            CodeIndexCadenceTriggerV1::Overflow,
-        );
+        Self::note_wake(&pending_wake, &wake, CodeIndexCadenceTriggerV1::Overflow);
         true
     }
 
@@ -1873,15 +3144,14 @@ impl CodeIndexSchedulerRegistryV1 {
         let project_root = project_root.canonicalize().ok()?;
         // Clone the per-worktree handle under a short map lock, then drop the
         // registry guard before checking the mounted route.
-        let (scheduler, serving_generation, wake, pending_wake_micros, pending_wake_trigger) = {
+        let (scheduler, serving_generation, wake, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
                 Arc::clone(&worktree.wake),
-                Arc::clone(&worktree.pending_wake_micros),
-                Arc::clone(&worktree.pending_wake_trigger),
+                Arc::clone(&worktree.pending_wake),
             )
         };
         // When the background worker already owns the scheduler, preserve the
@@ -1896,8 +3166,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     // follow-up verification so busy refresh cannot strand
                     // cadence indefinitely.
                     Self::note_wake(
-                        &pending_wake_micros,
-                        &pending_wake_trigger,
+                        &pending_wake,
                         &wake,
                         CodeIndexCadenceTriggerV1::BusyFollowUp,
                     );
@@ -1933,8 +3202,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // cadence sample for work that never ran.
                 if scheduler.request_fresh_for_query_background() {
                     Self::note_wake(
-                        &pending_wake_micros,
-                        &pending_wake_trigger,
+                        &pending_wake,
                         &wake,
                         CodeIndexCadenceTriggerV1::QueryAdmission,
                     );
@@ -1944,11 +3212,16 @@ impl CodeIndexSchedulerRegistryV1 {
             // Cold open has no servable generation. Verification and any
             // rebuild stay with the retained owner; reads only request the
             // wake and return typed unavailable/unverified.
-            if pending_wake_micros.load(Ordering::Acquire) == 0 {
+            if pending_wake
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .micros
+                == 0
+            {
                 scheduler.request_background_reconcile();
                 Self::note_wake(
-                    &pending_wake_micros,
-                    &pending_wake_trigger,
+                    &pending_wake,
                     &wake,
                     CodeIndexCadenceTriggerV1::QueryAdmission,
                 );
@@ -2246,7 +3519,13 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_none()
             && (worktree.reconcile_in_progress.load(Ordering::Acquire) != 0
-                || worktree.pending_wake_micros.load(Ordering::Acquire) != 0)
+                || worktree
+                    .pending_wake
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .micros
+                    != 0)
     }
 
     /// Ask the background worker for a reconcile on behalf of a query admission
@@ -2270,7 +3549,15 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> bool {
-        let (scheduler, serving_generation, wake, pending_wake_micros, pending_wake_trigger) = {
+        #[cfg(test)]
+        let test_control = Self::query_admission_control_for_test(scope);
+        #[cfg(test)]
+        let lookup_guard = if let Some(test_control) = test_control.as_ref() {
+            Some(test_control.lookup_gate.lock().await)
+        } else {
+            None
+        };
+        let (scheduler, serving_generation, wake, pending_wake) = {
             let Ok(mounted) = self.mounted.try_lock() else {
                 return false;
             };
@@ -2288,8 +3575,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     Arc::clone(&worktree.scheduler),
                     Arc::clone(&worktree.serving_generation),
                     Arc::clone(&worktree.wake),
-                    Arc::clone(&worktree.pending_wake_micros),
-                    Arc::clone(&worktree.pending_wake_trigger),
+                    Arc::clone(&worktree.pending_wake),
                 ));
             }
             let Some(matched) = matched else {
@@ -2297,10 +3583,25 @@ impl CodeIndexSchedulerRegistryV1 {
             };
             matched
         };
-        // Debounce on the existing pending-wake slot: a wake already posted and
-        // not yet claimed by the worker covers this admission too.
-        if pending_wake_micros.load(Ordering::Acquire) != 0 {
+        #[cfg(test)]
+        drop(lookup_guard);
+        #[cfg(test)]
+        if let Some(test_control) = test_control.as_ref() {
+            test_control.rendezvous.wait().await;
+        }
+        // Atomically reserve the existing pending-wake slot before scheduling
+        // the blocking freshness probe. A pending or concurrently claimed wake
+        // already supplies this query's remedy.
+        let Some(wake_claim) = PendingWakeClaimV1::claim(Arc::clone(&pending_wake)) else {
             return false;
+        };
+        #[cfg(test)]
+        if let Some(test_control) = test_control.as_ref()
+            && test_control.pauses_after_claim.load(Ordering::Acquire)
+        {
+            test_control.claim_reached.store(true, Ordering::Release);
+            test_control.claim_entered.notify_waiters();
+            test_control.claim_release.notified().await;
         }
         tokio::task::spawn_blocking(move || {
             let mut scheduler = match scheduler.try_lock() {
@@ -2312,11 +3613,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     // instead, exactly as the grep/context/callers ladder does,
                     // so a busy refresh cannot strand cadence.
                     Self::note_wake(
-                        &pending_wake_micros,
-                        &pending_wake_trigger,
+                        &pending_wake,
                         &wake,
                         CodeIndexCadenceTriggerV1::BusyFollowUp,
                     );
+                    wake_claim.settle();
                     return true;
                 }
             };
@@ -2333,11 +3634,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 return false;
             }
             Self::note_wake(
-                &pending_wake_micros,
-                &pending_wake_trigger,
+                &pending_wake,
                 &wake,
                 CodeIndexCadenceTriggerV1::QueryAdmission,
             );
+            wake_claim.settle();
             true
         })
         .await
@@ -2403,6 +3704,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub async fn shutdown(&self) {
         self.cancel();
+        let cold_mount_completions = self.cold_mount_reservation_completions();
         let mut retiring_guard = self.retiring.lock().await;
         let mounted = std::mem::take(&mut *self.mounted.lock().await);
         let retiring = std::mem::take(&mut *retiring_guard);
@@ -2420,6 +3722,9 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         for (_, worktree) in retiring {
             let _ = worktree.task.await;
+        }
+        for mut completion in cold_mount_completions {
+            let _ = completion.changed().await;
         }
     }
 
@@ -2440,16 +3745,18 @@ impl CodeIndexSchedulerRegistryV1 {
         timeout: std::time::Duration,
     ) -> bool {
         let mut retiring = self.retiring.lock().await;
-        let retired = {
+        let (retired, cold_mount_waiting, mut completed_cold_mounts) = {
             let mut mounted = self.mounted.lock().await;
-            project_roots
+            let cold_mounts = self.retire_cold_mount_reservations(project_roots);
+            let retired = project_roots
                 .iter()
                 .filter_map(|root| {
                     mounted
                         .remove(root)
                         .map(|worktree| (root.clone(), worktree))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (retired, cold_mounts.0, cold_mounts.1)
         };
         {
             let mut authorities = match self.test_attribution_authorities.write() {
@@ -2467,6 +3774,21 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         let deadline = tokio::time::Instant::now() + timeout;
         let mut drained = true;
+        // A cold owner needs `retiring` for its final cancellation fence before
+        // it can drop the reservation that this wait observes. The retired
+        // reservation itself blocks remounts while this guard is released.
+        drop(retiring);
+        for (root, mut completion) in cold_mount_waiting {
+            match tokio::time::timeout_at(deadline, completion.changed()).await {
+                Ok(_) => {
+                    completed_cold_mounts.insert(root);
+                }
+                Err(_) => {
+                    drained = false;
+                }
+            }
+        }
+        let mut retiring = self.retiring.lock().await;
         let mut joined = BTreeSet::new();
         for root in project_roots {
             let Some(worktree) = retiring.get_mut(root) else {
@@ -2482,6 +3804,7 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         }
         retiring.retain(|root, _| !joined.contains(root));
+        self.release_completed_retired_cold_mount_reservations(&completed_cold_mounts);
         drained
     }
 
@@ -2492,6 +3815,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub fn cancel(&self) {
         self.background_reconcile_admission.close();
+        self.cancel_cold_mount_reservations();
         if let Ok(mounted) = self.mounted.try_lock() {
             for worktree in mounted.values() {
                 worktree.shutting_down.store(true, Ordering::Release);

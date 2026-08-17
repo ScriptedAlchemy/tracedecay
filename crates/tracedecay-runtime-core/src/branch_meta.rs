@@ -12,7 +12,7 @@ use tracedecay_domain::BranchGraphPublicationEpochV1;
 use crate::storage::{BRANCH_META_FILENAME, PrivateStoreIo};
 
 /// Metadata for a single tracked branch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchEntry {
     /// Relative path to the database serving this branch. Branches tracked on
     /// the single project graph store reference the canonical main database
@@ -62,6 +62,68 @@ pub struct BranchGraphSourceV1 {
     pub worktree_root: String,
     pub reference: String,
     pub source_oid: String,
+}
+
+/// Exact graph provenance before the metadata publisher assigns its monotonic
+/// publication epoch. Callers must derive this from one Git snapshot rather
+/// than composing fields from separate scheduler observations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchGraphSourceDraftV1 {
+    pub project_id: String,
+    pub repository_id: String,
+    pub worktree_id: String,
+    pub worktree_root: String,
+    pub reference: String,
+    pub source_oid: String,
+}
+
+impl BranchGraphSourceV1 {
+    #[must_use]
+    pub fn matches_draft(&self, draft: &BranchGraphSourceDraftV1) -> bool {
+        self.project_id == draft.project_id
+            && self.repository_id == draft.repository_id
+            && self.worktree_id == draft.worktree_id
+            && self.worktree_root == draft.worktree_root
+            && self.reference == draft.reference
+            && self.source_oid == draft.source_oid
+    }
+}
+
+/// Result of the locked graph-source compare-and-swap publisher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchGraphSourcePublishOutcomeV1 {
+    Published(BranchGraphSourcePublicationV1),
+    AlreadyPublished(BranchGraphSourceV1),
+    CompareAndSwapMiss {
+        observed: Option<BranchGraphSourceV1>,
+    },
+    BranchNotTracked,
+}
+
+/// Exact metadata mutation installed by [`publish_graph_source`].
+///
+/// This is an in-memory rollback authority, not persisted branch metadata.
+/// Its full-entry compare-and-swap precondition prevents a failed publisher
+/// from erasing a newer sync timestamp or foreign source publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchGraphSourcePublicationV1 {
+    branch: String,
+    previous_entry: BranchEntry,
+    installed_entry: BranchEntry,
+}
+
+impl BranchGraphSourcePublicationV1 {
+    #[must_use]
+    pub fn source(&self) -> Option<&BranchGraphSourceV1> {
+        self.installed_entry.graph_source.as_ref()
+    }
+}
+
+/// Result of an exact graph-source publication rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchGraphSourceRollbackOutcomeV1 {
+    Restored,
+    NoMatch,
 }
 
 /// Top-level branch metadata for a project.
@@ -369,24 +431,102 @@ pub fn update_synced_timestamp(tracedecay_dir: &Path, branch: &str) {
     update_synced_timestamp_with(tracedecay_dir, branch, || {});
 }
 
-/// Atomically publishes the exact worktree/ref/OID identity that produced a
-/// tracked branch graph.
+/// Atomically allocates and publishes the exact worktree/ref/OID identity
+/// that produced a tracked branch graph.
+///
+/// The expected source is a compare-and-swap precondition: `None` means the
+/// tracked entry must still be unpublished. Epoch allocation happens only
+/// after that precondition succeeds while holding the shared branch lock, so
+/// concurrent branch publications cannot reuse an epoch or overwrite newer
+/// provenance.
 pub fn publish_graph_source(
     tracedecay_dir: &Path,
     branch: &str,
-    source: BranchGraphSourceV1,
-) -> std::io::Result<bool> {
+    expected: Option<&BranchGraphSourceV1>,
+    draft: BranchGraphSourceDraftV1,
+) -> std::io::Result<BranchGraphSourcePublishOutcomeV1> {
     let _branch_lock = crate::branch::acquire_branch_lock_blocking(tracedecay_dir)
         .map_err(std::io::Error::other)?;
     let Some(mut meta) = load_branch_meta(tracedecay_dir) else {
-        return Ok(false);
+        return Ok(BranchGraphSourcePublishOutcomeV1::BranchNotTracked);
     };
-    if !meta.is_tracked(branch) {
-        return Ok(false);
+    let Some(entry) = meta.branches.get(branch) else {
+        return Ok(BranchGraphSourcePublishOutcomeV1::BranchNotTracked);
+    };
+    let observed = entry.graph_source.clone();
+    if observed.as_ref() != expected {
+        return Ok(BranchGraphSourcePublishOutcomeV1::CompareAndSwapMiss { observed });
     }
+    if let Some(source) = observed.filter(|source| source.matches_draft(&draft)) {
+        return Ok(BranchGraphSourcePublishOutcomeV1::AlreadyPublished(source));
+    }
+    let last_epoch = meta
+        .branches
+        .values()
+        .filter_map(|entry| entry.graph_source.as_ref())
+        .map(|source| source.publication_epoch.get())
+        .max()
+        .unwrap_or(0);
+    let epoch = last_epoch.checked_add(1).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "branch graph publication epoch is exhausted",
+        )
+    })?;
+    let publication_epoch = BranchGraphPublicationEpochV1::new(epoch).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("branch graph publication epoch is invalid: {error}"),
+        )
+    })?;
+    let source = BranchGraphSourceV1 {
+        publication_epoch,
+        project_id: draft.project_id,
+        repository_id: draft.repository_id,
+        worktree_id: draft.worktree_id,
+        worktree_root: draft.worktree_root,
+        reference: draft.reference,
+        source_oid: draft.source_oid,
+    };
+    let previous_entry = entry.clone();
     meta.publish_graph_source(branch, source);
+    let installed_entry = meta.branches.get(branch).cloned().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "branch graph source publication disappeared before commit",
+        )
+    })?;
     save_branch_meta(tracedecay_dir, &meta)?;
-    Ok(true)
+    Ok(BranchGraphSourcePublishOutcomeV1::Published(
+        BranchGraphSourcePublicationV1 {
+            branch: branch.to_owned(),
+            previous_entry,
+            installed_entry,
+        },
+    ))
+}
+
+/// Restores the entry immediately preceding one exact graph-source
+/// publication. A no-match means another writer owns the metadata now and
+/// must be preserved.
+pub fn rollback_graph_source_publication(
+    tracedecay_dir: &Path,
+    publication: &BranchGraphSourcePublicationV1,
+) -> std::io::Result<BranchGraphSourceRollbackOutcomeV1> {
+    let _branch_lock = crate::branch::acquire_branch_lock_blocking(tracedecay_dir)
+        .map_err(std::io::Error::other)?;
+    let Some(mut meta) = load_branch_meta(tracedecay_dir) else {
+        return Ok(BranchGraphSourceRollbackOutcomeV1::NoMatch);
+    };
+    let Some(entry) = meta.branches.get_mut(&publication.branch) else {
+        return Ok(BranchGraphSourceRollbackOutcomeV1::NoMatch);
+    };
+    if entry != &publication.installed_entry {
+        return Ok(BranchGraphSourceRollbackOutcomeV1::NoMatch);
+    }
+    *entry = publication.previous_entry.clone();
+    save_branch_meta(tracedecay_dir, &meta)?;
+    Ok(BranchGraphSourceRollbackOutcomeV1::Restored)
 }
 
 fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock: impl FnOnce()) {
@@ -645,7 +785,24 @@ mod tests {
             reference: "refs/heads/main".to_owned(),
             source_oid: "a".repeat(40),
         };
-        assert!(publish_graph_source(dir.path(), "main", source.clone()).unwrap());
+        let draft = BranchGraphSourceDraftV1 {
+            project_id: source.project_id.clone(),
+            repository_id: source.repository_id.clone(),
+            worktree_id: source.worktree_id.clone(),
+            worktree_root: source.worktree_root.clone(),
+            reference: source.reference.clone(),
+            source_oid: source.source_oid.clone(),
+        };
+        let BranchGraphSourcePublishOutcomeV1::Published(publication) =
+            publish_graph_source(dir.path(), "main", None, draft.clone()).unwrap()
+        else {
+            panic!("first exact source publication must install metadata")
+        };
+        assert_eq!(publication.source(), Some(&source));
+        assert_eq!(
+            publish_graph_source(dir.path(), "main", Some(&source), draft).unwrap(),
+            BranchGraphSourcePublishOutcomeV1::AlreadyPublished(source.clone())
+        );
         assert_eq!(
             load_branch_meta(dir.path())
                 .unwrap()
@@ -654,6 +811,131 @@ mod tests {
                 .unwrap()
                 .graph_source,
             Some(source)
+        );
+    }
+
+    #[test]
+    fn graph_source_rollback_requires_the_exact_installed_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = BranchMeta::new_for_dir(dir.path(), "main");
+        save_branch_meta(dir.path(), &meta).unwrap();
+        let draft = BranchGraphSourceDraftV1 {
+            project_id: "project.fixture".to_owned(),
+            repository_id: "repository.fixture".to_owned(),
+            worktree_id: "worktree.fixture".to_owned(),
+            worktree_root: "/fixture".to_owned(),
+            reference: "refs/heads/main".to_owned(),
+            source_oid: "a".repeat(40),
+        };
+        let BranchGraphSourcePublishOutcomeV1::Published(publication) =
+            publish_graph_source(dir.path(), "main", None, draft.clone()).unwrap()
+        else {
+            panic!("publication must install a rollback authority")
+        };
+        assert_eq!(
+            rollback_graph_source_publication(dir.path(), &publication).unwrap(),
+            BranchGraphSourceRollbackOutcomeV1::Restored
+        );
+        assert!(
+            load_branch_meta(dir.path()).unwrap().branches["main"]
+                .graph_source
+                .is_none(),
+            "the exact rollback restores the unpublished entry"
+        );
+
+        let BranchGraphSourcePublishOutcomeV1::Published(publication) =
+            publish_graph_source(dir.path(), "main", None, draft).unwrap()
+        else {
+            panic!("republication must install a new rollback authority")
+        };
+        let mut foreign = load_branch_meta(dir.path()).unwrap();
+        foreign.branches.get_mut("main").unwrap().last_synced_at = "foreign".to_owned();
+        save_branch_meta(dir.path(), &foreign).unwrap();
+        assert_eq!(
+            rollback_graph_source_publication(dir.path(), &publication).unwrap(),
+            BranchGraphSourceRollbackOutcomeV1::NoMatch,
+            "a foreign metadata write must survive a stale rollback"
+        );
+        assert_eq!(
+            load_branch_meta(dir.path()).unwrap().branches["main"].last_synced_at,
+            "foreign"
+        );
+    }
+
+    #[test]
+    fn concurrent_graph_source_publications_allocate_distinct_epochs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut meta = BranchMeta::new_for_dir(dir.path(), "main");
+        meta.add_branch("feature/one", crate::config::DB_FILENAME, "main");
+        meta.add_branch("feature/two", crate::config::DB_FILENAME, "main");
+        save_branch_meta(dir.path(), &meta).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let first_dir = dir.path().to_path_buf();
+        let first_barrier = std::sync::Arc::clone(&barrier);
+        let second_dir = dir.path().to_path_buf();
+        let second_barrier = std::sync::Arc::clone(&barrier);
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            publish_graph_source(
+                &first_dir,
+                "feature/one",
+                None,
+                BranchGraphSourceDraftV1 {
+                    project_id: "project.fixture".to_owned(),
+                    repository_id: "repository.fixture".to_owned(),
+                    worktree_id: "worktree.one".to_owned(),
+                    worktree_root: "/fixture/one".to_owned(),
+                    reference: "refs/heads/feature/one".to_owned(),
+                    source_oid: "a".repeat(40),
+                },
+            )
+        });
+        let second = std::thread::spawn(move || {
+            second_barrier.wait();
+            publish_graph_source(
+                &second_dir,
+                "feature/two",
+                None,
+                BranchGraphSourceDraftV1 {
+                    project_id: "project.fixture".to_owned(),
+                    repository_id: "repository.fixture".to_owned(),
+                    worktree_id: "worktree.two".to_owned(),
+                    worktree_root: "/fixture/two".to_owned(),
+                    reference: "refs/heads/feature/two".to_owned(),
+                    source_oid: "b".repeat(40),
+                },
+            )
+        });
+
+        assert!(matches!(
+            first.join().unwrap().unwrap(),
+            BranchGraphSourcePublishOutcomeV1::Published(_)
+        ));
+        assert!(matches!(
+            second.join().unwrap().unwrap(),
+            BranchGraphSourcePublishOutcomeV1::Published(_)
+        ));
+
+        let meta = load_branch_meta(dir.path()).unwrap();
+        let first_epoch = meta.branches["feature/one"]
+            .graph_source
+            .as_ref()
+            .unwrap()
+            .publication_epoch
+            .get();
+        let second_epoch = meta.branches["feature/two"]
+            .graph_source
+            .as_ref()
+            .unwrap()
+            .publication_epoch
+            .get();
+        assert_ne!(first_epoch, second_epoch);
+        assert!(
+            [first_epoch, second_epoch]
+                .into_iter()
+                .all(|epoch| epoch <= 2),
+            "the locked publisher must allocate the first two epochs, got {first_epoch} and {second_epoch}"
         );
     }
 

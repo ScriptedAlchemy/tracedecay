@@ -591,15 +591,17 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
         now.checked_sub(std::time::Duration::from_secs(20)).unwrap(),
     );
     registry.bind_route(route("oldest-active"), oldest.clone());
+    let idle_server = Arc::new(2);
+    let idle_witness = Arc::downgrade(&idle_server);
     registry.insert_at(
         idle.clone(),
-        Arc::new(2),
+        idle_server,
         now.checked_sub(std::time::Duration::from_secs(10)).unwrap(),
     );
     registry.bind_route(route("idle"), idle.clone());
     let active_lease = Arc::clone(registry.get(&oldest).expect("oldest server"));
 
-    let (server, was_inserted) = registry
+    let (server, was_inserted, retired) = registry
         .bind_or_insert_route_bounded(
             route("inserted"),
             inserted.clone(),
@@ -610,9 +612,29 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
         .expect("idle entry should be evicted");
     assert!(was_inserted);
     assert_eq!(*server, 3);
+    assert_eq!(retired.len(), 1, "bounded admission must return one victim");
+    assert_eq!(
+        &retired[0].0, &idle,
+        "retirement must retain the exact victim identity"
+    );
+    let idle_server = idle_witness
+        .upgrade()
+        .expect("the returned retirement owns the evicted server");
+    assert!(
+        Arc::ptr_eq(&retired[0].1, &idle_server),
+        "the caller must receive the exact idle server for canonical retirement"
+    );
     assert!(registry.get(&idle).is_none());
     assert!(registry.get_route(&route("idle")).is_none());
-    assert!(registry.get(&oldest).is_some());
+    assert!(
+        Arc::ptr_eq(
+            registry
+                .get(&oldest)
+                .expect("leased server remains registered"),
+            &active_lease,
+        ),
+        "an active lease must protect its exact server from eviction"
+    );
     assert!(registry.get(&inserted).is_some());
 
     let inserted_lease = Arc::clone(registry.get(&inserted).expect("inserted server"));
@@ -636,6 +658,38 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
 
     drop(active_lease);
     drop(inserted_lease);
+    drop(idle_server);
+    drop(retired);
+
+    let reopened = Arc::new(5);
+    let (server, was_inserted, retired) = registry
+        .bind_or_insert_route_bounded(
+            route("idle"),
+            idle.clone(),
+            Arc::clone(&reopened),
+            2,
+            |server| Arc::strong_count(server) > 1,
+        )
+        .expect("the retired identity must be able to reopen");
+    assert!(was_inserted);
+    assert!(
+        Arc::ptr_eq(&server, &reopened),
+        "reopen must bind the replacement for the exact evicted identity"
+    );
+    assert_eq!(retired.len(), 1, "reopen must return its own idle victim");
+    assert_eq!(
+        &retired[0].0, &oldest,
+        "reopen must return the next exact idle identity for retirement"
+    );
+    assert!(
+        Arc::ptr_eq(
+            registry
+                .get(&idle)
+                .expect("reopened identity remains registered"),
+            &reopened,
+        ),
+        "the reopened identity must route to its replacement server"
+    );
 }
 
 #[test]
@@ -659,11 +713,15 @@ fn database_owner_registry_hides_bounded_insert_until_core_publication() {
     };
     let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
 
-    let (_, inserted) = registry
+    let (_, inserted, retired) = registry
         .bind_or_insert_route_bounded(route.clone(), key.clone(), Arc::new(1), 1, |_| false)
         .expect("pending owner should fit");
 
     assert!(inserted);
+    assert!(
+        retired.is_empty(),
+        "a non-evicting insert has no retirement"
+    );
     assert!(
         registry.get_route_and_touch(&route).is_none(),
         "a route must remain hidden until its core server is constructed"
