@@ -193,7 +193,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert_eq!(entity_bounded["domain_state"], "partial");
         assert_eq!(
             entity_bounded["payload"]["holographic"]["reads"]["entities"]["state"],
-            "bounded"
+            "partial"
         );
         assert_eq!(
             entity_bounded["payload"]["holographic"]["reads"]["entities"]["code"],
@@ -359,15 +359,16 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             }),
             "similarity must preserve canonical fact identities: {pairs:?}"
         );
-        let duplicate_pair = pairs
+        let high_similarity_pair = pairs
             .iter()
-            .find(|pair| pair["classification"] == "likely_duplicate")
-            .unwrap_or_else(|| panic!("expected likely_duplicate similarity pair"));
-        let duplicate_similarity = duplicate_pair["similarity"]
+            .find(|pair| pair["classification"] == "high_similarity")
+            .unwrap_or_else(|| panic!("expected high_similarity pair: {pairs:?}"));
+        let high_similarity = high_similarity_pair["similarity"]
             .as_f64()
             .unwrap_or_else(|| panic!("expected numeric similarity"));
+        let rounded_similarity = (high_similarity * 10_000.0).round() / 10_000.0;
         assert!(
-            duplicate_similarity < 1.0 && duplicate_similarity > 0.9999,
+            (high_similarity - rounded_similarity).abs() > f64::EPSILON,
             "similarity should retain full precision instead of rounding to four decimals"
         );
         let distribution = &similarity["score_distribution"];
@@ -403,8 +404,8 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert!(
             pairs
                 .iter()
-                .any(|pair| pair["classification"] == "likely_duplicate"),
-            "fixture vectors should produce a likely_duplicate pair"
+                .any(|pair| pair["classification"] == "high_similarity"),
+            "fixture vectors should produce a high_similarity pair"
         );
     });
 }

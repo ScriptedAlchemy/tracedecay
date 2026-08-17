@@ -134,6 +134,15 @@ pub(crate) fn spawn_dashboard_server_with_host_runtime(
     spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), false, port)
 }
 
+pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
+    cg: TraceDecay,
+    host_runtime: Arc<DashboardTestRuntimeV1>,
+    project_graphs: dashboard::DashboardTestProjectGraphsV1,
+    port: u16,
+) -> DashboardServer {
+    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), true, port)
+}
+
 fn spawn_dashboard_server_with_runner(
     cg: TraceDecay,
     host_authority: Option<(
@@ -785,7 +794,6 @@ for line in sys.stdin:
     elif method == "turn/start":
         payload = {
             "ops": [{
-                "cluster_id": "cluster-0000",
                 "op": "normalize_tags",
                 "target": {
                     "fact_id": fact_id,
@@ -796,8 +804,7 @@ for line in sys.stdin:
                     "fact_id": fact_id,
                     "expected_last_event_id": last_event_id,
                 }],
-                "confidence": 0.98,
-                "reason": "normalize reviewed dashboard fact tags"
+                "confidence": 0.98
             }]
         }
         print(json.dumps({

@@ -190,6 +190,12 @@ async fn project_memory_rank_facts_tx(
                     &fact,
                     now,
                 )?;
+                if !tokens.is_empty()
+                    && scores.fts_score_millionths() == 0
+                    && scores.jaccard_score_millionths() == 0
+                {
+                    continue;
+                }
                 if query
                     .filter()
                     .threshold_millionths()

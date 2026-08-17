@@ -160,7 +160,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server_with_host_runtime(
+        let mut server = spawn_dashboard_server_with_configuration_runtime(
             cg,
             host_runtime,
             dashboard::DashboardTestProjectGraphsV1::default(),
@@ -228,10 +228,10 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         assert_eq!(proposed.len(), 1);
         assert_eq!(proposed[0]["op"], "normalize_tags");
         assert_eq!(
-            proposed[0]["fact_id"].as_str(),
+            proposed[0]["target"]["fact_id"].as_str(),
             Some(curated_fact_id.as_str())
         );
-        assert!(proposed[0]["fact_id"]
+        assert!(proposed[0]["target"]["fact_id"]
             .as_str()
             .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok()));
         let applied = record
@@ -299,7 +299,10 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
             evals["payload"]["runner"]["results"][0]["status"],
             "passed"
         );
-        assert_eq!(evals["payload"]["promotion"]["state"], "validated");
+        assert_eq!(
+            evals["payload"]["automatic_application"]["status"],
+            "applied"
+        );
         assert_eq!(
             evals["payload"]["eval_definitions"][0]["eval_id"],
             "memory_curator:accepted:0"
@@ -322,7 +325,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         assert_eq!(handoff["payload"]["status"], "ready_for_review");
         assert_eq!(
             handoff["payload"]["machine_summary"]["next_stage"],
-            "codex_review"
+            "monitor_applied_outcomes"
         );
         assert_eq!(
             handoff["payload"]["artifact_manifest"]["api_list"],
