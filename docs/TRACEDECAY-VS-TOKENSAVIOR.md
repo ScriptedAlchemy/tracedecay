@@ -279,8 +279,8 @@ a long-lived `tracedecay serve --timings` session — the per-query column
 reports the handler's `_meta.duration_us`, stripping JSON-RPC / stdio /
 Python-parse overhead. token-savior runs in-process.
 
-Script: [`benchmarks/run_benchmarks.py`](../benchmarks/run_benchmarks.py).
-Latest report: [`benchmarks/comparison-report.md`](../benchmarks/comparison-report.md).
+Script: [`benchmarks/run_benchmarks.py`](../benchmarks/run_benchmarks.py),
+which writes `comparison-report.md` into its results directory.
 
 | Metric | token-savior | tracedecay | Delta |
 |---|---:|---:|---:|
@@ -369,9 +369,8 @@ Our adaptation:
 - **No timeouts, no harness errors.** All 96 tasks completed cleanly in 29
   minutes wall time across one Max OAuth session.
 
-Reproduction harness, patch, and full per-task summary in
+Reproduction harness and patch in
 [`benchmarks/tsbench/`](../benchmarks/tsbench/) — see
-[`benchmarks/tsbench/SUMMARY.md`](../benchmarks/tsbench/SUMMARY.md) and
 [`benchmarks/tsbench/README.md`](../benchmarks/tsbench/README.md).
 
 ---
