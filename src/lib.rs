@@ -68,7 +68,6 @@ pub mod daemon_client;
 pub mod daemon_contract;
 pub mod dashboard;
 pub mod db;
-pub mod derive_table;
 pub mod diagnose;
 pub mod diagnostics;
 pub(crate) use diagnostics::lsp::semantic::production_semantic_authorities;

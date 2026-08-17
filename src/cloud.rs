@@ -146,11 +146,6 @@ fn platform_asset_name(prefix: &str, version: &str) -> String {
     format!("{prefix}-v{version}-{platform}.{ext}")
 }
 
-/// Candidate asset names for explicit release installs.
-pub(crate) fn asset_name_candidates(version: &str, is_beta: bool) -> [String; 1] {
-    [asset_name(version, is_beta)]
-}
-
 /// First major version of the pre-reset release line that already shipped
 /// `tracedecay-*` named assets (the 4.x–6.x era used the new asset names
 /// before the version reset to 0.0.2). Latest-version detection refuses any
@@ -303,14 +298,6 @@ pub fn detect_install_method() -> InstallMethod {
     }
 }
 
-/// Returns the upgrade command string.
-///
-/// Always suggests `tracedecay upgrade` which handles all install methods
-/// and channels automatically.
-pub fn upgrade_command(_method: &InstallMethod) -> &'static str {
-    "tracedecay upgrade"
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -411,8 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_name_candidates_use_current_name() {
-        let [first] = asset_name_candidates("9.9.9", false);
-        assert!(first.starts_with("tracedecay-v9.9.9-"));
+    fn asset_name_uses_current_name() {
+        assert!(asset_name("9.9.9", false).starts_with("tracedecay-v9.9.9-"));
     }
 }

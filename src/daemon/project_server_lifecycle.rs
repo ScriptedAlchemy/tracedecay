@@ -229,7 +229,6 @@ pub(super) async fn schedule_project_server_retirement(
 /// Kick coalesced per-profile replay without awaiting a pass (handshake-safe).
 pub(super) async fn ensure_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
-    _client_identity: &DaemonClientIdentity,
 ) -> Result<()> {
     let user_session_db = store_administration
         .registered_profile_session_database()
@@ -292,8 +291,7 @@ pub(super) async fn await_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
     client_identity: &DaemonClientIdentity,
 ) -> Result<()> {
-    ensure_user_profile_host_admission_replay_for_identity(store_administration, client_identity)
-        .await?;
+    ensure_user_profile_host_admission_replay_for_identity(store_administration).await?;
     let broker_path = authority::canonical_identity_path(
         &tracedecay_sessions::runtime::user_sessions_db_path(&client_identity.profile_root),
     )

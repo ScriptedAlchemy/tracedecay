@@ -1531,9 +1531,9 @@ pub(super) async fn handle_impls(
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
-/// Handles `tracedecay_derives` — lists `#[derive(...)]` macros on a type
-/// and the trait + method names each one synthesizes (per the static
-/// `derive_table`). Accepts either `node_id` or `qualified_name`.
+/// Handles `tracedecay_derives`. Derive annotations are not published in the
+/// verified code graph generation, so a matched symbol reports a typed
+/// evidence-unavailable route error. Accepts `node_id` or `qualified_name`.
 pub(super) async fn handle_derives(
     _cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,

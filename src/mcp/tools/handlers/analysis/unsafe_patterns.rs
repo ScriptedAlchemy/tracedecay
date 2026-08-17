@@ -39,7 +39,7 @@ fn line_matches_unsafe_kind(line: &str, kind: &str) -> bool {
         "expect" => contains_method_call(line, "expect", false),
         "panic" => line.contains("panic!("),
         "todo" => line.contains("todo!("),
-        "unimplemented" => line.contains("unimplemented!(") || line.contains("unimplemented!()"),
+        "unimplemented" => line.contains("unimplemented!("),
         "unsafe_block" => contains_unsafe_block_start(line),
         _ => false,
     }

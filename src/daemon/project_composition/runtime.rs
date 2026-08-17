@@ -5,15 +5,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_store::ProjectId;
 
 #[cfg(any(not(unix), test, feature = "test-transport"))]
 use super::portable_database_owner_reconciler;
 use super::{DaemonEngine, DaemonHandshake, ProjectServerKey, StoreAdministration};
 
 pub(super) async fn bind_verified_project_graph_runtime(
-    _graph_runtime: &crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
-    _project_id: ProjectId,
     database: Arc<crate::db::Database>,
     sessions: &RegisteredGlobalDb,
 ) -> crate::errors::Result<()> {

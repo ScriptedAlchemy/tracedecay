@@ -451,8 +451,6 @@ pub(super) async fn production_project_server(
             ) = join_independent_session_opens(project_session_open, profile_session_open).await?;
             if !project_database_is_read_only {
                 bind_verified_project_graph_runtime(
-                    &graph_runtime,
-                    code_search_project_id.clone(),
                     Arc::new(cg.db().clone()),
                     registered_project_session_db.as_ref(),
                 )

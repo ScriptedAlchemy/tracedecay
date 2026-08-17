@@ -540,7 +540,7 @@ impl DaemonEngine {
             let Some(cg) = retained_project_graph(self, &key).await else {
                 return AutomationSchedulerReconcileOutcome::OwnerUnavailable;
             };
-            match automation_scheduler_has_work_for_project(&cg, &handshake).await {
+            match automation_scheduler_has_work_for_project(&cg).await {
                 Ok(configured) => configured,
                 Err(e) => {
                     log_daemon_event(
@@ -767,7 +767,6 @@ impl DaemonEngine {
         &self,
         key: &ProjectServerKey,
         project_path: &Path,
-        handshake: &DaemonHandshake,
         cg: &TraceDecay,
         completion: &Arc<()>,
         observed_generation: u64,
@@ -795,7 +794,7 @@ impl DaemonEngine {
                 }
 
                 let still_configured =
-                    match automation_scheduler_has_work_for_project(cg, handshake).await {
+                    match automation_scheduler_has_work_for_project(cg).await {
                         Ok(configured) => configured,
                         Err(error) => {
                             log_daemon_event(
@@ -996,7 +995,7 @@ async fn run_automation_scheduler_loop(
     let mut consecutive_open_failures: u32 = 0;
     loop {
         let observed_generation = generation.load(std::sync::atomic::Ordering::Acquire);
-        match automation_scheduler_has_work_for_project(&cg, &handshake).await {
+        match automation_scheduler_has_work_for_project(&cg).await {
             Ok(true) => {
                 consecutive_open_failures = 0;
             }
@@ -1010,7 +1009,6 @@ async fn run_automation_scheduler_loop(
                     .commit_automation_scheduler_exit(
                         &key,
                         &project_path,
-                        &handshake,
                         &cg,
                         &completion,
                         observed_generation,
@@ -1132,7 +1130,7 @@ async fn run_automation_scheduler_loop(
                 ],
             );
         }
-        let tick_secs = Box::pin(automation_scheduler_tick_secs_for_project(&cg, &handshake)).await;
+        let tick_secs = Box::pin(automation_scheduler_tick_secs_for_project(&cg)).await;
         log_daemon_event(
             "scheduler_sleep",
             &[
@@ -1175,18 +1173,12 @@ async fn run_automation_scheduler_loop(
     }
 }
 
-async fn automation_scheduler_has_work_for_project(
-    cg: &TraceDecay,
-    _handshake: &DaemonHandshake,
-) -> Result<bool> {
+async fn automation_scheduler_has_work_for_project(cg: &TraceDecay) -> Result<bool> {
     let configuration = effective_automation_config_for_project(cg).await?;
     automation_scheduler_has_work(cg, &configuration.settings).await
 }
 
-pub(super) async fn automation_scheduler_tick_secs_for_project(
-    cg: &TraceDecay,
-    _handshake: &DaemonHandshake,
-) -> u64 {
+pub(super) async fn automation_scheduler_tick_secs_for_project(cg: &TraceDecay) -> u64 {
     match effective_automation_config_for_project(cg).await {
         Ok(configuration) => configuration.settings.scheduler_tick_secs,
         Err(e) => {

@@ -471,9 +471,6 @@ pub(super) async fn dispatch_admin_tools(
                 args,
                 options.global_db.map(std::sync::Arc::as_ref),
                 options.automation_scheduler_reconciler,
-                options.profile_root,
-                options.daemon_invocation_service,
-                options.application_request_id,
                 deadline,
                 cancellation,
             )

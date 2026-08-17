@@ -22,7 +22,7 @@ const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 // Asset-naming and platform helpers live in `crate::cloud` so the version-
 // detection path can use the same naming convention to filter out releases
 // whose CI hasn't finished uploading the current platform's binary yet.
-use crate::cloud::asset_name_candidates;
+use crate::cloud::asset_name;
 #[cfg(test)]
 use crate::cloud::{asset_name, current_platform};
 
@@ -46,7 +46,7 @@ struct ReleaseDownload {
 
 /// Resolves both the platform archive and its checksum manifest from one
 /// GitHub release. An archive without `SHA256SUMS` is not installable.
-fn fetch_release_download(tag: &str, candidates: &[String]) -> Result<ReleaseDownload> {
+fn fetch_release_download(tag: &str, asset_name: &str) -> Result<ReleaseDownload> {
     #[derive(serde::Deserialize)]
     struct Asset {
         name: String,
@@ -76,18 +76,16 @@ fn fetch_release_download(tag: &str, candidates: &[String]) -> Result<ReleaseDow
             message: format!("failed to parse release info: {e}"),
         })?;
 
-    let archive = candidates
+    let archive = release
+        .assets
         .iter()
-        .find_map(|candidate| release.assets.iter().find(|asset| asset.name == *candidate))
-        .ok_or_else(|| {
-            let expected = candidates.join("' or '");
-            TraceDecayError::Config {
-                message: format!(
-                    "release {tag} exists but asset '{expected}' is not yet available.\n  \
-                     CI build may still be in progress — try again in a few minutes.\n  \
-                     https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
-                ),
-            }
+        .find(|asset| asset.name == asset_name)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "release {tag} exists but asset '{asset_name}' is not yet available.\n  \
+                 CI build may still be in progress — try again in a few minutes.\n  \
+                 https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
+            ),
         })?;
     let checksums = release
         .assets
@@ -777,10 +775,9 @@ fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<Option<PathBu
 /// release yet.
 fn preflight_asset_check(version: &str, is_beta: bool) -> Result<ReleaseDownload> {
     let tag = release_tag(version);
-    let candidates = asset_name_candidates(version, is_beta);
-    let [primary_candidate] = &candidates;
-    eprintln!("  Asset: {primary_candidate}");
-    fetch_release_download(&tag, &candidates)
+    let asset = asset_name(version, is_beta);
+    eprintln!("  Asset: {asset}");
+    fetch_release_download(&tag, &asset)
 }
 
 /// Record the *currently running* binary's version in user config just before
@@ -1083,9 +1080,8 @@ mod tests {
     }
 
     #[test]
-    fn test_asset_name_candidates_use_current_name() {
-        let candidates = asset_name_candidates("3.3.3", false);
-        assert!(candidates[0].starts_with("tracedecay-v3.3.3-"));
+    fn test_asset_name_uses_current_name() {
+        assert!(asset_name("3.3.3", false).starts_with("tracedecay-v3.3.3-"));
     }
 
     #[test]

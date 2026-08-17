@@ -7,7 +7,7 @@
 //! The `GitWatcher` type itself is a crate-private daemon component, so these
 //! integration tests validate the *composed behavior* through the same public
 //! APIs the watcher orchestrates (`TraceDecay::sync*`, `stale_files_since_commit`,
-//! `add_branch_tracking_with_options`, `branch::gc_dead_branch_stores`) against
+//! `add_branch_tracking_with_options`) against
 //! real temp git repos. Watcher-internal wiring (debounce coalescing, event
 //! classification, heartbeat staleness) is unit-tested inline in
 //! `src/daemon/git_watch.rs`.

@@ -82,7 +82,7 @@ fn prefix_lines(text: &str, prefix: &str) -> String {
 fn has_directory_shape(node: &PathNode) -> bool {
     node.children
         .values()
-        .any(|child| !child.children.is_empty() || has_directory_shape(child))
+        .any(|child| !child.children.is_empty())
 }
 
 fn render_children(children: &BTreeMap<String, PathNode>, indent: usize, lines: &mut Vec<String>) {

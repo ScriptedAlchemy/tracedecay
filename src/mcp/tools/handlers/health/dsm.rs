@@ -43,9 +43,9 @@ pub(crate) async fn handle_dsm(
             })
         })
         .collect();
-    let largest_cluster = clusters
+    let largest_cluster = cluster_rows
         .iter()
-        .filter_map(|cluster| cluster["file_count"].as_u64())
+        .map(|cluster| cluster.file_count as u64)
         .max()
         .unwrap_or(0);
     let stats = json!({

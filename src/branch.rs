@@ -1,6 +1,6 @@
 //! Git branch resolution utilities for multi-branch indexing.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::branch_meta::BranchMeta;
 
@@ -537,16 +537,6 @@ pub fn is_branch_ref_present(project_root: &Path, branch: &str) -> bool {
 }
 
 /// Result of a dead/orphan branch-store GC pass.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct GcReport {
-    /// Names of tracked branches whose DB + metadata entry were removed because
-    /// their git ref is gone and their last sync predates the grace window.
-    pub removed_tracked: Vec<String>,
-    /// Paths of orphan `branches/*.db` files (not referenced by any meta entry)
-    /// that were deleted because their mtime predates the grace window.
-    pub removed_orphan_dbs: Vec<PathBuf>,
-}
-
 /// Parses a `last_synced_at` / `created_at` unix-seconds string defensively.
 /// Returns 0 (epoch, i.e. maximally stale) when unparseable so a corrupt
 /// timestamp never protects a dead store from collection.
@@ -559,21 +549,6 @@ fn now_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-/// Compatibility wrapper retained for callers that cannot reach the managed
-/// daemon. Physical branch-store GC requires daemon-owned store administration,
-/// so this API fails closed without mutating metadata or `SQLite` files.
-pub fn gc_dead_branch_stores(
-    _project_root: &Path,
-    _tracedecay_dir: &Path,
-    _branch_gc_days: u64,
-    _orphan_db_gc_days: u64,
-) -> GcReport {
-    // Physical branch-store GC requires daemon-owned writer exclusion, cached
-    // owner checks, a deletion fence, and holder proof. This compatibility API
-    // cannot establish those invariants, so it deliberately fails closed.
-    GcReport::default()
 }
 
 #[cfg(test)]

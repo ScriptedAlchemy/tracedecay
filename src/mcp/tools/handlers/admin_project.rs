@@ -1,10 +1,9 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tracedecay_agent_hosts::automation::AutomationRunControl;
-use tracedecay_application::{CancellationSignal, Deadline, RequestId, now_micros};
+use tracedecay_application::{CancellationSignal, Deadline, now_micros};
 use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};
 
@@ -143,9 +142,6 @@ pub(super) async fn handle_admin_project(
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
-    _profile_root: Option<&Path>,
-    _daemon_invocation_service: Option<&crate::daemon::DaemonInvocationService>,
-    _application_request_id: Option<RequestId>,
     application_deadline: Deadline,
     application_cancellation: CancellationSignal,
 ) -> Result<ToolResult> {
@@ -377,9 +373,6 @@ mod tests {
                 }),
                 None,
                 None,
-                None,
-                None,
-                None,
                 deadline,
                 cancellation,
             )
@@ -401,9 +394,6 @@ mod tests {
             &handle_admin_project(
                 &cg,
                 json!({ "action": "automatic_fact_receipt_view", "id": apply_id }),
-                None,
-                None,
-                None,
                 None,
                 None,
                 deadline,
@@ -442,9 +432,6 @@ mod tests {
                 handle_admin_project(
                     &cg,
                     action,
-                    None,
-                    None,
-                    None,
                     None,
                     None,
                     deadline,
