@@ -28,3 +28,6 @@ __pycache__/
 # Shipped-state baselines live in dashboard/audit-baselines/ and stay tracked.
 dashboard/.*-axe/
 .superpowers/
+
+# mockup screenshot output; regenerate with each mockup's shoot.mjs / qa-drive.mjs
+mockups/**/shots/
