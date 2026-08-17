@@ -134,66 +134,13 @@ impl RetainedSurfaceOperation {
     ];
 
     /// Operations with a current callable transport. Daemon grants, HTTP
-    /// routes, and the SDK all derive from this exact mounted set.
-    pub const CALLABLE: [Self; 26] = [
-        Self::FactStoreCurate,
-        Self::FactStoreAdd,
-        Self::FactStoreSearch,
-        Self::FactStoreProbe,
-        Self::FactStoreRelated,
-        Self::FactStoreReason,
-        Self::FactStoreContradict,
-        Self::FactStoreGet,
-        Self::FactStoreUpdate,
-        Self::FactStoreRemove,
-        Self::FactStoreList,
-        Self::FactFeedback,
-        Self::MemoryStatus,
-        Self::SessionRefreshStatus,
-        Self::SessionRefreshCancel,
-        Self::SessionRefreshBegin,
-        Self::MessageSearch,
-        Self::SessionsFor,
-        Self::LcmStatus,
-        Self::LcmDoctor,
-        Self::LcmLoadSession,
-        Self::LcmGrep,
-        Self::LcmDescribe,
-        Self::LcmExpand,
-        Self::LcmExpandQuery,
-        Self::Workflows,
-    ];
+    /// routes, and the SDK all derive from this exact mounted set, which is
+    /// the full catalog today.
+    pub const CALLABLE: [Self; 26] = Self::ALL;
 
     /// Every current retained action has an exact project-open production
     /// adapter. SDK clients invoke the operation-selected routes.
-    pub const SDK_EXECUTABLE: [Self; 26] = [
-        Self::FactStoreCurate,
-        Self::FactStoreAdd,
-        Self::FactStoreSearch,
-        Self::FactStoreProbe,
-        Self::FactStoreRelated,
-        Self::FactStoreReason,
-        Self::FactStoreContradict,
-        Self::FactStoreGet,
-        Self::FactStoreUpdate,
-        Self::FactStoreRemove,
-        Self::FactStoreList,
-        Self::FactFeedback,
-        Self::MemoryStatus,
-        Self::SessionRefreshStatus,
-        Self::SessionRefreshCancel,
-        Self::SessionRefreshBegin,
-        Self::MessageSearch,
-        Self::SessionsFor,
-        Self::LcmStatus,
-        Self::LcmDoctor,
-        Self::LcmLoadSession,
-        Self::LcmGrep,
-        Self::LcmDescribe,
-        Self::LcmExpand,
-        Self::LcmExpandQuery,
-        Self::Workflows,
-    ];
+    pub const SDK_EXECUTABLE: [Self; 26] = Self::ALL;
 
     pub const fn is_callable(self) -> bool {
         !matches!(self, Self::SessionRefresh)
@@ -1036,10 +983,6 @@ mod tests {
     #[test]
     fn every_mounted_retained_action_is_sdk_executable() {
         let registry = retained_surface_executable_binding_registry().expect("registry");
-        assert_eq!(
-            RetainedSurfaceOperation::SDK_EXECUTABLE,
-            RetainedSurfaceOperation::CALLABLE
-        );
         assert_eq!(
             registry.iter().count(),
             RetainedSurfaceOperation::SDK_EXECUTABLE.len()

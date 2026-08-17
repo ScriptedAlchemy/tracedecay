@@ -359,14 +359,7 @@ impl AgentIntegration for KiroIntegration {
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        let path = mcp_config_path(home);
-        if !path.exists() {
-            return false;
-        }
-        let json = load_json_file(&path);
-        json.get("mcpServers")
-            .and_then(|v| v.get("tracedecay"))
-            .is_some()
+        mcp_registry_has_tracedecay(&mcp_config_path(home))
     }
 
     fn export_managed_skills(
@@ -402,12 +395,15 @@ impl AgentIntegration for KiroIntegration {
 }
 
 fn workspace_mcp_has_tracedecay(project_root: &Path) -> bool {
-    let path = workspace_mcp_config_path(project_root);
+    mcp_registry_has_tracedecay(&workspace_mcp_config_path(project_root))
+}
+
+fn mcp_registry_has_tracedecay(path: &Path) -> bool {
     if !path.exists() {
         return false;
     }
-    let json = load_json_file(&path);
-    json.get("mcpServers")
+    load_json_file(path)
+        .get("mcpServers")
         .and_then(|servers| servers.get("tracedecay"))
         .is_some()
 }
@@ -484,7 +480,7 @@ fn kiro_mcp_remove_with(kiro_cli: &Path, home: &Path) -> Result<()> {
 /// the command fails or a later verification step rejects the effect.
 fn run_kiro_mcp_step(kiro_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
     let mcp_path = mcp_config_path(home);
-    let peers_before = mcp_peer_servers(&mcp_path)?;
+    let (_, peers_before) = read_mcp_config_observation(&mcp_path)?;
     let outcome = super::host_cli::run_host_cli(kiro_cli, args, home)?;
     // Snapshot once after the child exits. The bytes that pass the peer guard
     // are the bytes recorded for rollback; reading again after recording
@@ -511,14 +507,6 @@ fn run_kiro_mcp_step(kiro_cli: &Path, args: &[&str], home: &Path) -> Result<()> 
     Err(TraceDecayError::Config {
         message: outcome.failure_message(),
     })
-}
-
-/// Return the operator-owned MCP servers in a registry document, excluding
-/// TraceDecay's own entry. The host CLI remains the only writer; this read-only
-/// snapshot lets the lifecycle reject a command that drops or rewrites peers.
-fn mcp_peer_servers(path: &Path) -> Result<serde_json::Map<String, serde_json::Value>> {
-    let (_, peers) = read_mcp_config_observation(path)?;
-    Ok(peers)
 }
 
 fn read_mcp_config_observation(

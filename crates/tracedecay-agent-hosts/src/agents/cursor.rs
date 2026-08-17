@@ -316,22 +316,16 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
         .into_iter()
         .map(|(relative, contents)| {
             let rendered = match relative {
-                ".cursor-plugin/plugin.json" => cursor_plugin_manifest(contents)?,
-                "mcp.json" => cursor_plugin_mcp(contents, tracedecay_bin)?,
+                ".cursor-plugin/plugin.json" => {
+                    super::plugin_bundle::stamp_manifest_version(contents)?
+                }
+                "mcp.json" => super::plugin_bundle::set_mcp_command(contents, tracedecay_bin)?,
                 "hooks/hooks.json" => cursor_plugin_hooks(contents, tracedecay_bin)?,
                 _ => contents.to_string(),
             };
             Ok((relative, rendered))
         })
         .collect()
-}
-
-fn cursor_plugin_manifest(raw: &str) -> Result<String> {
-    super::plugin_bundle::stamp_manifest_version(raw)
-}
-
-fn cursor_plugin_mcp(raw: &str, tracedecay_bin: &str) -> Result<String> {
-    super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)
 }
 
 fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {

@@ -325,7 +325,7 @@ fn copilot_mcp_remove_with(copilot_cli: &Path, home: &Path) -> Result<()> {
 /// later verification step rejects the effect.
 fn run_copilot_mcp_step(copilot_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
     let mcp_path = copilot_cli_mcp_config_path(home);
-    let peers_before = mcp_peer_servers(&mcp_path)?;
+    let (_, peers_before) = read_mcp_config_observation(&mcp_path)?;
     let outcome = super::host_cli::run_host_cli(copilot_cli, args, home)?;
     // Snapshot once after the child exits. The bytes that pass the peer guard
     // are the bytes recorded for rollback; reading again after recording would
@@ -365,15 +365,6 @@ fn rendered_invocation(copilot_cli: &Path, args: &[&str]) -> String {
 /// this read-only snapshot lets the lifecycle reject a command that drops or
 /// rewrites peers.
 ///
-/// This is deliberately a small Copilot-local equivalent of Kiro's guard
-/// rather than a shared helper: the two hosts agree on the `mcpServers` key
-/// today by coincidence of format, not by contract, and a single shared reader
-/// would silently bind Copilot's registry shape to Kiro's.
-fn mcp_peer_servers(path: &Path) -> Result<serde_json::Map<String, serde_json::Value>> {
-    let (_, peers) = read_mcp_config_observation(path)?;
-    Ok(peers)
-}
-
 /// Read the registry document once, returning both its exact bytes (for the
 /// rollback observation) and its peer servers (for the preservation guard).
 /// An absent file is a legitimate state — nothing registered yet — and yields

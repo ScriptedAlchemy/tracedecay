@@ -145,7 +145,8 @@ impl AgentIntegration for ClineIntegration {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check Cline's `cline_mcp_settings.json` has tracedecay MCP server registered.
+/// Check Cline's primary `.cline/mcp.json` has the tracedecay MCP server
+/// registered, falling back to the legacy VS Code `cline_mcp_settings.json`.
 ///
 /// Unlike the plain [`super::doctor_check_mcp_registration`] flow, an absent
 /// primary settings file is not a warning on its own: Cline falls through to
