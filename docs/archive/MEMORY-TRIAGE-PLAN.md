@@ -28,7 +28,7 @@ the current checkout, only `retrieval.rs::temporal_decay_factor` remains.
 
 | Audit | Doc | Scope |
 |---|---|---|
-| Storage | `docs/MEMORY-STORAGE-GROWTH-AUDIT.md` | per-fact byte cost, capacity math, unbounded-growth paths |
+| Storage | `docs/archive/MEMORY-STORAGE-GROWTH-AUDIT.md` | per-fact byte cost, capacity math, unbounded-growth paths |
 | Retrieval/entity | `docs/RETRIEVAL-QUALITY-EVAL.md` | recall pipeline + 7 empirically-measured quality risks (binary-driven evidence) |
 | Trust-decay | `docs/TRUST-DECAY-SEMANTICS.md` | persisted vs. ranking decay, dead code, explainability gaps |
 | Visibility | `docs/MEMORY-HEALTH-VISIBILITY-GAPS.md` | dashboard/CLI/doctor/MCP surfacing gaps (G1–G11) |
@@ -107,7 +107,7 @@ It does **not** depend on any policy decision. Pair it with
 `PRAGMA auto_vacuum = INCREMENTAL` or the migration's bytes never reclaim.
 
 ### X5 — Cross-doc inconsistency — **resolved by Q1/Q2**
-The original plan flagged `docs/MEMORY-STORAGE-GROWTH-AUDIT.md:166` for
+The original plan flagged `docs/archive/MEMORY-STORAGE-GROWTH-AUDIT.md:166` for
 crediting the dead `trust.rs::temporal_decay` with "affecting scoring only".
 Current docs now state the correct behavior: only
 `retrieval.rs::temporal_decay_factor` affects ranking; the stored `trust_score`

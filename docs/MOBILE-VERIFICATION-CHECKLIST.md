@@ -16,7 +16,7 @@ Companion docs (read these for the "why" behind the regression-risk checks):
   `CurationPanel.tsx` seams, risk ratings, and the load-bearing invariants.
 - `docs/CODE-GRAPH-EXPLORER-SEAMS.md` — `CodeGraphExplorer.tsx` + `GraphCanvas.tsx`
   seams, and the canvas interaction/`propsRef` invariants.
-- `docs/dashboard.md`, `docs/dashboard-port-handoff.md` — how the dashboard is
+- `docs/dashboard.md`, `docs/archive/dashboard-port-handoff.md` — how the dashboard is
   served and launched.
 - `dashboard/smoke.mjs` — the existing playwright smoke harness this checklist
   extends (see "How to run" below).

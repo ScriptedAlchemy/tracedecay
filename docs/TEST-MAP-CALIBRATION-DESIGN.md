@@ -7,7 +7,7 @@
 > exact counts, source shape, and golden snapshots are not rebuild instructions.
 
 **Task:** `t_d000933c` (Design integration-test coverage calibration heuristics)
-**Built on:** `docs/TEST-MAP-AUDIT.md` (`t_b1feb03c`) — the root-cause audit of the ~12% signal.
+**Built on:** `docs/archive/TEST-MAP-AUDIT.md` (`t_b1feb03c`) — the root-cause audit of the ~12% signal.
 **Scope:** how `tracedecay_test_risk` and `tracedecay_test_map` should change so their coverage
 signal is *defensible* on integration-heavy Rust repos. This is a design spec, not an implementation.
 

@@ -18,8 +18,8 @@ write paths and must not be presented as Doctor actions.
 This is a **gap analysis + recommendations** artifact, not an implementation. It
 builds on two prior audits in this repo:
 
-- `docs/DASHBOARD-API-AUDIT.md` — every dashboard route + the data-access contract.
-- `docs/MEMORY-STORAGE-GROWTH-AUDIT.md` — per-fact cost, capacity math, unbounded-growth paths.
+- `docs/archive/DASHBOARD-API-AUDIT.md` — every dashboard route + the data-access contract.
+- `docs/archive/MEMORY-STORAGE-GROWTH-AUDIT.md` — per-fact cost, capacity math, unbounded-growth paths.
 
 The measured snapshot below uses the live checkout DB
 (`.tracedecay/tracedecay.db`, 78.5 MB total; **129 facts**, memory subsystem
@@ -302,7 +302,7 @@ owners, not to Doctor.
   `CurationPanel.tsx:32` (`DIAGNOSTIC_COUNT_KEYS`), `api.ts`.
 - Data: `src/memory/types.rs:161` (`MemoryStatus`), `:155` (`MemoryRepairStats`),
   `src/tracedecay.rs:3386` (`memory_status`), `:3367` (`repair_derived_memory`).
-- Prior audits: `docs/DASHBOARD-API-AUDIT.md`, `docs/MEMORY-STORAGE-GROWTH-AUDIT.md`,
+- Prior audits: `docs/archive/DASHBOARD-API-AUDIT.md`, `docs/archive/MEMORY-STORAGE-GROWTH-AUDIT.md`,
   `docs/HOLOGRAPHIC-DASHBOARD-SEAMS.md`.
 - Live DB: `.tracedecay/tracedecay.db` (129 facts; memory subsystem 2.43 MiB of
   78.5 MB total; 5 orphan entities; 3 dirty banks; 129/129 facts never recalled).

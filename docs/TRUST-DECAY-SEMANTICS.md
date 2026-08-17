@@ -25,7 +25,7 @@ backed by a `file:line` reference so it can be re-verified.
   `GET /api/plugins/holographic/fact/{fact_id}/trust-history` (landed via Q6;
   see §5). (Historical: at audit time the table was write-only — only `store.rs`
   inserted; no SELECT/read path existed.)
-- The storage audit (`docs/MEMORY-STORAGE-GROWTH-AUDIT.md` §7) was corrected:
+- The storage audit (`docs/archive/MEMORY-STORAGE-GROWTH-AUDIT.md` §7) was corrected:
   it now states that *only* `retrieval.rs::temporal_decay_factor` affects
   ranking, that the stored `trust_score` never decays, and that
   `trust.rs::temporal_decay` has been removed.
@@ -175,7 +175,7 @@ not leave both half-implemented.
 ### B. Concrete changes (ranked; do regardless of A/Option)
 
 1. **Docs — fix the inaccuracy (DONE).** The storage audit
-   (`docs/MEMORY-STORAGE-GROWTH-AUDIT.md` §7) now reads: only
+   (`docs/archive/MEMORY-STORAGE-GROWTH-AUDIT.md` §7) now reads: only
    `retrieval.rs::temporal_decay_factor` (365-day half-life, floor 0.10, keyed
    on `updated_at`) affects ranking; the stored `trust_score` never decays;
    `trust.rs::temporal_decay` has been removed. The `trust.rs:1` module doc no

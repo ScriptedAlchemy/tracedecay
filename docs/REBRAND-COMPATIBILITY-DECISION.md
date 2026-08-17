@@ -19,7 +19,7 @@ points at them and records what the root reviewer verified and decided.
 
 | Artifact | Role | Child task |
 |---|---|---|
-| `docs/TRACEDECAY-COMPATIBILITY-AUDIT.md` | Fact inventory of every legacy surface, with file:line anchors and risk notes. | `t_3482e439` |
+| `docs/archive/TRACEDECAY-COMPATIBILITY-AUDIT.md` | Fact inventory of every legacy surface, with file:line anchors and risk notes. | `t_3482e439` |
 | `docs/TREESITTERS-RENAME-CONSTRAINTS.md` | Deep dive on the one externally constrained name. | `t_4070b0b0` |
 | `docs/REBRAND-COMPATIBILITY-POLICY.md` | Normative policy: categories A–E, principles, a 37-row surface map, and a review checklist. | `t_da7151b6` |
 | `docs/REBRAND-COMPATIBILITY-FOLLOW-UP-CHECKLIST.md` | Retired ticket backlog; current review guardrails for released external compatibility surfaces. | `t_a33b4ad3` |

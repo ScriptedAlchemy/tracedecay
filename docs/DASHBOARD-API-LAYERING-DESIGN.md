@@ -16,7 +16,7 @@ This is a historical **design note + implementation plan**, not a code change.
 The headings below record the proposed target files, migration order,
 compatibility constraints, and non-goals at design time.
 
-It builds directly on [`DASHBOARD-API-AUDIT.md`](./DASHBOARD-API-AUDIT.md) (the
+It builds directly on [`DASHBOARD-API-AUDIT.md`](./archive/DASHBOARD-API-AUDIT.md) (the
 audit): route inventory, SQL hotspots, fan-in/fan-out, and the 21
 "preserve-during-refactor" items (referenced below as **P1–P21**). Every
 structural decision here is checked against those items. Read the audit first if
@@ -458,6 +458,6 @@ completed successfully on this branch and therefore is not a verified gate.
 
 ---
 
-*Design note for Kanban task t_166b3cf9. Inputs: `docs/DASHBOARD-API-AUDIT.md`
+*Design note for Kanban task t_166b3cf9. Inputs: `docs/archive/DASHBOARD-API-AUDIT.md`
 (parent task t_2ccceb97). Source audited at the `master` working tree (≈ `5ad31c4`).
 Consumed by the per-domain implementation tasks.*

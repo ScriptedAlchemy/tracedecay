@@ -140,7 +140,7 @@ concurrently without collision:
 
 | Ticket | What | Files | Route |
 |---|---|---|---|
-| **Q1+Q2** | DONE: fixed `temporal_decay` doc inaccuracy and deleted the former `trust.rs::temporal_decay` name collision; only `retrieval.rs::temporal_decay_factor` remains | `docs/MEMORY-STORAGE-GROWTH-AUDIT.md`, `docs/TRUST-DECAY-SEMANTICS.md`, `src/memory/trust.rs`, `tests/memory_test.rs` | codex-gpt-5-3 |
+| **Q1+Q2** | DONE: fixed `temporal_decay` doc inaccuracy and deleted the former `trust.rs::temporal_decay` name collision; only `retrieval.rs::temporal_decay_factor` remains | `docs/archive/MEMORY-STORAGE-GROWTH-AUDIT.md`, `docs/TRUST-DECAY-SEMANTICS.md`, `src/memory/trust.rs`, `tests/memory_test.rs` | codex-gpt-5-3 |
 | **Q3** | DONE: surfaced `MemoryStatus` — `tracedecay memory status` CLI (`MemoryAction::Status`) + `GET /api/plugins/holographic/status` + dashboard Health card + MCP doc cross-reference | `src/cli.rs`, `src/main.rs`, `src/dashboard/memory_api.rs`, `dashboard/holographic/*` | codex-gpt-5-4 |
 | **Q4** | f64 → f32 vector serialization + incremental VACUUM (one-way door; backfill + tolerance test) | `src/memory/encoding.rs`, `src/db/migrations.rs`, `src/memory/store.rs` | codex-gpt-5-5 |
 | **Q5** | Fix entity extraction coverage + brittle verb list (stem/prefix + head noun) | `src/memory/entities.rs` | codex-gpt-5-3 |

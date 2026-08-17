@@ -555,5 +555,5 @@ fn local_install_detection_tracks_dispatch_preamble_behavior() {
 // These tests intentionally stay on pure parse/dispatch guard seams. Direct
 // invocation of blocking or destructive run arms (serve/dashboard/upgrade,
 // install mutations, status network paths, hooks that `process::exit`) is
-// documented in docs/MAIN-RUN-DISPATCH-NOTE.md §5 and remains covered, where
+// documented in docs/archive/MAIN-RUN-DISPATCH-NOTE.md §5 and remains covered, where
 // appropriate, by spawn-the-binary integration tests instead.
