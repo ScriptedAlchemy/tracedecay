@@ -794,25 +794,24 @@ mod tests {
                 kind: ContextProjectionKind::diagnostics(),
                 revision: TRACEDECAY_CONTEXT_REVISION,
             };
-            subscriptions
-                .contains(&registration)
-                .then(|| {
-                    (0..self.change_count)
-                        .map(|index| ContextProjectionChange {
-                            root_uri: root.uri().to_owned(),
-                            document_uri: Some(format!("file:///root/{index}.rs")),
-                            kind: ContextProjectionKind::diagnostics(),
-                            generation: 7,
-                            identity: identity(),
-                            freshness: ContextFreshness::Current,
-                            producer_state: ContextProducerState::Complete,
-                            coverage: ContextCoverage::Complete,
-                            revision: TRACEDECAY_CONTEXT_REVISION,
-                            retrieval_handle: None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
+            if subscriptions.contains(&registration) {
+                (0..self.change_count)
+                    .map(|index| ContextProjectionChange {
+                        root_uri: root.uri().to_owned(),
+                        document_uri: Some(format!("file:///root/{index}.rs")),
+                        kind: ContextProjectionKind::diagnostics(),
+                        generation: 7,
+                        identity: identity(),
+                        freshness: ContextFreshness::Current,
+                        producer_state: ContextProducerState::Complete,
+                        coverage: ContextCoverage::Complete,
+                        revision: TRACEDECAY_CONTEXT_REVISION,
+                        retrieval_handle: None,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
         }
     }
 

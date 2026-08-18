@@ -85,7 +85,7 @@ pub use gateway::{
     AdmittedRoot, AnalyzerCancellationAdapter, CallHierarchyItem, DaemonLspGateway,
     DaemonLspProviderBundle, DaemonLspProviderFactory, DaemonLspRuntimeSession, DiagnosticTrigger,
     DocumentSymbol, FeedbackCycleAdapter, FeedbackCyclePort, FeedbackCycleRequest,
-    FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayDocumentDiagnostics, GatewayMethod,
+    FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayMethod,
     GatewayResponse, Hover, IncomingCall, LspAnalyzerCancellationAuthority, LspLocation,
     LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask,
     LspSemanticOperationOutcome, LspSemanticRequest, LspSemanticRequestAuthority,

@@ -79,10 +79,6 @@ pub enum PolicyReasonCodeV1 {
     ContentAuthoritativeDeleted,
     SinkPolicyDrift,
     AuthorizationInputDrift,
-    ReplayInputsMissing,
-    ReplayRecordInvalid,
-    ReplayEvaluatorVersionMismatch,
-    ReplayDecisionMismatch,
 }
 
 /// Decision trace over immutable source authorization facts.
@@ -145,10 +141,6 @@ impl SourceAuthorizationDecisionV1 {
         )
     }
 
-    pub(crate) fn has_valid_digest(&self) -> bool {
-        self.decision_digest.validate().is_ok()
-            && self.decision_digest == self.compute_decision_digest()
-    }
 }
 
 /// Expected JSON truth-table projection. It intentionally asserts only public

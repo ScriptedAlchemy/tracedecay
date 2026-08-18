@@ -23,9 +23,7 @@ use crate::capabilities::{
     SemanticCapability, UpstreamCapabilities, negotiate_capabilities,
 };
 use crate::context::{ContextProjectionPort, MAX_CONTEXT_PROJECTION_KINDS};
-use crate::diagnostics::{
-    DiagnosticMerge, DocumentDiagnosticReport, GatewayDiagnostic, LspPosition, LspRange,
-};
+use crate::diagnostics::{LspPosition, LspRange};
 use crate::gateway::operation_table::{
     BoundedOperationCapacity, BoundedOperationTable, OperationAdmission, OperationPoll,
 };
@@ -319,13 +317,7 @@ pub enum GatewayMethod {
     TypeHierarchySupertypes,
     TypeHierarchySubtypes,
     TextDocumentPrepareRename,
-    TextDocumentRename,
-    TextDocumentCodeAction,
     WorkspaceDiagnostic,
-    WorkspaceExecuteCommand,
-    WorkspaceFolders,
-    GitHubCiProximityTransport,
-    DirectDatabaseWrite,
 }
 
 impl GatewayMethod {
@@ -348,13 +340,7 @@ impl GatewayMethod {
             Self::TypeHierarchySupertypes => "typeHierarchy/supertypes",
             Self::TypeHierarchySubtypes => "typeHierarchy/subtypes",
             Self::TextDocumentPrepareRename => "textDocument/prepareRename",
-            Self::TextDocumentRename => "textDocument/rename",
-            Self::TextDocumentCodeAction => "textDocument/codeAction",
             Self::WorkspaceDiagnostic => "workspace/diagnostic",
-            Self::WorkspaceExecuteCommand => "workspace/executeCommand",
-            Self::WorkspaceFolders => "workspace/didChangeWorkspaceFolders",
-            Self::GitHubCiProximityTransport => "tracedecay/github-ci-proximity",
-            Self::DirectDatabaseWrite => "tracedecay/direct-database-write",
         }
     }
 }
@@ -2155,12 +2141,6 @@ where
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GatewayDocumentDiagnostics {
-    pub report: DocumentDiagnosticReport,
-    pub omitted_count: usize,
-}
-
 /// A daemon-owned LSP workspace session.
 ///
 /// Both application ports are explicit constructor inputs. A retained daemon
@@ -2313,155 +2293,9 @@ where
         }
     }
 
-    /// Projects an already-read canonical snapshot into a generation-bound,
-    /// bounded document report. This function never schedules feedback work,
-    /// which keeps the request-before-read ordering explicit at the actor.
-    pub fn project_document_diagnostics(
-        &self,
-        document_uri: &str,
-        result_id: impl Into<String>,
-        upstream: Vec<GatewayDiagnostic>,
-        tracedecay: Vec<GatewayDiagnostic>,
-    ) -> GatewayResponse<GatewayDocumentDiagnostics> {
-        if !self.capabilities.supports_document_diagnostics {
-            return GatewayResponse::unavailable(
-                GatewayMethod::TextDocumentDiagnostic,
-                MethodUnavailableReason::CapabilityNotNegotiated,
-            );
-        }
-        if let Err(reason) = self.root_for_document(document_uri) {
-            return GatewayResponse::unavailable(GatewayMethod::TextDocumentDiagnostic, reason);
-        }
-        let result_id = result_id.into();
-        if result_id.is_empty() {
-            return GatewayResponse::RequestFailed(LspRequestFailure::ServerCancelled {
-                retrigger_request: true,
-            });
-        }
-
-        let DiagnosticMerge {
-            items,
-            omitted_count,
-        } = DiagnosticMerge::for_document(document_uri, upstream, tracedecay);
-        GatewayResponse::Value(GatewayDocumentDiagnostics {
-            report: DocumentDiagnosticReport::full(result_id, items),
-            omitted_count,
-        })
-    }
-
-    /// Convenience composition for non-protocol callers. The daemon protocol
-    /// actor uses [`Self::request_document_diagnostics`] followed by a
-    /// canonical snapshot read and [`Self::project_document_diagnostics`].
-    pub fn document_diagnostics(
-        &self,
-        document_uri: &str,
-        result_id: impl Into<String>,
-        upstream: Vec<GatewayDiagnostic>,
-        tracedecay: Vec<GatewayDiagnostic>,
-    ) -> GatewayResponse<GatewayDocumentDiagnostics> {
-        match self.request_document_diagnostics(document_uri) {
-            GatewayResponse::Value(()) => {
-                self.project_document_diagnostics(document_uri, result_id, upstream, tracedecay)
-            }
-            GatewayResponse::Unavailable(unavailable) => GatewayResponse::Unavailable(unavailable),
-            GatewayResponse::RequestFailed(failure) => GatewayResponse::RequestFailed(failure),
-            // Feedback admission returns none of these today. If a future
-            // admission path does, the honest answer for an LSP request is
-            // "not settled yet, ask again" — the admission carries no
-            // diagnostics payload to project, and panicking here would take
-            // down the request loop over a recoverable state.
-            GatewayResponse::Partial { .. } | GatewayResponse::Pending => GatewayResponse::Pending,
-        }
-    }
-
-    pub fn declaration(
-        &self,
-        document_uri: &str,
-        position: LspPosition,
-    ) -> GatewayResponse<Vec<LspLocation>> {
-        self.route_semantic(
-            GatewayMethod::TextDocumentDeclaration,
-            SemanticCapability::Declaration,
-            Some(document_uri),
-            |provider, root| provider.declaration(root, document_uri, position),
-        )
-    }
-
-    pub fn definition(
-        &self,
-        document_uri: &str,
-        position: LspPosition,
-    ) -> GatewayResponse<Vec<LspLocation>> {
-        self.route_semantic(
-            GatewayMethod::TextDocumentDefinition,
-            SemanticCapability::Definition,
-            Some(document_uri),
-            |provider, root| provider.definition(root, document_uri, position),
-        )
-    }
-
-    pub fn type_definition(
-        &self,
-        document_uri: &str,
-        position: LspPosition,
-    ) -> GatewayResponse<Vec<LspLocation>> {
-        self.route_semantic(
-            GatewayMethod::TextDocumentTypeDefinition,
-            SemanticCapability::TypeDefinition,
-            Some(document_uri),
-            |provider, root| provider.type_definition(root, document_uri, position),
-        )
-    }
-
-    pub fn implementation(
-        &self,
-        document_uri: &str,
-        position: LspPosition,
-    ) -> GatewayResponse<Vec<LspLocation>> {
-        self.route_semantic(
-            GatewayMethod::TextDocumentImplementation,
-            SemanticCapability::Implementation,
-            Some(document_uri),
-            |provider, root| provider.implementation(root, document_uri, position),
-        )
-    }
-
-    pub fn references(
-        &self,
-        document_uri: &str,
-        position: LspPosition,
-    ) -> GatewayResponse<Vec<LspLocation>> {
-        self.route_semantic(
-            GatewayMethod::TextDocumentReferences,
-            SemanticCapability::References,
-            Some(document_uri),
-            |provider, root| provider.references(root, document_uri, position),
-        )
-    }
-
-    pub fn hover(
-        &self,
-        document_uri: &str,
-        position: LspPosition,
-    ) -> GatewayResponse<Option<Hover>> {
-        self.route_semantic(
-            GatewayMethod::TextDocumentHover,
-            SemanticCapability::Hover,
-            Some(document_uri),
-            |provider, root| provider.hover(root, document_uri, position),
-        )
-    }
-
-    pub fn document_symbols(&self, document_uri: &str) -> GatewayResponse<Vec<DocumentSymbol>> {
-        self.route_semantic(
-            GatewayMethod::TextDocumentDocumentSymbol,
-            SemanticCapability::DocumentSymbol,
-            Some(document_uri),
-            |provider, root| provider.document_symbols(root, document_uri),
-        )
-    }
-
-    pub fn workspace_symbols(&self, query: &str) -> GatewayResponse<Vec<WorkspaceSymbol>> {
+    /// Multi-root fan-out for `workspace/symbol`. Reached only through
+    /// [`Self::semantic_request`], the single production semantic entry point.
+    fn workspace_symbols(&self, query: &str) -> GatewayResponse<Vec<WorkspaceSymbol>> {
         if !self
             .capabilities
             .supports_semantic(SemanticCapability::WorkspaceSymbol)
@@ -2517,135 +2351,6 @@ where
         }
     }
 
-    pub fn prepare_call_hierarchy(
-        &self,
-        document_uri: &str,
-        position: LspPosition,
-    ) -> GatewayResponse<Vec<CallHierarchyItem>> {
-        self.route_semantic(
-            GatewayMethod::TextDocumentPrepareCallHierarchy,
-            SemanticCapability::CallHierarchy,
-            Some(document_uri),
-            |provider, root| provider.prepare_call_hierarchy(root, document_uri, position),
-        )
-    }
-
-    pub fn incoming_calls(&self, item: &CallHierarchyItem) -> GatewayResponse<Vec<IncomingCall>> {
-        self.route_semantic(
-            GatewayMethod::CallHierarchyIncomingCalls,
-            SemanticCapability::CallHierarchy,
-            Some(&item.uri),
-            |provider, root| provider.incoming_calls(root, item),
-        )
-    }
-
-    pub fn outgoing_calls(&self, item: &CallHierarchyItem) -> GatewayResponse<Vec<OutgoingCall>> {
-        self.route_semantic(
-            GatewayMethod::CallHierarchyOutgoingCalls,
-            SemanticCapability::CallHierarchy,
-            Some(&item.uri),
-            |provider, root| provider.outgoing_calls(root, item),
-        )
-    }
-
-    pub fn signature_help(
-        &self,
-        document_uri: &str,
-        position: LspPosition,
-    ) -> GatewayResponse<Option<SignatureHelp>> {
-        self.route_semantic(
-            GatewayMethod::TextDocumentSignatureHelp,
-            SemanticCapability::SignatureHelp,
-            Some(document_uri),
-            |provider, root| provider.signature_help(root, document_uri, position),
-        )
-    }
-
-    pub fn prepare_type_hierarchy(
-        &self,
-        document_uri: &str,
-        position: LspPosition,
-    ) -> GatewayResponse<Vec<TypeHierarchyItem>> {
-        self.route_semantic(
-            GatewayMethod::TextDocumentPrepareTypeHierarchy,
-            SemanticCapability::TypeHierarchy,
-            Some(document_uri),
-            |provider, root| provider.prepare_type_hierarchy(root, document_uri, position),
-        )
-    }
-
-    pub fn type_hierarchy_supertypes(
-        &self,
-        item: &TypeHierarchyItem,
-    ) -> GatewayResponse<Vec<TypeHierarchyItem>> {
-        self.route_semantic(
-            GatewayMethod::TypeHierarchySupertypes,
-            SemanticCapability::TypeHierarchy,
-            Some(&item.uri),
-            |provider, root| provider.type_hierarchy_supertypes(root, item),
-        )
-    }
-
-    pub fn type_hierarchy_subtypes(
-        &self,
-        item: &TypeHierarchyItem,
-    ) -> GatewayResponse<Vec<TypeHierarchyItem>> {
-        self.route_semantic(
-            GatewayMethod::TypeHierarchySubtypes,
-            SemanticCapability::TypeHierarchy,
-            Some(&item.uri),
-            |provider, root| provider.type_hierarchy_subtypes(root, item),
-        )
-    }
-
-    /// Internal read-only rename-candidate operation. It never projects
-    /// `renameProvider` and never returns or applies a `WorkspaceEdit`.
-    pub fn rename_candidate(
-        &self,
-        request_id: &LspRequestId,
-        document_uri: &str,
-        position: LspPosition,
-    ) -> GatewayResponse<RenameCandidateResult> {
-        let unavailable = RenameCandidateResult::Unavailable {
-            reason: RenameCandidateUnavailableReason::AmbiguousEvidence,
-        };
-        match self.semantic_request(
-            request_id,
-            &SemanticRequest::RenameCandidate {
-                document_uri: document_uri.to_owned(),
-                position,
-            },
-        ) {
-            GatewayResponse::Value(SemanticResponse::RenameCandidate(value)) => {
-                GatewayResponse::Value(value)
-            }
-            GatewayResponse::Partial {
-                value: SemanticResponse::RenameCandidate(value),
-                coverage,
-                detail,
-            } => GatewayResponse::Partial {
-                value,
-                coverage,
-                detail,
-            },
-            GatewayResponse::Value(_) => GatewayResponse::Partial {
-                value: unavailable,
-                coverage: "rename-candidate-response-mismatch".to_owned(),
-                detail: None,
-            },
-            GatewayResponse::Partial {
-                coverage, detail, ..
-            } => GatewayResponse::Partial {
-                value: unavailable,
-                coverage,
-                detail,
-            },
-            GatewayResponse::Pending => GatewayResponse::Pending,
-            GatewayResponse::Unavailable(unavailable) => GatewayResponse::Unavailable(unavailable),
-            GatewayResponse::RequestFailed(failure) => GatewayResponse::RequestFailed(failure),
-        }
-    }
-
     pub fn semantic_request(
         &self,
         request_id: &LspRequestId,
@@ -2678,45 +2383,6 @@ where
             request.document_uri(),
             |provider, root| provider.request(root, request_id, request),
         )
-    }
-
-    pub fn prepare_rename(&self) -> GatewayResponse<()> {
-        Self::explicitly_unavailable(GatewayMethod::TextDocumentPrepareRename)
-    }
-
-    pub fn rename(&self) -> GatewayResponse<()> {
-        Self::explicitly_unavailable(GatewayMethod::TextDocumentRename)
-    }
-
-    pub fn general_code_actions(&self) -> GatewayResponse<()> {
-        Self::explicitly_unavailable(GatewayMethod::TextDocumentCodeAction)
-    }
-
-    pub fn workspace_diagnostics(&self) -> GatewayResponse<()> {
-        if self.capabilities.workspace_diagnostics_supported {
-            GatewayResponse::Value(())
-        } else {
-            GatewayResponse::unavailable(
-                GatewayMethod::WorkspaceDiagnostic,
-                MethodUnavailableReason::CapabilityNotNegotiated,
-            )
-        }
-    }
-
-    pub fn execute_command(&self) -> GatewayResponse<()> {
-        Self::explicitly_unavailable(GatewayMethod::WorkspaceExecuteCommand)
-    }
-
-    pub fn add_workspace_folder(&self) -> GatewayResponse<()> {
-        Self::explicitly_unavailable(GatewayMethod::WorkspaceFolders)
-    }
-
-    pub fn github_ci_proximity_transport(&self) -> GatewayResponse<()> {
-        Self::explicitly_unavailable(GatewayMethod::GitHubCiProximityTransport)
-    }
-
-    pub fn direct_database_write(&self) -> GatewayResponse<()> {
-        Self::explicitly_unavailable(GatewayMethod::DirectDatabaseWrite)
     }
 
     fn trigger_feedback_cycle(
@@ -2778,10 +2444,6 @@ where
                 GatewayResponse::unavailable(method, MethodUnavailableReason::ProviderUnavailable)
             }
         }
-    }
-
-    fn explicitly_unavailable<T>(method: GatewayMethod) -> GatewayResponse<T> {
-        GatewayResponse::unavailable(method, MethodUnavailableReason::ExplicitlyUnavailable)
     }
 }
 
@@ -2890,16 +2552,8 @@ mod tests {
             FeedbackCycleResponse::Accepted
         );
         assert!(matches!(
-            gateway.document_diagnostics(
-                "file:///root/a.rs",
-                "generation:7",
-                Vec::new(),
-                Vec::new(),
-            ),
-            GatewayResponse::Value(GatewayDocumentDiagnostics {
-                report: DocumentDiagnosticReport::Full { .. },
-                omitted_count: 0,
-            })
+            gateway.request_document_diagnostics("file:///root/a.rs"),
+            GatewayResponse::Value(())
         ));
         let requests = gateway.feedback_cycle.requests.borrow();
         assert_eq!(requests.len(), 2);
@@ -2908,6 +2562,16 @@ mod tests {
             requests[1].trigger,
             DiagnosticTrigger::ExplicitDocumentDiagnostics
         );
+    }
+
+    fn definition_request(document_uri: &str) -> SemanticRequest {
+        SemanticRequest::Definition {
+            document_uri: document_uri.to_owned(),
+            position: LspPosition {
+                line: 0,
+                character: 0,
+            },
+        }
     }
 
     #[test]
@@ -2919,12 +2583,9 @@ mod tests {
             UnavailableSemanticProvider,
         );
         assert!(matches!(
-            unavailable.definition(
-                "file:///root/a.rs",
-                LspPosition {
-                    line: 0,
-                    character: 0,
-                }
+            unavailable.semantic_request(
+                &LspRequestId::Number(7),
+                &definition_request("file:///root/a.rs"),
             ),
             GatewayResponse::Unavailable(MethodUnavailable {
                 reason: MethodUnavailableReason::ProviderUnavailable,
@@ -2939,33 +2600,32 @@ mod tests {
             Semantics,
         );
         assert!(matches!(
-            available.definition(
-                "file:///root/a.rs",
-                LspPosition {
-                    line: 0,
-                    character: 0,
-                }
+            available.semantic_request(
+                &LspRequestId::Number(7),
+                &definition_request("file:///root/a.rs"),
             ),
-            GatewayResponse::Value(locations) if locations.len() == 1
+            GatewayResponse::Value(SemanticResponse::Locations(locations))
+                if locations.len() == 1
         ));
         assert!(matches!(
-            available.rename_candidate(
+            available.semantic_request(
                 &LspRequestId::Number(7),
-                "file:///root/a.rs",
-                LspPosition {
-                    line: 0,
-                    character: 0,
+                &SemanticRequest::RenameCandidate {
+                    document_uri: "file:///root/a.rs".to_owned(),
+                    position: LspPosition {
+                        line: 0,
+                        character: 0,
+                    },
                 },
             ),
-            GatewayResponse::Value(RenameCandidateResult::Available(RenameCandidate {
-                placeholder,
-                ..
-            })) if placeholder == "old_name"
+            GatewayResponse::Value(SemanticResponse::RenameCandidate(
+                RenameCandidateResult::Available(RenameCandidate { placeholder, .. })
+            )) if placeholder == "old_name"
         ));
     }
 
     #[test]
-    fn rejects_prefix_confusion_and_future_methods_are_typed_unavailable() {
+    fn rejects_prefix_confusion_outside_the_admitted_root() {
         let gateway = DaemonLspGateway::new(
             AdmittedRoot::new("file:///root"),
             capabilities(),
@@ -2973,32 +2633,14 @@ mod tests {
             Semantics,
         );
         assert!(matches!(
-            gateway.definition(
-                "file:///root-other/a.rs",
-                LspPosition {
-                    line: 0,
-                    character: 0,
-                }
+            gateway.semantic_request(
+                &LspRequestId::Number(7),
+                &definition_request("file:///root-other/a.rs"),
             ),
             GatewayResponse::Unavailable(MethodUnavailable {
                 reason: MethodUnavailableReason::OutsideAdmittedRoot,
                 ..
             })
-        ));
-        assert!(matches!(
-            gateway.rename(),
-            GatewayResponse::Unavailable(MethodUnavailable {
-                reason: MethodUnavailableReason::ExplicitlyUnavailable,
-                ..
-            })
-        ));
-        assert!(matches!(
-            gateway.workspace_diagnostics(),
-            GatewayResponse::Unavailable(_)
-        ));
-        assert!(matches!(
-            gateway.github_ci_proximity_transport(),
-            GatewayResponse::Unavailable(_)
         ));
     }
 
@@ -3070,12 +2712,9 @@ mod tests {
             "untitled:///root/a.rs",
         ] {
             assert!(matches!(
-                gateway.definition(
-                    document_uri,
-                    LspPosition {
-                        line: 0,
-                        character: 0,
-                    }
+                gateway.semantic_request(
+                    &LspRequestId::Number(7),
+                    &definition_request(document_uri),
                 ),
                 GatewayResponse::Unavailable(MethodUnavailable {
                     reason: MethodUnavailableReason::OutsideAdmittedRoot,

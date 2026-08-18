@@ -56,16 +56,14 @@ pub(crate) struct RuntimeProjectionReplayOutcomeV1 {
     pub(crate) deferred: bool,
 }
 
-pub(crate) enum RuntimeSourceCaptureAuthorityV1<'a> {
+pub(crate) enum RuntimeSourceCaptureAuthorityV1 {
     Poll,
-    CanonicalRefetch(&'a SourceCanonicalRefetchAuthorityV1),
 }
 
-impl RuntimeSourceCaptureAuthorityV1<'_> {
+impl RuntimeSourceCaptureAuthorityV1 {
     fn canonical_refetch(&self) -> Option<&SourceCanonicalRefetchAuthorityV1> {
         match self {
             Self::Poll => None,
-            Self::CanonicalRefetch(authority) => Some(authority),
         }
     }
 }
@@ -75,7 +73,7 @@ pub(crate) struct RuntimeSourceCaptureRequestV1<'a> {
     pub(crate) binding: SourceBindingV1,
     pub(crate) refresh: SourceRefreshReceiptV1,
     pub(crate) provider_envelope: SourceProviderEnvelopeV1,
-    pub(crate) authority: RuntimeSourceCaptureAuthorityV1<'a>,
+    pub(crate) authority: RuntimeSourceCaptureAuthorityV1,
     pub(crate) expected_frontier: Option<SourceAggregateFrontierV1>,
     pub(crate) next_partition: SourcePartitionFrontierV1,
     pub(crate) previous_whole_root_stage: Option<&'a SourceWholeRootStageV1>,
@@ -446,19 +444,6 @@ impl RuntimeExternalSourceStore {
             cancellation,
         )
         .await
-    }
-
-    pub(crate) async fn drain_projection_replay(
-        &self,
-        binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
-        projector: ComponentVersion,
-        max: usize,
-        cancellation: &crate::observation::ObservationCancellation,
-    ) -> Result<usize, RuntimeExternalSourceErrorV1> {
-        Ok(self
-            .drain_projection_replay_outcome(binding, projector, max, cancellation)
-            .await?
-            .projected)
     }
 
     async fn drain_projection_replay_outcome(
@@ -878,6 +863,3 @@ fn invalid(error: impl std::fmt::Display) -> RuntimeExternalSourceErrorV1 {
 fn host_external_source_projector() -> Result<ComponentVersion, RuntimeExternalSourceErrorV1> {
     ComponentVersion::new(HOST_EXTERNAL_SOURCE_PROJECTOR).map_err(invalid)
 }
-
-#[path = "external_source_store_acquisition.rs"]
-pub(crate) mod acquisition;

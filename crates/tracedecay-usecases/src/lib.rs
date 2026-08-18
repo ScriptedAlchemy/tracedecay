@@ -84,8 +84,6 @@ pub mod edit;
 // Widened from `pub(crate)`: the root shim re-exports this crate, and root
 // adapters (`src/mcp`, `src/daemon`, `src/store`) publish onto the event lane.
 pub mod event_lane;
-pub mod external_source_acquisition;
-pub mod external_source_github;
 // Widened from `pub(crate)`: `tracedecay-global-db` reaches the runtime
 // external-source store through the root shim.
 pub mod external_source_store;
