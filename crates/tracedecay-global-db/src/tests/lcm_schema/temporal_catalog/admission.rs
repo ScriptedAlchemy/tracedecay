@@ -327,7 +327,11 @@ async fn temporal_schema_rejects_retired_summary_sources_without_mutation() {
     let (authority, reason) = error
         .reset_required_context()
         .expect("retired summary-source storage must return typed reset-required");
-    assert_eq!(authority, "session temporal");
+    // `session_summary_sources` is the retired pre-Grafeo relational
+    // authority, so the session-relation authority claims it ahead of the
+    // temporal namespace scan — the same order production admission has
+    // always used on reopen.
+    assert_eq!(authority, "registered session relation store");
     assert!(
         reason.contains("session_summary_sources"),
         "unexpected reason: {reason}"

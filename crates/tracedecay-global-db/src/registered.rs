@@ -49,6 +49,13 @@ impl RegisteredGlobalDbOwnerV1 {
     /// dropped before the owner is returned, so it never becomes a hidden
     /// retirement blocker.
     ///
+    /// Only initialization runs the sealed registered-schema installer, so
+    /// the attach boundary re-runs schema admission itself: a legacy,
+    /// version-skewed, or drifted store fails the attach with each
+    /// authority's exact typed reset identity instead of opening on schema it
+    /// cannot honor, and an admissibly-fresh existing store receives the full
+    /// install.
+    ///
     /// Short-lived attaches have no background maintenance task, so the
     /// authority-invariant convergence runs synchronously here: a store whose
     /// tamper-invalidation triggers deleted the trusted audit checkpoint (or
@@ -59,6 +66,7 @@ impl RegisteredGlobalDbOwnerV1 {
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_database(temporary);
+        super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
         registered.migrate_released_registry_columns().await?;
         registered.require_admitted_registry_shape().await?;
         registered.validate_authority_schema_contract().await?;
@@ -78,6 +86,7 @@ impl RegisteredGlobalDbOwnerV1 {
     )> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_database(temporary);
+        super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
         registered.migrate_released_registry_columns().await?;
         registered.require_admitted_registry_shape().await?;
         registered.validate_authority_schema_contract().await?;

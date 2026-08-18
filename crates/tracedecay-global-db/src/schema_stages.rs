@@ -417,24 +417,31 @@ impl RegisteredSchemaConvergence {
     }
 }
 
-/// Installs the minimum schema and write guards required before a registered
-/// runtime may be published. Historical convergence remains separately
-/// resumable so daemon admission never waits for whole-store scans.
-pub async fn ensure_registered_schema_for_admission(
-    installation: &RegisteredSchemaInstallationV1,
-) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
-    const OPERATION: &str = "initialize registered global database schema";
-    crate::registered_legacy_relations::reject_legacy_session_relation_shape(
-        installation,
-        installation.binding(),
-    )
-    .await?;
+/// Typed schema states an admissible store was classified into, carried from
+/// the read-only classification pass to the installation stages that consume
+/// them.
+struct RegisteredSchemaAdmissionClassification {
+    configuration_fresh: Option<configuration::FreshConfigurationStoreEvidence>,
+    temporal_admission: session_temporal::SessionTemporalSchemaAdmission,
+    workflow_admission: WorkflowSchemaAdmission,
+}
+
+/// Read-only classification of every schema authority's admission state,
+/// shared by initialization admission and existing-store attach. Each
+/// authority surfaces its own typed reset state; nothing here mutates the
+/// store.
+async fn classify_registered_schema_admission(
+    connection: &impl QueryExecutor,
+    binding: &tracedecay_store::StoreRuntimeBindingV1,
+) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaAdmissionClassification> {
+    crate::registered_legacy_relations::reject_legacy_session_relation_shape(connection, binding)
+        .await?;
     // The LCM authority classifies profile content first: a legacy or
     // version-skewed session store must surface its own ProfileResetRequired
     // state instead of being masked by the coarser workflow/configuration
     // schema resets, which would also flag a store those features were simply
     // never installed in.
-    tracedecay_sessions::runtime::lcm::schema::require_admissible_lcm_schema(installation)
+    tracedecay_sessions::runtime::lcm::schema::require_admissible_lcm_schema(connection)
         .await
         .map_err(|error| match error {
             tracedecay_sessions::runtime::lcm::LcmError::ProfileResetRequired {
@@ -447,7 +454,7 @@ pub async fn ensure_registered_schema_for_admission(
             },
             error => global_db_operation_error("classify LCM schema admission", error),
         })?;
-    let configuration_fresh = configuration::fresh_configuration_store_evidence(installation)
+    let configuration_fresh = configuration::fresh_configuration_store_evidence(connection)
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
@@ -461,12 +468,12 @@ pub async fn ensure_registered_schema_for_admission(
             }
         })?;
     let temporal_admission = session_temporal::require_admissible_session_temporal_schema(
-        installation,
+        connection,
         configuration_fresh.as_ref(),
     )
     .await?;
-    let workflow_admission = inspect_workflow_schema_for_admission(installation).await?;
-    configuration::admit_configuration_schema(installation, configuration_fresh.as_ref())
+    let workflow_admission = inspect_workflow_schema_for_admission(connection).await?;
+    configuration::admit_configuration_schema(connection, configuration_fresh.as_ref())
         .await
         .map_err(|error| match error {
             configuration::ConfigurationSchemaError::ResetRequired { reason } => {
@@ -479,12 +486,13 @@ pub async fn ensure_registered_schema_for_admission(
                 global_db_operation_error("admit configuration schema", error)
             }
         })?;
-    let is_fresh = configuration_fresh.is_some();
     // An existing catalog whose remote-deletion tombstone table drifted from the
     // contract cannot be trusted to gate replay or admission, so admission fails
     // closed with the tip's typed reset authority rather than silently
     // continuing on a shape that no longer proves deletion state.
-    if !is_fresh && let Err(error) = validate_remote_deletion_schema_contract(installation).await {
+    if configuration_fresh.is_none()
+        && let Err(error) = validate_remote_deletion_schema_contract(connection).await
+    {
         return Err(
             tracedecay_runtime_core::errors::TraceDecayError::reset_required(
                 "remote deletion tombstones",
@@ -492,174 +500,39 @@ pub async fn ensure_registered_schema_for_admission(
             ),
         );
     }
+    Ok(RegisteredSchemaAdmissionClassification {
+        configuration_fresh,
+        temporal_admission,
+        workflow_admission,
+    })
+}
+
+/// Installs the minimum schema and write guards required before a registered
+/// runtime may be published. Historical convergence remains separately
+/// resumable so daemon admission never waits for whole-store scans.
+pub async fn ensure_registered_schema_for_admission(
+    installation: &RegisteredSchemaInstallationV1,
+) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
+    const OPERATION: &str = "initialize registered global database schema";
+    let RegisteredSchemaAdmissionClassification {
+        configuration_fresh,
+        temporal_admission,
+        workflow_admission,
+    } = classify_registered_schema_admission(installation, installation.binding()).await?;
+    let is_fresh = configuration_fresh.is_some();
     let force_exhaustive = !authority_invariant_triggers_intact(installation).await?;
     let transaction = installation
         .begin_immediate()
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
-    let admission = async {
-        configuration::ensure_configuration_schema(&transaction, configuration_fresh.as_ref())
-            .await
-            .map_err(|error| match error {
-                configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                    tracedecay_runtime_core::errors::TraceDecayError::reset_required(
-                        "configuration",
-                        reason,
-                    )
-                }
-                configuration::ConfigurationSchemaError::Storage(error) => {
-                    global_db_operation_error("initialize configuration schema", error)
-                }
-            })?;
-        ensure_authority_audit_checkpoint_schema(&transaction).await?;
-        if force_exhaustive && !is_fresh {
-            // Persist the requirement before later schema work repairs the
-            // trigger evidence that armed it. The progress row doubles as the
-            // resumable cursor and is removed only by a completed FK sweep.
-            require_foreign_key_audit(&transaction).await?;
-        }
-        if is_fresh {
-            transaction
-                .execute_batch(REGISTRY_SCHEMA)
-                .await
-                .map_err(|error| {
-                    global_db_operation_error("initialize global project registry", error)
-                })?;
-        }
-        if is_fresh {
-            transaction
-                .execute_batch(REMOTE_DELETION_SCHEMA)
-                .await
-                .map_err(|error| {
-                    global_db_operation_error("initialize remote deletion catalog", error)
-                })?;
-        }
-        // A registry created by a released pre-`primary_root` binary (the
-        // 8-column `code_projects` shape shipped through 0.0.66) migrates
-        // additively in place; every other drift below still fails closed
-        // with the typed reset state.
-        if !is_fresh {
-            ensure_code_project_primary_root_columns(&transaction)
-                .await
-                .map_err(|error| {
-                    global_db_operation_error(
-                        "migrate released code_projects registry columns",
-                        error,
-                    )
-                })?;
-        }
-        if let Err(error) = validate_registry_schema_contract(&transaction).await {
-            if is_fresh {
-                return Err(error);
-            }
-            return Err(
-                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
-                    project_registry::PROJECT_REGISTRY_AUTHORITY,
-                    error.to_string(),
-                ),
-            );
-        }
-        project_registry::validate_project_rows_have_canonical_keys(&transaction).await?;
-
-        git_index_transactions::ensure_git_index_transaction_schema(&transaction).await?;
-        crate::native_integration::ensure_native_integration_schema(&transaction).await?;
-
-        transaction
-            .execute_batch(TRANSCRIPT_SCHEMA)
-            .await
-            .map_err(|error| global_db_operation_error("initialize transcript schema", error))?;
-        transaction
-            .execute_batch(DELIVERY_SETTLEMENT_SCHEMA)
-            .await
-            .map_err(|error| {
-                global_db_operation_error("initialize delivery settlement schema", error)
-            })?;
-        stack_delivery::ensure_github_stack_delivery_schema(&transaction).await?;
-        observability_rollup::ensure_observability_rollup_schema(&transaction).await?;
-        if workflow_admission == WorkflowSchemaAdmission::Create {
-            for table in WORKFLOW_TABLE_CONTRACTS_V1 {
-                transaction
-                    .execute_batch(table.sql)
-                    .await
-                    .map_err(|error| {
-                        global_db_operation_error("initialize workflow schema", error)
-                    })?;
-            }
-            transaction
-                .execute_batch(WORKFLOW_SCHEMA_IDENTITY_V1)
-                .await
-                .map_err(|error| global_db_operation_error("initialize workflow schema", error))?;
-        }
-        transaction
-            .execute_batch(WORK_EVENT_JOURNAL_SCHEMA_V1)
-            .await
-            .map_err(|error| global_db_operation_error("initialize Work event journal", error))?;
-        // The Work product graph authority is its own admission stage, not a
-        // continuation of the task journal above: it is owner-scoped rather
-        // than WorkAuthority-scoped, so a store that carries one and not the
-        // other is a legible state, and its failure names itself.
-        transaction
-            .execute_batch(WORK_PRODUCT_GRAPH_JOURNAL_SCHEMA_V1)
-            .await
-            .map_err(|error| {
-                global_db_operation_error("initialize Work product graph journal", error)
-            })?;
-        transaction
-            .execute_batch(AUTHORIZED_SCOPE_SET_SCHEMA_V1)
-            .await
-            .map_err(|error| {
-                global_db_operation_error("initialize authorized scope-set schema", error)
-            })?;
-        ensure_session_parent_columns(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("ensure session parent columns", error))?;
-        ensure_parse_offset_columns(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("ensure parse offset columns", error))?;
-
-        ensure_authority_audit_checkpoint_schema(&transaction).await?;
-        if temporal_admission == session_temporal::SessionTemporalSchemaAdmission::Fresh {
-            session_temporal::install_session_temporal_schema(&transaction).await?;
-        }
-        observation::ensure_observation_schema(&transaction).await?;
-        observation_projection::ensure_observation_projection_schema(&transaction)
-            .await
-            .map_err(|error| {
-                global_db_operation_error("initialize observation projection", error)
-            })?;
-        tracedecay_runtime_core::db::install_external_source_schema(
-            &transaction,
-            "initialize registered external source state",
-        )
-        .await?;
-        if temporal_admission == session_temporal::SessionTemporalSchemaAdmission::Fresh {
-            ensure_authority_invariant_schema(&transaction).await?;
-        }
-
-        tracedecay_sessions::runtime::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
-            .await
-            .map_err(|error| match error {
-                tracedecay_sessions::runtime::lcm::LcmError::ProfileResetRequired {
-                    found_version,
-                    required_version,
-                } => tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
-                    component: "LCM",
-                    found_version,
-                    required_version,
-                },
-                error => global_db_operation_error("initialize LCM schema", error),
-            })?;
-        tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction(
-            &transaction,
-        )
-        .await
-        .map_err(|error| global_db_operation_error("initialize git correlation schema", error))?;
-        tracedecay_sessions::runtime::workflow_index::ensure_workflow_index_schema(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("initialize workflow index schema", error))?;
-        tracedecay_runtime_core::errors::Result::Ok(())
-    }
+    let admission = install_registered_schema_stages(
+        &transaction,
+        configuration_fresh.as_ref(),
+        temporal_admission,
+        workflow_admission,
+        force_exhaustive,
+    )
     .await;
 
     match admission {
@@ -688,6 +561,172 @@ pub async fn ensure_registered_schema_for_admission(
         force_exhaustive,
         is_fresh,
     })
+}
+
+/// Installs (or idempotently re-ensures) every registered schema stage inside
+/// the caller's admission transaction. Callers classify admission first, so
+/// this stage runs only for stores classified fresh or exactly current.
+async fn install_registered_schema_stages(
+    transaction: &(impl Executor + Sync),
+    configuration_fresh: Option<&configuration::FreshConfigurationStoreEvidence>,
+    temporal_admission: session_temporal::SessionTemporalSchemaAdmission,
+    workflow_admission: WorkflowSchemaAdmission,
+    force_exhaustive: bool,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    let is_fresh = configuration_fresh.is_some();
+    configuration::ensure_configuration_schema(transaction, configuration_fresh)
+        .await
+        .map_err(|error| match error {
+            configuration::ConfigurationSchemaError::ResetRequired { reason } => {
+                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                    "configuration",
+                    reason,
+                )
+            }
+            configuration::ConfigurationSchemaError::Storage(error) => {
+                global_db_operation_error("initialize configuration schema", error)
+            }
+        })?;
+    ensure_authority_audit_checkpoint_schema(transaction).await?;
+    if force_exhaustive && !is_fresh {
+        // Persist the requirement before later schema work repairs the
+        // trigger evidence that armed it. The progress row doubles as the
+        // resumable cursor and is removed only by a completed FK sweep.
+        require_foreign_key_audit(transaction).await?;
+    }
+    if is_fresh {
+        transaction
+            .execute_batch(REGISTRY_SCHEMA)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("initialize global project registry", error)
+            })?;
+    }
+    if is_fresh {
+        transaction
+            .execute_batch(REMOTE_DELETION_SCHEMA)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("initialize remote deletion catalog", error)
+            })?;
+    }
+    // A registry created by a released pre-`primary_root` binary (the
+    // 8-column `code_projects` shape shipped through 0.0.66) migrates
+    // additively in place; every other drift below still fails closed
+    // with the typed reset state.
+    if !is_fresh {
+        ensure_code_project_primary_root_columns(transaction)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("migrate released code_projects registry columns", error)
+            })?;
+    }
+    if let Err(error) = validate_registry_schema_contract(transaction).await {
+        if is_fresh {
+            return Err(error);
+        }
+        return Err(
+            tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                project_registry::PROJECT_REGISTRY_AUTHORITY,
+                error.to_string(),
+            ),
+        );
+    }
+    project_registry::validate_project_rows_have_canonical_keys(transaction).await?;
+
+    git_index_transactions::ensure_git_index_transaction_schema(transaction).await?;
+    crate::native_integration::ensure_native_integration_schema(transaction).await?;
+
+    transaction
+        .execute_batch(TRANSCRIPT_SCHEMA)
+        .await
+        .map_err(|error| global_db_operation_error("initialize transcript schema", error))?;
+    transaction
+        .execute_batch(DELIVERY_SETTLEMENT_SCHEMA)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("initialize delivery settlement schema", error)
+        })?;
+    stack_delivery::ensure_github_stack_delivery_schema(transaction).await?;
+    observability_rollup::ensure_observability_rollup_schema(transaction).await?;
+    if workflow_admission == WorkflowSchemaAdmission::Create {
+        for table in WORKFLOW_TABLE_CONTRACTS_V1 {
+            transaction
+                .execute_batch(table.sql)
+                .await
+                .map_err(|error| global_db_operation_error("initialize workflow schema", error))?;
+        }
+        transaction
+            .execute_batch(WORKFLOW_SCHEMA_IDENTITY_V1)
+            .await
+            .map_err(|error| global_db_operation_error("initialize workflow schema", error))?;
+    }
+    transaction
+        .execute_batch(WORK_EVENT_JOURNAL_SCHEMA_V1)
+        .await
+        .map_err(|error| global_db_operation_error("initialize Work event journal", error))?;
+    // The Work product graph authority is its own admission stage, not a
+    // continuation of the task journal above: it is owner-scoped rather
+    // than WorkAuthority-scoped, so a store that carries one and not the
+    // other is a legible state, and its failure names itself.
+    transaction
+        .execute_batch(WORK_PRODUCT_GRAPH_JOURNAL_SCHEMA_V1)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("initialize Work product graph journal", error)
+        })?;
+    transaction
+        .execute_batch(AUTHORIZED_SCOPE_SET_SCHEMA_V1)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("initialize authorized scope-set schema", error)
+        })?;
+    ensure_session_parent_columns(transaction)
+        .await
+        .map_err(|error| global_db_operation_error("ensure session parent columns", error))?;
+    ensure_parse_offset_columns(transaction)
+        .await
+        .map_err(|error| global_db_operation_error("ensure parse offset columns", error))?;
+
+    ensure_authority_audit_checkpoint_schema(transaction).await?;
+    if temporal_admission == session_temporal::SessionTemporalSchemaAdmission::Fresh {
+        session_temporal::install_session_temporal_schema(transaction).await?;
+    }
+    observation::ensure_observation_schema(transaction).await?;
+    observation_projection::ensure_observation_projection_schema(transaction)
+        .await
+        .map_err(|error| global_db_operation_error("initialize observation projection", error))?;
+    tracedecay_runtime_core::db::install_external_source_schema(
+        transaction,
+        "initialize registered external source state",
+    )
+    .await?;
+    if temporal_admission == session_temporal::SessionTemporalSchemaAdmission::Fresh {
+        ensure_authority_invariant_schema(transaction).await?;
+    }
+
+    tracedecay_sessions::runtime::lcm::schema::ensure_lcm_schema_in_transaction(transaction)
+        .await
+        .map_err(|error| match error {
+            tracedecay_sessions::runtime::lcm::LcmError::ProfileResetRequired {
+                found_version,
+                required_version,
+            } => tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
+                component: "LCM",
+                found_version,
+                required_version,
+            },
+            error => global_db_operation_error("initialize LCM schema", error),
+        })?;
+    tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction(
+            transaction,
+        )
+        .await
+        .map_err(|error| global_db_operation_error("initialize git correlation schema", error))?;
+    tracedecay_sessions::runtime::workflow_index::ensure_workflow_index_schema(transaction)
+        .await
+        .map_err(|error| global_db_operation_error("initialize workflow index schema", error))?;
+    Ok(())
 }
 
 /// Completes resumable authority convergence after the registered runtime is
@@ -754,6 +793,67 @@ pub async fn converge_attached_registered_schema(
     )
     .await?;
     transaction.commit().await
+}
+
+/// Verifies (or completes) an attached existing store's registered schema.
+///
+/// Only initialization runs the sealed registered-schema installer; reopening
+/// an existing store publishes the runtime directly, so the attach boundary
+/// re-runs the same admission. The read-only classification surfaces each
+/// authority's exact typed reset identity (LCM `ProfileResetRequired`,
+/// temporal / workflow / configuration / remote-deletion resets) while a
+/// refused store stays untouched for the operator's explicit reset decision.
+/// An admissible store then re-ensures every idempotent schema stage, so an
+/// admissibly-fresh store — an existing database file with no schema objects —
+/// receives the full install exactly as initialization would have.
+pub async fn ensure_attached_registered_schema(
+    database: &Database,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    let read_connection = database.read_connection();
+    let RegisteredSchemaAdmissionClassification {
+        configuration_fresh,
+        temporal_admission,
+        workflow_admission,
+    } = classify_registered_schema_admission(&read_connection, database.registered_binding())
+        .await?;
+    let force_exhaustive = !authority_invariant_triggers_intact(&read_connection).await?;
+    let transaction = database
+        .begin_bulk_write_transaction("install attached registered global database schema")
+        .await?;
+    let admission = install_registered_schema_stages(
+        &transaction,
+        configuration_fresh.as_ref(),
+        temporal_admission,
+        workflow_admission,
+        force_exhaustive,
+    )
+    .await;
+    match admission {
+        Ok(()) => transaction.commit().await?,
+        Err(error) => {
+            return match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(global_db_operation_error(
+                    "roll back attached registered global schema",
+                    std::io::Error::other(format!("{error}; rollback failed: {rollback_error}")),
+                )),
+            };
+        }
+    }
+    // Mirror initialization's independently durable index builds: each
+    // historical-data index commits on its own so an interrupted later build
+    // never rolls back an earlier completed one.
+    for sql in observation_projection::OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL {
+        let transaction = database
+            .begin_bulk_write_transaction("install observation projection performance index")
+            .await?;
+        transaction.execute_batch(sql).await.map_err(|error| {
+            global_db_operation_error("initialize observation projection indexes", error)
+        })?;
+        transaction.commit().await?;
+    }
+    validate_authority_schema_contract(&read_connection).await?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
