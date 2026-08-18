@@ -64,6 +64,7 @@ const NAVIGATION_TOOLS: &[&str] = &[
     "status",
     "active_project",
     "storage_status",
+    "remote_status",
     "project_list",
     "project_search",
     "project_context",

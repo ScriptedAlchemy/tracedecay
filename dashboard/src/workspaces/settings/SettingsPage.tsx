@@ -21,6 +21,7 @@ import {
   type WritableScopes,
 } from './SettingsEditorController.tsx';
 import { MultiRootPanel } from './MultiRootPanel.tsx';
+import { RemoteBrainPanel } from './RemoteBrainPanel.tsx';
 import { OriginBand, SectionIndex } from './SettingsProvenance.tsx';
 import { ConfigSectionBlock } from './SettingsValues.tsx';
 import {
@@ -271,6 +272,7 @@ function SettingsSurface({
        * the audit caught — and would have put a non-setting under a label
        * promising effective configuration. */}
       <MultiRootPanel />
+      <RemoteBrainPanel />
 
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         <SectionIndex entries={filtered} total={model.sections.length} onJump={jumpTo} />

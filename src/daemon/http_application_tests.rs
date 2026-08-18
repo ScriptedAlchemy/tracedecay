@@ -9,10 +9,12 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
+use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_application::{
     APPLICATION_REQUEST_ID_HEADER, CancellationContext, CancellationObservation, CancellationStage,
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, OperationBudgetUsage,
-    OperationReceipt, OperationTermination, RequestContext, RequestId, ResolvedScope,
+    OperationReceipt, OperationTermination, RemoteListenerReadV1, RequestContext, RequestId,
+    ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, BrainId, BrainNodeId, ManifestDigest, ProjectId, RefId, RepositoryId, UserProfileId,
@@ -1169,6 +1171,96 @@ async fn remote_protocol_mount_authenticates_before_json_and_outside_local_admis
     let response = request_path(&service, "POST", "/remote/query", None, None).await;
 
     assert_eq!(status(&response), StatusCode::NOT_FOUND);
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
+async fn local_remote_status_is_unavailable_without_a_mounted_runtime() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let origin = service.origin().to_owned();
+
+    let denied = request_path(&service, "GET", "/remote-status", None, Some(&origin)).await;
+    assert_eq!(status(&denied), StatusCode::UNAUTHORIZED);
+
+    let response = request_path(
+        &service,
+        "GET",
+        "/remote-status",
+        Some(&format!("Bearer {AUTH_TOKEN}")),
+        Some(&origin),
+    )
+    .await;
+    assert_eq!(status(&response), StatusCode::OK);
+    let read: RemoteOperationalStatusReadV1 =
+        serde_json::from_value(json_body(&response)).expect("typed remote status");
+    assert_eq!(read, RemoteOperationalStatusReadV1::Unavailable);
+
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_remote_status_reads_the_mounted_runtime() {
+    let temporary = tempfile::tempdir().expect("temporary profile parent");
+    let profile_root = temporary.path().join("profile");
+    #[cfg(unix)]
+    let endpoint = super::transport::DaemonEndpoint::Unix(profile_root.join("remote-status.sock"));
+    #[cfg(not(unix))]
+    let endpoint = super::transport::default_loopback_endpoint();
+    let daemon_authority =
+        super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
+            .expect("daemon authority");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        daemon_authority.record().epoch,
+        "remote HTTP status",
+    )
+    .expect("daemon database scope");
+    let identity = daemon_authority.profile_identity().clone();
+    let runtime = Arc::new(
+        super::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity.clone(),
+        )
+        .await
+        .expect("session runtime registry"),
+    );
+    let credentials = runtime.remote_credential_authority();
+    credentials.publish_listener_serving();
+    let remote = super::remote_protocol::build_daemon_remote_protocol_router(
+        Arc::clone(&credentials),
+        runtime.remote_replay_transaction(),
+        super::service::invocation::DaemonInvocationService::default(),
+    )
+    .expect("remote protocol router");
+    let registry = DaemonHttpApplicationRegistry::default();
+    registry
+        .install_remote(remote, credentials, Some(Arc::clone(&runtime)))
+        .expect("install Remote Brain router");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let origin = service.origin().to_owned();
+
+    let response = request_path(
+        &service,
+        "GET",
+        "/remote-status",
+        Some(&format!("Bearer {AUTH_TOKEN}")),
+        Some(&origin),
+    )
+    .await;
+    assert_eq!(status(&response), StatusCode::OK);
+    let read: RemoteOperationalStatusReadV1 =
+        serde_json::from_value(json_body(&response)).expect("typed remote status");
+    match read {
+        RemoteOperationalStatusReadV1::Observed { listener, .. } => {
+            assert_eq!(listener, RemoteListenerReadV1::Serving);
+        }
+        other => panic!("expected observed remote status, got {other:?}"),
+    }
+
     service.shutdown().await.expect("shutdown HTTP service");
 }
 

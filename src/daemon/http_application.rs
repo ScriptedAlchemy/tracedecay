@@ -24,7 +24,7 @@ use axum::http::header::{AUTHORIZATION, CONNECTION, ORIGIN};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, post};
+use axum::routing::{any, get, post};
 use constant_time_eq::constant_time_eq;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
@@ -39,6 +39,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
+use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_application::{
     APPLICATION_REQUEST_ID_HEADER, ApplicationProblem, LegalAction, RequestId, RetryDirective,
     SafeDiagnostic,
@@ -321,6 +322,7 @@ impl DaemonHttpApplicationRegistry {
                 any(dispatch_project_application),
             )
             .route("/remote-nodes/provision", post(provision_remote_node))
+            .route("/remote-status", get(remote_operational_status))
             // Deletion lifecycle intake. The upstream lanes mounted this at
             // `/remote/deletions`; at this tip `/remote` is a nest point for the
             // Remote Brain router, so the local admission surface uses the same
@@ -392,6 +394,84 @@ async fn provision_remote_node(
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => StatusCode::CONFLICT.into_response(),
+    }
+}
+
+async fn remote_operational_status(
+    State(registry): State<DaemonHttpApplicationRegistry>,
+) -> Response {
+    let status = match registry.remote.read() {
+        Ok(remote) => remote
+            .as_ref()
+            .and_then(|remote| remote.runtime.as_ref())
+            .map(|runtime| runtime.remote_operational_status())
+            .unwrap_or(RemoteOperationalStatusReadV1::Unavailable),
+        Err(_) => RemoteOperationalStatusReadV1::Unavailable,
+    };
+    Json(status).into_response()
+}
+
+const REMOTE_STATUS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reads the live daemon's mounted Remote Brain operational state over the
+/// authenticated loopback HTTP application. Never opens a local store or
+/// constructs a fresh in-process registry.
+pub(crate) fn live_remote_operational_status() -> Result<RemoteOperationalStatusReadV1> {
+    let connection = super::current_daemon_connection()?;
+    let Some(record) = connection.authority_record.as_ref() else {
+        return Err(missing_daemon_authority());
+    };
+    let Some(endpoint) = record.http_application_endpoint else {
+        return Err(TraceDecayError::Config {
+            message: "TraceDecay daemon HTTP application endpoint is not published. Start or restart the daemon.".to_owned(),
+        });
+    };
+    let Some(auth_token) = connection.auth_token.as_deref() else {
+        return Err(missing_daemon_authority());
+    };
+    let origin = format!("http://{endpoint}");
+    let url = format!("http://{endpoint}/remote-status");
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT))
+        .build()
+        .into();
+    let mut response = agent
+        .get(&url)
+        .header("Authorization", format!("Bearer {auth_token}"))
+        .header("Origin", origin)
+        .call()
+        .map_err(|_| remote_status_daemon_unavailable())?;
+    if response.status().as_u16() != 200 {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "TraceDecay daemon remote status returned HTTP {}. Start or restart the daemon.",
+                response.status()
+            ),
+        });
+    }
+    response
+        .body_mut()
+        .read_json()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "TraceDecay daemon remote status was not a typed operational read: {error}"
+            ),
+        })
+}
+
+fn missing_daemon_authority() -> TraceDecayError {
+    TraceDecayError::Config {
+        message:
+            "TraceDecay daemon authority record is not available. Start or restart the daemon."
+                .to_owned(),
+    }
+}
+
+fn remote_status_daemon_unavailable() -> TraceDecayError {
+    match super::default_socket_path() {
+        Ok(socket_path) => super::unavailable_error(&socket_path),
+        Err(error) => error,
     }
 }
 
@@ -605,6 +685,7 @@ struct RemoteBrainTlsServer {
     endpoint: SocketAddr,
     router: Router,
     admission: Arc<Semaphore>,
+    credentials: Arc<super::remote_protocol::DaemonRemoteCredentialAuthorityV1>,
     #[cfg(test)]
     egress: Arc<RemoteBrainTlsEgressObserver>,
 }
@@ -676,12 +757,13 @@ impl DaemonHttpApplicationService {
     ) -> Result<Self> {
         let remote_tls_server = match remote_tls {
             Some(config) => {
-                let Some((router, _credentials)) = registry.remote_protocol_router()? else {
+                let Some((router, credentials)) = registry.remote_protocol_router()? else {
                     return Err(TraceDecayError::Config {
                         message: "Remote Brain TLS listener requires the canonical remote protocol router".to_owned(),
                     });
                 };
                 let listener = RemoteBrainTlsListener::bind(config).await?;
+                credentials.publish_listener_serving();
                 let endpoint = listener.bound_addr()?;
                 let admission = Arc::clone(&listener.admission);
                 #[cfg(test)]
@@ -693,6 +775,7 @@ impl DaemonHttpApplicationService {
                         .nest("/remote", router)
                         .layer(middleware::from_fn(force_remote_connection_close)),
                     admission,
+                    credentials,
                     #[cfg(test)]
                     egress,
                 })
@@ -749,11 +832,17 @@ impl DaemonHttpApplicationService {
             {
                 remote_tls_egress = Some(server.egress);
             }
-            remote_tls_task = Some(tokio::spawn(serve_remote_brain_tls(
-                server.listener,
-                server.router,
-                shutdown_requested,
-            )));
+            let listener_state = server.credentials;
+            remote_tls_task = Some(tokio::spawn(async move {
+                let result =
+                    serve_remote_brain_tls(server.listener, server.router, shutdown_requested)
+                        .await;
+                match &result {
+                    Ok(()) => listener_state.publish_listener_stopped(),
+                    Err(_) => listener_state.publish_listener_degraded(),
+                }
+                result
+            }));
         }
         #[cfg(not(test))]
         drop(remote_tls_admission);

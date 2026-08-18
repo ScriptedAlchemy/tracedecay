@@ -110,6 +110,7 @@ pub use runtime_ports::register_runtime_ports;
 #[cfg(test)]
 #[path = "sessions/claude_observation_benchmark.rs"]
 mod claude_observation_benchmark;
+pub mod remote_command;
 pub mod runtime_telemetry;
 pub mod search_eval;
 mod semantic_code;

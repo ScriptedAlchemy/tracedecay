@@ -4,7 +4,7 @@
 //! only routing entries come from exact registered Remote-node runtimes; no
 //! path, request body, or caller-supplied node identity can select a store.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -43,6 +43,7 @@ use tracedecay_application::remote::replay::{
     RemoteReplayOutcomeV1, RemoteReplayProtocolAdapterV1, RemoteReplayRequestV1,
     RemoteReplayServiceV1,
 };
+use tracedecay_application::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_application::remote::transfer::{
     REMOTE_FRAME_TRANSFER_USE_CASE_ID_V1, RemoteFrameTransferErrorV1, RemoteFrameTransferPortV1,
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
@@ -120,12 +121,25 @@ pub(crate) enum DaemonRemoteCredentialRegistryErrorV1 {
     ResetRequired,
 }
 
+/// Shared provider of the canonical Remote Brain operational read. The
+/// composition root builds exactly one from the mounted session runtime
+/// registry; MCP, dashboard, and Doctor surfaces all read through it.
+pub(crate) type RemoteOperationalStatusProviderV1 =
+    Arc<dyn Fn() -> RemoteOperationalStatusReadV1 + Send + Sync>;
+
+const REMOTE_LISTENER_STOPPED: u8 = 0;
+const REMOTE_LISTENER_SERVING: u8 = 1;
+const REMOTE_LISTENER_DEGRADED: u8 = 2;
+
 pub(crate) struct DaemonRemoteCredentialAuthorityV1 {
     brain_id: BrainId,
     profile_id: UserProfileId,
     maximum_nodes: usize,
     maximum_credentials: usize,
     accepting: AtomicBool,
+    /// Observed Remote Brain TLS listener state, published by the daemon HTTP
+    /// application service that owns the listener task.
+    listener: AtomicU8,
     state: RwLock<RemoteCredentialRegistryStateV1>,
 }
 
@@ -162,7 +176,120 @@ impl DaemonRemoteCredentialAuthorityV1 {
             maximum_nodes,
             maximum_credentials,
             accepting: AtomicBool::new(true),
+            listener: AtomicU8::new(REMOTE_LISTENER_STOPPED),
             state: RwLock::new(RemoteCredentialRegistryStateV1::default()),
+        }
+    }
+
+    /// Records that the Remote Brain TLS listener is bound and serving.
+    pub(crate) fn publish_listener_serving(&self) {
+        self.listener
+            .store(REMOTE_LISTENER_SERVING, Ordering::Release);
+    }
+
+    /// Records that the Remote Brain TLS listener task failed while it was
+    /// expected to serve.
+    pub(crate) fn publish_listener_degraded(&self) {
+        self.listener
+            .store(REMOTE_LISTENER_DEGRADED, Ordering::Release);
+    }
+
+    /// Records that the Remote Brain TLS listener stopped through an ordinary
+    /// shutdown (or was never configured).
+    pub(crate) fn publish_listener_stopped(&self) {
+        self.listener
+            .store(REMOTE_LISTENER_STOPPED, Ordering::Release);
+    }
+
+    fn listener_read(&self) -> tracedecay_application::RemoteListenerReadV1 {
+        match self.listener.load(Ordering::Acquire) {
+            REMOTE_LISTENER_SERVING => tracedecay_application::RemoteListenerReadV1::Serving,
+            REMOTE_LISTENER_DEGRADED => tracedecay_application::RemoteListenerReadV1::Degraded,
+            _ => tracedecay_application::RemoteListenerReadV1::Disabled,
+        }
+    }
+
+    /// Composes the canonical Remote Brain operational read from the mounted
+    /// listener, enrollment, spool, replay, and recovery-journal authorities.
+    /// `Unconfigured` is returned only when the optional remote plane has no
+    /// listener and no registered node; `Unavailable` only when a mounted
+    /// authority genuinely cannot be read.
+    pub(crate) fn operational_status(&self) -> RemoteOperationalStatusReadV1 {
+        let now = tracedecay_application::clock::now_micros();
+        if !self.accepting.load(Ordering::Acquire) {
+            return RemoteOperationalStatusReadV1::Unavailable;
+        }
+        let Ok(state) = self.state.read() else {
+            return RemoteOperationalStatusReadV1::Unavailable;
+        };
+        let listener = self.listener_read();
+        if listener == tracedecay_application::RemoteListenerReadV1::Disabled
+            && state.nodes.is_empty()
+            && state.grants.is_empty()
+            && state.enrollments.is_empty()
+        {
+            return RemoteOperationalStatusReadV1::Unconfigured;
+        }
+        let enrollment_configured = !state.enrollments.is_empty();
+        let mut pending_count = 0_u64;
+        let mut quarantined_count = 0_u64;
+        let mut has_sequence_gap = false;
+        let mut coverage_complete = true;
+        let mut authorities = Vec::new();
+        let mut current_backup_verified = !state.nodes.is_empty();
+        let mut failover_in_progress = false;
+        let mut recovery_required = false;
+        for node in state.nodes.values() {
+            match node.storage.status_at(&self.brain_id, now) {
+                Ok(snapshot) => {
+                    pending_count = pending_count.saturating_add(snapshot.pending_spool_items);
+                    quarantined_count =
+                        quarantined_count.saturating_add(snapshot.quarantined_spool_items);
+                    has_sequence_gap |= snapshot.has_sequence_gap;
+                    authorities.push(snapshot.authority);
+                }
+                Err(_) => coverage_complete = false,
+            }
+            match node.storage.recovery_operational_snapshot() {
+                Ok(snapshot) => {
+                    current_backup_verified &= snapshot.current_backup_verified;
+                    failover_in_progress |= snapshot.failover_in_progress;
+                    recovery_required |= snapshot.recovery_required;
+                }
+                Err(_) => {
+                    coverage_complete = false;
+                    current_backup_verified = false;
+                }
+            }
+        }
+        drop(state);
+        let authority = aggregate_authority_states(authorities, now);
+        let spool = tracedecay_application::remote::status::RemoteSpoolOperationalStatusV1 {
+            pending_count,
+            quarantined_count,
+            has_sequence_gap,
+        };
+        let replay_coverage_complete = pending_count == 0 && !has_sequence_gap;
+        match tracedecay_application::remote::status::RemoteOperationalStatusV1::compose(
+            enrollment_configured,
+            authority,
+            spool,
+            replay_coverage_complete,
+            current_backup_verified,
+            failover_in_progress,
+            recovery_required,
+            now,
+        ) {
+            Ok(status) => RemoteOperationalStatusReadV1::Observed {
+                listener,
+                status,
+                coverage: if coverage_complete {
+                    tracedecay_application::DoctorCoverageCompletenessV1::Complete
+                } else {
+                    tracedecay_application::DoctorCoverageCompletenessV1::Partial
+                },
+            },
+            Err(_) => RemoteOperationalStatusReadV1::Unavailable,
         }
     }
 
@@ -368,6 +495,75 @@ impl RemoteCredentialLookupPortV1 for DaemonRemoteCredentialLookupV1 {
         fingerprint: &RemoteCredentialFingerprintV1,
     ) -> std::result::Result<RemoteCredentialAuthorityRecordV1, RemoteCredentialLookupErrorV1> {
         self.authority.credential_by_fingerprint(class, fingerprint)
+    }
+}
+
+/// Aggregates per-node authority states into one truthful read. All nodes
+/// available yields the highest-epoch authority; a mix yields `Partial` with
+/// the union of missing evidence; nothing available yields `Unavailable`.
+fn aggregate_authority_states(
+    states: Vec<CurrentRemoteAuthorityStateV1>,
+    observed_at: UtcMicros,
+) -> CurrentRemoteAuthorityStateV1 {
+    let mut best_available: Option<tracedecay_domain::CurrentRemoteAuthorityV1> = None;
+    let mut missing = BTreeSet::new();
+    let mut partial_fence = None;
+    let mut degraded = false;
+    let total = states.len();
+    for state in states {
+        match state {
+            CurrentRemoteAuthorityStateV1::Available(current) => {
+                let replace = best_available.as_ref().is_none_or(|best| {
+                    current.fence.authority_epoch.0 > best.fence.authority_epoch.0
+                });
+                if replace {
+                    best_available = Some(current);
+                }
+            }
+            CurrentRemoteAuthorityStateV1::Partial {
+                known_fence,
+                missing: node_missing,
+                ..
+            } => {
+                degraded = true;
+                if partial_fence.is_none() {
+                    partial_fence = known_fence;
+                }
+                missing.extend(node_missing);
+            }
+            CurrentRemoteAuthorityStateV1::Unavailable { reason, .. } => {
+                degraded = true;
+                missing.insert(reason);
+            }
+        }
+    }
+    if total == 0 {
+        return CurrentRemoteAuthorityStateV1::Unavailable {
+            reason: RemoteAuthorityUnavailableReasonV1::RegistryUnavailable,
+            observed_at,
+        };
+    }
+    match (best_available, degraded) {
+        (Some(current), false) => CurrentRemoteAuthorityStateV1::Available(current),
+        (Some(current), true) => CurrentRemoteAuthorityStateV1::Partial {
+            known_fence: Some(current.fence),
+            missing,
+            observed_at,
+        },
+        (None, _) => match missing.len() {
+            1 => CurrentRemoteAuthorityStateV1::Unavailable {
+                reason: missing
+                    .into_iter()
+                    .next()
+                    .unwrap_or(RemoteAuthorityUnavailableReasonV1::RegistryUnavailable),
+                observed_at,
+            },
+            _ => CurrentRemoteAuthorityStateV1::Partial {
+                known_fence: partial_fence,
+                missing,
+                observed_at,
+            },
+        },
     }
 }
 

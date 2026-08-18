@@ -13,14 +13,17 @@ use tracedecay_application::remote::credential_admission::{
     RemoteCredentialAdmissionServiceV1, RemoteCredentialUseV1,
 };
 use tracedecay_application::remote::query::{RemoteExactObservationResultV1, RemoteQueryResultV1};
+use tracedecay_application::remote::status::{
+    RemoteOperationalReadinessV1, RemoteOperationalStatusReadV1,
+};
 use tracedecay_application::{
-    AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, PolicyDecisionRef,
-    ResolvedScope,
+    AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, DoctorCoverageCompletenessV1,
+    PolicyDecisionRef, RemoteListenerReadV1, RemoteOperationalReadV1, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, BrainNodeId, ComponentVersion, CoverageStateV1, EnrollmentGrantV1, EntityId,
-    ManifestDigest, ObservedTernaryV1, ProjectId, RefId, RemoteCapabilityV1,
-    RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1, RepositoryId,
+    ActorId, BrainNodeId, ComponentVersion, CoverageStateV1, CurrentRemoteAuthorityStateV1,
+    EnrollmentGrantV1, EntityId, ManifestDigest, ObservedTernaryV1, ProjectId, RefId,
+    RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1, RepositoryId,
     RepositoryStateSnapshotId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::remote::{
@@ -203,6 +206,110 @@ pub(crate) fn admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionE
         Deadline::new(UtcMicros(100)).expect("deadline"),
     )
     .expect("enrollment admission")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_operational_read_observes_mounted_authorities_and_fails_typed_when_unmounted() {
+    let temporary = tempfile::tempdir().expect("temporary profile parent");
+    let profile_root = temporary.path().join("profile");
+    #[cfg(unix)]
+    let endpoint =
+        super::transport::DaemonEndpoint::Unix(profile_root.join("remote-operational.sock"));
+    #[cfg(not(unix))]
+    let endpoint = super::transport::default_loopback_endpoint();
+    let daemon_authority =
+        super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
+            .expect("daemon authority");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        daemon_authority.record().epoch,
+        "remote operational read",
+    )
+    .expect("daemon database scope");
+    let identity = daemon_authority.profile_identity().clone();
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("session runtime registry");
+    let credentials = registry.remote_credential_authority();
+
+    // No listener and no registered node: the optional remote plane is
+    // truthfully unconfigured, not unavailable and not an empty success.
+    assert_eq!(
+        registry.remote_operational_status(),
+        RemoteOperationalStatusReadV1::Unconfigured
+    );
+    assert_eq!(
+        credentials.operational_status().doctor_read(),
+        RemoteOperationalReadV1::Unconfigured
+    );
+
+    // Mount a real node store and serve the listener: the read must observe
+    // the mounted enrollment, spool, and recovery-journal authorities.
+    let node_id = BrainNodeId::new("node.remote-operational").expect("node identity");
+    let secret = [11_u8; 32];
+    let grant = grant(identity.brain_id().clone(), node_id.clone(), &secret);
+    registry
+        .provision_remote_node(grant.clone(), admission(&grant))
+        .await
+        .expect("authenticated RemoteNode provisioning");
+    credentials.publish_listener_serving();
+    let RemoteOperationalStatusReadV1::Observed {
+        listener,
+        status,
+        coverage,
+    } = registry.remote_operational_status()
+    else {
+        panic!("mounted remote authorities must produce an observed read");
+    };
+    assert_eq!(listener, RemoteListenerReadV1::Serving);
+    assert_eq!(coverage, DoctorCoverageCompletenessV1::Complete);
+    assert!(
+        !status.enrollment_configured,
+        "an enrollment grant alone is not a completed enrollment"
+    );
+    assert_eq!(status.readiness, RemoteOperationalReadinessV1::Unconfigured);
+    assert_eq!(status.spool.pending_count, 0);
+    assert_eq!(status.spool.quarantined_count, 0);
+    assert!(!status.spool.has_sequence_gap);
+    assert!(!status.current_backup_verified);
+    assert!(!status.failover_in_progress);
+    assert!(!status.recovery_required);
+    assert!(
+        matches!(
+            status.authority,
+            CurrentRemoteAuthorityStateV1::Unavailable { .. }
+        ),
+        "a never-published authority is a typed unavailable state"
+    );
+    assert!(matches!(
+        credentials.operational_status().doctor_read(),
+        RemoteOperationalReadV1::Observed {
+            listener: RemoteListenerReadV1::Serving,
+            ..
+        }
+    ));
+
+    // A degraded listener task stays visible without erasing the observation.
+    credentials.publish_listener_degraded();
+    assert!(matches!(
+        registry.remote_operational_status(),
+        RemoteOperationalStatusReadV1::Observed {
+            listener: RemoteListenerReadV1::Degraded,
+            ..
+        }
+    ));
+
+    // Unmounting the remote plane is a typed unavailable read, never an
+    // empty or unconfigured success.
+    credentials.cancel();
+    assert_eq!(
+        registry.remote_operational_status(),
+        RemoteOperationalStatusReadV1::Unavailable
+    );
+    assert_eq!(
+        credentials.operational_status().doctor_read(),
+        RemoteOperationalReadV1::Unavailable
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

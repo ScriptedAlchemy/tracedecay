@@ -64,19 +64,23 @@ and the specific scans the user asked for — don't run every tool by reflex.
 2. **Storage status → `tracedecay_storage_status`** (no args): resolved
    active project store health, graph DB path, writability, branch-fallback
    warnings — instead of probing `.tracedecay` or direct SQLite checks.
-3. **Project registry / cross-project context → `tracedecay_project_list` /
+3. **Remote Brain status → `tracedecay_remote_status`** (no args): listener,
+   enrollment, spool, replay coverage, backup verification, and
+   failover/recovery state — the same operational plane Doctor, CLI, and
+   the dashboard read. Direct/non-daemon servers return typed `unavailable`.
+4. **Project registry / cross-project context → `tracedecay_project_list` /
    `tracedecay_project_search` / `tracedecay_project_context`** when the user
    asks about another project, sibling workspace, cross-repo context, or
    cross-project context gathering. Confirm the target store first, then pass
    `project_id`, `project_path`, or `project_selector` to
    `tracedecay_context`, `tracedecay_search`, or `tracedecay_message_search`
    instead of scanning parent directories.
-4. **Index status → `tracedecay_status`**: node/edge/file counts, DB size,
+5. **Index status → `tracedecay_status`**: node/edge/file counts, DB size,
    active branch + fallback warning, tokens saved.
-5. **Config lookups → `tracedecay_config`** (`key` required, plus `path` or
+6. **Config lookups → `tracedecay_config`** (`key` required, plus `path` or
    `glob`): query TOML/JSON by dotted key — works even before `tracedecay init`.
-6. **Outstanding work → `tracedecay_todos`** (`kinds?`, `path?`, `limit?`).
-7. **Server triage → `tracedecay_runtime`** (PID, memory, CPU%, DB sizes) when
+7. **Outstanding work → `tracedecay_todos`** (`kinds?`, `path?`, `limit?`).
+8. **Server triage → `tracedecay_runtime`** (PID, memory, CPU%, DB sizes) when
    TraceDecay seems to hog CPU or RAM. **Visual → `tracedecay_dashboard`**
    (`action`: `start`|`stop`): hand the URL to the user.
 

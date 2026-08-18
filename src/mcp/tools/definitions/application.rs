@@ -689,6 +689,15 @@ pub(super) fn def_storage_status_read() -> ToolDefinition {
     )
 }
 
+pub(super) fn def_remote_status_read() -> ToolDefinition {
+    def(
+        "tracedecay_remote_status",
+        "Read Remote Brain status",
+        "Read the Remote Brain operational plane: listener, enrollment, spool, replay coverage, backup verification, and failover/recovery state.",
+        closed_object_schema(json!({}), &[]),
+    )
+}
+
 pub(super) fn def_diagnostics_read() -> ToolDefinition {
     primitive_read_definition(
         "diagnostics_read",
@@ -1415,6 +1424,7 @@ mod tests {
             def_health_read(),
             def_health_delta(),
             def_storage_status_read(),
+            def_remote_status_read(),
             def_diagnostics_read(),
             def_code_exact_occurrence(),
             def_code_phrase_search(),

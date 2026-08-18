@@ -94,6 +94,7 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_impls", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::Reader },
     McpToolBinding { name: "tracedecay_derives", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::Reader },
     McpToolBinding { name: "tracedecay_status", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_remote_status", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_active_project", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_project_list", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_project_search", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -921,6 +922,18 @@ mod tests {
     /// nothing. The `tracedecay_git_*` application-surface tools were removed
     /// for exactly that reason — they never consult this table, and their
     /// selector policy is enforced by the surface schema, not a binding row.
+    #[test]
+    fn remote_status_is_an_active_project_info_read() {
+        let entry = MCP_TOOL_BINDINGS
+            .iter()
+            .find(|entry| entry.name == "tracedecay_remote_status")
+            .expect("tracedecay_remote_status must have a binding row");
+        assert_eq!(entry.group, Some(McpToolDispatchGroup::Info));
+        assert_eq!(entry.project, RegisteredProjectAccess::ActiveProjectOnly);
+        assert!(!tool_accepts_registered_project_selector(entry.name));
+        assert!(!tool_dispatches_registered_project_reader(entry.name));
+    }
+
     #[test]
     fn authority_bound_reads_are_active_project_only() {
         let tool_name = "tracedecay_search";

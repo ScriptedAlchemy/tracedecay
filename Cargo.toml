@@ -317,6 +317,7 @@ tracedecay-semantic = { path = "crates/tracedecay-semantic", version = "0.1.0" }
 tracedecay-sessions = { path = "crates/tracedecay-sessions", version = "0.1.0" }
 tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "crates/tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-sdk = { path = "crates/tracedecay-sdk", version = "0.1.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "crates/tracedecay-tool-catalog", version = "0.1.0" }

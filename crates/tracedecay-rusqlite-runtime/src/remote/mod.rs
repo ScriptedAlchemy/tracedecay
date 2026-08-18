@@ -77,7 +77,7 @@ pub use replay_authority::RemoteQueryAuthoritySnapshotV1;
 pub use replay_recovery::RemoteReplayStartupRecoveryV1;
 use rows::*;
 pub use schema::REMOTE_NODE_LOCAL_SCHEMA;
-pub use status::RemoteStorageStatusSnapshotV1;
+pub use status::{RemoteRecoveryOperationalSnapshotV1, RemoteStorageStatusSnapshotV1};
 
 #[derive(Debug, Error)]
 pub enum RemoteSqliteStorageErrorV1 {

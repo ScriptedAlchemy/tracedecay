@@ -63,6 +63,7 @@ fn handshake(
         client_instance_id: "truthful-core-doctor-test".to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
+        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     }
 }
 

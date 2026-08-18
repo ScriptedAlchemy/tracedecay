@@ -760,6 +760,123 @@ fn capture_and_promotion_gate_share_one_write_transaction() {
 }
 
 #[test]
+fn operational_status_reads_report_typed_absence_gaps_and_recovery_truth() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let brain_id = BrainId::new("brain.remote").unwrap();
+
+    // A never-published authority is a typed unavailable state, not an error.
+    let snapshot = storage.status_at(&brain_id, UtcMicros(42)).unwrap();
+    assert_eq!(snapshot.pending_spool_items, 0);
+    assert_eq!(snapshot.quarantined_spool_items, 0);
+    assert!(!snapshot.has_sequence_gap);
+    assert_eq!(
+        snapshot.authority,
+        tracedecay_domain::CurrentRemoteAuthorityStateV1::Unavailable {
+            reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+            observed_at: UtcMicros(42),
+        }
+    );
+
+    // An empty recovery journal cannot claim a verified backup, an executing
+    // promotion, or required recovery.
+    let recovery = storage.recovery_operational_snapshot().unwrap();
+    assert!(!recovery.current_backup_verified);
+    assert!(!recovery.failover_in_progress);
+    assert!(!recovery.recovery_required);
+
+    // Non-contiguous retained frames surface as a sequence gap; contiguous
+    // frames do not.
+    for (event, sequence, state) in [
+        ("remote.event.1", 1_i64, "pending"),
+        ("remote.event.3", 3, "pending"),
+        ("remote.event.4", 4, "quarantined"),
+    ] {
+        fixture
+            .handle
+            .execute(
+                ExactSqlStatement::new(
+                    "INSERT INTO remote_spool_frames (
+                        event_id, enrollment_id, sequence, frame_digest,
+                        key_revision, nonce, ciphertext, state, captured_at
+                     ) VALUES (?1, 'enrollment.gap', ?2, 'sha256:frame', 7,
+                        ?3, ?4, ?5, 10)"
+                        .to_owned(),
+                    vec![
+                        text(event),
+                        ExactSqlValue::Integer(sequence),
+                        ExactSqlValue::Blob(vec![0; 12]),
+                        ExactSqlValue::Blob(vec![0]),
+                        text(state),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let snapshot = storage.status_at(&brain_id, UtcMicros(43)).unwrap();
+    assert_eq!(snapshot.pending_spool_items, 2);
+    assert_eq!(snapshot.quarantined_spool_items, 1);
+    assert!(snapshot.has_sequence_gap);
+
+    // The recovery journal drives backup, failover, and recovery truth from
+    // its exact persisted operation states.
+    for (operation, kind, state) in [
+        ("recovery.backup.old", "backup", "rolled_back"),
+        ("recovery.backup.current", "backup", "completed"),
+        ("recovery.promotion.live", "promotion", "executing"),
+    ] {
+        fixture
+            .handle
+            .execute(
+                ExactSqlStatement::new(
+                    "INSERT INTO remote_recovery_operations (
+                        operation_id, operation_kind, request_digest,
+                        expected_authority_key, pre_state_digest, context_json,
+                        state, output_json, receipt_json, started_at, updated_at
+                     ) VALUES (?1, ?2, 'sha256:request', 'authority-key',
+                        'sha256:pre', '{}', ?3, NULL, NULL, ?4, ?4)"
+                        .to_owned(),
+                    vec![
+                        text(operation),
+                        text(kind),
+                        text(state),
+                        ExactSqlValue::Integer(match state {
+                            "completed" => 30,
+                            _ => 20,
+                        }),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let recovery = storage.recovery_operational_snapshot().unwrap();
+    assert!(
+        recovery.current_backup_verified,
+        "the most recent backup operation completed verification"
+    );
+    assert!(recovery.failover_in_progress);
+    assert!(!recovery.recovery_required);
+
+    fixture
+        .handle
+        .execute(
+            ExactSqlStatement::new(
+                "UPDATE remote_recovery_operations SET state = 'forward_recovery_required'
+                 WHERE operation_id = 'recovery.promotion.live'"
+                    .to_owned(),
+                Vec::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let recovery = storage.recovery_operational_snapshot().unwrap();
+    assert!(!recovery.failover_in_progress);
+    assert!(recovery.recovery_required);
+}
+
+#[test]
 fn capture_rejects_sequence_gaps_and_corrupt_ciphertext() {
     let fixture = fixture();
     let storage = storage(&fixture);

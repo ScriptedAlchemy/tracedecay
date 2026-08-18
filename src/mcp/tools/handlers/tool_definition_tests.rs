@@ -119,6 +119,7 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_status"));
     assert!(tool_names.contains(&"tracedecay_active_project"));
     assert!(tool_names.contains(&"tracedecay_storage_status"));
+    assert!(tool_names.contains(&"tracedecay_remote_status"));
     assert!(tool_names.contains(&"tracedecay_project_list"));
     assert!(tool_names.contains(&"tracedecay_project_search"));
     assert!(tool_names.contains(&"tracedecay_project_context"));

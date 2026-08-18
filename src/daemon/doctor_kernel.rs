@@ -1280,6 +1280,12 @@ pub async fn compose_doctor_report(
     composer.compose(context).await
 }
 
+/// Live provider of the Remote Brain operational read. Every Doctor read
+/// re-observes the mounted remote authorities instead of freezing one value
+/// at project-composition time.
+pub(in crate::daemon) type RemoteOperationalReadProviderV1 =
+    Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>;
+
 /// Build the daemon-owned live Doctor reader installed into a project MCP
 /// server. Every read re-resolves exact project/worktree identity, observes the
 /// current registered runtimes, and composes through the sole application
@@ -1296,7 +1302,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     project_sessions: crate::global_db::RegisteredGlobalDbLeaseV1,
     profile_root: PathBuf,
     host_home: Option<PathBuf>,
-    remote_operational: RemoteOperationalReadV1,
+    remote_operational: RemoteOperationalReadProviderV1,
     retention: crate::config::RetentionConfig,
     schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -1314,7 +1320,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let project_sessions = project_sessions.clone();
         let profile_root = profile_root.clone();
         let host_home = host_home.clone();
-        let remote_operational = remote_operational.clone();
+        let remote_operational = Arc::clone(&remote_operational);
         let retention = retention.clone();
         let schedulers = schedulers.clone();
         let diagnostic_broker = Arc::clone(&diagnostic_broker);
@@ -1532,7 +1538,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     temporal_ok,
                 }),
                 operational_audit: OperationalAuditReadV1 {
-                    remote: remote_operational,
+                    remote: remote_operational(),
                     profile_authority: ProfileAuthorityReadV1::Observed {
                         registry_attached: registry.writer_connection().is_ok(),
                         profile_sessions_attached: profile_sessions.writer_connection().is_ok(),

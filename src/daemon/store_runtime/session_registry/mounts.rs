@@ -623,6 +623,15 @@ impl DaemonSessionRuntimeRegistryV1 {
         Arc::clone(&self.remote_credential_authority)
     }
 
+    /// Canonical Remote Brain operational read for every operator surface
+    /// (Doctor, CLI, MCP, dashboard), composed from the mounted remote
+    /// authorities.
+    pub(crate) fn remote_operational_status(
+        &self,
+    ) -> tracedecay_application::remote::status::RemoteOperationalStatusReadV1 {
+        self.remote_credential_authority.operational_status()
+    }
+
     pub(crate) fn remote_replay_transaction(
         &self,
     ) -> Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>
