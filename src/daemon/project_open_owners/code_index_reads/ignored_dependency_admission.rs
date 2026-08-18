@@ -58,7 +58,15 @@ impl CodeIndexIgnoredDependencyAdmissionPortV1
                     detail: format!("ignored-dependency request context is invalid: {error}"),
                 }
             })?;
-            if request.context().scope() != &self.scope {
+            // Checkout identity, not label equality: a request resolved after
+            // a `git switch` still names this exact worktree even though its
+            // branch label (and therefore its scope digest) differs from the
+            // binding retained at project open.
+            if !request
+                .context()
+                .scope()
+                .identifies_same_checkout(&self.scope)
+            {
                 return Err(CodeIndexIgnoredDependencyAdmissionErrorV1::Unavailable {
                     detail:
                         "ignored-dependency request scope is outside the mounted project binding"

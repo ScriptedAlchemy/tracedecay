@@ -4,6 +4,8 @@ mod ignored_dependency_admission;
 pub(crate) use ignored_dependency_admission::project_code_index_ignored_dependency_admission_port;
 #[cfg(test)]
 mod ignored_dependency_admission_tests;
+#[cfg(test)]
+mod scope_admission_tests;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,7 +33,13 @@ impl tracedecay_usecases::graph::CodeGraphProjectionReadPort
                 .map_err(|error| CodeGraphReadError::InvalidRequest {
                     detail: error.to_string(),
                 })?;
-            if request.context.scope() != &self.scope {
+            // Checkout identity, not label equality: the retained route scope
+            // pins the branch label that was live at project open, while a
+            // request scope is resolved against live HEAD. Full-struct
+            // equality (reference + scope digest) denied the route's own
+            // checkout after every ordinary `git switch`. A genuinely
+            // different project, repository, or worktree stays denied.
+            if !request.context.scope().identifies_same_checkout(&self.scope) {
                 return Err(CodeGraphReadError::Denied);
             }
             if request.cancellation.is_cancelled() {

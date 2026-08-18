@@ -432,7 +432,12 @@ impl CodeIndexSchedulerRegistryV1 {
             .validate()
             .map_err(|error| QuerySearchExecutionErrorV1::InvalidScope(error.to_string()))?;
         validate_search_policy(&input)?;
-        if !super::registry::latest_matches_scope(&latest, scope) {
+        // Checkout-identity gate: the caller pinned this generation
+        // explicitly, so a foreign project/repository/worktree is refused
+        // while a branch-label difference stays servable — the sealed
+        // reference is attribution, not identity (see
+        // [`super::registry::latest_matches_scope_identity`]).
+        if !super::registry::latest_matches_scope_identity(&latest, scope) {
             return Err(QuerySearchExecutionErrorV1::GenerationUnavailable);
         }
         execute_query_search_on_latest(self, scope, input, latest, false, graph_control).await

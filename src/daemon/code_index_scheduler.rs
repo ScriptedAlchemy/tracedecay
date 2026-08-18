@@ -1605,11 +1605,18 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
 
 impl CodeIndexSchedulerErrorV1 {
     /// An activation failure that leaves the sealed artifact intact and can
-    /// succeed on a later attempt (deadline, cancellation, budget, or an
-    /// unavailable/saturated graph runtime). The worker retries activation of
-    /// the same sealed generation with backoff for these instead of resealing
-    /// a duplicate; payload corruption and identity failures stay terminal so
-    /// reconcile can rebuild.
+    /// succeed on a later attempt (deadline, cancellation, budget, an
+    /// unavailable/saturated graph runtime, or a publication conflict). The
+    /// worker retries activation of the same sealed generation with backoff
+    /// for these instead of resealing a duplicate; payload corruption and
+    /// identity failures stay terminal so reconcile can rebuild.
+    ///
+    /// `Conflict` is a lifecycle or compare-and-swap race — a graph runtime
+    /// mid-close/retire, a concurrent publisher, or a superseded verified
+    /// head — never evidence about the sealed payload. Classifying it
+    /// terminal turned one such race into a permanent outage: the seat pass
+    /// gave up stale serving, the next reconcile hit the same race, and the
+    /// route answered `generation_unverified` until the daemon restarted.
     pub(super) fn is_retryable_activation(&self) -> bool {
         match self {
             Self::GraphProjection(error) => matches!(
@@ -1617,6 +1624,7 @@ impl CodeIndexSchedulerErrorV1 {
                 CodeGraphProjectionError::Cancelled
                     | CodeGraphProjectionError::BudgetExhausted
                     | CodeGraphProjectionError::DeadlineExceeded
+                    | CodeGraphProjectionError::Conflict
                     | CodeGraphProjectionError::Unavailable(_)
                     | CodeGraphProjectionError::Closed
             ),

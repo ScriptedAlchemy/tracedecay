@@ -2819,16 +2819,17 @@ async fn search_fails_fast_when_no_complete_generation_exists() {
     registry.shutdown().await;
 }
 
-/// The live outage this covers: `serving_generation` is in-memory, so after a
-/// daemon restart it is reseeded from the *restored sealed* generation — which
-/// was sealed under whatever reference was current when it was published. The
-/// ordinary develop cycle (commit or switch branch, then restart) therefore
-/// leaves every restored generation carrying a reference the admitted scope has
-/// moved past, and the exact scope gate made all of them unservable. Serve-stale
-/// died with the process and search collapsed into `GenerationUnavailable` for
-/// the whole rebuild window, which on a large repository is tens of minutes.
+/// The live outage this covers: a scope's branch label moves — a restored
+/// generation was sealed before a `git switch`, or a retained route scope
+/// pinned the label that was live at project open — while the worktree the
+/// daemon is serving stays byte-identical. The label is not checkout
+/// identity: the ready ladder has already verified the generation against
+/// the live worktree, so the exact worktree's own graph must keep serving as
+/// current instead of degrading to stale (queries) or `Unavailable` (graph
+/// reads and the runtime census, which have no stale arm and were orphaned
+/// until the route reopened).
 #[tokio::test]
-async fn search_serves_a_restored_generation_stale_across_a_moved_reference() {
+async fn moved_reference_label_still_serves_the_exact_worktree_as_current() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
@@ -2843,7 +2844,7 @@ async fn search_serves_a_restored_generation_stale_across_a_moved_reference() {
     let fresh_candidates = fresh.authorized.fallback.ordered_candidates.clone();
     assert!(!fresh_candidates.is_empty(), "live main symbol is returned");
 
-    // The reference moves. Nothing else about the worktree changes, and the
+    // The scope's label moves. Nothing about the worktree changes, and the
     // daemon mounts the authority for the *new* scope exactly as project open
     // does.
     let moved = moved_reference_scope(&scope);
@@ -2853,46 +2854,39 @@ async fn search_serves_a_restored_generation_stale_across_a_moved_reference() {
         .expect("retained generation");
     mount_core_query_authority(&registry, fixture.path(), &moved, &latest).await;
 
-    assert!(
-        registry
-            .latest_complete_ready_for_scope(&moved)
-            .await
-            .is_none(),
-        "the ready gate must never report a moved-reference generation as current"
-    );
-    let serving = registry
-        .latest_complete_serving_for_scope(&moved)
+    let ready = registry
+        .latest_complete_ready_for_scope(&moved)
         .await
-        .expect("the retained generation stays servable across a reference move");
+        .expect("a moved label must not orphan the exact worktree's ready generation");
     assert_eq!(
-        serving.generation.manifest().generation_id,
+        ready.generation.manifest().generation_id,
         fresh_generation,
-        "the relaxed arm serves the generation that was actually retained"
+        "the ready gate serves the generation verified against this worktree"
     );
     // Attribution is generation-bound, not scope-bound: the served generation
     // still names its own sealed reference, so the answer is attributed to the
     // revision that produced it rather than to the scope that asked.
     assert_ne!(
-        serving.generation.snapshot().reference,
+        ready.generation.snapshot().reference,
         moved.reference,
         "the served generation keeps its own sealed reference"
     );
 
-    let stale = registry
+    let answered = registry
         .execute_query_search(&moved, core_search_request("main"))
         .await
-        .expect("search survives restart-after-a-reference-move instead of failing");
+        .expect("search survives a moved reference label instead of failing");
     assert!(
-        stale.served_stale,
-        "a moved-reference answer must be reported stale, never as current"
+        !answered.served_stale,
+        "a byte-identical worktree is current regardless of the label the scope carries"
     );
     assert_eq!(
-        stale.generation, fresh_generation,
-        "the stale answer names the complete generation that actually answered"
+        answered.generation, fresh_generation,
+        "the answer names the complete generation that actually answered"
     );
     assert_eq!(
-        stale.authorized.fallback.ordered_candidates, fresh_candidates,
-        "serving stale changes only the coverage marker, not ranking identity"
+        answered.authorized.fallback.ordered_candidates, fresh_candidates,
+        "the label move changes nothing about ranking identity"
     );
 
     // The grep/context/callers ladder survives the same move.
@@ -2902,12 +2896,54 @@ async fn search_serves_a_restored_generation_stale_across_a_moved_reference() {
         .expect("the callable-code ladder also serves through a moved reference");
     assert_eq!(ladder.generation.manifest().generation_id, fresh_generation);
 
+    // The root-scope ready gate behind graph reads and the runtime census —
+    // the arms with no stale fallback — must not be orphaned either. Seating
+    // races the publication event, so the gate is polled bounded.
+    let decoded = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(decoded) = registry
+                .latest_complete_ready_decoded_for_root_scope(fixture.path(), &moved)
+                .await
+            {
+                break decoded;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("graph reads and the census survive a moved reference label");
+    assert_eq!(decoded.generation.manifest().generation_id, fresh_generation);
+
     registry.shutdown().await;
 }
 
-/// The relaxed arm is relaxed on `reference` only. A different repository or a
-/// different worktree is a different identity and must stay unservable, or a
-/// stale answer would be mis-attributed rather than merely old.
+/// A graph publication `Conflict` is a lifecycle or compare-and-swap race
+/// (a runtime mid-close/retire, a concurrent publisher, a superseded head),
+/// never evidence about the sealed payload. Classifying it terminal turned
+/// one race into a permanent outage: the seat pass gave up stale serving,
+/// every later reconcile hit the same race, and the route answered
+/// `generation_unverified` until the daemon restarted.
+#[test]
+fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() {
+    use crate::code_index::graph_projection::CodeGraphProjectionError;
+
+    assert!(
+        super::CodeIndexSchedulerErrorV1::GraphProjection(CodeGraphProjectionError::Conflict)
+            .is_retryable_activation(),
+        "a publication conflict leaves the sealed artifact intact and must retry with backoff"
+    );
+    assert!(
+        !super::CodeIndexSchedulerErrorV1::GraphProjection(CodeGraphProjectionError::Corrupt(
+            "sealed payload mismatch".to_owned()
+        ))
+        .is_retryable_activation(),
+        "payload corruption stays terminal so reconcile can rebuild"
+    );
+}
+
+/// The serving gates are relaxed on `reference` only. A different repository
+/// or a different worktree is a different checkout identity and must stay
+/// unservable, or an answer would be mis-attributed rather than merely old.
 #[tokio::test]
 async fn serving_arms_still_refuse_a_different_worktree_identity() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
@@ -2934,6 +2970,20 @@ async fn serving_arms_still_refuse_a_different_worktree_identity() {
             .await
             .is_none(),
         "the callable-code ladder refuses a different worktree identity too"
+    );
+    assert!(
+        registry
+            .latest_complete_ready_for_scope(&foreign)
+            .await
+            .is_none(),
+        "the ready gate refuses a different worktree identity"
+    );
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &foreign)
+            .await
+            .is_none(),
+        "graph reads and the census refuse a different worktree identity truthfully"
     );
 
     registry.shutdown().await;

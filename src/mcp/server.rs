@@ -301,10 +301,13 @@ pub struct McpServer {
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    remote_operational_status:
+        Option<crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1>,
     dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
+    dashboard_explorer_semantic_reader: Option<crate::dashboard::ExplorerSemanticReader>,
     dashboard_feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
@@ -337,7 +340,6 @@ pub struct McpServer {
     retained_project_server_resolver: Option<RetainedProjectServerResolver>,
     #[cfg(any(test, feature = "test-transport"))]
     _host_admission_test_runtime: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
-    initialize_root_routing_enabled: AtomicBool,
     hook_project_routes: SharedHookProjectRouteCache,
     /// Cached latest-version check result.
     version_cache: std::sync::Mutex<VersionCheckState>,
@@ -472,10 +474,7 @@ impl MountedProjectApplicationRetrievalV1 {
         // upgrade on any checkout serving a branch other than the registered
         // one, which silently disabled work evidence and every automation
         // task behind the retained runtime registration.
-        let same_coordinates = mounted_scope.project_id == expected_scope.project_id
-            && mounted_scope.repository_id == expected_scope.repository_id
-            && mounted_scope.worktree_id == expected_scope.worktree_id;
-        if !same_coordinates {
+        if !mounted_scope.identifies_same_checkout(expected_scope) {
             return Err(TraceDecayError::Config {
                 message: "Work evidence retrieval scope does not match the mounted project session authority"
                     .to_owned(),
@@ -747,8 +746,10 @@ impl McpServer {
             automation_scheduler_reconciler,
             database_owner_reconciler,
             dashboard_automation_writer,
+            remote_operational_status,
             dashboard_doctor_report_reader,
             dashboard_code_index_freshness_reader,
+            dashboard_explorer_semantic_reader,
             dashboard_feedback_status_reader,
             diagnostics_lsp,
             background_refresh_writer,
@@ -979,9 +980,11 @@ impl McpServer {
             automation_scheduler_reconciler,
             database_owner_reconciler,
             dashboard_automation_writer,
+            remote_operational_status,
             dashboard_doctor_report_reader,
             doctor_report_published: AtomicBool::new(false),
             dashboard_code_index_freshness_reader,
+            dashboard_explorer_semantic_reader,
             dashboard_feedback_status_reader,
             background_refresh_writer,
             code_index_hook_sink,
@@ -1000,7 +1003,6 @@ impl McpServer {
             retained_project_server_resolver,
             #[cfg(any(test, feature = "test-transport"))]
             _host_admission_test_runtime: host_admission_test_runtime,
-            initialize_root_routing_enabled: AtomicBool::new(true),
             hook_project_routes: project_routes,
             version_cache: std::sync::Mutex::new(VersionCheckState {
                 latest: None,
@@ -1088,11 +1090,6 @@ impl McpServer {
         }
 
         server
-    }
-
-    pub fn set_initialize_root_routing_enabled(&self, enabled: bool) {
-        self.initialize_root_routing_enabled
-            .store(enabled, Ordering::Relaxed);
     }
 
     /// Returns the active scope prefix, if the server was launched from a subdirectory.

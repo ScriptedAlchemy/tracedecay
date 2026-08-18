@@ -107,6 +107,25 @@ impl ResolvedScope {
         }
         Ok(())
     }
+
+    /// Whether two resolved scopes name the same physical checkout.
+    ///
+    /// Project, repository, and worktree are checkout identity. `reference`
+    /// is deliberately not: it is the branch label HEAD happened to carry
+    /// when the scope was resolved, and it moves under a fixed worktree on
+    /// every ordinary commit, branch switch, or rebase. Comparing it —
+    /// directly or through the derived `scope_digest` via full equality —
+    /// turns a label move into a false identity mismatch, orphaning a
+    /// retained route from the graph of the very checkout it is serving.
+    /// Serving-eligibility and authority gates compare checkout identity
+    /// with this; the label a generation was sealed under stays on its own
+    /// snapshot for attribution.
+    #[must_use]
+    pub fn identifies_same_checkout(&self, other: &Self) -> bool {
+        self.project_id == other.project_id
+            && self.repository_id == other.repository_id
+            && self.worktree_id == other.worktree_id
+    }
 }
 
 /// Disclosure ceiling carried by an immutable grant and revalidated at sinks.
@@ -550,8 +569,43 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::task::{Context, Poll, Wake, Waker};
 
-    use super::{CancellationSignal, CancellationState};
+    use super::{CancellationSignal, CancellationState, ResolvedScope};
     use tracedecay_domain::UtcMicros;
+
+    fn scope(worktree: &str, reference: Option<&str>) -> ResolvedScope {
+        ResolvedScope::new(
+            tracedecay_domain::ProjectId::new("project.scope-identity").unwrap(),
+            tracedecay_domain::RepositoryId::new("repository.scope-identity").unwrap(),
+            tracedecay_domain::WorktreeId::new(worktree).unwrap(),
+            reference.map(|reference| tracedecay_domain::RefId::new(reference).unwrap()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn checkout_identity_ignores_the_branch_label_but_not_the_worktree() {
+        let sealed = scope("worktree.primary", Some("refs/heads/master"));
+        let moved = scope("worktree.primary", Some("refs/heads/feature-after-switch"));
+        let detached = scope("worktree.primary", None);
+        let foreign = scope("worktree.other-checkout", Some("refs/heads/master"));
+
+        assert_ne!(
+            sealed, moved,
+            "full equality (label and digest) must still distinguish the scopes"
+        );
+        assert!(
+            sealed.identifies_same_checkout(&moved),
+            "a branch-label move on the same worktree is the same checkout"
+        );
+        assert!(
+            sealed.identifies_same_checkout(&detached),
+            "a detached HEAD on the same worktree is the same checkout"
+        );
+        assert!(
+            !sealed.identifies_same_checkout(&foreign),
+            "a different worktree is a different checkout even under the same label"
+        );
+    }
 
     struct WakeCounter(AtomicUsize);
 

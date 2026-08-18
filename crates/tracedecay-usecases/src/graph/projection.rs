@@ -179,7 +179,11 @@ impl VerifiedCodeGraphRead {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<CodeGraphInteractiveReader, CodeGraphReadError> {
         context.validate().map_err(|_| CodeGraphReadError::Denied)?;
-        if context.scope() != &self.scope {
+        // Checkout identity, not label equality: this read may be bound to
+        // the scope retained at project open while the request scope was
+        // resolved against live HEAD; a branch-label move between the two
+        // must not deny the exact checkout its own graph.
+        if !context.scope().identifies_same_checkout(&self.scope) {
             return Err(CodeGraphReadError::Denied);
         }
         match context.admission_at(observed_at) {

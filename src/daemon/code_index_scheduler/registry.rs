@@ -44,7 +44,7 @@ mod runtime_generation_census_tests;
 mod scope_identity;
 
 use self::ignored_dependencies::exact_activated_serving_generation;
-pub(super) use scope_identity::{latest_matches_scope, latest_matches_scope_identity};
+pub(super) use scope_identity::latest_matches_scope_identity;
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 
@@ -3440,7 +3440,11 @@ impl CodeIndexSchedulerRegistryV1 {
             )
             .ok()
             .flatten()?;
-        if !latest_matches_scope(&latest, scope) {
+        // Checkout-identity gate: the ready probe above already proved the
+        // generation current against the live worktree, and the sealed
+        // reference label is attribution, not identity (see
+        // [`latest_matches_scope_identity`]).
+        if !latest_matches_scope_identity(&latest, scope) {
             return None;
         }
         exact_activated_serving_generation(&serving_generation, &latest)
@@ -3499,7 +3503,11 @@ impl CodeIndexSchedulerRegistryV1 {
             matched?
         };
         let latest = self.latest_complete_ready_with(&root, admission).await?;
-        latest_matches_scope(&latest, scope).then_some(latest)
+        // Checkout-identity gate: the ready ladder verified currency against
+        // the live worktree, so a scope whose branch label was resolved on
+        // the other side of a `git switch` must still be served its own
+        // checkout's generation (see [`latest_matches_scope_identity`]).
+        latest_matches_scope_identity(&latest, scope).then_some(latest)
     }
 
     /// Resolve one exact scope and serve the last complete generation already
