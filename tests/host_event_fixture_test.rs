@@ -578,14 +578,6 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
         tracedecay::storage::write_repository_identity_marker(&project, project_id.as_str())
             .unwrap()
     );
-    tracedecay::storage::write_enrollment_marker(
-        &project,
-        &tracedecay::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: tracedecay::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
     let runtime = HostAdmissionTestRuntimeV1::project(
         tmp.path().join("profile"),
         &project,
@@ -1035,14 +1027,6 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
         )
         .unwrap()
     );
-    tracedecay::storage::write_enrollment_marker(
-        project_tmp.path(),
-        &tracedecay::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: tracedecay::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
     let runtime = HostAdmissionTestRuntimeV1::project(
         profile_tmp.path().join("profile"),
         project_tmp.path(),

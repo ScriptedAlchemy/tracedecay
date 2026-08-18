@@ -10,9 +10,7 @@ use tracedecay::hooks::{
     evaluate_hook_decision, evaluate_kiro_pre_tool_use, kiro_post_tool_use_rel_paths,
     record_codex_subagent_start,
 };
-use tracedecay::storage::{
-    EnrollmentMarker, StorageMode, resolve_layout_for_current_profile, write_enrollment_marker,
-};
+use tracedecay::storage::{pin_fixture_repository_identity, resolve_layout_for_current_profile};
 
 fn is_blocked(json: &str) -> bool {
     let v: serde_json::Value = serde_json::from_str(json).unwrap();
@@ -45,14 +43,7 @@ fn analytics_contains(events: &[serde_json::Value], event: &str, category: Optio
 }
 
 fn enroll_profile_project(project_root: &Path, project_id: &str) {
-    write_enrollment_marker(
-        project_root,
-        &EnrollmentMarker {
-            project_id: project_id.to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    pin_fixture_repository_identity(project_root, project_id).unwrap();
 }
 
 #[test]

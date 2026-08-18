@@ -391,12 +391,9 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&project).unwrap();
         let project_id = format!("proj_hook_capture_{index}");
-        tracedecay_runtime_core::storage::write_enrollment_marker(
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
             &project,
-            &tracedecay_runtime_core::storage::EnrollmentMarker {
-                project_id: project_id.clone(),
-                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-            },
+            &(project_id.clone()),
         )
         .unwrap();
         let data_root = home.join(".tracedecay/projects").join(&project_id);

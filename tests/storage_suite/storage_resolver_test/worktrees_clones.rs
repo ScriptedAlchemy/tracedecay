@@ -38,8 +38,9 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
 
     assert_eq!(
         discover_project_root(&worktree.join("src")),
-        None,
-        "discovery must not walk from a linked worktree into the main checkout"
+        Some(worktree.clone()),
+        "discovery resolves the worktree's own root through the shared \
+         repository identity, never the main checkout's path"
     );
     assert!(
         TraceDecay::has_initialized_store(&worktree).await,
@@ -154,15 +155,16 @@ async fn linked_worktree_ignores_local_enrollment_that_would_shard_shared_store(
         ],
     );
 
+    // A user leftover from before the working-tree cutover: a stale legacy
+    // enrollment file inside the linked worktree that would shard the shared
+    // store if anything honored it.
     let stale_project_id = "proj_local_linked_worktree";
     let stale_data_root = profile_root.join(format!("projects/{stale_project_id}"));
     fs::create_dir_all(&stale_data_root).unwrap();
-    write_enrollment_marker(
-        &worktree,
-        &EnrollmentMarker {
-            project_id: stale_project_id.to_owned(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
+    fs::create_dir_all(worktree.join(".tracedecay")).unwrap();
+    fs::write(
+        worktree.join(".tracedecay/enrollment.json"),
+        format!("{{\"project_id\":\"{stale_project_id}\",\"storage_mode\":\"profile_sharded\"}}"),
     )
     .unwrap();
 
@@ -519,8 +521,9 @@ async fn nested_linked_worktree_does_not_discover_parent_checkout_marker() {
 
     assert_eq!(
         discover_project_root(&worktree.join("src")),
-        None,
-        "a linked worktree inside the main checkout must not inherit the parent marker"
+        Some(worktree.clone()),
+        "a nested linked worktree resolves its own root through the shared \
+         repository identity, never the parent checkout's path"
     );
     assert!(
         TraceDecay::has_initialized_store(&worktree).await,

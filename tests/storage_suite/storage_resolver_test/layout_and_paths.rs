@@ -37,8 +37,11 @@ async fn config_path_uses_profile_shard_when_enrolled() {
     fs::create_dir_all(project.join(".tracedecay")).unwrap();
     fs::create_dir_all(&shard_root).unwrap();
     let _home_guard = HomeGuard::set(&home);
-    write_enrollment(&project);
+    fs::write(project.join("lib.rs"), "pub fn enrolled() {}\n").unwrap();
+    init_repo_with_commit(&project);
+    assert!(write_repository_identity_marker(&project, "proj_123").unwrap());
 
+    // A retired legacy config left in the working tree stays ignored.
     let repo_local_config = TraceDecayConfig {
         root_dir: "repo-local-config".to_string(),
         ..TraceDecayConfig::default()

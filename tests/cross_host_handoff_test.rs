@@ -40,14 +40,6 @@ async fn codex_to_claude_handoff_preserves_identity_lineage_privacy_and_provenan
         tracedecay::storage::write_repository_identity_marker(&project_root, project_id.as_str())
             .unwrap()
     );
-    tracedecay::storage::write_enrollment_marker(
-        &project_root,
-        &tracedecay::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: tracedecay::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
     let runtime =
         HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())
             .await

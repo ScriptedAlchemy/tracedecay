@@ -12,8 +12,7 @@ use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, default_profile_project_id, profile_sharded_data_root,
-    profile_sharded_layout, write_enrollment_marker, write_repository_identity_marker,
-    write_store_manifest,
+    profile_sharded_layout, write_repository_identity_marker, write_store_manifest,
 };
 use tracedecay_agent_hosts::PRODUCT_VERSION;
 use tracedecay_agent_hosts::automation::run_ledger::{
@@ -374,14 +373,7 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
     let project = canonical_temp_path(project);
     let shard_root = profile_shard_root(home);
     std::fs::create_dir_all(&shard_root).unwrap();
-    write_enrollment_marker(
-        &project,
-        &EnrollmentMarker {
-            project_id: "proj_cli".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    tracedecay::storage::pin_fixture_repository_identity(&project, "proj_cli").unwrap();
     let graph_db_path = shard_root.join("tracedecay.db");
     std::thread::spawn(move || {
         create_runtime()
@@ -1475,14 +1467,6 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
     git(project.path(), &["init"]);
     write_profile_sharded_fixture(home.path(), project.path());
     write_repository_identity_marker(project.path(), "proj_cli").unwrap();
-    write_enrollment_marker(
-        project.path(),
-        &EnrollmentMarker {
-            project_id: "proj_cli".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
     std::fs::create_dir_all(profile_root(home.path())).unwrap();
 
     let report = tracedecay::global_db::registry_maintenance::inspect_profile_store_orphans(

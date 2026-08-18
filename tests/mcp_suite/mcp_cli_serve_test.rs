@@ -34,7 +34,7 @@ use tracedecay::mcp::handle_tool_call;
 use tracedecay::serve;
 use tracedecay::storage::default_profile_sharded_layout;
 #[cfg(unix)]
-use tracedecay::storage::{EnrollmentMarker, PrivateStoreIo, StorageMode, write_enrollment_marker};
+use tracedecay::storage::{PrivateStoreIo, pin_fixture_repository_identity};
 #[cfg(unix)]
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::tracedecay::TraceDecayOpenOptions;
@@ -160,14 +160,7 @@ async fn create_read_only_project_db(
     // project id the caller named. Init (not a bare graph DB publish) is what
     // admits a canonical configuration revision — open_read_only fails closed
     // without one.
-    write_enrollment_marker(
-        &project_root,
-        &EnrollmentMarker {
-            project_id: project_id.to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    pin_fixture_repository_identity(&project_root, project_id).unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
         global_db_path: Some(profile_root.join("global.db")),

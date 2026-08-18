@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::serve;
-use tracedecay::storage::{
-    EnrollmentMarker, STORE_MANIFEST_FILENAME, StorageMode, write_enrollment_marker,
-};
+use tracedecay::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::home_env_lock::HOME_ENV_LOCK;
@@ -184,14 +182,7 @@ async fn fresh_profile_initialization_creates_the_final_v2_store() {
     let shard_root = profile_root.join("projects/proj_init");
     fs::create_dir_all(&project).unwrap();
     let _home_guard = HomeEnvGuard::set(&home);
-    write_enrollment_marker(
-        &project,
-        &EnrollmentMarker {
-            project_id: "proj_init".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    pin_fixture_repository_identity(&project, "proj_init").unwrap();
 
     let cg = init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
         .await
@@ -276,14 +267,7 @@ async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
     let project = root.join("repo");
     fs::create_dir_all(&project).unwrap();
     let _home_guard = HomeEnvGuard::set(&daemon_home);
-    write_enrollment_marker(
-        &project,
-        &EnrollmentMarker {
-            project_id: "proj_explicit".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    pin_fixture_repository_identity(&project, "proj_explicit").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(client_profile.clone()),
         global_db_path: Some(client_profile.join("global.db")),
@@ -327,14 +311,7 @@ async fn trace_decay_options_global_db_path_implies_profile_root() {
     let project = root.join("repo");
     fs::create_dir_all(&project).unwrap();
     let _home_guard = HomeEnvGuard::set(&daemon_home);
-    write_enrollment_marker(
-        &project,
-        &EnrollmentMarker {
-            project_id: "proj_db_only".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    pin_fixture_repository_identity(&project, "proj_db_only").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: None,
         global_db_path: Some(client_profile.join("global.db")),
@@ -537,14 +514,7 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
     run_git(&project, &["commit", "-m", "seed"]);
     run_git(&project, &["branch", "feature/profile"]);
     let _home_guard = HomeEnvGuard::set(&home);
-    write_enrollment_marker(
-        &project,
-        &EnrollmentMarker {
-            project_id: "proj_branch".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    pin_fixture_repository_identity(&project, "proj_branch").unwrap();
     let config = TraceDecayConfig {
         root_dir: project.to_string_lossy().to_string(),
         ..TraceDecayConfig::default()
@@ -599,14 +569,7 @@ async fn trace_decay_open_with_options_selects_branch_in_explicit_profile() {
     run_git(&project, &["checkout", "-"]);
 
     let _home_guard = HomeEnvGuard::set(&daemon_home);
-    write_enrollment_marker(
-        &project,
-        &EnrollmentMarker {
-            project_id: "proj_auto_branch".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    pin_fixture_repository_identity(&project, "proj_auto_branch").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(client_profile.clone()),
         global_db_path: Some(client_profile.join("global.db")),

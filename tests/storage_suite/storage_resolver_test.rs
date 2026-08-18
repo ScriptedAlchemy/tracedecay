@@ -20,9 +20,9 @@ use tracedecay::storage::{
     ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath,
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath,
     StoreKind, StoreManifest, default_profile_project_id, default_profile_sharded_layout,
-    profile_sharded_layout, read_enrollment_marker, read_repository_identity_marker,
+    profile_sharded_layout, read_legacy_enrollment_marker, read_repository_identity_marker,
     read_store_manifest, repository_identity_path, resolve_layout, resolve_lcm_payload_root,
-    resolve_project_session_db_path, resolve_response_handle_root, write_enrollment_marker,
+    resolve_project_session_db_path, resolve_response_handle_root,
     write_repository_identity_marker, write_store_manifest, write_store_manifest_to_path,
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
@@ -34,6 +34,7 @@ mod layout_and_paths;
 mod manifest;
 mod marker_relocation;
 mod markers;
+mod working_tree_guard;
 mod worktrees_clones;
 
 struct HomeGuard {
@@ -81,6 +82,9 @@ impl Drop for HomeGuard {
     }
 }
 
+/// Fabricates a retired legacy `<root>/.tracedecay/enrollment.json` exactly as
+/// a user leftover would look. Production never writes this; tests use it only
+/// to prove legacy adoption and legacy-ignoring behavior.
 fn write_enrollment(root: &Path) {
     fs::create_dir_all(root.join(".tracedecay")).unwrap();
     fs::write(

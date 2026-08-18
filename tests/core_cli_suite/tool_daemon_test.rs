@@ -13,8 +13,7 @@ use crate::common::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::storage::{
-    EnrollmentMarker, StorageMode, default_profile_project_id, profile_sharded_data_root,
-    write_enrollment_marker,
+    default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
@@ -509,14 +508,7 @@ fn enroll_native_capture_project(
     host: HookHostV1,
     families: &[HookEventFamily],
 ) -> PathBuf {
-    write_enrollment_marker(
-        project,
-        &EnrollmentMarker {
-            project_id: project_id.to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    pin_fixture_repository_identity(project, project_id).unwrap();
     let data_root = home.join(".tracedecay/projects").join(project_id);
     std::fs::create_dir_all(&data_root).unwrap();
     let now = capture_test_now();
@@ -1573,14 +1565,7 @@ fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() 
         "pub fn answer() -> u32 { 42 }\n",
     )
     .unwrap();
-    write_enrollment_marker(
-        &project_path,
-        &EnrollmentMarker {
-            project_id: "proj_daemon_registry".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    pin_fixture_repository_identity(&project_path, "proj_daemon_registry").unwrap();
 
     crate::common::initialize_tracedecay_cli_project(&client_home_path, &project_path);
     std::fs::remove_dir_all(project_path.join(".tracedecay")).unwrap();

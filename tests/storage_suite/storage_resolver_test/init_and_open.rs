@@ -70,8 +70,14 @@ async fn trace_decay_init_registers_default_profile_shard_globally() {
     );
 }
 
+/// Legacy adoption: a project enrolled before the working-tree cutover has a
+/// retired `<repo>/.tracedecay/enrollment.json`, a materialized profile shard,
+/// and no other resolvable identity. Opening it must adopt the identity the
+/// legacy file names (never a fresh path-derived alias), persist it durably in
+/// the `.git/` repository identity marker, and leave the user's legacy file
+/// untouched.
 #[tokio::test]
-async fn trace_decay_open_uses_profile_shard_paths_from_enrollment_marker() {
+async fn trace_decay_open_adopts_legacy_enrollment_marker_once() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
@@ -113,4 +119,17 @@ async fn trace_decay_open_uses_profile_shard_paths_from_enrollment_marker() {
     assert_path_eq(opened.db_path(), shard_root.join("tracedecay.db"));
     assert_eq!(opened.get_config().root_dir, project.to_string_lossy());
     assert_eq!(opened.serving_branch(), Some("main"));
+    let adopted = read_repository_identity_marker(&project)
+        .unwrap()
+        .expect("adoption must persist the identity in the .git/ marker");
+    assert_eq!(
+        adopted.project_id, "proj_123",
+        "adoption must keep the legacy identity, never mint an alias"
+    );
+    assert!(
+        read_legacy_enrollment_marker(&project)
+            .unwrap()
+            .is_some_and(|marker| marker.project_id == "proj_123"),
+        "adoption must leave the user's legacy file untouched"
+    );
 }

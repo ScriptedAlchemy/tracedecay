@@ -147,13 +147,6 @@ impl DashboardTestRuntimeV1 {
         // (delivery, explorer, storage telemetry, provider usage) as typed
         // unavailable, which is not the journey these tests prove.
         initialize_fixture_repository_identity(project_root, &project_id)?;
-        tracedecay::storage::write_enrollment_marker(
-            project_root,
-            &tracedecay::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: tracedecay::storage::StorageMode::ProfileSharded,
-            },
-        )?;
 
         let graph_profile_root = profile_root
             .join("dashboard-test-graphs")

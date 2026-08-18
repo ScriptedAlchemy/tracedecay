@@ -11,7 +11,7 @@ async fn resolved_project_store_helpers_route_profile_sharded_session_artifacts(
     let profile_root = home.join(".tracedecay");
     fs::create_dir_all(&project).unwrap();
     let _home_guard = HomeGuard::set(&home);
-    write_enrollment(&project);
+    tracedecay::storage::pin_fixture_repository_identity(&project, "proj_123").unwrap();
 
     assert_path_eq(
         resolve_project_session_db_path(&project).unwrap(),
@@ -77,7 +77,7 @@ async fn response_handles_route_to_profile_shard_when_enrolled() {
     let shard_root = home.join(".tracedecay/projects/proj_123");
     fs::create_dir_all(&project).unwrap();
     let _home_guard = HomeGuard::set(&home);
-    write_enrollment(&project);
+    tracedecay::storage::pin_fixture_repository_identity(&project, "proj_123").unwrap();
 
     let stored = store_response_handle(&project, r#"{"items":[1]}"#, 1_720_000_000).unwrap();
     let shard_path = shard_root

@@ -2,24 +2,41 @@ use super::*;
 use std::fs;
 use tempfile::TempDir;
 
+/// A retired legacy enrollment file is never an identity authority for the
+/// synchronous walk: discovery and initialization answer through the `.git/`
+/// marker, the profile store, or the registry — never a working-tree file.
 #[test]
-fn enrollment_marker_is_discovered_without_graph_db() {
+fn legacy_enrollment_marker_alone_is_not_discovered() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     let child = root.join("src/storage");
     fs::create_dir_all(&child).unwrap();
     write_enrollment(root);
 
-    assert_eq!(discover_project_root(&child), Some(root.to_path_buf()));
-    assert!(TraceDecay::is_initialized(root));
+    assert_eq!(discover_project_root(&child), None);
+    assert!(!TraceDecay::is_initialized(root));
 }
 
 #[test]
-fn enrollment_marker_preserves_profile_identity() {
+fn repository_identity_marker_is_discovered_without_graph_db() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("repo");
+    let child = root.join("src/storage");
+    fs::create_dir_all(&child).unwrap();
+    fs::write(root.join("lib.rs"), "pub fn discovered() {}\n").unwrap();
+    init_repo_with_commit(&root);
+    assert!(write_repository_identity_marker(&root, "proj_123").unwrap());
+
+    assert_eq!(discover_project_root(&child), Some(root.clone()));
+    assert!(TraceDecay::is_initialized(&root));
+}
+
+#[test]
+fn legacy_enrollment_marker_preserves_profile_identity() {
     let dir = TempDir::new().unwrap();
     write_enrollment(dir.path());
 
-    let marker = read_enrollment_marker(dir.path())
+    let marker = read_legacy_enrollment_marker(dir.path())
         .unwrap()
         .expect("marker should be present");
 
@@ -33,7 +50,7 @@ fn enrollment_marker_preserves_profile_identity() {
 }
 
 #[test]
-fn invalid_enrollment_marker_is_not_treated_as_initialized() {
+fn invalid_legacy_enrollment_marker_is_not_treated_as_initialized() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     fs::create_dir_all(root.join(".tracedecay")).unwrap();
@@ -45,7 +62,7 @@ fn invalid_enrollment_marker_is_not_treated_as_initialized() {
 
     assert_eq!(discover_project_root(root), None);
     assert!(!TraceDecay::is_initialized(root));
-    assert!(read_enrollment_marker(root).is_err());
+    assert!(read_legacy_enrollment_marker(root).is_err());
 }
 
 #[test]
@@ -116,8 +133,10 @@ fn profile_sharded_layout_maps_marker_to_profile_store_paths() {
     let project = dir.path().join("repo");
     let profile = dir.path().join("profile");
     fs::create_dir_all(&project).unwrap();
-    write_enrollment(&project);
-    let marker = read_enrollment_marker(&project).unwrap().unwrap();
+    let marker = EnrollmentMarker {
+        project_id: "proj_123".to_string(),
+        storage_mode: StorageMode::ProfileSharded,
+    };
 
     let layout = profile_sharded_layout(&project, &profile, &marker).unwrap();
 

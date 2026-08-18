@@ -253,14 +253,9 @@ fn canonical_runtime_resolver_locator_opens_through_graph_registry() {
     std::fs::create_dir(&project_root).unwrap();
 
     let binding = identity("profile-a", "project-a");
-    storage::write_enrollment_marker(
-        &project_root,
-        &storage::EnrollmentMarker {
-            project_id: "project-a".to_owned(),
-            storage_mode: storage::StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    // No repo-local enrollment marker exists any more: the typed enrollment
+    // authority below is the identity authority and store paths derive from
+    // the typed project id, never from the root.
     let store_root = storage::profile_sharded_data_root(&profile_root, "project-a");
     std::fs::create_dir_all(&store_root).unwrap();
 

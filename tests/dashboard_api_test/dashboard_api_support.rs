@@ -16,7 +16,6 @@ pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
 pub(crate) use tracedecay::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay::dashboard;
-pub(crate) use tracedecay::storage::{EnrollmentMarker, StorageMode, write_enrollment_marker};
 pub(crate) use tracedecay::tracedecay::TraceDecay;
 pub(crate) use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactEventId, FactId, ProjectId,
@@ -869,12 +868,11 @@ async fn start_dashboard_fixture_with_options(
     let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
     let home_guard = EnvVarGuard::set("HOME", &home);
     let userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
-    if let Err(err) = write_enrollment_marker(
+    std::fs::create_dir_all(&project_root)
+        .unwrap_or_else(|err| panic!("failed to create fixture project root: {err}"));
+    if let Err(err) = tracedecay::storage::pin_fixture_repository_identity(
         &project_root,
-        &EnrollmentMarker {
-            project_id: "dashboard_fixture_project".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
+        "dashboard_fixture_project",
     ) {
         panic!("failed to enroll dashboard fixture in profile storage: {err}");
     }
