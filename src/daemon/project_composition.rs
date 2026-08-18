@@ -253,6 +253,38 @@ pub(super) async fn production_project_server(
     );
     let dashboard_code_index_freshness_reader =
         project_dashboard_freshness_reader(invocation.code_index_schedulers.clone());
+    let configuration_client = cg.configuration_runtime().client();
+    let dashboard_explorer_semantic_reader: crate::dashboard::ExplorerSemanticReader = Arc::new(
+        move |project_root: std::path::PathBuf| {
+            let configuration_client = Arc::clone(&configuration_client);
+            Box::pin(async move {
+                let activated =
+                    tracedecay_usecases::semantic_runtime::project_committed_semantic_pins(
+                        &project_root,
+                    )
+                    .is_some();
+                let configuration = configuration_client
+                    .current()
+                    .await
+                    .ok()
+                    .and_then(|pinned| {
+                        tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
+                            &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+                                revision_id: pinned.revision_id,
+                                snapshot: pinned.snapshot,
+                            },
+                        )
+                        .ok()
+                    });
+                let status =
+                    tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+                        &project_root,
+                        configuration,
+                    );
+                crate::dashboard::ExplorerSemanticReadV1 { activated, status }
+            })
+        },
+    );
     let dashboard_feedback_status_reader = crate::dashboard::feedback_api::feedback_status_reader(
         invocation.feedback_runtime_registrar(),
     );
@@ -281,6 +313,7 @@ pub(super) async fn production_project_server(
         },
     )
     .with_dashboard_code_index_freshness_reader(Arc::clone(&dashboard_code_index_freshness_reader))
+    .with_dashboard_explorer_semantic_reader(Arc::clone(&dashboard_explorer_semantic_reader))
     .with_dashboard_feedback_status_reader(Arc::clone(&dashboard_feedback_status_reader))
     .with_diagnostics_lsp(Arc::clone(&diagnostic_broker))
     .with_code_index_hook_sink(Arc::clone(&code_index_hook_sink))
@@ -570,6 +603,20 @@ pub(super) async fn production_project_server(
                     session_db.as_ref(),
                 ],
             );
+            // Live Remote Brain operational read composed from the mounted
+            // remote credential/spool/recovery authorities. Every operator
+            // surface (Doctor, MCP, dashboard) re-observes current listener,
+            // enrollment, spool, replay, backup, and failover state through
+            // this one provider; typed `Unavailable` remains only when the
+            // remote plane is genuinely unreadable.
+            let remote_operational_status: crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1 = {
+                let remote_credentials = graph_runtime.remote_credential_authority();
+                Arc::new(move || remote_credentials.operational_status())
+            };
+            let remote_operational_read: doctor_kernel::RemoteOperationalReadProviderV1 = {
+                let remote_operational_status = Arc::clone(&remote_operational_status);
+                Arc::new(move || remote_operational_status().doctor_read())
+            };
             let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
                 canonical_project_path.to_path_buf(),
                 code_search_project_id.clone(),
@@ -580,7 +627,7 @@ pub(super) async fn production_project_server(
                 session_db.clone(),
                 profile_identity.profile_root().to_path_buf(),
                 transcript_source_home.clone(),
-                tracedecay_application::RemoteOperationalReadV1::Unavailable,
+                remote_operational_read,
                 cg.get_config().sync.retention.clone(),
                 invocation.code_index_schedulers.clone(),
                 Arc::clone(&diagnostic_broker),
@@ -617,8 +664,10 @@ pub(super) async fn production_project_server(
                     delivery_settlement_recorder,
                 },
             )
+            .with_remote_operational_status(remote_operational_status)
             .with_dashboard_doctor_report_reader(doctor_report_reader)
             .with_dashboard_code_index_freshness_reader(dashboard_code_index_freshness_reader)
+            .with_dashboard_explorer_semantic_reader(dashboard_explorer_semantic_reader)
             .with_dashboard_feedback_status_reader(dashboard_feedback_status_reader)
             .with_diagnostics_lsp(diagnostic_broker)
             .with_code_index_hook_sink(code_index_hook_sink)

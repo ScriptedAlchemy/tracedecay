@@ -101,9 +101,15 @@ pub(crate) struct McpServerConstructionContext {
         Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub(crate) database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     pub(crate) dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    /// Live Remote Brain operational read composed from the mounted remote
+    /// authorities. Daemon-owned servers install it; direct servers leave it
+    /// absent and remote operator surfaces report typed unavailable.
+    pub(crate) remote_operational_status:
+        Option<crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1>,
     pub(crate) dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub(crate) dashboard_explorer_semantic_reader: Option<crate::dashboard::ExplorerSemanticReader>,
     pub(crate) dashboard_feedback_status_reader:
         Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub(crate) diagnostics_lsp:
@@ -212,8 +218,10 @@ impl McpServerConstructionContext {
             automation_scheduler_reconciler: None,
             database_owner_reconciler: None,
             dashboard_automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
+            remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
+            dashboard_explorer_semantic_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
             background_refresh_writer: direct_background_refresh_writer(),
@@ -256,7 +264,7 @@ impl McpServerConstructionContext {
         self
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     pub(crate) fn with_direct_profile_identity(
         mut self,
         profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
@@ -307,8 +315,10 @@ impl McpServerConstructionContext {
             automation_scheduler_reconciler: None,
             database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,
+            remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
+            dashboard_explorer_semantic_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
             background_refresh_writer: writers.background_refresh,
@@ -368,8 +378,10 @@ impl McpServerConstructionContext {
             automation_scheduler_reconciler: None,
             database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,
+            remote_operational_status: None,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
+            dashboard_explorer_semantic_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
             background_refresh_writer: writers.background_refresh,
@@ -515,11 +527,27 @@ impl McpServerConstructionContext {
         self
     }
 
+    pub(crate) fn with_remote_operational_status(
+        mut self,
+        provider: crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1,
+    ) -> Self {
+        self.remote_operational_status = Some(provider);
+        self
+    }
+
     pub(crate) fn with_dashboard_code_index_freshness_reader(
         mut self,
         reader: crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
     ) -> Self {
         self.dashboard_code_index_freshness_reader = Some(reader);
+        self
+    }
+
+    pub(crate) fn with_dashboard_explorer_semantic_reader(
+        mut self,
+        reader: crate::dashboard::ExplorerSemanticReader,
+    ) -> Self {
+        self.dashboard_explorer_semantic_reader = Some(reader);
         self
     }
 

@@ -80,8 +80,10 @@ mod delivery_api;
 pub use delivery_api::{DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1};
 mod doctor_findings_api;
 mod events_api;
+mod remote_status_api;
 mod events_delivery;
 mod explorer_api;
+pub use explorer_api::{ExplorerSemanticReadFuture, ExplorerSemanticReadV1, ExplorerSemanticReader};
 pub mod feedback_api;
 mod graph_api;
 mod graph_service;
@@ -233,6 +235,12 @@ pub type DoctorReportReadFuture = Pin<
     >,
 >;
 pub type DoctorReportReader = Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sync + 'static>;
+pub type RemoteOperationalStatusReader = Arc<
+    dyn Fn() -> tracedecay_application::remote::status::RemoteOperationalStatusReadV1
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Runtime authorities retained by one daemon-managed dashboard state.
 ///
@@ -268,7 +276,14 @@ pub struct DashboardStateCompositionV1 {
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     pub automation_writer: DashboardAutomationWriter,
     pub doctor_report_reader: Option<DoctorReportReader>,
+    /// Daemon-owned Remote Brain operational read. Standalone dashboards leave
+    /// it absent and `GET /api/remote/status` reports typed unavailable.
+    pub remote_operational_status_reader: Option<RemoteOperationalStatusReader>,
     pub code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    /// Daemon-owned read over the semantic activation gate and runtime
+    /// status for the Explorer semantic source. Standalone dashboards leave
+    /// it absent and the source reports typed `unsupported`.
+    pub explorer_semantic_reader: Option<ExplorerSemanticReader>,
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
     pub code_diagnostics_broker:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
@@ -368,6 +383,11 @@ pub struct DashboardState {
     pub project_root: PathBuf,
     /// Live read port over the daemon-owned code-index scheduler registry.
     pub code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    /// Root-addressed read over the daemon-owned semantic activation gate and
+    /// runtime status. Absent for standalone dashboards, whose Explorer
+    /// semantic source reports typed `unsupported` instead of guessing from
+    /// process-local state.
+    pub explorer_semantic_reader: Option<ExplorerSemanticReader>,
     /// Root-addressed read over the daemon-mounted canonical feedback
     /// observation owner. Selected projects reuse the resolver but resolve
     /// their own exact project root on every call.
@@ -403,6 +423,9 @@ pub struct DashboardState {
     /// Admitted canonical Doctor report source. Absent when the dashboard was
     /// not opened by an owner holding an exact application request context.
     pub doctor_report_reader: Option<DoctorReportReader>,
+    /// Admitted Remote Brain operational read. Absent for standalone
+    /// dashboards that were not opened by a daemon holding the live provider.
+    pub remote_operational_status_reader: Option<RemoteOperationalStatusReader>,
     /// Active-project daemon application transport. Mutating dashboard routes
     /// use this catalog-bound executor instead of opening stores or applying
     /// configuration inside HTTP adapters.
@@ -567,9 +590,11 @@ impl DashboardState {
             crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1,
         >,
         doctor_report_reader: Option<DoctorReportReader>,
+        remote_operational_status_reader: Option<RemoteOperationalStatusReader>,
     ) {
         self.code_diagnostics_authority = code_diagnostics_authority;
         self.doctor_report_reader = doctor_report_reader;
+        self.remote_operational_status_reader = remote_operational_status_reader;
     }
 }
 
@@ -659,7 +684,9 @@ async fn build_state_inner(
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader,
+        remote_operational_status_reader,
         code_index_freshness_reader,
+        explorer_semantic_reader,
         feedback_status_reader,
         code_diagnostics_broker,
         application_invocation_executor,
@@ -729,6 +756,7 @@ async fn build_state_inner(
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
         code_index_freshness_reader,
+        explorer_semantic_reader,
         feedback_status_reader,
         storage_mode,
         store_root,
@@ -743,10 +771,15 @@ async fn build_state_inner(
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader: None,
+        remote_operational_status_reader: None,
         application_invocation_executor,
         delivery_settlements,
     };
-    state.retain_admitted_authorities(code_diagnostics_authority, doctor_report_reader);
+    state.retain_admitted_authorities(
+        code_diagnostics_authority,
+        doctor_report_reader,
+        remote_operational_status_reader,
+    );
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
     if warm_token_counts {
@@ -794,7 +827,14 @@ pub async fn build_selected_project_state(
             // selected state's exact canonical root and returns only a mounted
             // scheduler, so the root-addressed read port is safe to reuse.
             doctor_report_reader: None,
+            // Remote Brain operational status is daemon-wide, not bound to the
+            // active project's Doctor scope, so the selected project reuses
+            // the same admitted reader.
+            remote_operational_status_reader: active.remote_operational_status_reader.clone(),
             code_index_freshness_reader: active.code_index_freshness_reader.clone(),
+            // Like freshness, the semantic reader is root-addressed and
+            // resolves the selected state's exact root on every call.
+            explorer_semantic_reader: active.explorer_semantic_reader.clone(),
             feedback_status_reader: active.feedback_status_reader.clone(),
             code_diagnostics_broker: None,
             application_invocation_executor: active.application_invocation_executor.clone(),
@@ -808,67 +848,6 @@ pub fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),
     }
-}
-
-/// Builds state and runs the dashboard server until `shutdown` resolves.
-/// Binds `host:port` (`port` 0 lets the OS pick) and prints the URL on
-/// stderr; the URL line on stdout is stable output for wrappers to parse.
-/// Pass `open: true` to also open the URL in the default browser (CLI --open).
-///
-/// `spa_routes` is the owning binary's embedded single-page-app router; see
-/// [`router`] for the contract it must satisfy.
-pub async fn run_until_shutdown<F>(
-    cg: &TraceDecay,
-    host: &str,
-    port: u16,
-    open: bool,
-    spa_routes: Router,
-    shutdown: F,
-) -> Result<()>
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    run_until_shutdown_inner(
-        cg,
-        DashboardRunRequest {
-            host,
-            port,
-            spa_routes,
-            options: DashboardRunOptions::production(open),
-            test_authority: None,
-            test_project_graph_resolver: None,
-            test_project_graph: None,
-        },
-        shutdown,
-    )
-    .await
-}
-
-#[doc(hidden)]
-pub async fn run_until_shutdown_for_tests<F>(
-    cg: &TraceDecay,
-    host: &str,
-    port: u16,
-    spa_routes: Router,
-    shutdown: F,
-) -> Result<()>
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    run_until_shutdown_inner(
-        cg,
-        DashboardRunRequest {
-            host,
-            port,
-            spa_routes,
-            options: DashboardRunOptions::test(),
-            test_authority: None,
-            test_project_graph_resolver: None,
-            test_project_graph: None,
-        },
-        shutdown,
-    )
-    .await
 }
 
 #[doc(hidden)]
@@ -892,7 +871,6 @@ where
             host,
             port,
             spa_routes,
-            options: DashboardRunOptions::test(),
             test_authority: Some(&authority),
             test_project_graph_resolver: Some(project_graph_resolver),
             test_project_graph: Some(Arc::clone(&cg)),
@@ -902,33 +880,10 @@ where
     .await
 }
 
-#[derive(Debug, Clone, Copy)]
-struct DashboardRunOptions {
-    open: bool,
-    warm_token_counts: bool,
-}
-
-impl DashboardRunOptions {
-    fn production(open: bool) -> Self {
-        Self {
-            open,
-            warm_token_counts: true,
-        }
-    }
-
-    fn test() -> Self {
-        Self {
-            open: false,
-            warm_token_counts: false,
-        }
-    }
-}
-
 struct DashboardRunRequest<'a> {
     host: &'a str,
     port: u16,
     spa_routes: Router,
-    options: DashboardRunOptions,
     test_authority: Option<&'a DashboardHostAdmissionTestAuthorityV1>,
     test_project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
     test_project_graph: Option<Arc<TraceDecay>>,
@@ -946,7 +901,6 @@ where
         host,
         port,
         spa_routes,
-        options,
         test_authority,
         test_project_graph_resolver,
         test_project_graph,
@@ -964,7 +918,10 @@ where
     let state = build_state_inner(
         cg,
         test_project_graph,
-        options.warm_token_counts,
+        // The test harness is the only remaining direct-serve entry; the
+        // production dashboard is served by the daemon MCP tool, which warms
+        // token counts through its own composition.
+        false,
         DashboardStateCompositionV1 {
             project_graph_resolver: test_project_graph_resolver,
             code_graph_read_admission: test_authority
@@ -989,7 +946,9 @@ where
                 .and_then(|authority| authority.automation_writer.clone())
                 .unwrap_or_else(standalone_dashboard_automation_writer),
             doctor_report_reader: None,
+            remote_operational_status_reader: None,
             code_index_freshness_reader: None,
+            explorer_semantic_reader: None,
             feedback_status_reader: None,
             code_diagnostics_broker: Some(code_diagnostics_broker),
             application_invocation_executor: test_authority
@@ -1006,14 +965,6 @@ where
     // Stable, parseable line for wrappers (the Hermes plugin reads this).
     println!("tracedecay dashboard listening on {url}");
     eprintln!("Serving project {}", cg.project_root().display());
-    eprintln!("Press Ctrl+C to stop.");
-
-    if options.open {
-        match open::that(&url) {
-            Ok(()) => eprintln!("Opened dashboard in default browser: {url}"),
-            Err(e) => eprintln!("Warning: could not open browser for {url}: {e}"),
-        }
-    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -1021,25 +972,8 @@ where
         .map_err(|e| config_error(format!("dashboard server error: {e}")))
 }
 
-/// Runs the dashboard server until interrupted by Ctrl-C.
-///
-/// `spa_routes` is the owning binary's embedded single-page-app router; see
-/// [`router`] for the contract it must satisfy.
-pub async fn run(
-    cg: &TraceDecay,
-    host: &str,
-    port: u16,
-    open: bool,
-    spa_routes: Router,
-) -> Result<()> {
-    run_until_shutdown(cg, host, port, open, spa_routes, async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await
-}
-
-/// Shared bind logic for both CLI `run` and the MCP `tracedecay_dashboard` tool
-/// (so port 0 allocation and URL formatting are consistent, no duplication).
+/// Shared bind logic for the MCP `tracedecay_dashboard` tool and the test
+/// harness (so port 0 allocation and URL formatting are consistent).
 pub async fn bind_dashboard(
     host: &str,
     port: u16,
@@ -1334,6 +1268,7 @@ fn router_with_active_application(
         .route("/api/doctor/{*tail}", any(active_api_gateway))
         .route("/api/storage/{*tail}", any(active_api_gateway))
         .route("/api/code-index/{*tail}", any(active_api_gateway))
+        .route("/api/remote/{*tail}", any(active_api_gateway))
         .route("/api/feedback/status", any(active_api_gateway))
         .route("/api/events", any(active_api_gateway))
         .route("/api/events/delivery-ack", any(active_api_gateway))
@@ -1560,6 +1495,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/code-index/freshness",
             get(code_index_freshness_api::freshness),
         )
+        .route("/api/remote/status", get(remote_status_api::status))
         .route("/api/delivery/overview", get(delivery_api::overview))
         .route("/api/events", get(events_api::events))
         .route(
@@ -2188,6 +2124,7 @@ mod authority_tests {
                 savings_db_path: String::new(),
                 project_root: project_root.clone(),
                 code_index_freshness_reader: None,
+                explorer_semantic_reader: None,
                 feedback_status_reader: None,
                 storage_mode: storage_mode_label(&layout.storage_mode).to_owned(),
                 store_root: layout.data_root.clone(),
@@ -2205,6 +2142,7 @@ mod authority_tests {
                 automation_scheduler_reconciler: None,
                 automation_writer: standalone_dashboard_automation_writer(),
                 doctor_report_reader: None,
+                remote_operational_status_reader: None,
                 application_invocation_executor: None,
                 delivery_settlements: Arc::new(
                     events_delivery::DashboardDeliverySettlementRegistryV1::new(None),
@@ -2319,6 +2257,7 @@ mod authority_tests {
                 ),
             ),
             Some(Arc::clone(&doctor_reader)),
+            None,
         );
         let state = fixture.state;
 

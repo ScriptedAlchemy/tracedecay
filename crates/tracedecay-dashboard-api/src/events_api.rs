@@ -953,6 +953,7 @@ pub(crate) async fn dashboard_state_fixture(
         savings_db_path: String::new(),
         project_root,
         code_index_freshness_reader: None,
+        explorer_semantic_reader: None,
         feedback_status_reader: None,
         storage_mode: "profile_sharded".to_owned(),
         store_root,
@@ -967,6 +968,7 @@ pub(crate) async fn dashboard_state_fixture(
         automation_scheduler_reconciler: None,
         automation_writer: crate::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
+        remote_operational_status_reader: None,
         application_invocation_executor: None,
         delivery_settlements: Arc::new(
             crate::events_delivery::DashboardDeliverySettlementRegistryV1::new(None),

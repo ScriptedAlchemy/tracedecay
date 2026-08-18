@@ -332,9 +332,13 @@ pub(super) async fn handle_dashboard(
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    remote_operational_status: Option<
+        crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1,
+    >,
     code_index_freshness_reader: Option<
         crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
     >,
+    explorer_semantic_reader: Option<crate::dashboard::ExplorerSemanticReader>,
     feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -549,7 +553,12 @@ pub(super) async fn handle_dashboard(
                     automation_observation,
                     automation_writer,
                     doctor_report_reader,
+                    remote_operational_status_reader: remote_operational_status.map(|provider| {
+                        Arc::new(move || provider())
+                            as crate::dashboard::RemoteOperationalStatusReader
+                    }),
                     code_index_freshness_reader,
+                    explorer_semantic_reader,
                     feedback_status_reader,
                     code_diagnostics_broker,
                     application_invocation_executor,

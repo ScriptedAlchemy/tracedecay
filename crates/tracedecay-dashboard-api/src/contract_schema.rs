@@ -41,6 +41,7 @@ use super::automation_scheduler_api::AutomationSchedulerStatusV1;
 use super::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
 use super::delivery_api::DeliveryOverviewV1;
 use super::doctor_findings_api::DoctorFindingsPayloadV1;
+use super::remote_status_api::RemoteOperationalStatusPayloadV1;
 use super::explorer_api::{ExplorerQueryRunV1, ExplorerReadContextV1, ExplorerSessionSizeV1};
 use super::graph_service::{
     GraphNeighborsPayloadV1, GraphNodePayloadV1, GraphOverviewPayloadV1, GraphPathPayloadV1,
@@ -73,6 +74,7 @@ struct DashboardContractCatalogV1 {
     storage_telemetry: StorageTelemetryPayloadV1,
     storage_findings: StorageFindingsPayloadV1,
     doctor_findings: DoctorFindingsPayloadV1,
+    remote_operational_status: RemoteOperationalStatusPayloadV1,
     explorer_query_run: ExplorerQueryRunV1,
     explorer_session_size: DashboardEnvelopeV1<Option<ExplorerSessionSizeV1>>,
     explorer_read_context: DashboardEnvelopeV1<Option<ExplorerReadContextV1>>,

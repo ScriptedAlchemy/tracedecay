@@ -341,6 +341,11 @@ pub(super) async fn dispatch_info_tools(
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match tool_name {
+        "tracedecay_remote_status" => info::handle_remote_status(
+            cg.project_root(),
+            &args,
+            options.remote_operational_status.as_ref(),
+        ),
         "tracedecay_status" => {
             info::handle_status(
                 cg,
@@ -943,7 +948,9 @@ pub(super) async fn dispatch_session_workflow_tools(
                 options.automation_scheduler_reconciler.clone(),
                 options.automation_writer.clone(),
                 options.doctor_report_reader.clone(),
+                options.remote_operational_status.clone(),
                 options.code_index_freshness_reader.clone(),
+                options.explorer_semantic_reader.clone(),
                 options.feedback_status_reader.clone(),
                 options.diagnostics_lsp.clone(),
                 options.dashboard_application_invocation_executor.clone(),
