@@ -90,8 +90,18 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
             .iter()
             .find(|source| source["source_id"] == "knowledge")
             .expect("knowledge source");
-        assert_eq!(knowledge["coverage"]["completeness"], "unknown");
-        assert_eq!(knowledge["total_units"], Value::Null);
+        // The final-v2 memory floor reports genuine coverage: a complete fact
+        // page with complete verified-graph coverage carries an exact total.
+        assert_eq!(knowledge["coverage"]["completeness"], "complete");
+        let knowledge_rows = knowledge["page"]["rows"]
+            .as_array()
+            .unwrap_or_else(|| panic!("knowledge rows missing: {knowledge}"))
+            .len() as u64;
+        assert_eq!(
+            knowledge["total_units"].as_u64(),
+            Some(knowledge_rows),
+            "complete knowledge coverage must carry the exact unit total: {knowledge}"
+        );
         assert!(
             knowledge["page"]["rows"]
                 .as_array()

@@ -112,7 +112,6 @@ impl TraceDecay {
         &self.store_layout
     }
 
-    #[cfg(unix)]
     pub(crate) fn retained_store_runtime_registry(
         &self,
     ) -> std::sync::Arc<

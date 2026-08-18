@@ -489,7 +489,7 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
         let (status, rejected_filter) = get_json(&agent, &format!("{endpoint}?state=staged"));
         assert_eq!(status, 400);
         assert!(
-            rejected_filter["error"]
+            rejected_filter["detail"]
                 .as_str()
                 .is_some_and(|error| error.contains("expected applied or quarantined")),
             "non-terminal filter must be rejected: {rejected_filter}"

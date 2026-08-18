@@ -1053,13 +1053,14 @@ fn bind_test_session_relation_graph_with_registry(
     use std::time::{Duration, Instant};
 
     use crate::session_temporal::relations::SessionRelationScope;
-    use tracedecay_graph_db::{GraphDbRegistration, NeverCancelled};
+    use tracedecay_graph_db::{GraphDbOwnerRegistrationV1, GraphDbRegistration, NeverCancelled};
     use tracedecay_store::{
-        RetainedGraphStoreLeaseV1, StoreRuntimeBindingV1, StoreShardScopeV1,
+        RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
+        RetainedGraphStoreOwnerOperationLeaseErrorV1, StoreRuntimeBindingV1, StoreShardScopeV1,
         VerifiedStoreLocatorV1, canonical_store_locator_digest, graph_store_locator_path,
     };
 
-    #[derive(Debug)]
+    #[derive(Clone, Debug)]
     struct TestSessionGraphLease {
         binding: StoreRuntimeBindingV1,
         verified_locator: VerifiedStoreLocatorV1,
@@ -1077,6 +1078,27 @@ fn bind_test_session_relation_graph_with_registry(
 
         fn canonical_path(&self) -> &std::path::Path {
             &self.canonical_path
+        }
+    }
+
+    impl RetainedGraphStoreOwnerAttachmentV1 for TestSessionGraphLease {
+        fn binding(&self) -> &StoreRuntimeBindingV1 {
+            &self.binding
+        }
+
+        fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+            &self.verified_locator
+        }
+
+        fn canonical_path(&self) -> &std::path::Path {
+            &self.canonical_path
+        }
+
+        fn issue_operation_lease(
+            &self,
+        ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>
+        {
+            Ok(Arc::new(self.clone()))
         }
     }
 
@@ -1118,23 +1140,41 @@ fn bind_test_session_relation_graph_with_registry(
             }
         })?,
     );
-    let graph = registry
-        .resolve(GraphDbRegistration {
-            authority_lease: Arc::new(TestSessionGraphLease {
-                binding: binding.clone(),
-                verified_locator: verified_locator.clone(),
-                canonical_path,
-            }),
-            cancellation: Arc::new(NeverCancelled),
-            lifecycle_cancellation: Arc::new(NeverCancelled),
-            deadline: Instant::now() + Duration::from_secs(30),
+    let lease = TestSessionGraphLease {
+        binding: binding.clone(),
+        verified_locator: verified_locator.clone(),
+        canonical_path,
+    };
+    let operation = GraphDbRegistration {
+        authority_lease: Arc::new(lease.clone()),
+        cancellation: Arc::new(NeverCancelled),
+        lifecycle_cancellation: Arc::new(NeverCancelled),
+        deadline: Instant::now() + Duration::from_secs(30),
+    };
+    // Owner attachment is the only registry entry-creation path: an ordinary
+    // `resolve` can reuse a mounted runtime but never mounts one. Mount through
+    // the exact map-owner attachment first (matching the daemon's
+    // `open_session_relation_owner`), then resolve the ordinary lease the
+    // database retains; the transient attachment may drop afterwards without
+    // unmounting the Ready entry.
+    let owner_attachment = registry
+        .resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+            operation: operation.clone(),
+            authority_attachment: Box::new(lease),
         })
         .map_err(
             |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "resolve test session relation graph".to_owned(),
+                operation: "mount test session relation graph owner".to_owned(),
                 message: error.to_string(),
             },
         )?;
+    let graph = registry.resolve(operation).map_err(|error| {
+        tracedecay_runtime_core::errors::TraceDecayError::Database {
+            operation: "resolve test session relation graph".to_owned(),
+            message: error.to_string(),
+        }
+    })?;
+    drop(owner_attachment);
     database.bind_session_relation_graph(scope, graph, binding.clone(), verified_locator)
 }
 
