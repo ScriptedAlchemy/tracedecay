@@ -111,6 +111,7 @@ pub(crate) fn install_dashboard_hook_readiness_projection() -> crate::errors::Re
         .copied()
 }
 use tool_hints::{HintAgent, ToolHint};
+use tracedecay_policy::hint_delivery::HintDeliveryDecisionV1;
 
 pub async fn dispatch_kimi_event(event_json: &str, project_root: &Path) -> Option<String> {
     let telemetry = record_other_hook_invoked(Some(project_root), "kimi_event", event_json);
@@ -852,16 +853,16 @@ fn deduped_project_hint_with_id(
     // A suppressed decision still records the hint as it stood; only the
     // escalation path reports the escalated wording.
     let (event, reported) = match decision {
-        tool_hints::HintDecision::Emit => ("hint_emitted", hint),
-        tool_hints::HintDecision::Escalate => ("hint_escalated", hint.escalated()),
-        tool_hints::HintDecision::SuppressedBudget => ("suppressed_budget", hint),
-        tool_hints::HintDecision::SuppressedDuplicate => ("suppressed_duplicate", hint),
+        HintDeliveryDecisionV1::Deliver => ("hint_emitted", hint),
+        HintDeliveryDecisionV1::DeliverEscalation => ("hint_escalated", hint.escalated()),
+        HintDeliveryDecisionV1::SuppressBudget => ("suppressed_budget", hint),
+        HintDeliveryDecisionV1::SuppressDuplicate => ("suppressed_duplicate", hint),
     };
     record_hint_analytics(root, event, agent, Some(&session_id), hint_id, &reported);
 
     matches!(
         decision,
-        tool_hints::HintDecision::Emit | tool_hints::HintDecision::Escalate
+        HintDeliveryDecisionV1::Deliver | HintDeliveryDecisionV1::DeliverEscalation
     )
     .then_some(reported)
 }

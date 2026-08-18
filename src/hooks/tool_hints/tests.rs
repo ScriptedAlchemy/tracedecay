@@ -382,24 +382,24 @@ fn dedupe_emits_each_category_once_per_session() {
     let mut dedupe = ToolHintDedupe::default();
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::SuppressedDuplicate
+        HintDeliveryDecisionV1::SuppressDuplicate
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::FileRead),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::ToolDescriptorRead),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     // Fresh session gets its own budget.
     assert_eq!(
         dedupe.decide("s2", HintCategory::Search),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
 }
 
@@ -408,19 +408,19 @@ fn descriptor_reads_dedupe_separately_from_source_file_reads() {
     let mut dedupe = ToolHintDedupe::default();
     assert_eq!(
         dedupe.decide("s1", HintCategory::FileRead),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::ToolDescriptorRead),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::FileRead),
-        HintDecision::SuppressedDuplicate
+        HintDeliveryDecisionV1::SuppressDuplicate
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::ToolDescriptorRead),
-        HintDecision::SuppressedDuplicate
+        HintDeliveryDecisionV1::SuppressDuplicate
     );
 }
 
@@ -430,25 +430,25 @@ fn per_session_budget_caps_total_hints() {
     // Three distinct categories fit the budget.
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::FileRead),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::Impact),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     // The fourth distinct category is held back by the budget, not dedupe.
     assert_eq!(
         dedupe.decide("s1", HintCategory::CallGraph),
-        HintDecision::SuppressedBudget
+        HintDeliveryDecisionV1::SuppressBudget
     );
     // A different session is unaffected by s1's exhausted budget.
     assert_eq!(
         dedupe.decide("s2", HintCategory::CallGraph),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
 }
 
@@ -457,30 +457,30 @@ fn escalation_fires_exactly_once_after_repeated_triggers() {
     let mut dedupe = ToolHintDedupe::default();
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     // Repeat fires below the threshold stay silent.
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::SuppressedDuplicate
+        HintDeliveryDecisionV1::SuppressDuplicate
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::SuppressedDuplicate
+        HintDeliveryDecisionV1::SuppressDuplicate
     );
     // Third post-hint fire unlocks the single escalation.
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::Escalate
+        HintDeliveryDecisionV1::DeliverEscalation
     );
     // Everything after escalation is permanently silent.
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::SuppressedDuplicate
+        HintDeliveryDecisionV1::SuppressDuplicate
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::SuppressedDuplicate
+        HintDeliveryDecisionV1::SuppressDuplicate
     );
 }
 
@@ -490,26 +490,26 @@ fn escalation_does_not_count_against_the_budget() {
     // Exhaust the budget with three categories, then escalate the first.
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::FileRead),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::Impact),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     for _ in 0..(ESCALATION_TRIGGER_THRESHOLD - 1) {
         assert_eq!(
             dedupe.decide("s1", HintCategory::Search),
-            HintDecision::SuppressedDuplicate
+            HintDeliveryDecisionV1::SuppressDuplicate
         );
     }
     // Escalation is allowed even though the budget is spent.
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::Escalate
+        HintDeliveryDecisionV1::DeliverEscalation
     );
 }
 
@@ -536,19 +536,19 @@ fn dedupe_round_trips_through_disk() {
     let mut dedupe = ToolHintDedupe::load_or_default(&path);
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     dedupe.save(&path).unwrap();
 
     let mut reloaded = ToolHintDedupe::load_or_default(&path);
     assert_eq!(
         reloaded.decide("s1", HintCategory::Search),
-        HintDecision::SuppressedDuplicate,
+        HintDeliveryDecisionV1::SuppressDuplicate,
         "persisted (session, category) pairs must suppress re-emission"
     );
     assert_eq!(
         reloaded.decide("s1", HintCategory::FileRead),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
 }
 
@@ -559,7 +559,7 @@ fn save_writes_versioned_schema() {
     let mut dedupe = ToolHintDedupe::default();
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     dedupe.save(&path).unwrap();
 
@@ -585,21 +585,21 @@ fn legacy_store_migrates_to_versioned_schema() {
     // v1 categories load as already-hinted: they suppress, not re-emit.
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::SuppressedDuplicate
+        HintDeliveryDecisionV1::SuppressDuplicate
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::FileRead),
-        HintDecision::SuppressedDuplicate
+        HintDeliveryDecisionV1::SuppressDuplicate
     );
     // The two migrated hints already count against s1's budget, so only one
     // more distinct category can emit before the cap.
     assert_eq!(
         dedupe.decide("s1", HintCategory::Impact),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
     assert_eq!(
         dedupe.decide("s1", HintCategory::CallGraph),
-        HintDecision::SuppressedBudget
+        HintDeliveryDecisionV1::SuppressBudget
     );
 
     // Persisting rewrites the file in v2 shape.
@@ -612,7 +612,7 @@ fn legacy_store_migrates_to_versioned_schema() {
     let mut reloaded = ToolHintDedupe::load_or_default(&path);
     assert_eq!(
         reloaded.decide("s1", HintCategory::Search),
-        HintDecision::SuppressedDuplicate
+        HintDeliveryDecisionV1::SuppressDuplicate
     );
 }
 
@@ -630,7 +630,7 @@ fn oversized_store_resets() {
     // Reset means s0's category is treated as never hinted.
     assert_eq!(
         dedupe.decide("s0", HintCategory::Search),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
 }
 
@@ -657,7 +657,7 @@ fn dedupe_load_tolerates_missing_and_corrupt_files() {
     let mut dedupe = ToolHintDedupe::load_or_default(&missing);
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
 
     let corrupt = dir.path().join("corrupt.json");
@@ -665,7 +665,7 @@ fn dedupe_load_tolerates_missing_and_corrupt_files() {
     let mut dedupe = ToolHintDedupe::load_or_default(&corrupt);
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
-        HintDecision::Emit
+        HintDeliveryDecisionV1::Deliver
     );
 }
 

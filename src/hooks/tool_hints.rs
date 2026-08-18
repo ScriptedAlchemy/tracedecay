@@ -440,25 +440,6 @@ pub const MAX_HINTS_PER_SESSION: usize = 3;
 /// gets exactly one louder reminder, then permanent silence for that category.
 pub const ESCALATION_TRIGGER_THRESHOLD: u32 = 3;
 
-/// Outcome of a single hint-candidate decision. Mirrors the terminal-event
-/// vocabulary the analytics layer records: `Emit`/`Escalate` surface a hint,
-/// while the `Suppressed*` variants drop it for distinct reasons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HintDecision {
-    /// First surfacing of this category in the session; counts against the
-    /// per-session budget.
-    Emit,
-    /// The one-time stronger re-hint after repeated native usage. Does not count
-    /// against the budget (it is the escalation allowance).
-    Escalate,
-    /// This category already surfaced (or already escalated) and is now silent,
-    /// or its escalation threshold is not yet reached.
-    SuppressedDuplicate,
-    /// The per-session hint budget is exhausted, so a not-yet-seen category is
-    /// held back.
-    SuppressedBudget,
-}
-
 /// Per (session, category) escalation bookkeeping.
 #[derive(Debug, Clone, Copy, Default)]
 struct CategoryState {
@@ -480,14 +461,15 @@ pub struct ToolHintDedupe {
 }
 
 impl ToolHintDedupe {
-    /// Decides what to do with one hint candidate, updating per-session budget
-    /// and per-category escalation counters. This is the impure dedupe layer;
-    /// the pure text decision lives in [`decide_hint`].
+    /// Evaluates one hint candidate through the canonical policy evaluator
+    /// ([`decide_hint_delivery`]) and applies the resulting per-session budget
+    /// and per-category escalation state mutations. The policy decision is
+    /// returned unchanged; rendering happens only from it.
     pub fn decide(
         &mut self,
         session_id: impl Into<String>,
         category: HintCategory,
-    ) -> HintDecision {
+    ) -> HintDeliveryDecisionV1 {
         let session_id = session_id.into();
         let delivered_in_session = *self.emitted.get(&session_id).unwrap_or(&0);
         let state = self
@@ -507,21 +489,19 @@ impl ToolHintDedupe {
             HintDeliveryDecisionV1::Deliver => {
                 *self.emitted.entry(session_id).or_default() += 1;
                 state.hinted = true;
-                HintDecision::Emit
             }
             HintDeliveryDecisionV1::DeliverEscalation => {
                 state.triggers_after_hint = state.triggers_after_hint.saturating_add(1);
                 state.escalated = true;
-                HintDecision::Escalate
             }
             HintDeliveryDecisionV1::SuppressDuplicate => {
                 if state.hinted && !state.escalated {
                     state.triggers_after_hint = state.triggers_after_hint.saturating_add(1);
                 }
-                HintDecision::SuppressedDuplicate
             }
-            HintDeliveryDecisionV1::SuppressBudget => HintDecision::SuppressedBudget,
+            HintDeliveryDecisionV1::SuppressBudget => {}
         }
+        decision
     }
 
     /// Loads the dedupe state from `path`, tolerating a missing file (empty

@@ -118,7 +118,7 @@ fn session_stream_eval_rotates_repeated_hints() {
         HintCategory::Search,
         HintCategory::Search,
     ];
-    let decisions: Vec<HintDecision> = sequence
+    let decisions: Vec<HintDeliveryDecisionV1> = sequence
         .into_iter()
         .map(|category| dedupe.decide("realistic-session", category))
         .collect();
@@ -126,14 +126,14 @@ fn session_stream_eval_rotates_repeated_hints() {
     assert_eq!(
         decisions,
         vec![
-            HintDecision::Emit,
-            HintDecision::SuppressedDuplicate,
-            HintDecision::Emit,
-            HintDecision::SuppressedDuplicate,
-            HintDecision::Emit,
-            HintDecision::SuppressedBudget,
-            HintDecision::Escalate,
-            HintDecision::SuppressedDuplicate,
+            HintDeliveryDecisionV1::Deliver,
+            HintDeliveryDecisionV1::SuppressDuplicate,
+            HintDeliveryDecisionV1::Deliver,
+            HintDeliveryDecisionV1::SuppressDuplicate,
+            HintDeliveryDecisionV1::Deliver,
+            HintDeliveryDecisionV1::SuppressBudget,
+            HintDeliveryDecisionV1::DeliverEscalation,
+            HintDeliveryDecisionV1::SuppressDuplicate,
         ]
     );
 }
