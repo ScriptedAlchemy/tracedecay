@@ -130,7 +130,10 @@ jobs:
     name: MCP conformance smoke
     needs: dashboard-assets
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Cold `cargo build --bin tracedecay` plus the SDK smoke has been
+    # cancelled at exactly 20m during the compile step. 30 leaves
+    # headroom without hiding a hung linker.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 

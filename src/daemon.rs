@@ -187,7 +187,9 @@ pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay;
 pub(crate) mod project_open_owners;
 #[cfg(feature = "test-transport")]
-pub(crate) use dashboard_configuration_test_runtime::dashboard_configuration_runtime_for_test;
+pub(crate) use dashboard_configuration_test_runtime::{
+    dashboard_configuration_runtime_for_test, register_dashboard_test_retained_runtime,
+};
 pub(crate) mod query_authority_provider;
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) mod retained_test_support;

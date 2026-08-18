@@ -801,11 +801,11 @@ fn rename_noreplace(parent: &Dir, from: &OsStr, to: &OsStr) -> std::io::Result<(
                 libc::RENAME_NOREPLACE,
             )
         };
-        return if result == 0 {
+        if result == 0 {
             Ok(())
         } else {
             Err(std::io::Error::last_os_error())
-        };
+        }
     }
     #[cfg(target_os = "macos")]
     {

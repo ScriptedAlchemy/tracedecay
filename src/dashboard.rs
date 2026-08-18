@@ -70,7 +70,8 @@ pub fn register_test_schema_installer() {
 /// mounted into dashboard state with the authority. Runs use canonical runner
 /// locking directly, so a model turn never holds this broad writer. The
 /// retained invocation service is mounted with the graph's exact project
-/// observability identity before that authority can admit backend execution.
+/// observability identity and retained application runtime before that
+/// authority can admit backend execution.
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
 pub async fn dashboard_automation_authority_for_test(
@@ -127,13 +128,20 @@ pub async fn dashboard_automation_authority_for_test(
     );
     invocation_service
         .mount_observability_producer(
-            project_root,
+            project_root.clone(),
             project_database,
-            project_id,
+            project_id.clone(),
             configuration.snapshot.effective_behavior_digest,
             configuration_policy_digest,
         )
         .await?;
+    crate::daemon::register_dashboard_test_retained_runtime(
+        &invocation_service,
+        &cg,
+        project_root.clone(),
+        project_id,
+    )
+    .await?;
     let authority =
         crate::daemon::dashboard_automation::compose_dashboard_automation_authority_for_test(
             profile_root,

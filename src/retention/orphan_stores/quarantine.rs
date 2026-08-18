@@ -687,7 +687,7 @@ fn rename_noreplace(parent: &Dir, from: &OsStr, to: &OsStr) -> std::io::Result<(
         if result == 0 {
             return Ok(());
         }
-        return Err(std::io::Error::last_os_error());
+        Err(std::io::Error::last_os_error())
     }
     #[cfg(target_os = "macos")]
     {

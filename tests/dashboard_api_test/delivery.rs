@@ -17,6 +17,10 @@ fn delivery_overview_serves_real_git_reads_and_typed_unmounted_authority() {
             "pub fn delivery_fixture() -> &'static str { \"initial\" }\n",
         );
         commit_all(&project_root, "initial delivery fixture");
+        // Host `git init` still defaults to `master` on Ubuntu CI images;
+        // this test owns an attached `main` so the live-head assertion is
+        // not host-default-branch noise.
+        git(&project_root, &["branch", "-M", "main"]);
         write_file(
             &project_root.join("src/review.rs"),
             "pub fn review_context() -> bool { true }\n",

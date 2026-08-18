@@ -277,26 +277,45 @@ for line in sys.stdin:
         install_fake_codex_launcher(&fake_codex_script, &fake_codex_bin);
         let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake_codex_bin);
 
-        let mut global_config = tracedecay::user_config::UserConfig::default();
-        global_config.automation.enabled = true;
-        global_config.automation.backend =
-            tracedecay_agent_hosts::automation::config::AutomationBackend::CodexAppServer;
-        global_config
-            .save()
-            .expect("global user config should save");
-
         let (cg, host_runtime) = setup_project(&project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server_with_host_runtime(
+        // User-job execution reads the pinned configuration snapshot, not
+        // legacy UserConfig.save(). Mount the configuration runtime and
+        // enable Codex through that authority, matching the retained
+        // automation smoke.
+        let mut server = spawn_dashboard_server_with_configuration_runtime(
             cg,
             host_runtime,
             dashboard::DashboardTestProjectGraphsV1::default(),
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;
+
+        let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
+        let (status, current_config) = get_json(&agent, &config_url);
+        assert_eq!(status, 200, "config read should succeed: {current_config}");
+        let expected_revision_id = current_config["configuration_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!("config read must return the pinned revision: {current_config}")
+            });
+        let (status, config) = patch_json_body(
+            &agent,
+            &config_url,
+            &serde_json::json!({
+                "expected_revision_id": expected_revision_id,
+                "idempotency_key": "dashboard-user-job-retained-settlement",
+                "enabled": true,
+                "backend": "codex_app_server",
+                "host_mode": "standalone"
+            }),
+        );
+        assert_eq!(status, 200, "automation config patch failed: {config}");
+        assert_eq!(config["effective"]["enabled"], true);
+        assert_eq!(config["effective"]["backend"], "codex_app_server");
 
         let jobs_url = format!("{base_url}/api/automation/jobs");
         let (status, created) = post_json_body(

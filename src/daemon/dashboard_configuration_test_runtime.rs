@@ -286,6 +286,42 @@ pub(crate) async fn dashboard_configuration_runtime_for_test(
             policy_digest,
         )
         .await?;
+    register_dashboard_test_retained_runtime(&service, &cg, project_root.clone(), project_id)
+        .await?;
+    let operation = tracedecay_application::configuration_surface_operation(
+        ApplicationSurfaceOperation::ConfigurationBatch.as_str(),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("dashboard configuration contract is invalid: {error}"),
+    })?
+    .ok_or_else(|| TraceDecayError::Config {
+        message: "dashboard configuration batch operation is not registered".to_owned(),
+    })?;
+    Ok(Arc::new(DashboardConfigurationRuntimeForTestV1 {
+        service,
+        lsp_registry: Arc::new(Mutex::new(LspSessionRegistry::default())),
+        project_root,
+        scope,
+        user_profile_id,
+        result_contract: operation.result_contract().clone(),
+    }))
+}
+
+/// Registers the same retained application runtime production project-open
+/// mounts, on a dashboard integration-test invocation service. User-job
+/// admission goes through `AutomationEffectAuthority::prepare`, which fails
+/// closed without this exact authority.
+pub(crate) async fn register_dashboard_test_retained_runtime(
+    service: &DaemonInvocationService,
+    cg: &Arc<TraceDecay>,
+    project_root: PathBuf,
+    project_id: ProjectId,
+) -> Result<()> {
+    let scope = super::project_open_owners::resolved_scope_for_project(&project_root, &project_id)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("dashboard test retained scope is invalid: {error}"),
+        })?;
+    let observed_at = invocation_now_micros();
     let configuration = cg
         .configuration_runtime()
         .client()
@@ -310,9 +346,9 @@ pub(crate) async fn dashboard_configuration_runtime_for_test(
             })?;
     let retained_ports = super::retained_owner::retained_surface_ports(
         super::retained_owner::ProductionRetainedAuthoritiesV1 {
-            cg: Arc::new(tokio::sync::RwLock::new(Arc::clone(&cg))),
+            cg: Arc::new(tokio::sync::RwLock::new(Arc::clone(cg))),
             project_root: project_root.clone(),
-            project_id: project_id.clone(),
+            project_id,
             mounted_profile_id: None,
             mounted_session_store_id: None,
             mounted_session_root_id: None,
@@ -325,30 +361,13 @@ pub(crate) async fn dashboard_configuration_runtime_for_test(
             configuration_digest: retained_access.configuration_digest.clone(),
         },
     );
-    DaemonRetainedRuntimeRegistrar::new(&service)
+    DaemonRetainedRuntimeRegistrar::new(service)
         .register(
-            project_root.clone(),
-            scope.clone(),
+            project_root,
+            scope,
             retained_access.requester,
             retained_grant,
             retained_ports,
         )
-        .await?;
-    let operation = tracedecay_application::configuration_surface_operation(
-        ApplicationSurfaceOperation::ConfigurationBatch.as_str(),
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("dashboard configuration contract is invalid: {error}"),
-    })?
-    .ok_or_else(|| TraceDecayError::Config {
-        message: "dashboard configuration batch operation is not registered".to_owned(),
-    })?;
-    Ok(Arc::new(DashboardConfigurationRuntimeForTestV1 {
-        service,
-        lsp_registry: Arc::new(Mutex::new(LspSessionRegistry::default())),
-        project_root,
-        scope,
-        user_profile_id,
-        result_contract: operation.result_contract().clone(),
-    }))
+        .await
 }
