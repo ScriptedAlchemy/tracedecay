@@ -358,14 +358,8 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
     let feature_worktree =
         WorktreeId::new("worktree.session-sync.feature").expect("feature worktree");
     for root in [&repository_root, &linked_root] {
-        crate::storage::write_enrollment_marker(
-            root,
-            &crate::storage::EnrollmentMarker {
-                project_id: project.as_str().to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .expect("project enrollment");
+        crate::storage::pin_fixture_repository_identity(root, project.as_str())
+            .expect("project enrollment");
     }
     let roots = vec![
         repository_root

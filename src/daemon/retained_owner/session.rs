@@ -659,7 +659,7 @@ async fn retrieve_bounded(
         query,
     );
     tokio::select! {
-        _ = context.cancellation_signal.cancelled() => {
+        () = context.cancellation_signal.cancelled() => {
             Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::DuringRead))
         }
         outcome = tokio::time::timeout(remaining, retrieval) => {
@@ -673,7 +673,9 @@ fn apply_page(
     page: SessionRetrievalPageView,
     freshness: SessionDataFreshness,
 ) -> Result<(), RetainedSurfaceExecutionErrorV1> {
-    result.selected_project_root = page.temporal.authorized_root.clone();
+    result
+        .selected_project_root
+        .clone_from(&page.temporal.authorized_root);
     result.count = Some(page.results.len());
     result.results = Some(
         page.results
@@ -690,7 +692,9 @@ fn apply_temporal(
     temporal_view: SessionTemporalMetadataView,
     freshness: SessionDataFreshness,
 ) {
-    result.selected_project_root = temporal_view.authorized_root.clone();
+    result
+        .selected_project_root
+        .clone_from(&temporal_view.authorized_root);
     result.temporal = Some(temporal(temporal_view, freshness));
 }
 

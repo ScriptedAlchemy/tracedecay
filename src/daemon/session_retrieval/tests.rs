@@ -128,7 +128,12 @@ async fn seed_real_page_fixture(
     root: &TemporalAuthorizedRoot,
     rank: usize,
 ) -> RealPageFixture {
-    let provider = if rank % 2 == 0 { "codex" } else { "claude" }.to_owned();
+    let provider = if rank.is_multiple_of(2) {
+        "codex"
+    } else {
+        "claude"
+    }
+    .to_owned();
     let session_id = format!("session.page.{rank:02}");
     let message_id = format!("message.page.{rank:02}");
     let text = format!("canonical content {rank}");

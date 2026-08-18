@@ -14,6 +14,7 @@ use std::{
         Arc, Mutex, RwLock, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 #[cfg(test)]
@@ -46,6 +47,22 @@ use self::ignored_dependencies::exact_activated_serving_generation;
 pub(super) use scope_identity::{latest_matches_scope, latest_matches_scope_identity};
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
+
+/// Bounded exponential backoff between activation retries of the same sealed
+/// generation. Activation of a large artifact is minutes of real work, so the
+/// floor stays above the query staleness threshold and the ceiling keeps a
+/// persistently failing artifact from being retried more than a few times an
+/// hour while never resealing it. Tests shrink the clock, not the shape.
+const ACTIVATION_RETRY_BACKOFF_FLOOR: Duration = if cfg!(test) {
+    Duration::from_millis(50)
+} else {
+    Duration::from_secs(30)
+};
+const ACTIVATION_RETRY_BACKOFF_CEILING: Duration = if cfg!(test) {
+    Duration::from_millis(400)
+} else {
+    Duration::from_mins(10)
+};
 
 #[cfg(test)]
 struct ColdMountFinalCommitGateV1 {
@@ -2094,6 +2111,12 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         };
         let task = tokio::spawn(async move {
+            // Bounded retry state for activating an already-sealed complete
+            // generation. The sealed artifact is immutable and retryable, so a
+            // retryable activation failure must not fall through into a
+            // rebuild+reseal of an equivalent generation.
+            let mut seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+            let mut next_seat_attempt_at: Option<Instant> = None;
             loop {
                 worker_wake.notified().await;
                 if worker_shutting_down.load(Ordering::Acquire) {
@@ -2128,6 +2151,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // generation before rebuild. A cancelled refresh or branch
                 // split must not hide a sealed generation for the duration
                 // of reconcile. Stale is truthful; do not mark_reconciled.
+                let mut seat_retry_pending = false;
                 if serving_generation
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2146,53 +2170,96 @@ impl CodeIndexSchedulerRegistryV1 {
                     })
                     .await;
                     if let Ok(Some((retained, replay_binding))) = remount {
-                        let activation = match replay_binding {
-                            Ok(replay_binding) => {
-                                worker_graph_activation
-                                    .activate(
-                                        &worker_project_id,
-                                        &worker_repository_id,
-                                        &worker_worktree_id,
-                                        retained.clone(),
-                                        replay_binding,
-                                        Arc::clone(&worker_shutting_down),
-                                    )
-                                    .await
-                            }
-                            Err(error) => Err(error),
-                        };
-                        if let Err(error) = activation {
-                            tracing::warn!(
-                                event = "code_index_retained_seat_failed",
-                                path = "background_worker",
-                                error = %error,
-                                "code-index retained generation did not activate; refresh continues without stale serving"
-                            );
+                        if next_seat_attempt_at.is_some_and(|at| Instant::now() < at) {
+                            // A sealed complete generation exists and its
+                            // activation is backing off; hold this pass so the
+                            // scheduled retry activates the same artifact.
+                            seat_retry_pending = true;
                         } else {
-                            let swap_scheduler = Arc::clone(&scheduler);
-                            let swap_serving = Arc::clone(&serving_generation);
-                            let swap_serving_epoch = Arc::clone(&serving_generation_epoch);
-                            let _ = tokio::task::spawn_blocking(move || {
-                                let scheduler = swap_scheduler
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                if scheduler
-                                    .active_publication_matches(&retained)
-                                    .unwrap_or(false)
-                                {
-                                    let mut serving = swap_serving
-                                        .write()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                    *serving = Some(retained.clone());
-                                    swap_serving_epoch.fetch_add(1, Ordering::AcqRel);
-                                    drop(serving);
-                                    let _ = scheduler
-                                        .schedule_semantic_generation(retained.generation());
+                            let activation = match replay_binding {
+                                Ok(replay_binding) => {
+                                    worker_graph_activation
+                                        .activate(
+                                            &worker_project_id,
+                                            &worker_repository_id,
+                                            &worker_worktree_id,
+                                            retained.clone(),
+                                            replay_binding,
+                                            Arc::clone(&worker_shutting_down),
+                                        )
+                                        .await
                                 }
-                            })
-                            .await;
+                                Err(error) => Err(error),
+                            };
+                            match activation {
+                                Err(error) => {
+                                    let retryable = error.is_retryable_activation();
+                                    tracing::warn!(
+                                        event = "code_index_retained_seat_failed",
+                                        path = "background_worker",
+                                        retryable,
+                                        error = %error,
+                                        "code-index retained generation did not activate; refresh continues without stale serving"
+                                    );
+                                    if retryable {
+                                        next_seat_attempt_at =
+                                            Some(Instant::now() + seat_retry_backoff);
+                                        let retry_wake = Arc::clone(&worker_wake);
+                                        let retry_delay = seat_retry_backoff;
+                                        tokio::spawn(async move {
+                                            tokio::time::sleep(retry_delay).await;
+                                            retry_wake.notify_one();
+                                        });
+                                        seat_retry_backoff = seat_retry_backoff
+                                            .saturating_mul(2)
+                                            .min(ACTIVATION_RETRY_BACKOFF_CEILING);
+                                        seat_retry_pending = true;
+                                    } else {
+                                        next_seat_attempt_at = None;
+                                        seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+                                    }
+                                }
+                                Ok(()) => {
+                                    next_seat_attempt_at = None;
+                                    seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+                                    let swap_scheduler = Arc::clone(&scheduler);
+                                    let swap_serving = Arc::clone(&serving_generation);
+                                    let swap_serving_epoch = Arc::clone(&serving_generation_epoch);
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        let scheduler = swap_scheduler
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                        if scheduler
+                                            .active_publication_matches(&retained)
+                                            .unwrap_or(false)
+                                        {
+                                            let mut serving = swap_serving
+                                                .write()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                            *serving = Some(retained.clone());
+                                            swap_serving_epoch.fetch_add(1, Ordering::AcqRel);
+                                            drop(serving);
+                                            let _ = scheduler.schedule_semantic_generation(
+                                                retained.generation(),
+                                            );
+                                        }
+                                    })
+                                    .await;
+                                }
+                            }
                         }
                     }
+                }
+                if seat_retry_pending {
+                    // Rebuilding here would seal a duplicate of an artifact
+                    // that only failed to activate. Restore the arrival so the
+                    // next pass measures this wake's full queue wait, then let
+                    // the scheduled retry wake re-attempt activation.
+                    Self::restore_pending_arrival(&worker_pending_wake, arrival, trigger);
+                    if worker_shutting_down.load(Ordering::Acquire) {
+                        return;
+                    }
+                    continue;
                 }
                 let mut result = tokio::task::spawn_blocking(move || {
                     let mut scheduler = scheduler
@@ -2233,6 +2300,21 @@ impl CodeIndexSchedulerRegistryV1 {
                         )
                         .await;
                     if let Err(error) = activation {
+                        // The generation just sealed is complete; a retryable
+                        // activation failure arms the same seat backoff so the
+                        // next passes retry this artifact instead of resealing.
+                        if error.is_retryable_activation() {
+                            next_seat_attempt_at = Some(Instant::now() + seat_retry_backoff);
+                            let retry_wake = Arc::clone(&worker_wake);
+                            let retry_delay = seat_retry_backoff;
+                            tokio::spawn(async move {
+                                tokio::time::sleep(retry_delay).await;
+                                retry_wake.notify_one();
+                            });
+                            seat_retry_backoff = seat_retry_backoff
+                                .saturating_mul(2)
+                                .min(ACTIVATION_RETRY_BACKOFF_CEILING);
+                        }
                         result = Ok((Err(error), None, None));
                     }
                 }

@@ -571,9 +571,8 @@ async fn assert_one_lsp_delivery_drop(fixture: LspDeliveryFixture) {
     assert_eq!(summary.failed, 0, "terminal LSP drop must persist");
     drop(fixture.recorder);
     drop(fixture.authority);
-    let producer = match Arc::try_unwrap(fixture.producer) {
-        Ok(producer) => producer,
-        Err(_) => panic!("LSP delivery components must release the producer"),
+    let Ok(producer) = Arc::try_unwrap(fixture.producer) else {
+        panic!("LSP delivery components must release the producer")
     };
     producer.shutdown().await.expect("flush LSP observability");
     let page =

@@ -64,7 +64,8 @@ pub(super) fn spawn_deferred_query_authority_mount(
                 _ = ready_poll.tick() => {}
                 publication = publications.recv() => match publication {
                     Ok(publication) if publication.project_root == project_root => {}
-                    Ok(_) => continue,
+                    // Another project's publication; loop for the next signal.
+                    Ok(_) => {}
                     // A lagged receiver dropped publications; one of them may have
                     // been this project's, so attempt the mount anyway.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}

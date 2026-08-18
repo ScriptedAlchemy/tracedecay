@@ -112,14 +112,8 @@ mod tests {
 
         // Enrolling after the miss is cached does not change the memoized
         // answer: a hook process resolves one checkout's identity once.
-        crate::storage::write_enrollment_marker(
-            &project_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: "proj_hook_layout_memo".to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
+        crate::storage::pin_fixture_repository_identity(&project_root, "proj_hook_layout_memo")
+            .unwrap();
         assert!(enrolled_layout(&project_root).is_none());
 
         clear_memoized_layouts();

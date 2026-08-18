@@ -176,7 +176,8 @@ pub(super) fn tool_allows_identical_read_coalescing(tool_name: &str) -> bool {
     ) {
         return false;
     }
-    mcp_dispatch_contract(tool_name).is_ok_and(|contract| contract.read_only())
+    mcp_dispatch_contract(tool_name)
+        .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
 }
 
 fn read_flight_key(

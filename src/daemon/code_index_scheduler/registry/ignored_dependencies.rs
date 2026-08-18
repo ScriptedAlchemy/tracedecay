@@ -316,8 +316,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 )
             })?;
             if request.scope.validate().is_err()
-                || &request.scope.repository_id != &worktree.repository_id
-                || &request.scope.worktree_id != &worktree.worktree_id
+                || request.scope.repository_id != worktree.repository_id
+                || request.scope.worktree_id != worktree.worktree_id
             {
                 return Err(CodeIndexIgnoredDependencyRefusalV1::ScopeMismatch.into());
             }
@@ -587,12 +587,12 @@ fn validate_serving_request(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
         .ok_or(CodeIndexIgnoredDependencyRefusalV1::StaleGeneration)?;
-    if &request.scope.project_id != &serving.generation().manifest().project_id
-        || &request.scope.reference != &serving.generation().snapshot().reference
+    if request.scope.project_id != serving.generation().manifest().project_id
+        || request.scope.reference != serving.generation().snapshot().reference
     {
         return Err(CodeIndexIgnoredDependencyRefusalV1::ScopeMismatch.into());
     }
-    if &request.expected_generation != &serving.generation().manifest().generation_id {
+    if request.expected_generation != serving.generation().manifest().generation_id {
         return Err(CodeIndexIgnoredDependencyRefusalV1::StaleGeneration.into());
     }
     Ok(serving)

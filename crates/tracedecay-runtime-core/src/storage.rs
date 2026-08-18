@@ -424,10 +424,11 @@ mod layout;
 mod manifest;
 mod paths_and_io;
 
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+pub use identity::pin_fixture_repository_identity;
 pub use identity::{
-    enrollment_marker_path, has_enrollment_marker, read_enrollment_marker,
-    read_repository_identity_marker, remove_enrollment_marker, repository_identity_path,
-    write_enrollment_marker, write_repository_identity_marker,
+    has_repository_identity_marker, legacy_enrollment_marker_path, read_legacy_enrollment_marker,
+    read_repository_identity_marker, repository_identity_path, write_repository_identity_marker,
 };
 pub(crate) use layout::has_path_local_profile_store;
 pub use layout::{

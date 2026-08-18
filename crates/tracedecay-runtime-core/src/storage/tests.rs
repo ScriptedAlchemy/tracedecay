@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn linked_worktree_repository_identity_outranks_stale_local_enrollment() {
+    fn linked_worktree_resolves_the_repository_identity_marker() {
         let dir = tempfile::tempdir().unwrap();
         let primary = dir.path().join("primary");
         let linked = dir.path().join("linked");
@@ -311,23 +311,7 @@ mod tests {
         );
 
         let project_id = "proj_primary_store";
-        write_enrollment_marker(
-            &primary,
-            &EnrollmentMarker {
-                project_id: project_id.to_owned(),
-                storage_mode: StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
         assert!(write_repository_identity_marker(&primary, project_id).unwrap());
-        write_enrollment_marker(
-            &linked,
-            &EnrollmentMarker {
-                project_id: "proj_stale_linked_store".to_owned(),
-                storage_mode: StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
 
         let layout = resolve_persisted_layout(&linked, &profile_root)
             .unwrap()

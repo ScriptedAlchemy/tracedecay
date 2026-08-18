@@ -87,9 +87,7 @@ pub(super) async fn scheduler_automation_effect(
     let effect_run_control =
         scheduler_effect_run_control(run_control, cancellation.clone(), deadline.clone());
     synchronize_scheduler_effect_control(&effect_run_control);
-    let run_id = requested_run_id
-        .map(str::to_owned)
-        .unwrap_or_else(|| request_id.as_str().to_owned());
+    let run_id = requested_run_id.map_or_else(|| request_id.as_str().to_owned(), str::to_owned);
     let request = request(&run_id)?;
     let effect = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
         &engine.invocation.invocation_service(),
@@ -121,7 +119,7 @@ const SCHEDULER_CANCELLATION_BRIDGE_POLL: std::time::Duration =
 /// signal is cancelled. This bound is the backstop that stops a leaked run
 /// control clone from polling for the remaining life of the daemon.
 const SCHEDULER_CANCELLATION_BRIDGE_MAX_LIFETIME: std::time::Duration =
-    std::time::Duration::from_secs(30 * 60);
+    std::time::Duration::from_mins(30);
 
 /// Keeps one scheduler run's cancellation signal live while its settlement
 /// blocks, and aborts that polling task as soon as the owning effect run
@@ -378,7 +376,7 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
                     project_path,
                     AgentTaskKind::MemoryCurator,
                     &effect_run_control,
-                    effect,
+                    *effect,
                     retained_run,
                     |run| (run.ledger_record, run.committed_receipt),
                 )
@@ -507,7 +505,7 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
                     project_path,
                     AgentTaskKind::SessionReflector,
                     &effect_run_control,
-                    effect,
+                    *effect,
                     retained_run,
                     |run| (run.ledger_record, run.committed_receipt),
                 )
@@ -577,7 +575,7 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
                     project_path,
                     AgentTaskKind::SkillWriter,
                     &effect_run_control,
-                    effect,
+                    *effect,
                     retained_run,
                     |run| (run.ledger_record, run.committed_receipt),
                 )
@@ -738,7 +736,7 @@ mod tests {
 
         drop(control);
         stopped.store(true, Ordering::Release);
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_mins(1)).await;
 
         assert!(
             !effect_cancellation.is_cancelled(),

@@ -285,6 +285,55 @@ pub(super) enum LaunchctlFailureMode {
     TolerateNotLoaded,
     /// Best effort: ignore any failure.
     Ignore,
+    /// `bootstrap` right after `bootout` can race the old job's teardown:
+    /// launchd rejects the re-bootstrap with `Bootstrap failed: 5:
+    /// Input/output error` (EIO) until the previous instance drains, which
+    /// left `daemon restart` with a stopped service. Retry exactly that
+    /// failure a bounded number of times with a short backoff; every other
+    /// failure propagates immediately.
+    RetryTransientBootstrap,
+}
+
+const TRANSIENT_BOOTSTRAP_ATTEMPTS: u32 = 5;
+const TRANSIENT_BOOTSTRAP_INITIAL_BACKOFF: std::time::Duration =
+    std::time::Duration::from_millis(200);
+const TRANSIENT_BOOTSTRAP_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(1600);
+
+/// Matches only launchd's EIO bootstrap rejection — the transient window
+/// while the booted-out job is still draining. Other bootstrap failures
+/// (bad plist, permission, unknown domain) are not transient and must fail.
+pub(super) fn launchctl_output_is_transient_bootstrap_failure(output: &str) -> bool {
+    output.contains("Bootstrap failed: 5:")
+}
+
+fn run_launchctl_retrying_transient_bootstrap(args: &[&str]) -> Result<()> {
+    retry_transient_bootstrap(args, || launchctl_spawn(args), std::thread::sleep)
+}
+
+pub(super) fn retry_transient_bootstrap(
+    args: &[&str],
+    mut spawn: impl FnMut() -> Result<std::process::Output>,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> Result<()> {
+    let mut backoff = TRANSIENT_BOOTSTRAP_INITIAL_BACKOFF;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let output = spawn()?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let transient = launchctl_output_is_transient_bootstrap_failure(&String::from_utf8_lossy(
+            &output.stderr,
+        )) || launchctl_output_is_transient_bootstrap_failure(
+            &String::from_utf8_lossy(&output.stdout),
+        );
+        if !transient || attempt >= TRANSIENT_BOOTSTRAP_ATTEMPTS {
+            return Err(launchctl_failure(args, &output));
+        }
+        sleep(backoff);
+        backoff = (backoff * 2).min(TRANSIENT_BOOTSTRAP_MAX_BACKOFF);
+    }
 }
 
 /// Commands that (re)start the launchd agent. Booting the service out first
@@ -304,7 +353,7 @@ pub(super) fn launchd_start_command_plan(
         LaunchdCommand::new(&["enable", target], LaunchctlFailureMode::Fail),
         LaunchdCommand::new(
             &["bootstrap", domain, &service_path.display().to_string()],
-            LaunchctlFailureMode::Fail,
+            LaunchctlFailureMode::RetryTransientBootstrap,
         ),
         LaunchdCommand::new(&["kickstart", "-k", target], LaunchctlFailureMode::Fail),
     ]
@@ -332,6 +381,9 @@ fn run_launchd_commands(commands: &[LaunchdCommand]) -> Result<()> {
             LaunchctlFailureMode::TolerateNotLoaded => run_launchctl_allow_not_loaded(&args)?,
             LaunchctlFailureMode::Ignore => {
                 let _ = run_launchctl(&args);
+            }
+            LaunchctlFailureMode::RetryTransientBootstrap => {
+                run_launchctl_retrying_transient_bootstrap(&args)?;
             }
         }
     }

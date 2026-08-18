@@ -241,13 +241,9 @@ impl DashboardGraphTestRuntimeV1 {
         project_root: &std::path::Path,
         project_id: tracedecay_domain::ProjectId,
     ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
-        crate::storage::write_enrollment_marker(
-            project_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )?;
+        // Fixture identity is pinned in the sanctioned `.git/` repository
+        // identity marker; nothing is written into the working tree.
+        crate::storage::pin_fixture_repository_identity(project_root, project_id.as_str())?;
         let options = crate::tracedecay::TraceDecayOpenOptions {
             profile_root: Some(self.profile_root.clone()),
             global_db_path: Some(self.profile_database.db_path().to_path_buf()),

@@ -201,7 +201,7 @@ impl DaemonInvocationService {
     }
 
     /// Resolve the durable workflow owner for an exact Work attempt without
-    /// widening response-path reads to every run. The production SQLite port
+    /// widening response-path reads to every run. The production `SQLite` port
     /// answers this through the run journal primary key.
     pub(crate) async fn work_fan_out_binding(
         &self,

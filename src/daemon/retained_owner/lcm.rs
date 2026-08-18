@@ -156,7 +156,7 @@ impl SessionApplicationRetrievalPortV1 for ScopedRetrieval<'_> {
 enum RetainedLcmRetrieval<'a> {
     Mounted(ScopedRetrieval<'a>),
     Profile {
-        service: DaemonSessionRetrievalService,
+        service: Box<DaemonSessionRetrievalService>,
         cancellation: &'a CancellationSignal,
     },
 }
@@ -176,7 +176,7 @@ impl RetainedLcmRetrieval<'_> {
                 cancellation,
             } => {
                 let service = ScopedRetrieval::new(
-                    service,
+                    service.as_ref(),
                     SessionRetrievalStoreScope::Profile,
                     cancellation,
                 );
@@ -199,7 +199,7 @@ impl RetainedLcmRetrieval<'_> {
                 cancellation,
             } => {
                 let service = ScopedRetrieval::new(
-                    service,
+                    service.as_ref(),
                     SessionRetrievalStoreScope::Profile,
                     cancellation,
                 );
@@ -222,7 +222,7 @@ impl RetainedLcmRetrieval<'_> {
                 cancellation,
             } => {
                 let service = ScopedRetrieval::new(
-                    service,
+                    service.as_ref(),
                     SessionRetrievalStoreScope::Profile,
                     cancellation,
                 );
@@ -245,7 +245,7 @@ impl RetainedLcmRetrieval<'_> {
                 cancellation,
             } => {
                 let service = ScopedRetrieval::new(
-                    service,
+                    service.as_ref(),
                     SessionRetrievalStoreScope::Profile,
                     cancellation,
                 );
@@ -268,7 +268,7 @@ impl RetainedLcmRetrieval<'_> {
                 cancellation,
             } => {
                 let service = ScopedRetrieval::new(
-                    service,
+                    service.as_ref(),
                     SessionRetrievalStoreScope::Profile,
                     cancellation,
                 );
@@ -361,7 +361,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                     DaemonSessionRetrievalService::new_admitted_profile(database, identity.clone())
                         .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
                 Ok(RetainedLcmRetrieval::Profile {
-                    service,
+                    service: Box::new(service),
                     cancellation: context.cancellation_signal,
                 })
             }

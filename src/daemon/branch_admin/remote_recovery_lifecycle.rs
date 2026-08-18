@@ -125,67 +125,6 @@ fn lifecycle_registry_unavailable() -> TraceDecayError {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::path::Path;
-    use std::sync::Arc;
-
-    use super::StoreAdministration;
-    use crate::daemon::{DaemonInvocationState, ProjectOpenGates};
-
-    fn profile_identity(
-        root: &Path,
-    ) -> crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1 {
-        std::fs::create_dir_all(root).expect("create profile root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
-                .expect("secure profile root");
-        }
-        crate::daemon::profile_identity::load_or_create(root).expect("profile identity")
-    }
-
-    #[test]
-    fn authenticated_clones_select_profile_keyed_recovery_lifecycles() {
-        let first_root = tempfile::tempdir().expect("first profile");
-        let second_root = tempfile::tempdir().expect("second profile");
-        let first_identity = profile_identity(first_root.path());
-        let second_identity = profile_identity(second_root.path());
-        let administration = StoreAdministration::default();
-        let first = administration
-            .clone()
-            .with_profile_identity(first_identity.clone());
-        let second = administration.with_profile_identity(second_identity.clone());
-        first
-            .install_remote_recovery_project_lifecycle(
-                DaemonInvocationState::default(),
-                Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default())),
-            )
-            .expect("install lifecycle factory");
-
-        let first_lifecycle = first
-            .remote_recovery_project_lifecycle()
-            .expect("first lookup")
-            .expect("first lifecycle");
-        let second_lifecycle = second
-            .remote_recovery_project_lifecycle()
-            .expect("second lookup")
-            .expect("second lifecycle");
-
-        assert_eq!(&first_lifecycle.profile_id, first_identity.profile_id());
-        assert_eq!(&second_lifecycle.profile_id, second_identity.profile_id());
-        assert!(!Arc::ptr_eq(&first_lifecycle, &second_lifecycle));
-        assert!(Arc::ptr_eq(
-            &first_lifecycle,
-            &first
-                .remote_recovery_project_lifecycle()
-                .expect("repeat lookup")
-                .expect("retained first lifecycle")
-        ));
-    }
-}
-
 impl RemoteRecoveryProjectLifecycleV1 {
     pub(super) fn new(
         administration: &super::StoreAdministration,
@@ -288,7 +227,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
             project_open,
             writer,
         ));
-        if let Err(error) = retire_runtime_work(
+        retire_runtime_work(
             &self.project_servers,
             &self.session_temporal_refresh_schedulers,
             #[cfg(unix)]
@@ -298,10 +237,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
             project_id.as_str(),
             Some(Arc::clone(&fence)),
         )
-        .await
-        {
-            return Err(error);
-        }
+        .await?;
         self.git_index_transaction_services
             .retire_project_database(project_id, database.db_path())
             .await
@@ -564,4 +500,65 @@ fn matching_scheduler_keys<T>(
         })
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use super::StoreAdministration;
+    use crate::daemon::{DaemonInvocationState, ProjectOpenGates};
+
+    fn profile_identity(
+        root: &Path,
+    ) -> crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1 {
+        std::fs::create_dir_all(root).expect("create profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+                .expect("secure profile root");
+        }
+        crate::daemon::profile_identity::load_or_create(root).expect("profile identity")
+    }
+
+    #[test]
+    fn authenticated_clones_select_profile_keyed_recovery_lifecycles() {
+        let first_root = tempfile::tempdir().expect("first profile");
+        let second_root = tempfile::tempdir().expect("second profile");
+        let first_identity = profile_identity(first_root.path());
+        let second_identity = profile_identity(second_root.path());
+        let administration = StoreAdministration::default();
+        let first = administration
+            .clone()
+            .with_profile_identity(first_identity.clone());
+        let second = administration.with_profile_identity(second_identity.clone());
+        first
+            .install_remote_recovery_project_lifecycle(
+                DaemonInvocationState::default(),
+                Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default())),
+            )
+            .expect("install lifecycle factory");
+
+        let first_lifecycle = first
+            .remote_recovery_project_lifecycle()
+            .expect("first lookup")
+            .expect("first lifecycle");
+        let second_lifecycle = second
+            .remote_recovery_project_lifecycle()
+            .expect("second lookup")
+            .expect("second lifecycle");
+
+        assert_eq!(&first_lifecycle.profile_id, first_identity.profile_id());
+        assert_eq!(&second_lifecycle.profile_id, second_identity.profile_id());
+        assert!(!Arc::ptr_eq(&first_lifecycle, &second_lifecycle));
+        assert!(Arc::ptr_eq(
+            &first_lifecycle,
+            &first
+                .remote_recovery_project_lifecycle()
+                .expect("repeat lookup")
+                .expect("retained first lifecycle")
+        ));
+    }
 }

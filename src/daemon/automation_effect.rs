@@ -80,7 +80,7 @@ use projection::{
 /// exhaustion the journal state is left exactly as it was
 /// (Reserved/Prepared); that is the durable recovery path and
 /// `reconcile_reserved_automation_effects_for_project` picks it up later.
-const RETAINED_SETTLEMENT_RETRY_BUDGET: Duration = Duration::from_secs(120);
+const RETAINED_SETTLEMENT_RETRY_BUDGET: Duration = Duration::from_mins(2);
 
 pub(crate) struct AutomationEffectAuthority {
     context: RequestContext,
@@ -161,9 +161,13 @@ impl SettlementPhaseHook {
 }
 
 #[cfg(test)]
+type PreparedWriteCallback =
+    Arc<dyn Fn(&ExactRunPublication) -> Result<()> + Send + Sync + 'static>;
+
+#[cfg(test)]
 #[derive(Clone)]
 struct PreparedWriteHook {
-    callback: Arc<dyn Fn(&ExactRunPublication) -> Result<()> + Send + Sync + 'static>,
+    callback: PreparedWriteCallback,
 }
 
 #[cfg(test)]
@@ -207,11 +211,11 @@ pub(crate) enum DeferredSettlementOutcome {
 
 pub(crate) enum RetainedAutomationSettlementOutcome {
     Run {
-        terminal: AutomationSettledTerminal,
+        terminal: Box<AutomationSettledTerminal>,
         record: AutomationRunLedgerRecord,
     },
     Problem {
-        problem: AutomationSettledProblem,
+        problem: Box<AutomationSettledProblem>,
         record: Option<AutomationRunLedgerRecord>,
     },
     Reused {
@@ -225,7 +229,7 @@ pub(crate) enum RetainedAutomationSettlementOutcome {
 pub(crate) enum RetainedAutomationSettlementProjection {
     Run {
         record: AutomationRunLedgerRecord,
-        committed: Option<AutomationCommittedReceipt>,
+        committed: Option<Box<AutomationCommittedReceipt>>,
     },
     AbandonObserved {
         record: AutomationRunLedgerRecord,
@@ -244,7 +248,10 @@ impl
             Option<AutomationCommittedReceipt>,
         ),
     ) -> Self {
-        Self::Run { record, committed }
+        Self::Run {
+            record,
+            committed: committed.map(Box::new),
+        }
     }
 }
 
@@ -441,7 +448,7 @@ pub(crate) type AutomationSettledProblem = AutomationRunProblemV1;
 pub(crate) enum AutomationSettledTerminal {
     Outcome {
         scope: ResolvedScope,
-        outcome: ApplicationOutcome<RetainedSurfaceResultV1>,
+        outcome: Box<ApplicationOutcome<RetainedSurfaceResultV1>>,
     },
     Problem(AutomationSettledProblem),
 }
@@ -449,11 +456,13 @@ pub(crate) enum AutomationSettledTerminal {
 impl AutomationSettledTerminal {
     pub(crate) fn into_outcome(
         self,
-    ) -> std::result::Result<ApplicationOutcome<RetainedSurfaceResultV1>, AutomationSettledProblem>
-    {
+    ) -> std::result::Result<
+        ApplicationOutcome<RetainedSurfaceResultV1>,
+        Box<AutomationSettledProblem>,
+    > {
         match self {
-            Self::Outcome { outcome, .. } => Ok(outcome),
-            Self::Problem(problem) => Err(problem),
+            Self::Outcome { outcome, .. } => Ok(*outcome),
+            Self::Problem(problem) => Err(Box::new(problem)),
         }
     }
 
@@ -471,7 +480,7 @@ impl AutomationSettledTerminal {
                         outcome,
                     )
                     && matches!(
-                        outcome,
+                        outcome.as_ref(),
                         ApplicationOutcome::Effect(effect)
                             if matches!(
                                 effect.payload.as_ref(),
@@ -492,7 +501,7 @@ impl AutomationSettledTerminal {
         let Self::Outcome { outcome, .. } = self else {
             return None;
         };
-        let ApplicationOutcome::Effect(effect) = outcome else {
+        let ApplicationOutcome::Effect(effect) = outcome.as_ref() else {
             return None;
         };
         let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
@@ -512,7 +521,7 @@ impl AutomationSettledTerminal {
         let Self::Outcome { outcome, .. } = self else {
             return false;
         };
-        let ApplicationOutcome::Effect(effect) = outcome else {
+        let ApplicationOutcome::Effect(effect) = outcome.as_ref() else {
             return false;
         };
         let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
@@ -525,7 +534,7 @@ impl AutomationSettledTerminal {
         let Self::Outcome { outcome, .. } = self else {
             return false;
         };
-        let ApplicationOutcome::Effect(effect) = outcome else {
+        let ApplicationOutcome::Effect(effect) = outcome.as_ref() else {
             return false;
         };
         let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
@@ -577,8 +586,8 @@ fn agent_task_kind(task: AutomationTaskV1) -> AgentTaskKind {
 }
 
 pub(crate) enum AutomationEffectAdmission {
-    Execute(AutomationEffectAuthority),
-    Replay(AutomationSettledTerminal),
+    Execute(Box<AutomationEffectAuthority>),
+    Replay(Box<AutomationSettledTerminal>),
     /// A valid durable record already owns this run identity under a different
     /// stable admission. Callers must not execute or settle a second effect.
     Conflict,
@@ -673,7 +682,7 @@ impl AutomationEffectAuthority {
                                 } => self
                                     .settle_retained_run_blocking(
                                         record,
-                                        committed,
+                                        committed.map(|receipt| *receipt),
                                         RetainedSettlementGuardOwner::Single(settlement_guard),
                                         observer,
                                         #[cfg(test)]
@@ -684,7 +693,7 @@ impl AutomationEffectAuthority {
                                     .map(|owned| {
                                         let (terminal, record) = owned.value;
                                         RetainedAutomationSettlementOutcome::Run {
-                                            terminal,
+                                            terminal: Box::new(terminal),
                                             record,
                                         }
                                     }),
@@ -711,7 +720,10 @@ impl AutomationEffectAuthority {
                             )
                             .map(|owned| {
                                 let (problem, record) = owned.value;
-                                RetainedAutomationSettlementOutcome::Problem { problem, record }
+                                RetainedAutomationSettlementOutcome::Problem {
+                                    problem: Box::new(problem),
+                                    record,
+                                }
                             }),
                     },
                     RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
@@ -1367,7 +1379,7 @@ impl AutomationEffectAuthority {
                     live_retirement,
                 )
                 .await?;
-                Ok(AutomationEffectAdmission::Replay(terminal))
+                Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
             }
             ReservationResult::Execute { claim, retirement } => {
                 validate_retirement_binding(&admission, retirement.as_ref())?;
@@ -1398,7 +1410,7 @@ impl AutomationEffectAuthority {
                         None,
                     )
                     .await?;
-                    Ok(AutomationEffectAdmission::Replay(terminal))
+                    Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
                 } else if retirement.is_some() {
                     let terminal = authority.settle_retirement().await?;
                     finalize_terminal_housekeeping(
@@ -1409,9 +1421,9 @@ impl AutomationEffectAuthority {
                         live_retirement,
                     )
                     .await?;
-                    Ok(AutomationEffectAdmission::Replay(terminal))
+                    Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
                 } else {
-                    Ok(AutomationEffectAdmission::Execute(authority))
+                    Ok(AutomationEffectAdmission::Execute(Box::new(authority)))
                 }
             }
             ReservationResult::Recover { retirement } => {
@@ -1441,7 +1453,7 @@ impl AutomationEffectAuthority {
                         None,
                     )
                     .await?;
-                    return Ok(AutomationEffectAdmission::Replay(terminal));
+                    return Ok(AutomationEffectAdmission::Replay(Box::new(terminal)));
                 }
                 let recovery_cancellation = cancellation.clone();
                 let read_control =
@@ -1500,7 +1512,7 @@ impl AutomationEffectAuthority {
                     live_retirement,
                 )
                 .await?;
-                Ok(AutomationEffectAdmission::Replay(terminal))
+                Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
             }
             ReservationResult::RecoverPrepared {
                 terminal,
@@ -1525,7 +1537,7 @@ impl AutomationEffectAuthority {
                 let terminal = authority
                     .promote_prepared_terminal(terminal, publication)
                     .await?;
-                Ok(AutomationEffectAdmission::Replay(terminal))
+                Ok(AutomationEffectAdmission::Replay(Box::new(terminal)))
             }
             ReservationResult::Conflict { terminal } => {
                 reservation_conflict_admission(dashboard_root, &journal_path, terminal).await
@@ -1728,7 +1740,7 @@ impl AutomationEffectAuthority {
         }
         Ok(AutomationSettledTerminal::Outcome {
             scope: self.context.scope().clone(),
-            outcome,
+            outcome: Box::new(outcome),
         })
     }
 
@@ -2083,7 +2095,7 @@ fn settle_bound_once(state: &mut RetainedBoundSettlement) -> Result<()> {
                 if let Some(phase_hook) = state.phase_hook.as_ref() {
                     phase_hook.notify(RetainedSettlementPhase::PreparedWriteFailed);
                 }
-                return Err(error.into());
+                return Err(error);
             }
         }
     }
@@ -2130,21 +2142,20 @@ fn classify_bound_settlement(
 }
 
 fn cleanup_bound_terminal(state: &RetainedBoundSettlement) {
-    if let Some(publication) = state.publication.as_ref() {
-        if let Err(error) =
+    if let Some(publication) = state.publication.as_ref()
+        && let Err(error) =
             tracedecay_agent_hosts::automation::run_ledger::discard_staged_run_record_exact_blocking(
                 &state.authority.dashboard_root,
                 state.authority.admission.request.run_id.as_str(),
                 publication,
             )
-        {
-            tracing::warn!(
-                run_id = %state.ledger.run_id,
-                error = %error,
-                "exact automation terminal is committed; spool cleanup remains recoverable"
-            );
-            return;
-        }
+    {
+        tracing::warn!(
+            run_id = %state.ledger.run_id,
+            error = %error,
+            "exact automation terminal is committed; spool cleanup remains recoverable"
+        );
+        return;
     }
     if let Err(error) = recovery_index::remove_pending_blocking(
         &state.authority.dashboard_root,
@@ -2230,7 +2241,7 @@ fn settle_direct_owner_with_budget(
                         return Ok(complete_direct_settlement(state));
                     }
                     Ok(_) => {
-                        tracing::warn!(error = %error, "direct automation finalization remains pending under its blocking owner")
+                        tracing::warn!(error = %error, "direct automation finalization remains pending under its blocking owner");
                     }
                     Err(classification_error) => tracing::warn!(
                         error = %error,

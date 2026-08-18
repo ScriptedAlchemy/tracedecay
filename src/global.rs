@@ -388,9 +388,15 @@ fn local_project_marker_exists(project_root: &Path, data_dir: &Path) -> bool {
     {
         return true;
     }
+    // Wipe cleanup still recognizes retired repo-local enrollment markers so
+    // legacy `.tracedecay/` debris is removed alongside the profile store.
     data_dir.file_name().is_some_and(|name| {
         name == tracedecay::config::TRACEDECAY_DIR
-            && tracedecay::storage::has_enrollment_marker(project_root)
+            && matches!(
+                tracedecay::storage::read_legacy_enrollment_marker(project_root),
+                Ok(Some(marker))
+                    if marker.storage_mode == tracedecay::storage::StorageMode::ProfileSharded
+            )
     })
 }
 

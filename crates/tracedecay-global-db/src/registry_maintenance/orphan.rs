@@ -235,7 +235,9 @@ fn classify_project_root(
             );
         }
     };
-    let enrollment = match read_enrollment_marker(&canonical_root) {
+    // Legacy read-only evidence: markers written before the working-tree
+    // cutover still vouch for orphan re-adoption; nothing rewrites them.
+    let enrollment = match read_legacy_enrollment_marker(&canonical_root) {
         Ok(marker) => marker.map(|marker| marker.project_id),
         Err(error) => {
             return (

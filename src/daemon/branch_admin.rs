@@ -485,7 +485,7 @@ impl Default for StoreAdministration {
                 crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry::default(
                 ),
             ),
-            remote_recovery_project_lifecycles: Default::default(),
+            remote_recovery_project_lifecycles: Arc::default(),
             #[cfg(unix)]
             retirement_reapers: Arc::new(MaintenanceReaperRegistry::default()),
         }
@@ -638,7 +638,8 @@ impl StoreAdministration {
         else {
             return Vec::new();
         };
-        let servers = {
+
+        {
             let servers = self.project_servers.lock().await;
             servers
                 .servers
@@ -646,8 +647,7 @@ impl StoreAdministration {
                 .filter(|(key, _)| key.owner.profile_root == profile_root)
                 .map(|(_, entry)| Arc::clone(&entry.server))
                 .collect::<Vec<_>>()
-        };
-        servers
+        }
     }
 
     pub(super) async fn mounted_project_graphs(&self) -> Vec<Arc<crate::tracedecay::TraceDecay>> {

@@ -2742,7 +2742,7 @@ mod tests {
 
     #[test]
     fn task_xml_rejects_ambiguous_remote_tls_argument_quoting() {
-        let xml = r#"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443 --remote-tls-cert &quot;C:\TraceDecay TLS\server.pem --remote-tls-key C:\TraceDecay\server-key.pem</Arguments></Task>"#;
+        let xml = r"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443 --remote-tls-cert &quot;C:\TraceDecay TLS\server.pem --remote-tls-key C:\TraceDecay\server-key.pem</Arguments></Task>";
 
         let error = remote_tls_from_task_xml(xml)
             .expect_err("unterminated Windows argument quoting must fail closed");
@@ -2753,8 +2753,8 @@ mod tests {
     #[test]
     fn task_xml_rejects_partial_and_duplicate_remote_tls_arguments() {
         let partial =
-            r#"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443</Arguments></Task>"#;
-        let duplicate = r#"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443 --remote-listen 192.0.2.11:7443 --remote-tls-cert C:\TraceDecay\server.pem --remote-tls-key C:\TraceDecay\server-key.pem</Arguments></Task>"#;
+            r"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443</Arguments></Task>";
+        let duplicate = r"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443 --remote-listen 192.0.2.11:7443 --remote-tls-cert C:\TraceDecay\server.pem --remote-tls-key C:\TraceDecay\server-key.pem</Arguments></Task>";
 
         assert!(remote_tls_from_task_xml(partial).is_err());
         assert!(remote_tls_from_task_xml(duplicate).is_err());

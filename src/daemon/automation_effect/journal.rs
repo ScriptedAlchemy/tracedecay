@@ -1277,12 +1277,12 @@ fn write_terminal_sidecar_with_publisher(
 ) -> Result<DurableAutomationTerminalBinding> {
     let binding = terminal_binding(terminal)?;
     let path = terminal_sidecar_path(journal_path)?;
-    if let Some(existing) = read_terminal_sidecar_if_present(&path, &binding)? {
-        if existing != *terminal {
-            return Err(contract_error(
-                "automation terminal sidecar conflicts with its durable binding",
-            ));
-        }
+    if let Some(existing) = read_terminal_sidecar_if_present(&path, &binding)?
+        && existing != *terminal
+    {
+        return Err(contract_error(
+            "automation terminal sidecar conflicts with its durable binding",
+        ));
     }
     tracedecay_domain::with_owned_temp_publish(
         &path,
@@ -1334,7 +1334,7 @@ fn read_terminal_sidecar_if_present(
         ));
     }
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     let mut remaining = binding.payload_len;
     while remaining > 0 {
         let take = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| {

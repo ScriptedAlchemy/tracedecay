@@ -1028,10 +1028,12 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         &project,
         &client,
         &dashboard,
-        &product_selection,
-        &synthesis_task,
-        restored_entry.verified_version(),
-        completed_synthesis.identity(),
+        task_session::TaskSessionEvidenceScope {
+            selection: &product_selection,
+            task_id: &synthesis_task,
+            verified_version: restored_entry.verified_version(),
+            identity: completed_synthesis.identity(),
+        },
     );
 
     let handoff_scope = TaskHandoffScope::new(

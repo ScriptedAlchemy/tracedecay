@@ -81,8 +81,10 @@ impl TraceDecay {
         candidates
     }
 
-    /// Filters candidate roots down to the ones that already carry a
-    /// profile-sharded enrollment marker naming exactly `project_id`.
+    /// Filters candidate roots down to the ones whose root-side evidence
+    /// names exactly `project_id`: a `.git/` repository identity marker with
+    /// that id, or (for roots without one) a deterministic path-derived
+    /// identity equal to it.
     ///
     /// This never creates or repairs a marker, so a caller that must not mount
     /// a store the profile has not enrolled — a cross-project memory reader,
@@ -105,12 +107,11 @@ impl TraceDecay {
             if roots.contains(&canonical) {
                 continue;
             }
-            let Some(marker) = storage::read_enrollment_marker(&canonical)? else {
-                continue;
+            let named_id = match storage::read_repository_identity_marker(&canonical)? {
+                Some(marker) => marker.project_id,
+                None => storage::default_profile_project_id(&canonical),
             };
-            if marker.storage_mode == storage::StorageMode::ProfileSharded
-                && marker.project_id == project_id.as_str()
-            {
+            if named_id == project_id.as_str() {
                 roots.push(canonical);
             }
         }
@@ -135,26 +136,32 @@ impl TraceDecay {
         }
 
         let mut roots = Self::enrolled_project_roots(candidates, project_id)?;
-        if roots.is_empty() {
-            let enrollment_root = crate::worktree::repository_identity_root(project_root)
-                .unwrap_or_else(|| project_root.to_path_buf());
-            let canonical =
-                enrollment_root
-                    .canonicalize()
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!(
-                            "could not canonicalize project enrollment root '{}': {error}",
-                            enrollment_root.display()
-                        ),
-                    })?;
-            storage::write_enrollment_marker(
-                &canonical,
-                &storage::EnrollmentMarker {
-                    project_id: project_id.as_str().to_owned(),
-                    storage_mode: storage::StorageMode::ProfileSharded,
-                },
-            )?;
-            roots.push(canonical);
+        // Self-heal the sanctioned `.git/`-side anchor: a session mount for a
+        // registered project rewrites a missing repository identity marker in
+        // place (re-adoption after loss, first mount, or a moved checkout).
+        // A non-git root persists nothing — its identity is deterministic
+        // from the canonical path with the registry as the durable home.
+        // Nothing is ever written into the working tree.
+        let enrollment_root = crate::worktree::repository_identity_root(project_root)
+            .unwrap_or_else(|| project_root.to_path_buf());
+        match enrollment_root.canonicalize() {
+            Ok(canonical) => {
+                if storage::read_repository_identity_marker(&canonical)?.is_none() {
+                    storage::write_repository_identity_marker(&canonical, project_id.as_str())?;
+                }
+                if roots.is_empty() {
+                    roots.push(canonical);
+                }
+            }
+            Err(error) if roots.is_empty() => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "could not canonicalize project enrollment root '{}': {error}",
+                        enrollment_root.display()
+                    ),
+                });
+            }
+            Err(_) => {}
         }
         Ok(roots)
     }
@@ -185,6 +192,27 @@ impl TraceDecay {
                     storage_mode: storage::StorageMode::ProfileSharded,
                 },
             )?);
+        }
+
+        // One-time legacy adoption: a project enrolled before the working-tree
+        // cutover may carry a retired `<repo>/.tracedecay/enrollment.json` and
+        // no other resolvable identity. Adopt the identity it names so the
+        // following open registers it durably (registry row plus `.git/`
+        // marker); after that, the marker or registry resolves first and the
+        // legacy file is never consulted again. The file itself is left
+        // untouched — users may delete it.
+        if selected.is_none() {
+            let enrollment_root = crate::worktree::repository_identity_root(project_root)
+                .unwrap_or_else(|| project_root.to_path_buf());
+            if let Some(marker) = storage::read_legacy_enrollment_marker(&enrollment_root)?
+                && marker.storage_mode == storage::StorageMode::ProfileSharded
+            {
+                selected = Some(storage::profile_sharded_layout(
+                    project_root,
+                    &profile_root,
+                    &marker,
+                )?);
+            }
         }
 
         match selected {
@@ -221,7 +249,7 @@ impl TraceDecay {
         }
         option_resolved_store_exists
             || crate::config::has_project_database(project_root)
-            || crate::storage::has_enrollment_marker(project_root)
+            || crate::storage::has_repository_identity_marker(project_root)
     }
 
     pub async fn has_initialized_store(project_root: &Path) -> bool {

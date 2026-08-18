@@ -55,6 +55,7 @@ use tracedecay_usecases::feedback::{
     FeedbackCycleLspInput, FeedbackCycleRuntime, ProductionFeedbackCycleAuthorizationFuture,
     ProductionFeedbackCycleAuthorizationPort, ProductionFeedbackCycleOpenV1,
     ProductionFeedbackRuntimeStateV1, resolve_production_feedback_cycle_parts,
+    resolve_project_feedback_scope_v1,
 };
 use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_usecases::operation_stream::OperationKind;
@@ -444,6 +445,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         );
         return Ok(());
     }
+    register_project_delivery_read_authority(invocation, project_root, &state).await?;
     if let Some(lsp_session_factory) = state.lsp_session_factory.as_ref() {
         if let Err(error) = register_production_feedback_and_advisory(
             invocation,
@@ -471,13 +473,12 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
             .await?;
             deferred::spawn(invocation.clone(), project_root.to_path_buf(), state);
             return Ok(());
-        } else {
-            tracing::info!(
-                event = "project_open_owner_phase",
-                project = %project_root.display(),
-                phase = "feedback_advisory_registered",
-            );
         }
+        tracing::info!(
+            event = "project_open_owner_phase",
+            project = %project_root.display(),
+            phase = "feedback_advisory_registered",
+        );
         let semantic_activation_started = Instant::now();
         register_semantic_activation_owner(
             invocation,
@@ -613,48 +614,6 @@ async fn register_production_advisory_owner(
     let remote =
         resolve_production_github_provider_config(invocation, project_root, state, &feedback_scope)
             .await;
-    let delivery_read = match &remote {
-        Ok(remote) => {
-            let review_bodies = github_anchor_authorities_arc_v1(
-                state.database.clone(),
-                project_root.to_path_buf(),
-                feedback_scope.clone(),
-                Arc::clone(&state.code_graph),
-                Arc::new(invocation.code_index_schedulers.clone()),
-            )
-            .map(|authorities| ProjectDeliveryReviewBodySourceV1 {
-                evidence: authorities.github_anchors,
-                source_access: Arc::clone(&remote.github_source_access),
-            });
-            match open_project_delivery_read_authority_v1(ProjectDeliveryReadOpenV1 {
-                database: state.database.clone(),
-                profile_id: state.session_db.binding().shard_id.profile_id.clone(),
-                resolved_scope: state.scope.clone(),
-                feedback_scope: feedback_scope.clone(),
-                github_target: remote.target.clone(),
-                github_http: remote.http.clone(),
-                review_bodies,
-            }) {
-                ProjectDeliveryReadAuthorityOpenOutcomeV1::Ready(handle) => {
-                    Some(RegisteredDeliveryReadAuthorityV1::new(
-                        project_root.to_path_buf(),
-                        state.scope.clone(),
-                        Arc::clone(state.graph.configuration_runtime()),
-                        handle,
-                    ))
-                }
-                ProjectDeliveryReadAuthorityOpenOutcomeV1::Unavailable => None,
-            }
-        }
-        // The provider mount gate is retained as a typed Delivery answer so
-        // the dashboard can tell "configure a token" apart from "broken".
-        Err(gate) => Some(RegisteredDeliveryReadAuthorityV1::new(
-            project_root.to_path_buf(),
-            state.scope.clone(),
-            Arc::clone(state.graph.configuration_runtime()),
-            gated_project_delivery_read_handle_v1(feedback_scope.clone(), *gate),
-        )),
-    };
     let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
         (remote.github, Some(remote.github_source_access), remote.ci)
     });
@@ -743,7 +702,6 @@ async fn register_production_advisory_owner(
         .publish(
             project_root,
             published_registration,
-            delivery_read,
             invocation_owner,
             advisory_cycle as Arc<dyn FeedbackCycleRuntimePort>,
         )
@@ -753,20 +711,127 @@ async fn register_production_advisory_owner(
         })
 }
 
+/// Registers the daemon-owned Delivery read authority for this admitted
+/// checkout as its own project-open component, before and independent of the
+/// feedback/advisory owners whose mounts can stay deferred behind a sealed
+/// code-index generation. A provider mount gate is retained as a typed
+/// Delivery answer so the dashboard can tell "configure a token" apart from
+/// "broken" even while the advisory chain never mounts.
+async fn register_project_delivery_read_authority(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    state: &ProjectOpenDependentOwnerState,
+) -> Result<()> {
+    let feedback_scope = match resolve_project_feedback_scope_v1(project_root, &state.scope) {
+        Ok(scope) => scope,
+        Err(error) => {
+            // The admitted checkout raced away from its attached-branch
+            // identity; without an exact feedback scope no Delivery authority
+            // (ready or gated) can truthfully exist, so the dashboard keeps
+            // its typed not-mounted answer.
+            tracing::warn!(
+                event = "delivery_read_mount",
+                outcome = "unavailable",
+                project = %project_root.display(),
+                reason = %error,
+                "project-open delivery read has no resolvable feedback scope"
+            );
+            return Ok(());
+        }
+    };
+    let handle = match resolve_production_github_provider_access(invocation, project_root, state) {
+        Ok(access) => {
+            let review_bodies = github_anchor_authorities_arc_v1(
+                state.database.clone(),
+                project_root.to_path_buf(),
+                feedback_scope.clone(),
+                Arc::clone(&state.code_graph),
+                Arc::new(invocation.code_index_schedulers.clone()),
+            )
+            .map(|authorities| ProjectDeliveryReviewBodySourceV1 {
+                evidence: authorities.github_anchors,
+                source_access: Arc::clone(&access.source_access),
+            });
+            match open_project_delivery_read_authority_v1(ProjectDeliveryReadOpenV1 {
+                database: state.database.clone(),
+                profile_id: state.session_db.binding().shard_id.profile_id.clone(),
+                resolved_scope: state.scope.clone(),
+                feedback_scope: feedback_scope.clone(),
+                github_target: access.target.clone(),
+                github_http: access.http.clone(),
+                review_bodies,
+            }) {
+                ProjectDeliveryReadAuthorityOpenOutcomeV1::Ready(handle) => {
+                    tracing::info!(
+                        event = "delivery_read_mount",
+                        outcome = "ready",
+                        project = %project_root.display(),
+                    );
+                    handle
+                }
+                ProjectDeliveryReadAuthorityOpenOutcomeV1::Unavailable => {
+                    tracing::warn!(
+                        event = "delivery_read_mount",
+                        outcome = "unavailable",
+                        project = %project_root.display(),
+                        "project-open delivery read authority could not open its retained stores"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        Err(gate) => {
+            tracing::info!(
+                event = "delivery_read_mount",
+                outcome = "gated",
+                project = %project_root.display(),
+                gate = ?gate,
+            );
+            gated_project_delivery_read_handle_v1(feedback_scope, gate)
+        }
+    };
+    invocation
+        .advisory_runtime_registrar()
+        .publish_delivery_read(
+            project_root,
+            RegisteredDeliveryReadAuthorityV1::new(
+                project_root.to_path_buf(),
+                state.scope.clone(),
+                Arc::clone(state.graph.configuration_runtime()),
+                handle,
+            ),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open delivery read registration failed: {error}"),
+        })
+}
+
 struct ProductionGitHubProviderConfigV1 {
-    target: GitHubCiRepositoryTargetV1,
-    http: GitHubHttpReadConfigV1,
     github: Option<GitHubReviewRuntimeOwnerConfigV1>,
     github_source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
     ci: Option<ProductionCiProviderConfigV1>,
 }
 
-async fn resolve_production_github_provider_config(
+/// Locally resolved GitHub provider access for this admitted checkout: the
+/// remote identity, mounted read-only credential, and source-access
+/// authorities. Resolution is bounded local work (no network discovery), so
+/// the Delivery read registration can consume it during project open.
+struct ProductionGitHubProviderAccessV1 {
+    owner: String,
+    repository: String,
+    credential: GitHubReadOnlyCredentialV1,
+    source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+    ci_source_access: Arc<dyn CiSourceAccessAuthorityV1>,
+    target: GitHubCiRepositoryTargetV1,
+    http: GitHubHttpReadConfigV1,
+}
+
+fn resolve_production_github_provider_access(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
-    feedback_scope: &FeedbackScopeV1,
-) -> std::result::Result<ProductionGitHubProviderConfigV1, ProjectDeliveryProviderMountGateV1> {
+) -> std::result::Result<ProductionGitHubProviderAccessV1, ProjectDeliveryProviderMountGateV1> {
     let Some(remote_url) = crate::tracedecay::git_remote_url(project_root) else {
         return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
     };
@@ -816,7 +881,32 @@ async fn resolve_production_github_provider_config(
         owner: owner.clone(),
         repository: repository.clone(),
     };
-    let http = GitHubHttpReadConfigV1::default();
+    Ok(ProductionGitHubProviderAccessV1 {
+        owner,
+        repository,
+        credential,
+        source_access,
+        ci_source_access,
+        target,
+        http: GitHubHttpReadConfigV1::default(),
+    })
+}
+
+async fn resolve_production_github_provider_config(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    state: &ProjectOpenDependentOwnerState,
+    feedback_scope: &FeedbackScopeV1,
+) -> std::result::Result<ProductionGitHubProviderConfigV1, ProjectDeliveryProviderMountGateV1> {
+    let ProductionGitHubProviderAccessV1 {
+        owner,
+        repository,
+        credential,
+        source_access,
+        ci_source_access,
+        target,
+        http,
+    } = resolve_production_github_provider_access(invocation, project_root, state)?;
     let ci = if credential.permits(GitHubReadPermissionV1::Actions)
         && credential.permits(GitHubReadPermissionV1::Checks)
     {
@@ -876,8 +966,6 @@ async fn resolve_production_github_provider_config(
         _ => None,
     };
     Ok(ProductionGitHubProviderConfigV1 {
-        target,
-        http,
         github,
         github_source_access: source_access,
         ci,

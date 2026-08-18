@@ -25,24 +25,24 @@ pub(super) enum CombinedEffectAdmission {
     Execute {
         run_id: String,
         run_control: AutomationRunControl,
-        reflector: AutomationEffectAuthority,
-        skill: AutomationEffectAuthority,
+        reflector: Box<AutomationEffectAuthority>,
+        skill: Box<AutomationEffectAuthority>,
     },
     ReflectorReplay {
-        reflector: AutomationSettledTerminal,
+        reflector: Box<AutomationSettledTerminal>,
         skill_run_id: String,
         skill_control: AutomationRunControl,
-        skill: AutomationEffectAuthority,
+        skill: Box<AutomationEffectAuthority>,
     },
     SkillReplay {
         run_id: String,
         reflector_control: AutomationRunControl,
-        reflector: AutomationEffectAuthority,
-        skill: AutomationSettledTerminal,
+        reflector: Box<AutomationEffectAuthority>,
+        skill: Box<AutomationSettledTerminal>,
     },
     Replay {
-        reflector: AutomationSettledTerminal,
-        skill: AutomationSettledTerminal,
+        reflector: Box<AutomationSettledTerminal>,
+        skill: Box<AutomationSettledTerminal>,
     },
     Conflict,
     PreAdmissionProblem(Vec<tracedecay_application::ApplicationProblemEnvelope>),
@@ -219,771 +219,6 @@ impl CombinedEffectOutcome {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use fs2::FileExt;
-    use tempfile::TempDir;
-    use tracedecay_agent_hosts::automation::AutomationRunControl;
-    use tracedecay_agent_hosts::automation::backend::{
-        AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
-    };
-    use tracedecay_agent_hosts::automation::config::AutomationConfig;
-    use tracedecay_agent_hosts::automation::run_ledger::{
-        AutomationRunStatus, AutomationTrigger, find_run_record_exact_bounded_blocking,
-        run_ledger_path,
-    };
-    use tracedecay_agent_hosts::automation::runner::{
-        AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
-        CombinedReviewAutomationOptions, RetainedAutomationSettlementDisposition,
-        run_skill_writer_with_backend_and_retrieval,
-    };
-    use tracedecay_application::{
-        CancellationSignal, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
-    };
-    use tracedecay_domain::{
-        AutomationTerminalV1, ManifestDigest, ObservabilityPayloadV1, ProjectId, RunId, SessionId,
-        canonical_sha256,
-    };
-    use tracedecay_usecases::observability::RegisteredObservabilityPortV1;
-
-    use super::{
-        AdmissionState, AutomationEffectAdmission, CombinedEffectAdmission, CombinedEffectOutcome,
-        DaemonEngine, PairMode, TraceDecay, pair_mode, prepare_combined_effects,
-        run_combined_scheduler_effect,
-        run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
-        scheduler_automation_effect,
-    };
-
-    struct CombinedAdmissionFixture {
-        _temp: TempDir,
-        engine: DaemonEngine,
-        memory: Arc<TraceDecay>,
-        project_root: PathBuf,
-        dashboard_root: PathBuf,
-        project_id: ProjectId,
-        configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
-        configuration_digest: ManifestDigest,
-    }
-
-    impl CombinedAdmissionFixture {
-        async fn new() -> Self {
-            let temp = TempDir::new().expect("combined admission fixture");
-            let project_root = temp.path().join("project");
-            let profile_root = temp.path().join("profile");
-            std::fs::create_dir_all(project_root.join("src"))
-                .expect("combined admission source directory");
-            std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
-                .expect("combined admission source");
-            let memory = Arc::new(
-                TraceDecay::init_with_options(
-                    &project_root,
-                    crate::tracedecay::TraceDecayOpenOptions {
-                        profile_root: Some(profile_root.clone()),
-                        global_db_path: Some(profile_root.join("global.db")),
-                    },
-                )
-                .await
-                .expect("initialize combined admission project"),
-            );
-            let project_root = memory
-                .project_root()
-                .canonicalize()
-                .expect("canonical combined admission project");
-            let dashboard_root = memory.store_layout().dashboard_root.clone();
-            let project_id = memory
-                .configuration_runtime()
-                .configuration_target()
-                .project_id
-                .clone();
-            let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
-                &project_root,
-                &project_id,
-            )
-            .expect("combined admission scope");
-            let observed_at = tracedecay_application::now_micros();
-            let configuration = memory
-                .configuration_runtime()
-                .client()
-                .current()
-                .await
-                .expect("combined admission configuration");
-            let configuration_revision_id = configuration.revision_id.clone();
-            let access = crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
-                &scope,
-                &project_root,
-                &configuration,
-                observed_at,
-            )
-            .expect("combined admission retained access");
-            let grant = crate::daemon::project_open_owners::project_open_retained_grant(
-                &access,
-                observed_at,
-            )
-            .expect("combined admission retained grant");
-            let engine = DaemonEngine::default();
-            let invocation_service = engine.invocation.invocation_service();
-            let retained_ports = crate::daemon::retained_owner::retained_surface_ports(
-                crate::daemon::retained_owner::ProductionRetainedAuthoritiesV1 {
-                    cg: Arc::new(tokio::sync::RwLock::new(Arc::clone(&memory))),
-                    project_root: project_root.clone(),
-                    project_id: project_id.clone(),
-                    mounted_profile_id: None,
-                    mounted_session_store_id: None,
-                    mounted_session_root_id: None,
-                    registered_session_db: None,
-                    project_refresh: None,
-                    project_retrieval: None,
-                    project_workflow_index: None,
-                    project_lcm: None,
-                    configuration_digest: access.configuration_digest.clone(),
-                    invocation_service: Some(invocation_service),
-                },
-            );
-            engine
-                .invocation
-                .retained_runtime_registrar()
-                .register(
-                    project_root.clone(),
-                    scope,
-                    access.requester,
-                    grant,
-                    retained_ports,
-                )
-                .await
-                .expect("register combined admission retained runtime");
-
-            Self {
-                _temp: temp,
-                engine,
-                memory,
-                project_root,
-                dashboard_root,
-                project_id,
-                configuration_revision_id,
-                configuration_digest: access.configuration_digest,
-            }
-        }
-
-        async fn mount_observability(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
-            let session_db = self
-                .memory
-                .store_runtime_registry()
-                .project_sessions(self.project_id.clone(), [self.project_root.clone()])
-                .await
-                .expect("combined admission project session database");
-            let policy_digest = canonical_sha256(&(
-                "tracedecay.combined-partial-replay.observability-policy.v1",
-                &self.project_id,
-                &self.configuration_digest,
-            ))
-            .expect("combined partial replay observability policy");
-            self.engine
-                .invocation
-                .invocation_service()
-                .mount_observability_producer(
-                    self.project_root.clone(),
-                    session_db.clone(),
-                    self.project_id.clone(),
-                    self.configuration_digest.clone(),
-                    policy_digest,
-                )
-                .await
-                .expect("mount combined partial replay observability");
-            session_db
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    enum ConflictingLeg {
-        Reflector,
-        Skill,
-    }
-
-    fn automation_journal_path(dashboard_root: &Path, run_id: &str) -> PathBuf {
-        let run_id = RunId::new(run_id).expect("automation run id");
-        let digest = canonical_sha256(&("tracedecay.automation-run.terminal-key.v1", &run_id))
-            .expect("automation journal key");
-        dashboard_root.join("automation_effects").join(format!(
-            "{}.json",
-            digest.as_str().trim_start_matches("sha256:")
-        ))
-    }
-
-    fn pending_journal_files(dashboard_root: &Path) -> Vec<String> {
-        let bytes = std::fs::read(
-            dashboard_root
-                .join("automation_effects")
-                .join("pending-index.json"),
-        )
-        .expect("automation pending index");
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("valid automation pending index");
-        let mut journals = value["entries"]
-            .as_array()
-            .expect("automation pending entries")
-            .iter()
-            .map(|entry| {
-                entry["journal_file"]
-                    .as_str()
-                    .expect("pending journal filename")
-                    .to_owned()
-            })
-            .collect::<Vec<_>>();
-        journals.sort();
-        journals
-    }
-
-    fn automation_terminal_sidecar_path(journal_path: &Path) -> PathBuf {
-        let filename = journal_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("automation journal filename");
-        journal_path.with_file_name(format!("{filename}.terminal"))
-    }
-
-    fn exact_spool_files(dashboard_root: &Path) -> Vec<PathBuf> {
-        let mut paths = match std::fs::read_dir(dashboard_root.join("automation_run_spool")) {
-            Ok(entries) => entries
-                .filter_map(std::result::Result::ok)
-                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-                .map(|entry| entry.path())
-                .collect::<Vec<_>>(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => panic!("read exact automation spool: {error}"),
-        };
-        paths.sort();
-        paths
-    }
-
-    fn now_secs() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("wall clock")
-            .as_secs() as i64
-    }
-
-    struct RecordingEarlyGateBackend {
-        calls: AtomicUsize,
-    }
-
-    impl RecordingEarlyGateBackend {
-        const fn new() -> Self {
-            Self {
-                calls: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl AgentTaskBackend for RecordingEarlyGateBackend {
-        fn run_task(
-            &self,
-            _request: &AgentTaskRequest,
-        ) -> std::result::Result<
-            AgentTaskResponse,
-            tracedecay_agent_hosts::automation::backend::AgentTaskError,
-        > {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            panic!("a disabled scheduler run must not invoke its backend")
-        }
-    }
-
-    struct RecordingEarlyGateRetrieval {
-        anchor_session_id: SessionId,
-        calls: AtomicUsize,
-    }
-
-    impl RecordingEarlyGateRetrieval {
-        fn new() -> Self {
-            Self {
-                anchor_session_id: SessionId::new("combined-partial-replay")
-                    .expect("combined partial replay session id"),
-                calls: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl AutomationSessionRetrieval for RecordingEarlyGateRetrieval {
-        fn anchor_session_id(&self) -> &SessionId {
-            &self.anchor_session_id
-        }
-
-        fn retrieve(
-            &self,
-            _query: tracedecay_usecases::session::SessionTemporalQuery,
-        ) -> AutomationSessionRetrievalFuture<'_> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { AutomationTemporalRetrieval::CompleteZero })
-        }
-    }
-
-    async fn assert_conflict_abandons_fresh_sibling(conflicting_leg: ConflictingLeg) {
-        let fixture = CombinedAdmissionFixture::new().await;
-        let run_id = match conflicting_leg {
-            ConflictingLeg::Reflector => "combined-conflict-reflector",
-            ConflictingLeg::Skill => "combined-conflict-skill",
-        };
-        let skill_run_id = format!("{run_id}_skills");
-        let options = CombinedReviewAutomationOptions::default();
-        let parent_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
-
-        let existing_admission = match conflicting_leg {
-            ConflictingLeg::Reflector => {
-                let mut conflicting = options.session_reflector.clone();
-                conflicting.query.push_str(" conflict");
-                scheduler_automation_effect(
-                    &fixture.engine,
-                    fixture.memory.as_ref(),
-                    &parent_control,
-                    &fixture.project_root,
-                    &fixture.dashboard_root,
-                    Some(run_id),
-                    fixture.configuration_digest.clone(),
-                    |run_id| {
-                        crate::daemon::automation_effect::session_reflector_run_request(
-                            run_id,
-                            &conflicting,
-                        )
-                    },
-                )
-                .await
-                .expect("reserve conflicting reflector")
-                .0
-            }
-            ConflictingLeg::Skill => {
-                let mut conflicting = options.skill_writer.clone();
-                conflicting.query.push_str(" conflict");
-                scheduler_automation_effect(
-                    &fixture.engine,
-                    fixture.memory.as_ref(),
-                    &parent_control,
-                    &fixture.project_root,
-                    &fixture.dashboard_root,
-                    Some(&skill_run_id),
-                    fixture.configuration_digest.clone(),
-                    |run_id| {
-                        crate::daemon::automation_effect::skill_writer_run_request(
-                            run_id,
-                            &conflicting,
-                        )
-                    },
-                )
-                .await
-                .expect("reserve conflicting skill")
-                .0
-            }
-        };
-        let AutomationEffectAdmission::Execute(existing) = existing_admission else {
-            panic!("fresh conflicting leg must own an Execute reservation")
-        };
-        let (conflicting_run_id, fresh_run_id) = match conflicting_leg {
-            ConflictingLeg::Reflector => (run_id, skill_run_id.as_str()),
-            ConflictingLeg::Skill => (skill_run_id.as_str(), run_id),
-        };
-        let conflicting_journal =
-            automation_journal_path(&fixture.dashboard_root, conflicting_run_id);
-        let fresh_journal = automation_journal_path(&fixture.dashboard_root, fresh_run_id);
-        assert!(conflicting_journal.is_file());
-
-        let admission = prepare_combined_effects(
-            &fixture.engine,
-            fixture.memory.as_ref(),
-            &parent_control,
-            &fixture.project_root,
-            &fixture.dashboard_root,
-            Some(run_id),
-            fixture.configuration_digest.clone(),
-            &options,
-        )
-        .await
-        .expect("resolve combined admission conflict");
-
-        assert!(matches!(admission, CombinedEffectAdmission::Conflict));
-        assert!(
-            conflicting_journal.is_file(),
-            "the conflicting sibling remains owned by its original authority"
-        );
-        assert!(
-            !fresh_journal.exists(),
-            "the newly reserved sibling must be abandoned before Conflict returns"
-        );
-        assert_eq!(
-            pending_journal_files(&fixture.dashboard_root),
-            vec![
-                conflicting_journal
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .expect("conflicting journal filename")
-                    .to_owned()
-            ],
-            "only the intentionally conflicting live authority remains recoverable"
-        );
-
-        let cancellation = CancellationSignal::active(format!("cancel.{run_id}"))
-            .expect("combined recovery cancellation");
-        let report =
-            crate::daemon::automation_effect::reconcile_reserved_automation_effects_for_project(
-                fixture.memory.as_ref(),
-                &fixture.dashboard_root,
-                &cancellation,
-            )
-            .await
-            .expect("inspect preserved conflicting authority");
-        assert_eq!(report.inspected, 1);
-        assert_eq!(report.deferred, 1);
-        assert_eq!(report.partial_effects, 0);
-        assert_eq!(report.reset_required, 0);
-        assert_eq!(report.indeterminate, 0);
-        assert_eq!(report.already_terminal, 0);
-
-        existing
-            .abandon_uncommitted()
-            .await
-            .expect("abandon preserved conflicting authority");
-        assert!(!conflicting_journal.exists());
-        assert!(pending_journal_files(&fixture.dashboard_root).is_empty());
-        let report =
-            crate::daemon::automation_effect::reconcile_reserved_automation_effects_for_project(
-                fixture.memory.as_ref(),
-                &fixture.dashboard_root,
-                &cancellation,
-            )
-            .await
-            .expect("verify conflict cleanup has no false recovery");
-        assert_eq!(report.inspected, 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn partial_replay_reuses_prior_scheduler_skip_without_current_publication() {
-        let fixture = CombinedAdmissionFixture::new().await;
-        let session_db = fixture.mount_observability().await;
-        let backend = RecordingEarlyGateBackend::new();
-        let retrieval = RecordingEarlyGateRetrieval::new();
-        let mut config = AutomationConfig::default();
-        config.enabled = false;
-        let parent_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
-        let options = CombinedReviewAutomationOptions::default();
-        assert_eq!(options.trigger, AutomationTrigger::Scheduler);
-        assert_eq!(options.skill_writer.trigger, AutomationTrigger::ManualCli);
-
-        let prior_skill_run_id = "combined-partial-replay-prior-skill";
-        let prior_skill = run_skill_writer_with_backend_and_retrieval(
-            fixture.memory.as_ref(),
-            &config,
-            &fixture.configuration_revision_id,
-            &backend,
-            &retrieval,
-            tracedecay_agent_hosts::automation::runner::SkillWriterAutomationOptions {
-                trigger: AutomationTrigger::Scheduler,
-                run_id: Some(prior_skill_run_id.to_owned()),
-                ..options.skill_writer.clone()
-            },
-        )
-        .await
-        .expect("publish prior exact scheduler skip");
-        assert_eq!(
-            prior_skill.ledger_record.status,
-            AutomationRunStatus::Skipped
-        );
-        assert_eq!(
-            prior_skill.ledger_record.error.as_deref(),
-            Some("automation_disabled")
-        );
-
-        let combined_run_id = "combined-partial-replay-current";
-        let reflector_admission = scheduler_automation_effect(
-            &fixture.engine,
-            fixture.memory.as_ref(),
-            &parent_control,
-            &fixture.project_root,
-            &fixture.dashboard_root,
-            Some(combined_run_id),
-            fixture.configuration_digest.clone(),
-            |run_id| {
-                crate::daemon::automation_effect::session_reflector_run_request(
-                    run_id,
-                    &options.session_reflector,
-                )
-            },
-        )
-        .await
-        .expect("reserve replayed reflector")
-        .0;
-        let AutomationEffectAdmission::Execute(reflector_authority) = reflector_admission else {
-            panic!("replayed reflector fixture must start as Execute")
-        };
-        let mut reflector_options = options.session_reflector.clone();
-        reflector_options.trigger = AutomationTrigger::Scheduler;
-        reflector_options.run_id = Some(combined_run_id.to_owned());
-        let reflector_run =
-            run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-                fixture.memory.as_ref(),
-                &config,
-                &parent_control,
-                &fixture.configuration_revision_id,
-                &backend,
-                &retrieval,
-                reflector_options,
-            )
-            .await;
-        let RetainedAutomationSettlementDisposition::Current {
-            result: Ok(reflector_run),
-            settlement_guard,
-        } = reflector_run.into_settlement_disposition()
-        else {
-            panic!("first exact reflector skip must be a current retained terminal")
-        };
-        let replayed_reflector = reflector_authority
-            .start_deferred_run_settlement_observed(
-                reflector_run.ledger_record,
-                reflector_run.committed_receipt,
-                settlement_guard,
-                None,
-            )
-            .wait()
-            .await
-            .expect("settle replayed reflector")
-            .0;
-        assert!(!replayed_reflector.is_completed());
-
-        let ledger_path = run_ledger_path(&fixture.dashboard_root);
-        let ledger_before = std::fs::read(&ledger_path).expect("partial replay ledger before run");
-        let spool_before = exact_spool_files(&fixture.dashboard_root);
-        let current_skill_run_id = format!("{combined_run_id}_skills");
-        let current_skill_journal =
-            automation_journal_path(&fixture.dashboard_root, &current_skill_run_id);
-        let current_skill_sidecar = automation_terminal_sidecar_path(&current_skill_journal);
-        let admission = prepare_combined_effects(
-            &fixture.engine,
-            fixture.memory.as_ref(),
-            &parent_control,
-            &fixture.project_root,
-            &fixture.dashboard_root,
-            Some(combined_run_id),
-            fixture.configuration_digest.clone(),
-            &options,
-        )
-        .await
-        .expect("prepare combined partial replay");
-        assert!(matches!(
-            &admission,
-            CombinedEffectAdmission::ReflectorReplay { .. }
-        ));
-        assert!(current_skill_journal.is_file());
-
-        let journal_lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(crate::storage::append_lock_path(&current_skill_journal))
-            .expect("open current skill journal lock");
-        journal_lock
-            .lock_exclusive()
-            .expect("block current skill abandonment");
-        let mut first_error = None;
-        let mut effect = Box::pin(run_combined_scheduler_effect(
-            admission,
-            &fixture.engine,
-            fixture.memory.as_ref(),
-            &fixture.project_id,
-            &fixture.project_root,
-            &config,
-            &fixture.configuration_revision_id,
-            &backend,
-            &retrieval,
-            options,
-            &mut first_error,
-        ));
-        let current_skill_task_lock = fixture
-            .dashboard_root
-            .join("automation_locks")
-            .join("skill_writer.lock");
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !current_skill_task_lock.is_file() {
-                tokio::select! {
-                    outcome = &mut effect => {
-                        panic!("partial replay returned before current abandonment: {outcome:?}")
-                    }
-                    () = tokio::task::yield_now() => {}
-                }
-            }
-        })
-        .await
-        .expect("current skill task lock appears while abandonment is blocked");
-        assert!(
-            tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire(
-                &fixture.dashboard_root,
-                AgentTaskKind::SkillWriter,
-                None,
-                now_secs(),
-            )
-            .await
-            .expect("competing skill task lock")
-            .is_none(),
-            "the current retained guard owns the task lock through abandonment"
-        );
-        assert!(current_skill_journal.is_file());
-        assert!(!current_skill_sidecar.exists());
-        assert_eq!(
-            std::fs::read(&ledger_path).expect("ledger while abandonment blocked"),
-            ledger_before
-        );
-        assert!(
-            find_run_record_exact_bounded_blocking(&fixture.dashboard_root, &current_skill_run_id,)
-                .expect("current exact ledger lookup while blocked")
-                .is_none()
-        );
-        assert_eq!(exact_spool_files(&fixture.dashboard_root), spool_before);
-        assert_eq!(pending_journal_files(&fixture.dashboard_root).len(), 1);
-
-        FileExt::unlock(&journal_lock).expect("release current skill abandonment");
-        assert_eq!((&mut effect).await, CombinedEffectOutcome::Handled);
-        drop(effect);
-        assert!(first_error.is_none());
-        assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(retrieval.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            std::fs::read(&ledger_path).expect("ledger after reused abandonment"),
-            ledger_before
-        );
-        assert_eq!(
-            find_run_record_exact_bounded_blocking(&fixture.dashboard_root, prior_skill_run_id)
-                .expect("prior exact ledger lookup after reuse"),
-            Some(prior_skill.ledger_record.clone())
-        );
-        assert!(
-            find_run_record_exact_bounded_blocking(&fixture.dashboard_root, &current_skill_run_id,)
-                .expect("current exact ledger absence after reuse")
-                .is_none()
-        );
-        assert!(!current_skill_journal.exists());
-        assert!(!current_skill_sidecar.exists());
-        assert!(pending_journal_files(&fixture.dashboard_root).is_empty());
-        assert_eq!(exact_spool_files(&fixture.dashboard_root), spool_before);
-        assert!(
-            tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire(
-                &fixture.dashboard_root,
-                AgentTaskKind::SkillWriter,
-                None,
-                now_secs(),
-            )
-            .await
-            .expect("post-abandonment skill task lock")
-            .is_some()
-        );
-
-        fixture
-            .engine
-            .invocation
-            .invocation_service()
-            .expire_all()
-            .await;
-        let observed = RegisteredObservabilityPortV1::new(session_db.as_ref())
-            .query(ObservabilityQueryV1 {
-                authorized_scope_ref: fixture.project_id.as_str().to_owned(),
-                event_kinds: vec!["automation.funnel.observed.v1".to_owned()],
-                horizon: ObservabilityHorizonV1 {
-                    since_micros: 0,
-                    until_micros: i64::MAX,
-                },
-                after_watermark: None,
-                limit: 32,
-            })
-            .await
-            .expect("query partial replay observations");
-        let prior_observations = observed
-            .events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    &event.payload,
-                    ObservabilityPayloadV1::AutomationFunnel(observation)
-                        if observation.run_ref == prior_skill_run_id
-                            && observation.terminal == AutomationTerminalV1::Skipped
-                )
-            })
-            .count();
-        assert_eq!(prior_observations, 1, "exact prior row is observed once");
-        assert!(observed.events.iter().all(|event| {
-            !matches!(
-                &event.payload,
-                ObservabilityPayloadV1::AutomationFunnel(observation)
-                    if observation.run_ref == current_skill_run_id
-            )
-        }));
-    }
-
-    #[test]
-    fn admission_matrix_never_reruns_a_replayed_leg() {
-        assert_eq!(
-            pair_mode(AdmissionState::Execute, AdmissionState::Execute),
-            PairMode::Combined
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Replay, AdmissionState::Execute),
-            PairMode::SkillOnly
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Execute, AdmissionState::Replay),
-            PairMode::ReflectorOnly
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Replay, AdmissionState::Replay),
-            PairMode::Replayed
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Problem, AdmissionState::Execute),
-            PairMode::ProblemAbandonSkill
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Execute, AdmissionState::Problem),
-            PairMode::ProblemAbandonReflector
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Problem, AdmissionState::Replay),
-            PairMode::ProblemNoAbandon
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Conflict, AdmissionState::Execute),
-            PairMode::ConflictAbandonSkill
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Execute, AdmissionState::Conflict),
-            PairMode::ConflictAbandonReflector
-        );
-        assert_eq!(
-            pair_mode(AdmissionState::Conflict, AdmissionState::Replay),
-            PairMode::ConflictNoAbandon
-        );
-    }
-
-    #[tokio::test]
-    async fn conflicting_reflector_abandons_only_the_fresh_skill_reservation() {
-        assert_conflict_abandons_fresh_sibling(ConflictingLeg::Reflector).await;
-    }
-
-    #[tokio::test]
-    async fn conflicting_skill_abandons_only_the_fresh_reflector_reservation() {
-        assert_conflict_abandons_fresh_sibling(ConflictingLeg::Skill).await;
-    }
-
-    #[test]
-    fn host_receipt_requires_both_exact_completed_terminals() {
-        assert!(CombinedEffectOutcome::Completed.completed());
-        assert!(!CombinedEffectOutcome::Handled.completed());
-        assert!(!CombinedEffectOutcome::Deferred.completed());
-    }
-
-    #[test]
-    fn only_not_combined_dispatch_falls_back_to_standalone_gates() {
-        assert!(CombinedEffectOutcome::Completed.handled());
-        assert!(CombinedEffectOutcome::Handled.handled());
-        assert!(!CombinedEffectOutcome::Deferred.handled());
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_combined_scheduler_effect(
     admission: CombinedEffectAdmission,
@@ -1125,7 +360,7 @@ pub(super) async fn run_combined_scheduler_effect(
                         project_path,
                         tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
                         &skill_control,
-                        skill,
+                        *skill,
                         reused,
                         settlement_guard,
                     )
@@ -1231,7 +466,7 @@ pub(super) async fn run_combined_scheduler_effect(
                         project_path,
                         tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
                         &reflector_control,
-                        reflector,
+                        *reflector,
                         reused,
                         settlement_guard,
                     )
@@ -1252,8 +487,8 @@ pub(super) async fn run_combined_scheduler_effect(
             run_execute_pair(
                 run_id,
                 run_control,
-                reflector,
-                skill,
+                *reflector,
+                *skill,
                 engine,
                 memory,
                 project_id,
@@ -1770,5 +1005,772 @@ pub(super) async fn prepare_combined_effects(
         _ => Err(crate::errors::TraceDecayError::Config {
             message: "combined automation admission matrix was internally inconsistent".to_owned(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use fs2::FileExt;
+    use tempfile::TempDir;
+    use tracedecay_agent_hosts::automation::AutomationRunControl;
+    use tracedecay_agent_hosts::automation::backend::{
+        AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    };
+    use tracedecay_agent_hosts::automation::config::AutomationConfig;
+    use tracedecay_agent_hosts::automation::run_ledger::{
+        AutomationRunStatus, AutomationTrigger, find_run_record_exact_bounded_blocking,
+        run_ledger_path,
+    };
+    use tracedecay_agent_hosts::automation::runner::{
+        AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
+        CombinedReviewAutomationOptions, RetainedAutomationSettlementDisposition,
+        run_skill_writer_with_backend_and_retrieval,
+    };
+    use tracedecay_application::{
+        CancellationSignal, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
+    };
+    use tracedecay_domain::{
+        AutomationTerminalV1, ManifestDigest, ObservabilityPayloadV1, ProjectId, RunId, SessionId,
+        canonical_sha256,
+    };
+    use tracedecay_usecases::observability::RegisteredObservabilityPortV1;
+
+    use super::{
+        AdmissionState, AutomationEffectAdmission, CombinedEffectAdmission, CombinedEffectOutcome,
+        DaemonEngine, PairMode, TraceDecay, pair_mode, prepare_combined_effects,
+        run_combined_scheduler_effect,
+        run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
+        scheduler_automation_effect,
+    };
+
+    struct CombinedAdmissionFixture {
+        _temp: TempDir,
+        engine: DaemonEngine,
+        memory: Arc<TraceDecay>,
+        project_root: PathBuf,
+        dashboard_root: PathBuf,
+        project_id: ProjectId,
+        configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
+        configuration_digest: ManifestDigest,
+    }
+
+    impl CombinedAdmissionFixture {
+        async fn new() -> Self {
+            let temp = TempDir::new().expect("combined admission fixture");
+            let project_root = temp.path().join("project");
+            let profile_root = temp.path().join("profile");
+            std::fs::create_dir_all(project_root.join("src"))
+                .expect("combined admission source directory");
+            std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
+                .expect("combined admission source");
+            let memory = Arc::new(
+                TraceDecay::init_with_options(
+                    &project_root,
+                    crate::tracedecay::TraceDecayOpenOptions {
+                        profile_root: Some(profile_root.clone()),
+                        global_db_path: Some(profile_root.join("global.db")),
+                    },
+                )
+                .await
+                .expect("initialize combined admission project"),
+            );
+            let project_root = memory
+                .project_root()
+                .canonicalize()
+                .expect("canonical combined admission project");
+            let dashboard_root = memory.store_layout().dashboard_root.clone();
+            let project_id = memory
+                .configuration_runtime()
+                .configuration_target()
+                .project_id
+                .clone();
+            let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+                &project_root,
+                &project_id,
+            )
+            .expect("combined admission scope");
+            let observed_at = tracedecay_application::now_micros();
+            let configuration = memory
+                .configuration_runtime()
+                .client()
+                .current()
+                .await
+                .expect("combined admission configuration");
+            let configuration_revision_id = configuration.revision_id.clone();
+            let access = crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
+                &scope,
+                &project_root,
+                &configuration,
+                observed_at,
+            )
+            .expect("combined admission retained access");
+            let grant = crate::daemon::project_open_owners::project_open_retained_grant(
+                &access,
+                observed_at,
+            )
+            .expect("combined admission retained grant");
+            let engine = DaemonEngine::default();
+            let invocation_service = engine.invocation.invocation_service();
+            let retained_ports = crate::daemon::retained_owner::retained_surface_ports(
+                crate::daemon::retained_owner::ProductionRetainedAuthoritiesV1 {
+                    cg: Arc::new(tokio::sync::RwLock::new(Arc::clone(&memory))),
+                    project_root: project_root.clone(),
+                    project_id: project_id.clone(),
+                    mounted_profile_id: None,
+                    mounted_session_store_id: None,
+                    mounted_session_root_id: None,
+                    registered_session_db: None,
+                    project_refresh: None,
+                    project_retrieval: None,
+                    project_workflow_index: None,
+                    project_lcm: None,
+                    configuration_digest: access.configuration_digest.clone(),
+                    invocation_service: Some(invocation_service),
+                },
+            );
+            engine
+                .invocation
+                .retained_runtime_registrar()
+                .register(
+                    project_root.clone(),
+                    scope,
+                    access.requester,
+                    grant,
+                    retained_ports,
+                )
+                .await
+                .expect("register combined admission retained runtime");
+
+            Self {
+                _temp: temp,
+                engine,
+                memory,
+                project_root,
+                dashboard_root,
+                project_id,
+                configuration_revision_id,
+                configuration_digest: access.configuration_digest,
+            }
+        }
+
+        async fn mount_observability(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
+            let session_db = self
+                .memory
+                .store_runtime_registry()
+                .project_sessions(self.project_id.clone(), [self.project_root.clone()])
+                .await
+                .expect("combined admission project session database");
+            let policy_digest = canonical_sha256(&(
+                "tracedecay.combined-partial-replay.observability-policy.v1",
+                &self.project_id,
+                &self.configuration_digest,
+            ))
+            .expect("combined partial replay observability policy");
+            self.engine
+                .invocation
+                .invocation_service()
+                .mount_observability_producer(
+                    self.project_root.clone(),
+                    session_db.clone(),
+                    self.project_id.clone(),
+                    self.configuration_digest.clone(),
+                    policy_digest,
+                )
+                .await
+                .expect("mount combined partial replay observability");
+            session_db
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ConflictingLeg {
+        Reflector,
+        Skill,
+    }
+
+    fn automation_journal_path(dashboard_root: &Path, run_id: &str) -> PathBuf {
+        let run_id = RunId::new(run_id).expect("automation run id");
+        let digest = canonical_sha256(&("tracedecay.automation-run.terminal-key.v1", &run_id))
+            .expect("automation journal key");
+        dashboard_root.join("automation_effects").join(format!(
+            "{}.json",
+            digest.as_str().trim_start_matches("sha256:")
+        ))
+    }
+
+    fn pending_journal_files(dashboard_root: &Path) -> Vec<String> {
+        let bytes = std::fs::read(
+            dashboard_root
+                .join("automation_effects")
+                .join("pending-index.json"),
+        )
+        .expect("automation pending index");
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("valid automation pending index");
+        let mut journals = value["entries"]
+            .as_array()
+            .expect("automation pending entries")
+            .iter()
+            .map(|entry| {
+                entry["journal_file"]
+                    .as_str()
+                    .expect("pending journal filename")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        journals.sort();
+        journals
+    }
+
+    fn automation_terminal_sidecar_path(journal_path: &Path) -> PathBuf {
+        let filename = journal_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("automation journal filename");
+        journal_path.with_file_name(format!("{filename}.terminal"))
+    }
+
+    fn exact_spool_files(dashboard_root: &Path) -> Vec<PathBuf> {
+        let mut paths = match std::fs::read_dir(dashboard_root.join("automation_run_spool")) {
+            Ok(entries) => entries
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("read exact automation spool: {error}"),
+        };
+        paths.sort();
+        paths
+    }
+
+    fn now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("wall clock")
+            .as_secs() as i64
+    }
+
+    struct RecordingEarlyGateBackend {
+        calls: AtomicUsize,
+    }
+
+    impl RecordingEarlyGateBackend {
+        const fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl AgentTaskBackend for RecordingEarlyGateBackend {
+        fn run_task(
+            &self,
+            _request: &AgentTaskRequest,
+        ) -> std::result::Result<
+            AgentTaskResponse,
+            tracedecay_agent_hosts::automation::backend::AgentTaskError,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            panic!("a disabled scheduler run must not invoke its backend")
+        }
+    }
+
+    struct RecordingEarlyGateRetrieval {
+        anchor_session_id: SessionId,
+        calls: AtomicUsize,
+    }
+
+    impl RecordingEarlyGateRetrieval {
+        fn new() -> Self {
+            Self {
+                anchor_session_id: SessionId::new("combined-partial-replay")
+                    .expect("combined partial replay session id"),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl AutomationSessionRetrieval for RecordingEarlyGateRetrieval {
+        fn anchor_session_id(&self) -> &SessionId {
+            &self.anchor_session_id
+        }
+
+        fn retrieve(
+            &self,
+            _query: tracedecay_usecases::session::SessionTemporalQuery,
+        ) -> AutomationSessionRetrievalFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { AutomationTemporalRetrieval::CompleteZero })
+        }
+    }
+
+    async fn assert_conflict_abandons_fresh_sibling(conflicting_leg: ConflictingLeg) {
+        let fixture = CombinedAdmissionFixture::new().await;
+        let run_id = match conflicting_leg {
+            ConflictingLeg::Reflector => "combined-conflict-reflector",
+            ConflictingLeg::Skill => "combined-conflict-skill",
+        };
+        let skill_run_id = format!("{run_id}_skills");
+        let options = CombinedReviewAutomationOptions::default();
+        let parent_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
+
+        let existing_admission = match conflicting_leg {
+            ConflictingLeg::Reflector => {
+                let mut conflicting = options.session_reflector.clone();
+                conflicting.query.push_str(" conflict");
+                scheduler_automation_effect(
+                    &fixture.engine,
+                    fixture.memory.as_ref(),
+                    &parent_control,
+                    &fixture.project_root,
+                    &fixture.dashboard_root,
+                    Some(run_id),
+                    fixture.configuration_digest.clone(),
+                    |run_id| {
+                        crate::daemon::automation_effect::session_reflector_run_request(
+                            run_id,
+                            &conflicting,
+                        )
+                    },
+                )
+                .await
+                .expect("reserve conflicting reflector")
+                .0
+            }
+            ConflictingLeg::Skill => {
+                let mut conflicting = options.skill_writer.clone();
+                conflicting.query.push_str(" conflict");
+                scheduler_automation_effect(
+                    &fixture.engine,
+                    fixture.memory.as_ref(),
+                    &parent_control,
+                    &fixture.project_root,
+                    &fixture.dashboard_root,
+                    Some(&skill_run_id),
+                    fixture.configuration_digest.clone(),
+                    |run_id| {
+                        crate::daemon::automation_effect::skill_writer_run_request(
+                            run_id,
+                            &conflicting,
+                        )
+                    },
+                )
+                .await
+                .expect("reserve conflicting skill")
+                .0
+            }
+        };
+        let AutomationEffectAdmission::Execute(existing) = existing_admission else {
+            panic!("fresh conflicting leg must own an Execute reservation")
+        };
+        let (conflicting_run_id, fresh_run_id) = match conflicting_leg {
+            ConflictingLeg::Reflector => (run_id, skill_run_id.as_str()),
+            ConflictingLeg::Skill => (skill_run_id.as_str(), run_id),
+        };
+        let conflicting_journal =
+            automation_journal_path(&fixture.dashboard_root, conflicting_run_id);
+        let fresh_journal = automation_journal_path(&fixture.dashboard_root, fresh_run_id);
+        assert!(conflicting_journal.is_file());
+
+        let admission = prepare_combined_effects(
+            &fixture.engine,
+            fixture.memory.as_ref(),
+            &parent_control,
+            &fixture.project_root,
+            &fixture.dashboard_root,
+            Some(run_id),
+            fixture.configuration_digest.clone(),
+            &options,
+        )
+        .await
+        .expect("resolve combined admission conflict");
+
+        assert!(matches!(admission, CombinedEffectAdmission::Conflict));
+        assert!(
+            conflicting_journal.is_file(),
+            "the conflicting sibling remains owned by its original authority"
+        );
+        assert!(
+            !fresh_journal.exists(),
+            "the newly reserved sibling must be abandoned before Conflict returns"
+        );
+        assert_eq!(
+            pending_journal_files(&fixture.dashboard_root),
+            vec![
+                conflicting_journal
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("conflicting journal filename")
+                    .to_owned()
+            ],
+            "only the intentionally conflicting live authority remains recoverable"
+        );
+
+        let cancellation = CancellationSignal::active(format!("cancel.{run_id}"))
+            .expect("combined recovery cancellation");
+        let report =
+            crate::daemon::automation_effect::reconcile_reserved_automation_effects_for_project(
+                fixture.memory.as_ref(),
+                &fixture.dashboard_root,
+                &cancellation,
+            )
+            .await
+            .expect("inspect preserved conflicting authority");
+        assert_eq!(report.inspected, 1);
+        assert_eq!(report.deferred, 1);
+        assert_eq!(report.partial_effects, 0);
+        assert_eq!(report.reset_required, 0);
+        assert_eq!(report.indeterminate, 0);
+        assert_eq!(report.already_terminal, 0);
+
+        existing
+            .abandon_uncommitted()
+            .await
+            .expect("abandon preserved conflicting authority");
+        assert!(!conflicting_journal.exists());
+        assert!(pending_journal_files(&fixture.dashboard_root).is_empty());
+        let report =
+            crate::daemon::automation_effect::reconcile_reserved_automation_effects_for_project(
+                fixture.memory.as_ref(),
+                &fixture.dashboard_root,
+                &cancellation,
+            )
+            .await
+            .expect("verify conflict cleanup has no false recovery");
+        assert_eq!(report.inspected, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn partial_replay_reuses_prior_scheduler_skip_without_current_publication() {
+        let fixture = CombinedAdmissionFixture::new().await;
+        let session_db = fixture.mount_observability().await;
+        let backend = RecordingEarlyGateBackend::new();
+        let retrieval = RecordingEarlyGateRetrieval::new();
+        let config = AutomationConfig {
+            enabled: false,
+            ..AutomationConfig::default()
+        };
+        let parent_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
+        let options = CombinedReviewAutomationOptions::default();
+        assert_eq!(options.trigger, AutomationTrigger::Scheduler);
+        assert_eq!(options.skill_writer.trigger, AutomationTrigger::ManualCli);
+
+        let prior_skill_run_id = "combined-partial-replay-prior-skill";
+        let prior_skill = run_skill_writer_with_backend_and_retrieval(
+            fixture.memory.as_ref(),
+            &config,
+            &fixture.configuration_revision_id,
+            &backend,
+            &retrieval,
+            tracedecay_agent_hosts::automation::runner::SkillWriterAutomationOptions {
+                trigger: AutomationTrigger::Scheduler,
+                run_id: Some(prior_skill_run_id.to_owned()),
+                ..options.skill_writer.clone()
+            },
+        )
+        .await
+        .expect("publish prior exact scheduler skip");
+        assert_eq!(
+            prior_skill.ledger_record.status,
+            AutomationRunStatus::Skipped
+        );
+        assert_eq!(
+            prior_skill.ledger_record.error.as_deref(),
+            Some("automation_disabled")
+        );
+
+        let combined_run_id = "combined-partial-replay-current";
+        let reflector_admission = scheduler_automation_effect(
+            &fixture.engine,
+            fixture.memory.as_ref(),
+            &parent_control,
+            &fixture.project_root,
+            &fixture.dashboard_root,
+            Some(combined_run_id),
+            fixture.configuration_digest.clone(),
+            |run_id| {
+                crate::daemon::automation_effect::session_reflector_run_request(
+                    run_id,
+                    &options.session_reflector,
+                )
+            },
+        )
+        .await
+        .expect("reserve replayed reflector")
+        .0;
+        let AutomationEffectAdmission::Execute(reflector_authority) = reflector_admission else {
+            panic!("replayed reflector fixture must start as Execute")
+        };
+        let mut reflector_options = options.session_reflector.clone();
+        reflector_options.trigger = AutomationTrigger::Scheduler;
+        reflector_options.run_id = Some(combined_run_id.to_owned());
+        let reflector_run =
+            run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
+                fixture.memory.as_ref(),
+                &config,
+                &parent_control,
+                &fixture.configuration_revision_id,
+                &backend,
+                &retrieval,
+                reflector_options,
+            )
+            .await;
+        let RetainedAutomationSettlementDisposition::Current {
+            result: Ok(reflector_run),
+            settlement_guard,
+        } = reflector_run.into_settlement_disposition()
+        else {
+            panic!("first exact reflector skip must be a current retained terminal")
+        };
+        let replayed_reflector = reflector_authority
+            .start_deferred_run_settlement_observed(
+                reflector_run.ledger_record,
+                reflector_run.committed_receipt,
+                settlement_guard,
+                None,
+            )
+            .wait()
+            .await
+            .expect("settle replayed reflector")
+            .0;
+        assert!(!replayed_reflector.is_completed());
+
+        let ledger_path = run_ledger_path(&fixture.dashboard_root);
+        let ledger_before = std::fs::read(&ledger_path).expect("partial replay ledger before run");
+        let spool_before = exact_spool_files(&fixture.dashboard_root);
+        let current_skill_run_id = format!("{combined_run_id}_skills");
+        let current_skill_journal =
+            automation_journal_path(&fixture.dashboard_root, &current_skill_run_id);
+        let current_skill_sidecar = automation_terminal_sidecar_path(&current_skill_journal);
+        let admission = prepare_combined_effects(
+            &fixture.engine,
+            fixture.memory.as_ref(),
+            &parent_control,
+            &fixture.project_root,
+            &fixture.dashboard_root,
+            Some(combined_run_id),
+            fixture.configuration_digest.clone(),
+            &options,
+        )
+        .await
+        .expect("prepare combined partial replay");
+        assert!(matches!(
+            &admission,
+            CombinedEffectAdmission::ReflectorReplay { .. }
+        ));
+        assert!(current_skill_journal.is_file());
+
+        let journal_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(crate::storage::append_lock_path(&current_skill_journal))
+            .expect("open current skill journal lock");
+        journal_lock
+            .lock_exclusive()
+            .expect("block current skill abandonment");
+        let mut first_error = None;
+        let mut effect = Box::pin(run_combined_scheduler_effect(
+            admission,
+            &fixture.engine,
+            fixture.memory.as_ref(),
+            &fixture.project_id,
+            &fixture.project_root,
+            &config,
+            &fixture.configuration_revision_id,
+            &backend,
+            &retrieval,
+            options,
+            &mut first_error,
+        ));
+        let current_skill_task_lock = fixture
+            .dashboard_root
+            .join("automation_locks")
+            .join("skill_writer.lock");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !current_skill_task_lock.is_file() {
+                tokio::select! {
+                    outcome = &mut effect => {
+                        panic!("partial replay returned before current abandonment: {outcome:?}")
+                    }
+                    () = tokio::task::yield_now() => {}
+                }
+            }
+        })
+        .await
+        .expect("current skill task lock appears while abandonment is blocked");
+        assert!(
+            tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire(
+                &fixture.dashboard_root,
+                AgentTaskKind::SkillWriter,
+                None,
+                now_secs(),
+            )
+            .await
+            .expect("competing skill task lock")
+            .is_none(),
+            "the current retained guard owns the task lock through abandonment"
+        );
+        assert!(current_skill_journal.is_file());
+        assert!(!current_skill_sidecar.exists());
+        assert_eq!(
+            std::fs::read(&ledger_path).expect("ledger while abandonment blocked"),
+            ledger_before
+        );
+        assert!(
+            find_run_record_exact_bounded_blocking(&fixture.dashboard_root, &current_skill_run_id,)
+                .expect("current exact ledger lookup while blocked")
+                .is_none()
+        );
+        assert_eq!(exact_spool_files(&fixture.dashboard_root), spool_before);
+        assert_eq!(pending_journal_files(&fixture.dashboard_root).len(), 1);
+
+        FileExt::unlock(&journal_lock).expect("release current skill abandonment");
+        assert_eq!((&mut effect).await, CombinedEffectOutcome::Handled);
+        drop(effect);
+        assert!(first_error.is_none());
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(retrieval.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            std::fs::read(&ledger_path).expect("ledger after reused abandonment"),
+            ledger_before
+        );
+        assert_eq!(
+            find_run_record_exact_bounded_blocking(&fixture.dashboard_root, prior_skill_run_id)
+                .expect("prior exact ledger lookup after reuse"),
+            Some(prior_skill.ledger_record.clone())
+        );
+        assert!(
+            find_run_record_exact_bounded_blocking(&fixture.dashboard_root, &current_skill_run_id,)
+                .expect("current exact ledger absence after reuse")
+                .is_none()
+        );
+        assert!(!current_skill_journal.exists());
+        assert!(!current_skill_sidecar.exists());
+        assert!(pending_journal_files(&fixture.dashboard_root).is_empty());
+        assert_eq!(exact_spool_files(&fixture.dashboard_root), spool_before);
+        assert!(
+            tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire(
+                &fixture.dashboard_root,
+                AgentTaskKind::SkillWriter,
+                None,
+                now_secs(),
+            )
+            .await
+            .expect("post-abandonment skill task lock")
+            .is_some()
+        );
+
+        fixture
+            .engine
+            .invocation
+            .invocation_service()
+            .expire_all()
+            .await;
+        let observed = RegisteredObservabilityPortV1::new(session_db.as_ref())
+            .query(ObservabilityQueryV1 {
+                authorized_scope_ref: fixture.project_id.as_str().to_owned(),
+                event_kinds: vec!["automation.funnel.observed.v1".to_owned()],
+                horizon: ObservabilityHorizonV1 {
+                    since_micros: 0,
+                    until_micros: i64::MAX,
+                },
+                after_watermark: None,
+                limit: 32,
+            })
+            .await
+            .expect("query partial replay observations");
+        let prior_observations = observed
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.payload,
+                    ObservabilityPayloadV1::AutomationFunnel(observation)
+                        if observation.run_ref == prior_skill_run_id
+                            && observation.terminal == AutomationTerminalV1::Skipped
+                )
+            })
+            .count();
+        assert_eq!(prior_observations, 1, "exact prior row is observed once");
+        assert!(observed.events.iter().all(|event| {
+            !matches!(
+                &event.payload,
+                ObservabilityPayloadV1::AutomationFunnel(observation)
+                    if observation.run_ref == current_skill_run_id
+            )
+        }));
+    }
+
+    #[test]
+    fn admission_matrix_never_reruns_a_replayed_leg() {
+        assert_eq!(
+            pair_mode(AdmissionState::Execute, AdmissionState::Execute),
+            PairMode::Combined
+        );
+        assert_eq!(
+            pair_mode(AdmissionState::Replay, AdmissionState::Execute),
+            PairMode::SkillOnly
+        );
+        assert_eq!(
+            pair_mode(AdmissionState::Execute, AdmissionState::Replay),
+            PairMode::ReflectorOnly
+        );
+        assert_eq!(
+            pair_mode(AdmissionState::Replay, AdmissionState::Replay),
+            PairMode::Replayed
+        );
+        assert_eq!(
+            pair_mode(AdmissionState::Problem, AdmissionState::Execute),
+            PairMode::ProblemAbandonSkill
+        );
+        assert_eq!(
+            pair_mode(AdmissionState::Execute, AdmissionState::Problem),
+            PairMode::ProblemAbandonReflector
+        );
+        assert_eq!(
+            pair_mode(AdmissionState::Problem, AdmissionState::Replay),
+            PairMode::ProblemNoAbandon
+        );
+        assert_eq!(
+            pair_mode(AdmissionState::Conflict, AdmissionState::Execute),
+            PairMode::ConflictAbandonSkill
+        );
+        assert_eq!(
+            pair_mode(AdmissionState::Execute, AdmissionState::Conflict),
+            PairMode::ConflictAbandonReflector
+        );
+        assert_eq!(
+            pair_mode(AdmissionState::Conflict, AdmissionState::Replay),
+            PairMode::ConflictNoAbandon
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_reflector_abandons_only_the_fresh_skill_reservation() {
+        assert_conflict_abandons_fresh_sibling(ConflictingLeg::Reflector).await;
+    }
+
+    #[tokio::test]
+    async fn conflicting_skill_abandons_only_the_fresh_reflector_reservation() {
+        assert_conflict_abandons_fresh_sibling(ConflictingLeg::Skill).await;
+    }
+
+    #[test]
+    fn host_receipt_requires_both_exact_completed_terminals() {
+        assert!(CombinedEffectOutcome::Completed.completed());
+        assert!(!CombinedEffectOutcome::Handled.completed());
+        assert!(!CombinedEffectOutcome::Deferred.completed());
+    }
+
+    #[test]
+    fn only_not_combined_dispatch_falls_back_to_standalone_gates() {
+        assert!(CombinedEffectOutcome::Completed.handled());
+        assert!(CombinedEffectOutcome::Handled.handled());
+        assert!(!CombinedEffectOutcome::Deferred.handled());
     }
 }

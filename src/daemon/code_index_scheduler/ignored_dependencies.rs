@@ -110,14 +110,14 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
         let snapshot = serving.generation().snapshot();
         if request.scope.validate().is_err()
-            || &request.scope.project_id != &self.project_id
-            || &request.scope.repository_id != &self.repository_id
-            || &request.scope.worktree_id != &self.worktree_id
-            || &request.scope.reference != &snapshot.reference
+            || request.scope.project_id != self.project_id
+            || request.scope.repository_id != self.repository_id
+            || request.scope.worktree_id != self.worktree_id
+            || request.scope.reference != snapshot.reference
         {
             return Err(CodeIndexIgnoredDependencyRefusalV1::ScopeMismatch.into());
         }
-        if &request.expected_generation != &serving.generation().manifest().generation_id {
+        if request.expected_generation != serving.generation().manifest().generation_id {
             return Err(CodeIndexIgnoredDependencyRefusalV1::StaleGeneration.into());
         }
         Ok(())
@@ -564,7 +564,7 @@ fn read_bounded_source(
         })?;
     let mut bytes = Vec::new();
     let mut source = std::fs::File::open(path)?.take(limit as u64);
-    let mut chunk = [0_u8; ADMITTED_SOURCE_READ_CHUNK_BYTES];
+    let mut chunk = vec![0_u8; ADMITTED_SOURCE_READ_CHUNK_BYTES];
     loop {
         checkpoint_if_present(control)?;
         let read = source.read(&mut chunk)?;
@@ -585,7 +585,7 @@ pub(super) fn read_bounded_snapshot_source(
 ) -> Result<Vec<u8>, CodeIndexSchedulerErrorV1> {
     let mut bytes = Vec::new();
     let mut source = std::fs::File::open(path)?;
-    let mut chunk = [0_u8; ADMITTED_SOURCE_READ_CHUNK_BYTES];
+    let mut chunk = vec![0_u8; ADMITTED_SOURCE_READ_CHUNK_BYTES];
     loop {
         checkpoint_if_present(control)?;
         let read = source.read(&mut chunk)?;

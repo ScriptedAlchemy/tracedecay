@@ -205,21 +205,25 @@ async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
 }
 
 /// Enrolls `project_root` on disk exactly as a previously-initialized project
-/// is enrolled — an in-repo enrollment marker plus a materialized profile store
-/// — without touching the profile registry. This is the on-disk shape retained
-/// while the derived registry is rebuilt: every project's durable enrollment
-/// survives.
+/// is enrolled — a `.git/` repository identity marker plus a materialized
+/// profile store — without touching the profile registry. This is the on-disk
+/// shape retained while the derived registry is rebuilt: every project's
+/// durable enrollment survives, and nothing lives in the working tree.
 #[cfg(unix)]
 pub(super) fn enroll_project_on_disk_only(
     project_root: &std::path::Path,
     profile_root: &std::path::Path,
     project_id: &str,
 ) -> crate::storage::StoreLayout {
+    assert!(
+        crate::storage::write_repository_identity_marker(project_root, project_id)
+            .expect("repository identity marker"),
+        "fixture repository must accept an identity marker"
+    );
     let marker = crate::storage::EnrollmentMarker {
         project_id: project_id.to_owned(),
         storage_mode: crate::storage::StorageMode::ProfileSharded,
     };
-    crate::storage::write_enrollment_marker(project_root, &marker).expect("enrollment marker");
     let layout = crate::storage::profile_sharded_layout(project_root, profile_root, &marker)
         .expect("layout");
     std::fs::create_dir_all(&layout.data_root).expect("profile store root");
@@ -274,9 +278,9 @@ async fn durably_enrolled_project_is_admitted_after_a_registry_reset() {
         .expect("a durably enrolled project must be admitted without allow_init");
 
     // Admission must mount the recovered store, never mint a replacement.
-    let marker = crate::storage::read_enrollment_marker(&project)
-        .expect("read enrollment marker")
-        .expect("enrollment marker retained");
+    let marker = crate::storage::read_repository_identity_marker(&project)
+        .expect("read repository identity marker")
+        .expect("repository identity marker retained");
     assert_eq!(marker.project_id, "proj_forward_boundary");
     assert!(
         layout.graph_db_path.is_file(),
@@ -284,12 +288,12 @@ async fn durably_enrolled_project_is_admitted_after_a_registry_reset() {
     );
 }
 
-/// The guard still refuses a project whose enrollment marker points at a store
-/// that is not on disk, so the widened admission cannot resurrect a route with
-/// nothing behind it.
+/// The guard still refuses a project whose repository identity marker points
+/// at a store that is not on disk, so the widened admission cannot resurrect a
+/// route with nothing behind it.
 #[cfg(unix)]
 #[tokio::test]
-async fn enrollment_marker_without_a_store_is_still_rejected() {
+async fn identity_marker_without_a_store_is_still_rejected() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let profile_root = root.join(".tracedecay");
@@ -314,15 +318,13 @@ async fn enrollment_marker_without_a_store_is_still_rejected() {
 }
 
 /// Regression for the orphaned-store deadlock: a repository whose durable
-/// identity marker (`.git/tracedecay-project.json`) survived while both its
-/// in-repo enrollment marker and its registry rows were lost, with the profile
-/// store still fully materialized on disk. Identity resolution answers through
-/// the durable marker (so first-touch never runs), while the store resolver
-/// demands the enrollment marker nothing would ever rewrite — `tracedecay
-/// init` failed deterministically with `MissingEnrollment` and hooks kept
-/// writing into the orphan. Recovery must re-adopt: admit the route, restore
-/// the enrollment marker under exactly the identity the durable marker names
-/// (never a freshly minted alias), and leave the store's data untouched.
+/// identity marker (`.git/tracedecay-project.json`) survived while its
+/// registry rows were lost, with the profile store still fully materialized
+/// on disk. Identity resolution answers through the durable marker (so
+/// first-touch never runs). Recovery must re-adopt: admit the route, resolve
+/// the enrollment roots under exactly the identity the durable marker names
+/// (never a freshly minted alias), and leave the store's data untouched —
+/// without creating anything in the working tree.
 #[cfg(unix)]
 #[tokio::test]
 async fn orphaned_store_with_repository_identity_is_readopted_without_aliasing() {
@@ -337,19 +339,7 @@ async fn orphaned_store_with_repository_identity_is_readopted_without_aliasing()
     // the path-derived hash of this checkout, so a re-adoption that silently
     // minted a fresh identity would fail the assertions below.
     let project_id = "proj_orphan_readopt";
-    crate::storage::write_repository_identity_marker(&project, project_id)
-        .expect("repository identity marker");
-
-    // Materialize the orphan store exactly as `enroll_project_on_disk_only`
-    // does, then remove the enrollment marker to reproduce the orphan shape.
     let layout = enroll_project_on_disk_only(&project, &profile_root, project_id);
-    crate::storage::remove_enrollment_marker(&project, project_id).expect("drop enrollment marker");
-    assert!(
-        crate::storage::read_enrollment_marker(&project)
-            .expect("read enrollment marker")
-            .is_none(),
-        "fixture must reproduce the missing-enrollment orphan shape"
-    );
     let graph_bytes_before = std::fs::read(&layout.graph_db_path).expect("orphan graph bytes");
 
     let _database_scope =
@@ -386,8 +376,9 @@ async fn orphaned_store_with_repository_identity_is_readopted_without_aliasing()
         "re-adoption must keep the durable identity, never mint an alias"
     );
 
-    // Enrollment restoration is the re-adoption step: the same resolution the
-    // session mount performs must rewrite the missing marker in place.
+    // Enrollment-root resolution is the re-adoption step: the same resolution
+    // the session mount performs must answer through the durable `.git/`
+    // marker without creating anything in the working tree.
     let typed_project_id =
         tracedecay_store::ProjectId::new(project_id.to_owned()).expect("typed project id");
     let roots = crate::tracedecay::TraceDecay::registered_enrollment_roots(
@@ -397,21 +388,21 @@ async fn orphaned_store_with_repository_identity_is_readopted_without_aliasing()
         registry.as_ref(),
     )
     .await
-    .expect("re-adoption must restore the enrollment root");
+    .expect("re-adoption must resolve the enrollment root");
     assert!(
         !roots.is_empty(),
         "re-adoption must produce enrollment roots"
     );
-    let restored = crate::storage::read_enrollment_marker(&project)
-        .expect("read restored enrollment marker")
-        .expect("enrollment marker must be restored");
+    let retained = crate::storage::read_repository_identity_marker(&project)
+        .expect("read repository identity marker")
+        .expect("repository identity marker must be retained");
     assert_eq!(
-        restored.project_id, project_id,
-        "restored enrollment must name the durable identity"
+        retained.project_id, project_id,
+        "re-adoption must keep the durable identity"
     );
-    assert_eq!(
-        restored.storage_mode,
-        crate::storage::StorageMode::ProfileSharded
+    assert!(
+        !project.join(".tracedecay").exists(),
+        "re-adoption must not create anything in the working tree"
     );
 
     // Re-adoption restores identity only; the store's data is never replaced.
@@ -1137,10 +1128,8 @@ async fn linked_worktree_root_is_not_admitted_as_first_touch_project() {
         "linked first-touch rejection must precede project opening"
     );
     assert!(
-        crate::storage::read_enrollment_marker(&linked)
-            .expect("read linked marker")
-            .is_none(),
-        "rejection must not write a linked-worktree enrollment marker"
+        !linked.join(".tracedecay").exists(),
+        "rejection must not write linked-worktree project state"
     );
 }
 
@@ -1222,10 +1211,8 @@ async fn linked_route_reuses_primary_authority_while_shadow_writer_is_held() {
     assert_eq!(servers.aliases.len(), 2, "primary and linked route aliases");
     drop(servers);
     assert!(
-        crate::storage::read_enrollment_marker(&linked)
-            .expect("read linked marker")
-            .is_none(),
-        "linked route must not acquire a second enrollment marker"
+        !linked.join(".tracedecay").exists(),
+        "linked route must not acquire working-tree project state"
     );
     engine.shutdown_all().await;
 }
@@ -1945,14 +1932,8 @@ async fn project_deletion_retires_rootless_open_by_persisted_project_identity() 
     let project_root = temp.path().join("repository");
     std::fs::create_dir_all(&profile_root).expect("profile root");
     std::fs::create_dir_all(&project_root).expect("project root");
-    crate::storage::write_enrollment_marker(
-        &project_root,
-        &crate::storage::EnrollmentMarker {
-            project_id: "proj_rootless_open".to_owned(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .expect("enrollment marker");
+    crate::storage::pin_fixture_repository_identity(&project_root, "proj_rootless_open")
+        .expect("pin fixture repository identity");
     let route = ProjectRouteKey {
         profile_root: profile_root.canonicalize().expect("canonical profile"),
         global_db_path: profile_root.join("global.db"),

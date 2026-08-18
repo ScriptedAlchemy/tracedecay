@@ -47,6 +47,22 @@ use seals::{
 
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
 const GRAPH_OPEN_DEADLINE: Duration = Duration::from_secs(30);
+/// Sealed-generation projection replays the whole sealed artifact into the
+/// native graph, so its ceiling scales with the sealed byte size instead of
+/// reusing the ordinary 30-second graph-operation budget. The floor keeps the
+/// small-generation behavior; the throughput divisor is a conservative
+/// decode+apply rate; the ceiling matches the evaluation-runtime projection
+/// bound so a pathological artifact still terminates.
+const SEALED_PROJECTION_DEADLINE_FLOOR: Duration = GRAPH_OPERATION_DEADLINE;
+const SEALED_PROJECTION_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
+const SEALED_PROJECTION_DEADLINE_CEILING: Duration = Duration::from_mins(15);
+
+fn sealed_projection_deadline(sealed_bytes: u64) -> Duration {
+    let scaled = Duration::from_secs(sealed_bytes.div_ceil(SEALED_PROJECTION_BYTES_PER_SECOND));
+    SEALED_PROJECTION_DEADLINE_FLOOR
+        .saturating_add(scaled)
+        .min(SEALED_PROJECTION_DEADLINE_CEILING)
+}
 
 struct AtomicGraphCancellationV1 {
     cancelled: Arc<AtomicBool>,
@@ -201,7 +217,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 GraphDbError::unavailable("memory graph retirement target lock is poisoned")
             })?
             .take()
-            .ok_or_else(|| GraphDbError::Conflict)
+            .ok_or(GraphDbError::Conflict)
     }
 
     pub(crate) fn restore_store_graph_retirement_target(
@@ -610,7 +626,8 @@ impl RetainedCodeGraphRuntimeV1 {
         if generation.manifest().generation_id != self.generation_id {
             return Err(GraphDbError::Conflict);
         }
-        let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
+        let projection_deadline = sealed_projection_deadline(self.sealed_generation_bytes()?);
+        let deadline_at = Instant::now() + projection_deadline;
         let graph_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
             &self.generation_id,
             &GraphProjectorRevision::try_from(
@@ -720,9 +737,10 @@ impl RetainedCodeGraphRuntimeV1 {
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         );
         let publish = |storage: &mut dyn GraphPublicationStoreV1,
-                       key: &GraphPublicationKeyV1|
+                       key: &GraphPublicationKeyV1,
+                       manifest: GraphGenerationManifest|
          -> std::result::Result<_, GraphDbError> {
-            let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
+            let deadline_at = Instant::now() + projection_deadline;
             let cancellation_identity = RuntimeCancellationIdentityV1 {
                 cancellation_id: RuntimeCancellationIdV1::new(format!(
                     "graph-publish-commit:{}",
@@ -756,7 +774,10 @@ impl RetainedCodeGraphRuntimeV1 {
             };
             let context = GraphPublicationOperationContextV1::new(&control, &probe)
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-            self.graph_registry.publish_verified(
+            // The already-built projection manifest rides along so first
+            // publication does not re-read and re-project the sealed artifact
+            // through the replay manifest provider.
+            self.graph_registry.publish_verified_manifest(
                 GraphDbRegistration {
                     authority_lease: Arc::clone(&authority_lease),
                     cancellation: request_cancellation,
@@ -768,6 +789,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 storage,
                 &context,
                 key,
+                manifest,
             )
         };
         match storage
@@ -801,7 +823,7 @@ impl RetainedCodeGraphRuntimeV1 {
                         &relational_projection,
                     );
                 }
-                let publication = publish(&mut storage, &publication_key)?;
+                let publication = publish(&mut storage, &publication_key, manifest)?;
                 return Ok(publication.snapshot);
             }
             GraphPublicationReplayLookupV1::Retired(_) => return Err(GraphDbError::Conflict),
@@ -879,8 +901,27 @@ impl RetainedCodeGraphRuntimeV1 {
             }
         }
         drop(replay_pool_lock);
-        let publication = publish(&mut storage, &replay.key)?;
+        let publication = publish(&mut storage, &replay.key, manifest)?;
         Ok(publication.snapshot)
+    }
+
+    fn sealed_generation_bytes(&self) -> std::result::Result<u64, GraphDbError> {
+        let digest = self
+            .sealed_state_digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
+        let path = self
+            .generations_root
+            .join(format!("generation-{digest}.json"));
+        std::fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .map_err(|error| {
+                GraphDbError::unavailable(format!(
+                    "sealed code generation file is unreadable at '{}': {error}",
+                    path.display()
+                ))
+            })
     }
 
     pub(crate) fn recover_semantic_vector_projection(
@@ -1384,5 +1425,33 @@ impl Drop for DaemonSessionRuntimeRegistryV1 {
         self.graph_lifecycle_cancelled
             .store(true, Ordering::Release);
         self.cancel_memory_graph_reconciliation_tasks();
+    }
+}
+
+#[cfg(test)]
+mod sealed_projection_deadline_tests {
+    use super::{
+        SEALED_PROJECTION_DEADLINE_CEILING, SEALED_PROJECTION_DEADLINE_FLOOR,
+        sealed_projection_deadline,
+    };
+
+    #[test]
+    fn sealed_projection_deadline_scales_with_artifact_size_between_floor_and_ceiling() {
+        assert_eq!(
+            sealed_projection_deadline(0),
+            SEALED_PROJECTION_DEADLINE_FLOOR
+        );
+        let small = sealed_projection_deadline(8 * 1024 * 1024);
+        assert!(small > SEALED_PROJECTION_DEADLINE_FLOOR);
+        assert!(small < SEALED_PROJECTION_DEADLINE_CEILING);
+        // The live incident shape: a ~1.6 GB sealed generation must get far
+        // more than the ordinary 30-second graph-operation budget.
+        let incident = sealed_projection_deadline(1_603_803_371);
+        assert!(incident >= std::time::Duration::from_mins(5));
+        assert!(incident <= SEALED_PROJECTION_DEADLINE_CEILING);
+        assert_eq!(
+            sealed_projection_deadline(u64::MAX),
+            SEALED_PROJECTION_DEADLINE_CEILING
+        );
     }
 }

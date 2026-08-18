@@ -790,13 +790,6 @@ fn cursor_after_attempted_units(
         .or_else(|| prior.map(str::to_owned))
 }
 
-fn code_generation_retention_is_eligible(
-    semantic_vector_retention_succeeded: bool,
-    cancelled: bool,
-) -> bool {
-    semantic_vector_retention_succeeded && !cancelled
-}
-
 impl MaintenanceCoordinator {
     pub(super) async fn spawn(
         profile_root: PathBuf,
@@ -1340,9 +1333,9 @@ mod tests {
     use super::{
         ColdStoreCursorV1, MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCadence,
         MaintenanceStoreOutcomeV1, SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry,
-        TableGrowthObservation, checkpoint_path, classify_cold_store_state,
-        code_generation_retention_is_eligible, compare_table_growth, cursor_after_attempted_units,
-        load_cursor, next_cold_store_cursor, persist_cursor, select_store_window,
+        TableGrowthObservation, checkpoint_path, classify_cold_store_state, compare_table_growth,
+        cursor_after_attempted_units, load_cursor, next_cold_store_cursor, persist_cursor,
+        select_store_window,
     };
 
     #[test]
@@ -1630,13 +1623,6 @@ mod tests {
             registry.semantic_vector_retention_read(project),
             SemanticVectorRetentionReadV1::Unknown
         );
-    }
-
-    #[test]
-    fn code_generation_retention_requires_prior_vector_success() {
-        assert!(!code_generation_retention_is_eligible(false, false));
-        assert!(!code_generation_retention_is_eligible(true, true));
-        assert!(code_generation_retention_is_eligible(true, false));
     }
 
     #[test]

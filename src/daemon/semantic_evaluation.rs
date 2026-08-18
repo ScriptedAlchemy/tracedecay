@@ -690,8 +690,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                             context.incremental_code,
                         )
                         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-                    let measured = self
-                        .incremental_projections
+
+                    self.incremental_projections
                         .lock()
                         .map_err(|_| {
                             CandidateOutputError::Contract(
@@ -700,8 +700,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                         })?
                         .entry(incremental_key)
                         .or_insert(measured)
-                        .clone();
-                    measured
+                        .clone()
                 }
             };
             // The isolated projection-case measurement stands up a fresh
@@ -755,8 +754,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                             &context.semantic_projection_sources,
                         )
                         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-                    let measured = self
-                        .projection_cases
+
+                    self.projection_cases
                         .lock()
                         .map_err(|_| {
                             CandidateOutputError::Contract(
@@ -765,8 +764,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                         })?
                         .entry(projection_cases_key)
                         .or_insert(measured)
-                        .clone();
-                    measured
+                        .clone()
                 }
             };
             resources
@@ -1164,6 +1162,11 @@ fn read_linux_process_cpu_ticks() -> Option<u64> {
     None
 }
 
+#[cfg(not(target_os = "linux"))]
+fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
+    None
+}
+
 #[cfg(target_os = "linux")]
 fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
@@ -1449,11 +1452,6 @@ mod lifecycle_tests {
         assert!(receipt.is_clean());
         assert_eq!(receipt.remaining_workers, 0);
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
-    None
 }
 
 #[cfg(all(test, target_os = "linux"))]

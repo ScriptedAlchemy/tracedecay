@@ -501,7 +501,7 @@ pub(crate) async fn handle_commit_context(
 
     for file in &changed_files {
         let role = classify_file_role(file, &files_with_inline_tests);
-        let symbols = symbols_by_file.get(file).map(Vec::as_slice).unwrap_or(&[]);
+        let symbols = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
         file_roles.push(json!({"file": file, "role": role, "symbols": symbols.len()}));
 
         // Config files (Cargo.toml, *.yaml, package.json, ...) explode into

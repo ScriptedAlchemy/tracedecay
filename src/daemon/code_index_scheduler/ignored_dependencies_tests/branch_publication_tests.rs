@@ -276,14 +276,8 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
     let store = TempDir::new().expect("store root");
     let profile = TempDir::new().expect("profile root");
     let profile_root = profile.path().join("profile");
-    crate::storage::write_enrollment_marker(
-        fixture.path(),
-        &crate::storage::EnrollmentMarker {
-            project_id: PROJECT_ID.to_owned(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .expect("project enrollment");
+    crate::storage::pin_fixture_repository_identity(fixture.path(), PROJECT_ID)
+        .expect("project enrollment");
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _database_scope =

@@ -70,14 +70,8 @@ impl TestFactLifecycle {
 fn enrolled_root(base: &Path, project_id: &ProjectId) -> PathBuf {
     let root = base.join(project_id.as_str());
     std::fs::create_dir_all(&root).expect("project root");
-    crate::storage::write_enrollment_marker(
-        &root,
-        &crate::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .expect("project enrollment");
+    crate::storage::pin_fixture_repository_identity(&root, project_id.as_str())
+        .expect("project enrollment");
     root
 }
 
@@ -509,7 +503,7 @@ async fn registered_memory_relation_graph_survives_restart_and_isolates_topologi
             fact_target(relation.source()) == Some(&core[0])
                 && fact_target(relation.target()) == Some(&core[1])
         })
-        .map(|relation| relation.kind())
+        .map(tracedecay_store::ProjectMemoryGraphRelationV1::kind)
         .collect::<BTreeSet<_>>();
     assert_eq!(
         parallel,

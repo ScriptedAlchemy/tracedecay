@@ -197,11 +197,7 @@ fn flatten_configuration_mutation(
 ) {
     match mutation {
         DirectConfigurationMutation::Set { layer, key, value } => {
-            output.push(ConfigurationDirectMutationRequestV1::Set {
-                layer,
-                key,
-                value: Box::new(value),
-            });
+            output.push(ConfigurationDirectMutationRequestV1::Set { layer, key, value });
         }
         DirectConfigurationMutation::Unset { layer, key } => {
             output.push(ConfigurationDirectMutationRequestV1::Unset { layer, key });

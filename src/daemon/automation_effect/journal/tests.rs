@@ -1,6 +1,7 @@
 use super::*;
 
 use serde_json::json;
+use std::collections::BTreeMap;
 use tracedecay_agent_hosts::automation::AutomationCommittedReceipt;
 use tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord;
 use tracedecay_application::retained_surfaces::{
@@ -11,10 +12,11 @@ use tracedecay_application::retained_surfaces::{
     RetainedSurfaceResultV1, UserJobRunInputV1, retained_surface_application_operation,
     retained_surface_execution_problem,
 };
+
 use tracedecay_application::{
     ApplicationOutcome, ApplicationProblemEnvelope, AuthorityReceipt, Deadline, DisclosureClass,
-    EffectId, EffectReceipt, EffectResult, EffectTermination, IdempotencyKey, OperationReceipt,
-    PolicyDecisionRef, ReconciliationState, RequestId, ResolvedScope,
+    EffectId, EffectReceipt, EffectResult, EffectTermination, IdempotencyKey, OperationBudgetUsage,
+    OperationReceipt, PolicyDecisionRef, ReconciliationState, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
@@ -413,7 +415,7 @@ async fn retained_disabled_user_job_run(
         delivery: JobDelivery::default(),
         created_at: 1,
         updated_at: 1,
-        extra: Default::default(),
+        extra: BTreeMap::default(),
     };
     run_user_job_with_backend_for_retained_settlement(
         dashboard_root,
@@ -711,7 +713,7 @@ fn result_terminal(
             UtcMicros(1),
             UtcMicros(2),
             Deadline::new(UtcMicros(10)).expect("deadline"),
-            Default::default(),
+            OperationBudgetUsage::default(),
         )
         .expect("execution"),
         ReconciliationState::Reconciled,
@@ -721,7 +723,7 @@ fn result_terminal(
     .expect("effect result");
     AutomationSettledTerminal::Outcome {
         scope: admission.scope.clone(),
-        outcome: ApplicationOutcome::Effect(effect),
+        outcome: Box::new(ApplicationOutcome::Effect(effect)),
     }
 }
 
@@ -1999,7 +2001,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     let temp = tempfile::tempdir().expect("tempdir");
     let fixture_name = "terminal-retirement-recovery";
     let cg = retained_recovery_project(&temp, fixture_name).await;
-    let dashboard_root = cg.store_layout().dashboard_root.to_path_buf();
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
     let project_root = cg.project_root().to_path_buf();
     let profile_root = temp.path().join(format!("{fixture_name}-profile"));
     let source_path = dashboard_root.join("fact_proposals.json");
@@ -2880,7 +2882,7 @@ async fn project_open_repairs_corrupt_append_intent_at_clean_eof_without_pending
                 cg.project_root(),
                 &match cg.project_memory_owner().expect("project owner") {
                     FactOwnerV1::Project { project_id } => project_id,
-                    _ => panic!("recovery fixture requires a project owner"),
+                    FactOwnerV1::Profile => panic!("recovery fixture requires a project owner"),
                 },
             )
             .expect("project scope"),
@@ -3524,11 +3526,12 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         .expect("exact lookup before publication")
         .is_none()
     );
-    let attempted_publications = publications.lock().expect("publication attempts");
-    assert_eq!(attempted_publications.len(), 2);
-    assert_eq!(attempted_publications[0], attempted_publications[1]);
-    let publication = attempted_publications[1].clone();
-    drop(attempted_publications);
+    let publication = {
+        let attempted_publications = publications.lock().expect("publication attempts");
+        assert_eq!(attempted_publications.len(), 2);
+        assert_eq!(attempted_publications[0], attempted_publications[1]);
+        attempted_publications[1].clone()
+    };
     assert_eq!(exact_spool_file_count(dashboard_root), 1);
     assert!(task_lock_is_denied(dashboard_root, job_id).await);
 

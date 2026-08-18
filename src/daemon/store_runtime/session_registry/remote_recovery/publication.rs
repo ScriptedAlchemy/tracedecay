@@ -744,14 +744,8 @@ mod tests {
         .expect("daemon database scope");
         let project_id =
             ProjectId::new("project.recovered-candidate-retry").expect("typed project identity");
-        crate::storage::write_enrollment_marker(
-            &project_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .expect("project enrollment");
+        crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+            .expect("project enrollment");
 
         let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
             .await
@@ -809,7 +803,7 @@ mod tests {
             .expect("profile pin");
         let publication = RemoteRecoveryPublicationContextV1::new(
             registry.identity.clone(),
-            registry.incarnation.clone(),
+            registry.incarnation,
             registry.resolver.clone(),
             registry.registry.clone(),
             registry.graph_registry.clone(),

@@ -506,14 +506,8 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
     let project_root = directory.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
     let project_id = ProjectId::new("project.query-restart").expect("project id");
-    crate::storage::write_enrollment_marker(
-        &project_root,
-        &crate::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .expect("production project enrollment");
+    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+        .expect("production project enrollment");
     let profile_sessions_path =
         tracedecay_sessions::runtime::user_sessions_db_path(identity.profile_root());
     let _scope_guard =
@@ -681,14 +675,8 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
     std::fs::create_dir_all(&foreign_root).expect("foreign project root");
     let foreign_project_id =
         ProjectId::new("project.query-restart-foreign").expect("foreign project id");
-    crate::storage::write_enrollment_marker(
-        &foreign_root,
-        &crate::storage::EnrollmentMarker {
-            project_id: foreign_project_id.as_str().to_owned(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .expect("foreign production project enrollment");
+    crate::storage::pin_fixture_repository_identity(&foreign_root, foreign_project_id.as_str())
+        .expect("foreign production project enrollment");
     let foreign_database = reopened_registry
         .project_sessions(foreign_project_id, [foreign_root])
         .await

@@ -267,7 +267,7 @@ async fn dispatch_admin_cli(
                 context.require_accounting_db()?,
                 context
                     .registered_project_session_db
-                    .map(|database| database.as_ref()),
+                    .map(std::convert::AsRef::as_ref),
                 provider_scope.as_ref(),
                 context.project_root(),
                 &range,
@@ -315,10 +315,10 @@ async fn dispatch_admin_cli(
                 context.require_accounting_db()?,
                 context
                     .registered_project_session_db
-                    .map(|database| database.as_ref()),
+                    .map(std::convert::AsRef::as_ref),
                 context
                     .registered_user_session_db
-                    .map(|database| database.as_ref()),
+                    .map(std::convert::AsRef::as_ref),
                 context.project_root(),
                 all,
                 no_sync,

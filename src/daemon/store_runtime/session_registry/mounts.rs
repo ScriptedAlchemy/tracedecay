@@ -649,13 +649,12 @@ impl DaemonSessionRuntimeRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-        {
-            if let Ok(database) = self.issue_session_owner_lease(
+            && let Ok(database) = self.issue_session_owner_lease(
                 database,
                 SessionRelationScope::profile_sessions(self.identity.profile_id().clone()),
-            ) {
-                databases.push(database);
-            }
+            )
+        {
+            databases.push(database);
         }
         let mounted = self
             .project_owners
@@ -695,10 +694,9 @@ impl DaemonSessionRuntimeRegistryV1 {
                 locator.clone(),
             )
             .await
+                && first_error.is_none()
             {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
+                first_error = Some(error);
             }
         }
         match first_error {
@@ -768,11 +766,13 @@ impl DaemonSessionRuntimeRegistryV1 {
                         "Project runtime is already opening",
                     ));
                 }
-                Some(ProjectRuntimeOwnerStateV1::Retiring)
-                | Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
-                | Some(ProjectRuntimeOwnerStateV1::Recovering)
-                | Some(ProjectRuntimeOwnerStateV1::RecoveryRequired(_))
-                | Some(ProjectRuntimeOwnerStateV1::Faulted(_)) => {
+                Some(
+                    ProjectRuntimeOwnerStateV1::Retiring
+                    | ProjectRuntimeOwnerStateV1::ReplacingSessions
+                    | ProjectRuntimeOwnerStateV1::Recovering
+                    | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
+                    | ProjectRuntimeOwnerStateV1::Faulted(_),
+                ) => {
                     return Err(TraceDecayError::project_route(
                         "project_runtime_retiring",
                         true,
@@ -933,17 +933,17 @@ impl DaemonSessionRuntimeRegistryV1 {
                     true,
                     "Project runtime is already opening",
                 )),
-                Some(ProjectRuntimeOwnerStateV1::Retiring)
-                | Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
-                | Some(ProjectRuntimeOwnerStateV1::Recovering)
-                | Some(ProjectRuntimeOwnerStateV1::RecoveryRequired(_))
-                | Some(ProjectRuntimeOwnerStateV1::Faulted(_)) => {
-                    Err(TraceDecayError::project_route(
-                        "project_runtime_retiring",
-                        true,
-                        "Project runtime is unavailable while retirement is terminal or in progress",
-                    ))
-                }
+                Some(
+                    ProjectRuntimeOwnerStateV1::Retiring
+                    | ProjectRuntimeOwnerStateV1::ReplacingSessions
+                    | ProjectRuntimeOwnerStateV1::Recovering
+                    | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
+                    | ProjectRuntimeOwnerStateV1::Faulted(_),
+                ) => Err(TraceDecayError::project_route(
+                    "project_runtime_retiring",
+                    true,
+                    "Project runtime is unavailable while retirement is terminal or in progress",
+                )),
                 None => Ok((false, None)),
             }
         }?;
@@ -1030,17 +1030,17 @@ impl DaemonSessionRuntimeRegistryV1 {
                     true,
                     "Project runtime is already opening",
                 )),
-                Some(ProjectRuntimeOwnerStateV1::Retiring)
-                | Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
-                | Some(ProjectRuntimeOwnerStateV1::Recovering)
-                | Some(ProjectRuntimeOwnerStateV1::RecoveryRequired(_))
-                | Some(ProjectRuntimeOwnerStateV1::Faulted(_)) => {
-                    Err(TraceDecayError::project_route(
-                        "project_runtime_retiring",
-                        true,
-                        "Project runtime is unavailable while retirement is terminal or in progress",
-                    ))
-                }
+                Some(
+                    ProjectRuntimeOwnerStateV1::Retiring
+                    | ProjectRuntimeOwnerStateV1::ReplacingSessions
+                    | ProjectRuntimeOwnerStateV1::Recovering
+                    | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
+                    | ProjectRuntimeOwnerStateV1::Faulted(_),
+                ) => Err(TraceDecayError::project_route(
+                    "project_runtime_retiring",
+                    true,
+                    "Project runtime is unavailable while retirement is terminal or in progress",
+                )),
                 None => Ok(None),
             }
         }?;

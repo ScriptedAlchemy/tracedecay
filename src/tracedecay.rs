@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-//! Central orchestrator for registered TraceDecay project storage.
+//! Central orchestrator for registered `TraceDecay` project storage.
 //!
 //! This module root holds the [`TraceDecay`] struct and its shared result
 //! types; the behavior is implemented in focused submodules:

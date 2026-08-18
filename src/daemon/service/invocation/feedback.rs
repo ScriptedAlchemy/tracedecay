@@ -637,12 +637,11 @@ impl DaemonInvocationService {
         project_root: Option<&Path>,
     ) -> Option<super::super::project_runtime::RegisteredDeliveryReadAuthorityV1> {
         self.project_runtimes
-            .read::<super::super::project_runtime::RegisteredAdvisoryRuntimeV1, _, _>(
+            .read::<super::super::project_runtime::RegisteredDeliveryReadAuthorityV1, _, _>(
                 project_root?,
-                |registered| registered.delivery_read(),
+                Clone::clone,
             )
             .await
-            .flatten()
     }
 
     pub(super) async fn feedback_cycle_input(

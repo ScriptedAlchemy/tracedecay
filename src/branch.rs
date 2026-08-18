@@ -247,7 +247,7 @@ pub enum BranchAddOutcome {
 pub enum BranchTrackingPreparation {
     AlreadyTracked,
     Deferred,
-    Added(PreparedBranchTracking),
+    Added(Box<PreparedBranchTracking>),
 }
 
 pub struct PreparedBranchTracking {
@@ -360,10 +360,12 @@ pub async fn prepare_branch_tracking_in_layout(
     })?;
     branch_meta::save_branch_meta(tracedecay_dir, &meta)?;
 
-    Ok(BranchTrackingPreparation::Added(PreparedBranchTracking {
-        branch_name: branch_name.to_string(),
-        entry,
-    }))
+    Ok(BranchTrackingPreparation::Added(Box::new(
+        PreparedBranchTracking {
+            branch_name: branch_name.to_string(),
+            entry,
+        },
+    )))
 }
 
 #[cfg(test)]

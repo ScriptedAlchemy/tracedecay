@@ -551,7 +551,9 @@ impl DashboardLcmReadAdapter {
         let digest = canonical_sha256(&(
             "tracedecay.dashboard.session-retrieval.grant.v1",
             self.identity.profile_id().as_str(),
-            self.identity.project_id().map(|project| project.as_str()),
+            self.identity
+                .project_id()
+                .map(tracedecay_domain::ProjectId::as_str),
             self.identity.store_id().as_str(),
             self.identity.root_id().as_str(),
             control.request_id().as_str(),

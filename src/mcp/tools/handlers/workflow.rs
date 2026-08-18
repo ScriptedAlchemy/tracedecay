@@ -216,11 +216,10 @@ pub(super) async fn handle_diagnose(
                         .flatten()
                         .take(5)
                         .map(|edge| {
-                            diagnostic_symbol_json(&edge.neighbor).map(|caller| {
+                            diagnostic_symbol_json(&edge.neighbor).inspect(|caller| {
                                 if let Some(file) = caller.get("file").and_then(Value::as_str) {
                                     touched.insert(file.to_owned());
                                 }
-                                caller
                             })
                         })
                         .collect::<Result<Vec<_>>>()?;

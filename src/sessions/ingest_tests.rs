@@ -81,12 +81,9 @@ async fn profile_test_runtime() -> IngestTestRuntime {
 
 async fn project_test_runtime(project_root: &Path, project_id: ProjectId) -> IngestTestRuntime {
     let (profile, scope, registry) = open_registry("sessions-ingest-project-test").await;
-    tracedecay_runtime_core::storage::write_enrollment_marker(
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
         project_root,
-        &tracedecay_runtime_core::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-        },
+        project_id.as_str(),
     )
     .unwrap();
     let database = registry

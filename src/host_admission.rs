@@ -1235,6 +1235,10 @@ fn prepare_host_admission_test_profile_root(profile_root: &Path) -> Result<()> {
     })
 }
 
+/// Pins a fixture project's identity in the sanctioned `.git/` repository
+/// identity marker (initializing a real git repository first when the fixture
+/// root has none). Nothing is written into the working tree and the registry
+/// fixture state stays exactly what each test arranged.
 fn prepare_host_admission_test_project_root(
     project_root: &Path,
     project_id: &ProjectId,
@@ -1245,13 +1249,30 @@ fn prepare_host_admission_test_project_root(
             project_root.display()
         ),
     })?;
-    if tracedecay_runtime_core::storage::read_enrollment_marker(project_root)?.is_none() {
-        tracedecay_runtime_core::storage::write_enrollment_marker(
+    if tracedecay_runtime_core::worktree::git_common_dir(project_root).is_none() {
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(project_root)
+            .status()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to run git init in host-admission test project '{}': {error}",
+                    project_root.display()
+                ),
+            })?;
+        if !status.success() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "git init failed in host-admission test project '{}': {status}",
+                    project_root.display()
+                ),
+            });
+        }
+    }
+    if tracedecay_runtime_core::storage::read_repository_identity_marker(project_root)?.is_none() {
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
             project_root,
-            &tracedecay_runtime_core::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-            },
+            project_id.as_str(),
         )?;
     }
     Ok(())

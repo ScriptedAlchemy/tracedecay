@@ -684,9 +684,8 @@ async fn remote_tls_startup_rejects_unusable_leaf_and_chain_constraints() {
             .contains("validate Remote Brain TLS certificate chain"),
         "not-yet-valid leaf returned the wrong startup error: {not_yet_valid_error}"
     );
-    let expired_at = rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(
-        4_102_444_800,
-    ));
+    let expired_at =
+        rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_hours(1_139_568));
     let expired_error = validate_remote_brain_tls_identity_at(
         &valid_chain,
         "127.0.0.1:0".parse().unwrap(),

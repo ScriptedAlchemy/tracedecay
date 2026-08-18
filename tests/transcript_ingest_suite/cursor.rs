@@ -1532,11 +1532,10 @@ async fn cursor_sweep_ingests_profile_stored_project_without_legacy_local_databa
         .unwrap();
     assert_eq!(indexed.sessions_upserted, 2);
     assert_eq!(indexed.messages_upserted, 2);
-    assert!(!project.join(".tracedecay/tracedecay.db").exists());
-    let enrollment = tracedecay::storage::read_enrollment_marker(&project)
-        .unwrap()
-        .expect("profile-backed project should retain its enrollment marker");
-    assert_eq!(enrollment.project_id, fixture_project_id().as_str());
+    assert!(
+        !project.join(".tracedecay").exists(),
+        "profile-backed ingest must not create working-tree project state"
+    );
 }
 
 #[tokio::test]

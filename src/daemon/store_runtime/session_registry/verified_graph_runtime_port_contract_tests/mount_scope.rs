@@ -182,14 +182,8 @@ async fn cold_read_only_mount_denies_publication_and_degrades_graph_assist_truth
     let project_id = project_id("cold-read-only");
     let project_root = temporary.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
-    crate::storage::write_enrollment_marker(
-        &project_root,
-        &crate::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .expect("project enrollment");
+    crate::storage::pin_fixture_repository_identity(&project_root, project_id.as_str())
+        .expect("project enrollment");
     let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
     let scope = crate::db::enter_daemon_database_scope(&profile_root, 37, "seed cold read-only")
         .expect("seed database scope");

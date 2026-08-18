@@ -112,7 +112,7 @@ fn verified_gini_values(
     }
 
     match (metric, scope) {
-        ("fan_in", "file") | ("fan_out", "file") => {
+        ("fan_in" | "fan_out", "file") => {
             verified_gini_fan_values(graph, &symbols, metric == "fan_in")
         }
         ("lines", "file") => {

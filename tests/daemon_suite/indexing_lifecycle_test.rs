@@ -586,12 +586,8 @@ async fn wait_for_refreshing_old_generation(
 }
 
 fn read_active_generation(home: &Path, project: &Path) -> CodeIndexPublishedGenerationV1 {
-    let marker = tracedecay::storage::read_enrollment_marker(project)
-        .expect("read exact project enrollment marker")
-        .expect("project enrollment marker must exist");
-    let layout =
-        tracedecay::storage::profile_sharded_layout(project, &home.join(".tracedecay"), &marker)
-            .expect("profile-sharded project layout");
+    let layout = tracedecay::storage::resolve_layout(project, &home.join(".tracedecay"))
+        .expect("profile-sharded project layout");
     let scope = scoped_code_index_store_root(&layout.data_root.join("code-index-v1"), project);
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &fs::read(scope.join("active-code-generation-v1.json"))

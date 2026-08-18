@@ -608,7 +608,7 @@ fn automation_terminal_run(
         return Ok(run.clone());
     }
     if let Some(problem) = terminal.problem() {
-        return Err(automation_problem(problem.clone()));
+        return Err(automation_problem(Box::new(problem.clone())));
     }
     Err(automation_failed(
         "automation terminal has neither a run nor a problem",
@@ -616,9 +616,9 @@ fn automation_terminal_run(
 }
 
 fn automation_problem(
-    problem: crate::daemon::automation_effect::AutomationSettledProblem,
+    problem: Box<crate::daemon::automation_effect::AutomationSettledProblem>,
 ) -> DashboardAutomationAuthorityErrorV1 {
-    DashboardAutomationAuthorityErrorV1::AutomationProblem(Box::new(problem))
+    DashboardAutomationAuthorityErrorV1::AutomationProblem(problem)
 }
 
 #[cfg(test)]

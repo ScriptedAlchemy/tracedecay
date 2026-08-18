@@ -59,23 +59,14 @@ pub(super) async fn open_project_for_handshake(
                 message: "registered project open requires an authoritative project identity"
                     .to_owned(),
             })?;
-    // First-touch enrollment: the daemon's registered session runtime resolves
-    // a project's store through its on-disk enrollment marker, which a
-    // never-seen project does not yet have. Persist it now — under the same
-    // minted identity the layout carries — so the session store can mount
-    // before init bootstraps the graph. This is the honest first enrollment
-    // step, not a bypass: it only runs on the explicit allow_init first-touch
-    // path, and a subsequent open resolves this same marker deterministically.
+    // First-touch enrollment: persist the minted identity in the `.git/`
+    // repository identity marker so a subsequent open resolves the same
+    // identity before the registry row lands. A non-git root persists
+    // nothing — its identity is deterministic from the canonical path and
+    // the registry registration below is its durable home. TraceDecay never
+    // creates files inside a project's working tree.
     if first_touch {
-        let enrollment_root = crate::worktree::repository_identity_root(project_path)
-            .unwrap_or_else(|| project_path.to_path_buf());
-        crate::storage::write_enrollment_marker(
-            &enrollment_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )?;
+        crate::storage::write_repository_identity_marker(project_path, project_id)?;
     }
     let configuration_database = store_administration
         .registered_project_session_database(project_path, &store_layout)

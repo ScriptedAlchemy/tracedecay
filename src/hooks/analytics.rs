@@ -642,7 +642,7 @@ pub(super) fn record_hook_analytics(
 /// those shards then outnumbered the real stores.
 ///
 /// The profile-wide fallback is observer-only: if the operator has no
-/// TraceDecay profile yet, skip the write instead of creating
+/// `TraceDecay` profile yet, skip the write instead of creating
 /// `$HOME/.tracedecay` from a fail-open hook.
 fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
     let enrolled_data_root = root

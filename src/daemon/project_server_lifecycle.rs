@@ -66,10 +66,10 @@ pub(super) async fn shutdown_project_servers(
                 replayed_failures.outcomes.push(ShutdownTaskOutcome {
                     owner: "retained_project_server".to_owned(),
                     status: ShutdownStatus::Failed(error.clone()),
-                })
+                });
             }
             super::branch_admin::RetainedProjectShutdownOwner::TimedOut { server } => {
-                attempted.push(Arc::clone(server))
+                attempted.push(Arc::clone(server));
             }
         }
     }
@@ -315,6 +315,15 @@ pub(super) async fn await_user_profile_host_admission_replay_for_identity(
 }
 
 #[cfg(test)]
+pub(super) async fn replay_user_profile_host_admission_for_identity(
+    store_administration: &StoreAdministration,
+    client_identity: &DaemonClientIdentity,
+) -> Result<()> {
+    await_user_profile_host_admission_replay_for_identity(store_administration, client_identity)
+        .await
+}
+
+#[cfg(test)]
 mod shutdown_owner_tests {
     use super::*;
 
@@ -374,13 +383,4 @@ mod shutdown_owner_tests {
             "a terminal receipt must not keep the failed project server or its daemon callbacks alive"
         );
     }
-}
-
-#[cfg(test)]
-pub(super) async fn replay_user_profile_host_admission_for_identity(
-    store_administration: &StoreAdministration,
-    client_identity: &DaemonClientIdentity,
-) -> Result<()> {
-    await_user_profile_host_admission_replay_for_identity(store_administration, client_identity)
-        .await
 }

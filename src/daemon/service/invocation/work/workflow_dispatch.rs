@@ -342,7 +342,7 @@ pub(in crate::daemon::service::invocation) async fn execute_workflow_application
                 &registered,
                 &services,
                 &context,
-                request,
+                *request,
                 &input_digest,
                 observed_at,
                 Arc::clone(&attempt_processes),

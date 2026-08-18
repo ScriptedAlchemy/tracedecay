@@ -64,8 +64,7 @@ impl<'a> DaemonAdmissionPort<'a> {
     pub(crate) fn take_github_stack_signal_available(&self) -> bool {
         self.github_stack_signal_available
             .lock()
-            .map(|mut available| std::mem::take(&mut *available))
-            .unwrap_or(false)
+            .is_ok_and(|mut available| std::mem::take(&mut *available))
     }
 }
 

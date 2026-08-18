@@ -120,8 +120,7 @@ pub(crate) async fn sessions_for(
             result.observed_count = Some(observed_count);
             result.observed_sessions = Some(observed.into_iter().map(correlation_hit).collect());
             result.message = Some(format!(
-                "no producing sessions; {} session(s) observed this commit — pass relation=observed to list them",
-                observed_count,
+                "no producing sessions; {observed_count} session(s) observed this commit — pass relation=observed to list them",
             ));
         } else {
             result.message = Some(if index_empty {

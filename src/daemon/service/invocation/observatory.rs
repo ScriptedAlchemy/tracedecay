@@ -8,10 +8,10 @@ struct RegisteredObservatoryReadPort {
 }
 
 impl tracedecay_application::ObservatoryReadPortV1 for RegisteredObservatoryReadPort {
-    fn read<'a>(
-        &'a self,
+    fn read(
+        &self,
         request: tracedecay_application::ObservatoryReadRequestV1,
-    ) -> tracedecay_application::ObservatoryReadFuture<'a> {
+    ) -> tracedecay_application::ObservatoryReadFuture<'_> {
         Box::pin(async move {
             let since_seconds = request.since_seconds();
             let observatory = tracedecay_usecases::observability::observatory_read_model(
@@ -66,7 +66,10 @@ pub(super) async fn execute_observatory_read(
     }
     let Some(database) = service
         .project_runtimes
-        .read::<RegisteredObservabilityProducerV1, _, _>(project_root, |runtime| runtime.database())
+        .read::<RegisteredObservabilityProducerV1, _, _>(
+            project_root,
+            RegisteredObservabilityProducerV1::database,
+        )
         .await
     else {
         return observatory_unavailable(

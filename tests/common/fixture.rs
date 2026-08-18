@@ -254,10 +254,13 @@ impl TestProfile {
     pub fn unenrolled(&self, name: impl AsRef<Path>) -> UnenrolledProject {
         let root = self.path(name);
         assert!(
-            storage::read_enrollment_marker(&root)
-                .unwrap_or_else(|err| panic!("failed to read fixture enrollment marker: {err}"))
-                .is_none(),
-            "an unenrolled fixture root must not carry an enrollment marker: {}",
+            !storage::has_repository_identity_marker(&root)
+                && storage::read_legacy_enrollment_marker(&root)
+                    .unwrap_or_else(|err| {
+                        panic!("failed to read fixture enrollment marker: {err}")
+                    })
+                    .is_none(),
+            "an unenrolled fixture root must not carry an identity marker: {}",
             root.display()
         );
         UnenrolledProject {

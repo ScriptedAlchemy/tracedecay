@@ -210,7 +210,7 @@ async fn run_recovery(
                     "Work blocked-interval exact source marker remains pending"
                 ),
                 Err(error) => {
-                    tracing::warn!(?error, "Work blocked-interval source marker worker failed")
+                    tracing::warn!(?error, "Work blocked-interval source marker worker failed");
                 }
             }
         }

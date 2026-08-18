@@ -891,7 +891,7 @@ mod tests {
                     .snapshot()
                     .source_revision
                     .as_ref()
-                    .map(|value| value.as_str()),
+                    .map(tracedecay_domain::CommitId::as_str),
                 Some(revision.as_str()),
                 "exact evidence must carry the requested commit revision"
             );
@@ -1081,7 +1081,7 @@ mod tests {
                 .snapshot()
                 .source_revision
                 .as_ref()
-                .map(|value| value.as_str()),
+                .map(tracedecay_domain::CommitId::as_str),
             Some(base_revision.as_str()),
             "the superseded commit must be captured as itself, not as the ref tip"
         );

@@ -24,10 +24,11 @@ Multi-branch is fully opt-in. Without it, tracedecay behaves exactly as before: 
 one graph, sync re-indexes whatever is on disk.
 
 When you opt in, tracedecay creates a `branch-meta.json` file inside the active project store that tracks
-which branches have their own database. In repo-local mode, the storage layout looks like this:
+which branches have their own database. The store lives in your user profile
+(`~/.tracedecay/projects/<project-id>`), never inside the repository:
 
 ```
-.tracedecay/
+~/.tracedecay/projects/<project-id>/
   tracedecay.db             # default branch (main/master)
   branch-meta.json          # branch tracking metadata
   branches/
@@ -35,10 +36,9 @@ which branches have their own database. In repo-local mode, the storage layout l
     release_3_4.db
 ```
 
-Projects indexed before the rebrand may still use a legacy `.tracedecay/` directory
-with the same layout; it is honored as a fallback.
-
-Profile-backed projects keep the same logical layout in their profile shard. The repository may contain only an enrollment marker, while `branch-meta.json`, `tracedecay.db`, and `branches/*.db` live under the resolved store root.
+Projects indexed by an older TraceDecay may still carry a leftover repo-local
+`.tracedecay/` directory. Its identity is adopted into the profile registry on
+first open; after that the directory is ignored and can be deleted.
 
 Creating a new branch database is cheap. TraceDecay copies the nearest ancestor's database
 (usually `main`) and then runs an incremental sync that only re-parses files whose content

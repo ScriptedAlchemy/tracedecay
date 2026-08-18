@@ -11,7 +11,7 @@ enum SemanticExecutionOutcomeV1 {
     Qualified {
         qualification: crate::daemon_contract::CanonicalQualificationBlob,
     },
-    Published(tracedecay_usecases::semantic_runtime::SemanticEvaluatedProfilePublicationV1),
+    Published(Box<tracedecay_usecases::semantic_runtime::SemanticEvaluatedProfilePublicationV1>),
 }
 
 #[derive(Clone)]
@@ -290,7 +290,9 @@ impl DaemonInvocationService {
                             operation
                                 .evaluate_and_publish_profile(&authority, &canonical_root, candidate)
                                 .await
-                                .map(SemanticExecutionOutcomeV1::Published)
+                                .map(|publication| {
+                                    SemanticExecutionOutcomeV1::Published(Box::new(publication))
+                                })
                         }
                     })
                     .await
@@ -384,7 +386,7 @@ fn semantic_execution_response(
             )
         }
         Ok(SemanticExecutionOutcomeV1::Published(publication)) => {
-            semantic_evaluation_response(request_id, Ok(publication))
+            semantic_evaluation_response(request_id, Ok(*publication))
         }
         Err(error) => semantic_evaluation_response(request_id, Err(error)),
     }
@@ -458,16 +460,13 @@ fn semantic_evaluation_rejection_problem(
 
 fn semantic_evaluation_rejection_message(detail: &str) -> String {
     const MAX_MESSAGE_BYTES: usize = 512;
-    let mut message: String = detail.chars().filter(|ch| !ch.is_control()).collect();
-    let trimmed = message.trim();
-    if trimmed.len() != message.len() {
-        message = trimmed.to_owned();
-    }
+    let collected: String = detail.chars().filter(|ch| !ch.is_control()).collect();
+    let message = collected.trim();
     if message.is_empty() {
         return "semantic activation input was rejected".to_owned();
     }
     if message.len() <= MAX_MESSAGE_BYTES {
-        return message;
+        return message.to_owned();
     }
     let mut truncated = String::new();
     for ch in message.chars() {

@@ -1165,10 +1165,10 @@ where
         .await;
     let outcome = validated_daemon_outcome(operation, &request_id, response);
     let owning_layer = match &outcome {
-        Ok(crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { .. })
-        | Ok(crate::daemon_contract::DaemonInvocationOutcome::RetainedApplicationProblem {
-            ..
-        }) => ProblemOwningLayer::Application,
+        Ok(
+            crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { .. }
+            | crate::daemon_contract::DaemonInvocationOutcome::RetainedApplicationProblem { .. },
+        ) => ProblemOwningLayer::Application,
         _ => ProblemOwningLayer::Runtime,
     };
     let problem = match outcome {

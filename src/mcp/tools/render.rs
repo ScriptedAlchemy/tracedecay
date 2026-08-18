@@ -1219,7 +1219,7 @@ fn render_object(md: &mut Md, map: &serde_json::Map<String, Value>, depth: u8) {
         }
         md.blank().heading(depth.min(6), k);
         if depth >= GENERIC_MAX_DEPTH {
-            md.line(&format!("`{}`", v));
+            md.line(&format!("`{v}`"));
         } else {
             render_value(md, v, depth + 1);
         }

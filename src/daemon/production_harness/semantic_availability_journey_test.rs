@@ -1,5 +1,5 @@
 //! Live journey: every non-semantic retrieval mode answers before a semantic
-//! profile is ever activated, a real FastEmbed accepted-profile evaluation
+//! profile is ever activated, a real `FastEmbed` accepted-profile evaluation
 //! runs, activation completes, and the other modes answer identically after.
 //!
 //! The contract under test is progressive degradation, not semantic search:
@@ -163,7 +163,7 @@ async fn non_semantic_answers(
 /// Claude transcript visible to ordinary session retrieval. The baseline is
 /// captured only after the non-semantic lane has actually answered.
 async fn wait_for_session_lane(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
-    tokio::time::timeout(Duration::from_secs(120), async {
+    tokio::time::timeout(Duration::from_mins(2), async {
         loop {
             let answers = non_semantic_answers(harness, project).await;
             if answers["session"]["count"]
@@ -448,7 +448,7 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         None,
     )
     .await;
-    let (activated, activated_state) = tokio::time::timeout(Duration::from_secs(60), async {
+    let (activated, activated_state) = tokio::time::timeout(Duration::from_mins(1), async {
         loop {
             let strict = search(&harness, &project, true).await;
             let state = semantic_runtime_state(&harness, &project).await;

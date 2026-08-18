@@ -52,7 +52,7 @@ pub(super) fn dispatch_catalog_bindings()
         .into_iter()
         .map(|operation| {
             let name = format!("tracedecay_work_{}", operation.operation_key());
-            let binding = work_executable_binding_for_tool(&name)?.ok_or_else(|| {
+            let binding = work_executable_binding_for_tool(&name)?.ok_or({
                 super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
                     tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
                         field: "MCP Work executable binding",

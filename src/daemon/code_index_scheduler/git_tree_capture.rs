@@ -623,7 +623,7 @@ mod tests {
                 .snapshot
                 .source_revision
                 .as_ref()
-                .map(|revision| revision.as_str()),
+                .map(tracedecay_domain::CommitId::as_str),
             Some(superseded_revision.as_str())
         );
         assert_eq!(
@@ -631,7 +631,7 @@ mod tests {
                 .repository_parse_identity
                 .tree
                 .as_ref()
-                .map(|tree| tree.as_str()),
+                .map(tracedecay_domain::TreeId::as_str),
             Some(superseded_tree.as_str())
         );
         let bytes = captured

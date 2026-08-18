@@ -54,7 +54,7 @@ pub(super) fn evidence_outcome(
         facts.returned,
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    page.cursor = facts.next_cursor.clone();
+    page.cursor.clone_from(&facts.next_cursor);
     let execution = OperationReceipt::completed(
         context.observed_at,
         finished_at,

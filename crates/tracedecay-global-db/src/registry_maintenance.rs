@@ -12,7 +12,7 @@ use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, params};
 use tracedecay_runtime_core::storage::{
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind,
-    read_enrollment_marker, read_repository_identity_marker, read_store_manifest,
+    read_legacy_enrollment_marker, read_repository_identity_marker, read_store_manifest,
     validate_project_id,
 };
 

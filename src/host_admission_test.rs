@@ -38,14 +38,8 @@ fn initialize_repository(path: &Path) {
 }
 
 fn enroll_project(path: &Path, project_id: &ProjectId) {
-    tracedecay_runtime_core::storage::write_enrollment_marker(
-        path,
-        &tracedecay_runtime_core::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(path, project_id.as_str())
+        .unwrap();
 }
 
 fn observation_store(database: &RegisteredGlobalDb) -> GlobalDbObservationStore {

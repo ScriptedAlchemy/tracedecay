@@ -230,10 +230,9 @@ impl WorkAttemptStoragePort for AttemptStore {
         let inner = self.inner.lock().unwrap();
         task_ids
             .iter()
-            .cloned()
             .map(|task_id| {
-                attempt_capacity(&inner, authority, &task_id, concurrency)
-                    .map(|capacity| (task_id, capacity))
+                attempt_capacity(&inner, authority, task_id, concurrency)
+                    .map(|capacity| (task_id.clone(), capacity))
             })
             .collect()
     }
@@ -885,7 +884,7 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
         root,
         "Observe the admitted provider environment.",
         &SnapshotShape {
-            environment_allowlist: BTreeSet::from([sentinel.to_owned()]),
+            environment_allowlist: BTreeSet::from([sentinel.clone()]),
             ..SnapshotShape::default()
         },
     );

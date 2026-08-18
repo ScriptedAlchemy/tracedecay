@@ -14,6 +14,46 @@ use super::{
 };
 use crate::code_index::graph_projection::CodeGraphProjectionStore;
 
+/// Test-only injected retryable activation failures, keyed by worktree id.
+/// The worktree id is unique per test fixture, while generation ids are
+/// content-derived and collide across tests that share a fixture template. A
+/// positive count makes the memory activation authority fail that many
+/// activations with a deadline error so worker retry behavior is observable.
+#[cfg(test)]
+fn injected_activation_failures()
+-> &'static std::sync::Mutex<std::collections::BTreeMap<String, usize>> {
+    static FAILURES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+    > = std::sync::OnceLock::new();
+    FAILURES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+#[cfg(test)]
+pub(super) fn set_injected_activation_failures(worktree_id: &WorktreeId, failures: usize) {
+    let mut injected = injected_activation_failures()
+        .lock()
+        .expect("injected activation failure gate must not be poisoned");
+    if failures == 0 {
+        injected.remove(worktree_id.as_str());
+    } else {
+        injected.insert(worktree_id.as_str().to_owned(), failures);
+    }
+}
+
+#[cfg(test)]
+fn take_injected_activation_failure(worktree_id: &WorktreeId) -> bool {
+    let mut injected = injected_activation_failures()
+        .lock()
+        .expect("injected activation failure gate must not be poisoned");
+    match injected.get_mut(worktree_id.as_str()) {
+        Some(remaining) if *remaining > 0 => {
+            *remaining = remaining.saturating_sub(1);
+            true
+        }
+        _ => false,
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum CodeGraphActivationAuthorityV1 {
     Persistent {
@@ -67,6 +107,11 @@ impl CodeGraphActivationAuthorityV1 {
             }
             #[cfg(test)]
             Self::Memory => {
+                if take_injected_activation_failure(worktree_id) {
+                    return Err(CodeIndexSchedulerErrorV1::GraphProjection(
+                        CodeGraphProjectionError::DeadlineExceeded,
+                    ));
+                }
                 latest.warm_serving_caches();
                 Ok(())
             }

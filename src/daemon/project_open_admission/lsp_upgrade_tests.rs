@@ -46,7 +46,7 @@ async fn lsp_wait_stays_pending_after_core_publication_until_full_open_finishes(
     tokio::pin!(wait);
     tokio::select! {
         _outcome = &mut wait => panic!("full-open wait completed before the tracked task"),
-        _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        () = tokio::time::sleep(Duration::from_millis(10)) => {}
     }
     full_open.notify_one();
     assert!(matches!(wait.await, ProjectOpenWaitOutcome::Completed));

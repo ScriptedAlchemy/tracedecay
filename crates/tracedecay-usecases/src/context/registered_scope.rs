@@ -69,33 +69,22 @@ impl RegisteredScopeResolver {
     }
 }
 
-/// Resolve an enrolled project that has no Git repository identity. Non-Git
-/// projects still have a durable enrollment marker, and their daemon scope
-/// identity is anchored on the canonical project path rather than a Git common
-/// directory. An enrollment marker is required so an arbitrary directory can
-/// never become an application scope merely because a caller supplies a
+/// Resolve an enrolled project that has no Git repository identity. A non-Git
+/// project persists nothing in its working tree: its identity is
+/// deterministic from the canonical project path, with the home-profile
+/// registry as the durable authority. Requiring the supplied project id to
+/// equal that deterministic identity keeps an arbitrary directory from
+/// becoming an application scope merely because a caller supplies a
 /// project id.
 fn resolve_non_git_scope(
     registered_root: &Path,
     scope_root: &Path,
     project_id: &ProjectId,
 ) -> Result<ResolvedScope, ApplicationScopeError> {
-    let enrollment_root =
-        tracedecay_runtime_core::worktree::repository_identity_root(registered_root)
-            .unwrap_or_else(|| registered_root.to_path_buf());
-    let marker = tracedecay_runtime_core::storage::read_enrollment_marker(&enrollment_root)
-        .map_err(|error| ApplicationScopeError::Resolution(error.to_string()))?
-        .ok_or_else(|| {
-            ApplicationScopeError::Resolution(format!(
-                "enrollment marker is unavailable for '{}'",
-                registered_root.display()
-            ))
-        })?;
-    if marker.storage_mode != tracedecay_runtime_core::storage::StorageMode::ProfileSharded
-        || marker.project_id != project_id.as_str()
-    {
+    let derived_id = tracedecay_runtime_core::storage::default_profile_project_id(registered_root);
+    if derived_id != project_id.as_str() {
         return Err(ApplicationScopeError::Resolution(format!(
-            "enrollment marker for '{}' does not match registered project '{}'",
+            "deterministic identity for '{}' does not match registered project '{}'",
             registered_root.display(),
             project_id
         )));

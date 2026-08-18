@@ -315,14 +315,14 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
             .provenance
             .configuration_revision
             .as_ref()
-            .map(|revision| revision.as_str()),
+            .map(tracedecay_domain::ConfigurationRevisionId::as_str),
         Some("configuration.revision.work-empty-routing")
     );
 
     let proposal = WorkProposalV1::new(
         ProposalId::new("proposal.work.core-invocation").expect("proposal id"),
         task_id.clone(),
-        created.verified_graph_version().graph_version().clone(),
+        created.verified_graph_version().graph_version(),
         WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, 1).expect("proposal shape"),
         WorkSizingV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, "explicit fixture work")
             .expect("proposal sizing"),

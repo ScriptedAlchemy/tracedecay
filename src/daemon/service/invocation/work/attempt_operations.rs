@@ -314,7 +314,7 @@ pub(super) fn retry_attempt(
         retried,
         observed_at,
         deadline,
-        WorkApplicationOutcomeV1::RetryAttempt,
+        |outcome| WorkApplicationOutcomeV1::RetryAttempt(Box::new(outcome)),
     )
 }
 

@@ -290,11 +290,16 @@ impl DaemonInvocationDeliveryAckRequest {
             && valid_token(&self.request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
             && valid_token(&self.target_request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
             && self.request_id == self.target_request_id
-            && match (self.outcome, self.drop_reason) {
-                (tracedecay_domain::DeliverySettlementOutcomeV1::Delivered, None) => true,
-                (tracedecay_domain::DeliverySettlementOutcomeV1::Dropped, Some(_)) => true,
-                _ => false,
-            }
+            && matches!(
+                (self.outcome, self.drop_reason),
+                (
+                    tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+                    None
+                ) | (
+                    tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                    Some(_)
+                )
+            )
     }
 }
 
@@ -628,7 +633,7 @@ pub(crate) enum WorkflowApplicationInvocation {
     DiffDefinition(WorkflowDefinitionDiffRequest),
     HandoffIssue(TaskHandoffIssueRequest),
     HandoffRedeem(TaskHandoffRedeemRequest),
-    StartRun(tracedecay_application::WorkflowRunStartRequest),
+    StartRun(Box<tracedecay_application::WorkflowRunStartRequest>),
     PauseRun(tracedecay_application::WorkflowRunPauseRequest),
     ResumeRun(tracedecay_application::WorkflowRunResumeRequest),
     CancelRun(tracedecay_application::WorkflowRunCancelRequest),
@@ -865,7 +870,7 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     WorkApplication {
-        request: WorkApplicationInvocationV1,
+        request: Box<WorkApplicationInvocationV1>,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1425,7 +1430,7 @@ impl DaemonInvocationRequest {
             request_id: request_id.into(),
             delivery_route: None,
             payload: DaemonInvocationPayload::WorkApplication {
-                request,
+                request: Box::new(request),
                 observed_at,
                 deadline,
                 cancellation,
@@ -2006,7 +2011,7 @@ impl DaemonInvocationRequest {
 
     /// The caller's immutable budget also bounds the terminal delivery ACK.
     /// Work output must not hold an authenticated connection past the
-    /// invocation's own deadline when a surface disappears before ACKing.
+    /// invocation's own deadline when a surface disappears before `ACKing`.
     pub(crate) fn delivery_ack_deadline(&self) -> Option<&Deadline> {
         match &self.payload {
             DaemonInvocationPayload::WorkApplication { deadline, .. } => Some(deadline),
@@ -2930,7 +2935,7 @@ impl CanonicalQualificationBlob {
     /// This is a bounded daemon response artifact, not an unbounded report
     /// transport. It matches the workspace's bounded artifact-payload scale.
     pub(crate) const MAX_BYTES: usize = 4 * 1024 * 1024;
-    const MAX_ENCODED_BYTES: usize = (Self::MAX_BYTES * 4 + 2) / 3;
+    const MAX_ENCODED_BYTES: usize = (Self::MAX_BYTES * 4).div_ceil(3);
 
     pub(crate) fn new(bytes: Vec<u8>) -> Result<Self, CanonicalQualificationBlobError> {
         if bytes.is_empty() {
@@ -3128,7 +3133,7 @@ pub(crate) enum WorkApplicationOutcomeV1 {
     AttemptStatus(ApplicationOutcome<WorkAttemptV1>),
     CancelAttempt(ApplicationOutcome<WorkAttemptV1>),
     ResumeAttempts(ApplicationOutcome<WorkAttemptRecoveryReportV1>),
-    RetryAttempt(ApplicationOutcome<tracedecay_application::WorkRetryAttemptOutcomeV1>),
+    RetryAttempt(Box<ApplicationOutcome<tracedecay_application::WorkRetryAttemptOutcomeV1>>),
     ListAttempts(ApplicationOutcome<WorkAttemptListV1>),
     ExecutionHistory(ApplicationOutcome<WorkExecutionHistoryV1>),
     HydrateArtifacts(ApplicationOutcome<WorkArtifactHydrationV1>),

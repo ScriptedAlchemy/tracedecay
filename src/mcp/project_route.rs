@@ -202,11 +202,7 @@ impl HookProjectRouteCache {
                 project_id,
             ))
         };
-        if self
-            .connection_route
-            .as_ref()
-            .is_some_and(|route| belongs_to(route))
-        {
+        if self.connection_route.as_ref().is_some_and(&belongs_to) {
             self.connection_route = None;
         }
         let sessions = self

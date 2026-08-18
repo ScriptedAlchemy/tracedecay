@@ -116,7 +116,7 @@ pub(crate) trait SessionApplicationRetrievalPortV1: Send + Sync {
             }
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => SessionRetrievalServiceOutcome::Cancelled,
+                () = cancellation.cancelled() => SessionRetrievalServiceOutcome::Cancelled,
                 outcome = self.retrieve_admitted(context, query) => outcome,
             }
         })
@@ -198,7 +198,7 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             }
             let binding = match admitted_session_binding(&self.root, self.configuration, context) {
                 Ok(binding) => binding,
-                Err(outcome) => return outcome,
+                Err(outcome) => return *outcome,
             };
             let outcome = self
                 .execute_temporal_query_with_context(
@@ -232,7 +232,7 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             }
             let binding = match admitted_session_binding(&self.root, self.configuration, context) {
                 Ok(binding) => binding,
-                Err(outcome) => return task_session_binding_outcome(outcome),
+                Err(outcome) => return task_session_binding_outcome(*outcome),
             };
             let authorizer = super::DaemonSessionRetrievalAuthorizer {
                 actor: context.actor().clone(),
@@ -284,11 +284,11 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             }
             let binding = match admitted_session_binding(&self.root, self.configuration, context) {
                 Ok(binding) => binding,
-                Err(outcome) => return describe_binding_outcome(outcome),
+                Err(outcome) => return describe_binding_outcome(*outcome),
             };
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => LcmDescribeServiceOutcome::Cancelled,
+                () = cancellation.cancelled() => LcmDescribeServiceOutcome::Cancelled,
                 outcome = self.execute_lcm_describe_admitted(context, &binding, command) => outcome,
             }
         })
@@ -309,11 +309,11 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
             }
             let binding = match admitted_session_binding(&self.root, self.configuration, context) {
                 Ok(binding) => binding,
-                Err(outcome) => return expand_binding_outcome(outcome),
+                Err(outcome) => return expand_binding_outcome(*outcome),
             };
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => LcmExpandServiceOutcome::Cancelled,
+                () = cancellation.cancelled() => LcmExpandServiceOutcome::Cancelled,
                 outcome = self.execute_lcm_expand_admitted(context, &binding, command) => outcome,
             }
         })
@@ -380,23 +380,23 @@ fn admitted_session_binding(
     root: &DaemonSessionRetrievalRoot,
     retrieval_configuration: SessionRetrievalConfiguration,
     context: &RequestContext,
-) -> Result<SessionRequestBinding, SessionRetrievalServiceOutcome> {
+) -> Result<SessionRequestBinding, Box<SessionRetrievalServiceOutcome>> {
     if matches!(root.store_scope, SessionRetrievalStoreScope::Project)
         != root.identity.project_id().is_some()
     {
-        return Err(SessionRetrievalServiceOutcome::WrongScope);
+        return Err(Box::new(SessionRetrievalServiceOutcome::WrongScope));
     }
     let scope = root
         .identity
         .session_request_scope()
-        .map_err(|_| SessionRetrievalServiceOutcome::WrongScope)?;
+        .map_err(|_| Box::new(SessionRetrievalServiceOutcome::WrongScope))?;
     if context.scope() != &scope {
-        return Err(SessionRetrievalServiceOutcome::WrongScope);
+        return Err(Box::new(SessionRetrievalServiceOutcome::WrongScope));
     }
     let cancellation = CancellationToken::for_admitted_application_request(
         context.cancellation().token_id.as_str(),
     )
-    .ok_or_else(temporal_store_unavailable)?;
+    .ok_or_else(|| Box::new(temporal_store_unavailable()))?;
     if context.cancellation().is_cancelled() {
         cancellation.cancel();
     }
@@ -405,7 +405,7 @@ fn admitted_session_binding(
         APPLICATION_RETRIEVAL_MAX_BYTES,
         APPLICATION_RETRIEVAL_MAX_WORK_UNITS,
     )
-    .map_err(|_| temporal_store_unavailable())?;
+    .map_err(|_| Box::new(temporal_store_unavailable()))?;
     let capability = CapabilityDigest::new(application_retrieval_digest(
         b"tracedecay.application.session-retrieval.capability.v1\0",
         &root.identity,
@@ -413,9 +413,9 @@ fn admitted_session_binding(
         retrieval_configuration,
     ));
     let access_policy = tracedecay_store::observation_capture_access_policy_digest_v1()
-        .map_err(|_| temporal_store_unavailable())?;
+        .map_err(|_| Box::new(temporal_store_unavailable()))?;
     let policy = PolicyDigest::from_access_policy_digest(&access_policy)
-        .map_err(|_| temporal_store_unavailable())?;
+        .map_err(|_| Box::new(temporal_store_unavailable()))?;
     let configuration = ConfigurationDigest::new(application_retrieval_digest(
         b"tracedecay.application.session-retrieval.configuration.v1\0",
         &root.identity,

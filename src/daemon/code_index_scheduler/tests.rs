@@ -1750,13 +1750,14 @@ async fn concurrent_same_root_mounts_keep_one_canonical_owner() {
     let mut mounted = 0;
     let mut reused = 0;
     for task in tasks {
-        match task
+        if task
             .await
             .expect("mount task joins")
             .expect("mount succeeds")
         {
-            true => mounted += 1,
-            false => reused += 1,
+            mounted += 1;
+        } else {
+            reused += 1;
         }
     }
     assert_eq!(mounted, 1, "one caller must install the canonical owner");
@@ -7212,14 +7213,8 @@ async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
     let profile = TempDir::new().expect("profile root");
     let profile_root = profile.path().join("profile");
     let project_id = test_project_id();
-    crate::storage::write_enrollment_marker(
-        fixture.path(),
-        &crate::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .expect("project enrollment");
+    crate::storage::pin_fixture_repository_identity(fixture.path(), project_id.as_str())
+        .expect("project enrollment");
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
     let _database_scope =
@@ -7468,6 +7463,100 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
             .is_some(),
         "successful retry installs the verified retained generation"
     );
+    registry.shutdown().await;
+}
+
+/// A retryable graph-activation failure of an already-sealed complete
+/// generation must retry activation of that exact immutable artifact with
+/// backoff. It must not fall through into reconcile and seal a duplicate
+/// generation, even when the worktree has changed and overflow hints keep
+/// waking the worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retryable_activation_failure_retries_the_sealed_generation_without_resealing() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let sealed_worktree_id = {
+        let mut scheduler = scheduler(&fixture, scoped_store.clone(), bytes);
+        published(scheduler.reconcile_now().expect("seed generation"));
+        scheduler
+            .latest_complete()
+            .expect("seeded generation")
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("seeded worktree id")
+    };
+    // Change the worktree so a reconcile pass would seal a brand-new
+    // generation if the worker fell through after the activation failure.
+    fixture.edit("src/extra.rs", "pub fn extra() -> u32 { 2 }\n");
+    let generation_files = |scoped_store: &Path| -> usize {
+        std::fs::read_dir(scoped_store.join("code-generations-v1")).map_or(0, |entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("generation-")
+                })
+                .count()
+        })
+    };
+    assert_eq!(generation_files(&scoped_store), 1);
+
+    super::graph_activation::set_injected_activation_failures(&sealed_worktree_id, usize::MAX);
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount retained generation");
+
+    // Keep waking the worker while activation stays failing; each pass must
+    // hold the sealed artifact instead of rebuilding.
+    for _ in 0..5 {
+        let _ = registry.notify_hook_overflow(fixture.path()).await;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    assert_eq!(
+        generation_files(&scoped_store),
+        1,
+        "a retryable activation failure must not seal a duplicate generation"
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        None,
+        "a generation that never activated must not serve"
+    );
+
+    // Clearing the injected failure lets the scheduled backoff retry activate
+    // the exact sealed artifact and resume ordinary refresh.
+    super::graph_activation::set_injected_activation_failures(&sealed_worktree_id, 0);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if registry
+            .latest_generation_id(fixture.path())
+            .await
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "the backoff retry did not activate the sealed generation"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     registry.shutdown().await;
 }
 

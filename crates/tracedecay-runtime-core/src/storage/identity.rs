@@ -6,23 +6,27 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     ENROLLMENT_FILENAME, EnrollmentMarker, PrivateStoreIo, REPOSITORY_IDENTITY_FILENAME,
-    REPOSITORY_IDENTITY_SCHEMA_VERSION, RepositoryIdentityMarker, StorageMode,
-    validate_enrollment_marker, validate_project_id,
+    REPOSITORY_IDENTITY_SCHEMA_VERSION, RepositoryIdentityMarker, validate_enrollment_marker,
+    validate_project_id,
 };
 
-pub fn enrollment_marker_path(project_root: &Path) -> PathBuf {
+/// Location of the retired repo-local enrollment marker.
+///
+/// `TraceDecay` never creates files inside a project's working tree. This path
+/// exists only so legacy identity can be adopted (read once, ingested into
+/// the home-profile registry) and so cleanup flows can recognize the debris.
+/// Users may delete the file at any time.
+pub fn legacy_enrollment_marker_path(project_root: &Path) -> PathBuf {
     project_root.join(TRACEDECAY_DIR).join(ENROLLMENT_FILENAME)
 }
 
-pub fn has_enrollment_marker(project_root: &Path) -> bool {
-    matches!(
-        read_enrollment_marker(project_root),
-        Ok(Some(marker)) if marker.storage_mode == StorageMode::ProfileSharded
-    )
-}
-
-pub fn read_enrollment_marker(project_root: &Path) -> Result<Option<EnrollmentMarker>> {
-    let path = enrollment_marker_path(project_root);
+/// Reads the retired repo-local enrollment marker, if the user still has one.
+///
+/// Read-only legacy adoption source: registry-aware resolution ingests the
+/// identity it names exactly once (when the project is not otherwise
+/// resolvable) and never consults the file again. Nothing writes it.
+pub fn read_legacy_enrollment_marker(project_root: &Path) -> Result<Option<EnrollmentMarker>> {
+    let path = legacy_enrollment_marker_path(project_root);
     if !path.is_file() {
         return Ok(None);
     }
@@ -39,66 +43,6 @@ pub fn read_enrollment_marker(project_root: &Path) -> Result<Option<EnrollmentMa
     Ok(Some(marker))
 }
 
-pub fn write_enrollment_marker(project_root: &Path, marker: &EnrollmentMarker) -> Result<()> {
-    validate_enrollment_marker(marker, &enrollment_marker_path(project_root))?;
-    let path = enrollment_marker_path(project_root);
-    let text = serde_json::to_vec_pretty(marker).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to serialize enrollment marker '{}': {e}",
-            path.display()
-        ),
-    })?;
-    // Several independent paths enroll the same project (CLI init, the
-    // daemon's first-touch open, enrollment-root repair) while the store
-    // resolver may read the marker concurrently. A truncate-then-write here
-    // briefly exposes an empty file, which the resolver reports as an
-    // invalid/missing enrollment and callers surface as a denial. Replace
-    // atomically so a reader only ever sees a complete marker or none.
-    let temp_path = path.with_extension(format!(
-        "json.tmp-{}-{}",
-        std::process::id(),
-        enrollment_marker_temp_nonce()
-    ));
-    PrivateStoreIo::write_file_atomically(&path, &temp_path, &text).map_err(|e| {
-        TraceDecayError::Config {
-            message: format!(
-                "failed to write enrollment marker '{}': {e}",
-                path.display()
-            ),
-        }
-    })
-}
-
-/// Distinguishes concurrent in-process enrollment writers, which would
-/// otherwise race each other on one shared pid-derived temp path.
-fn enrollment_marker_temp_nonce() -> u64 {
-    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-pub fn remove_enrollment_marker(project_root: &Path, project_id: &str) -> Result<bool> {
-    let path = enrollment_marker_path(project_root);
-    let Some(marker) = read_enrollment_marker(project_root)? else {
-        return Ok(false);
-    };
-    if marker.project_id != project_id || marker.storage_mode != StorageMode::ProfileSharded {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "refusing to remove enrollment marker '{}': it does not match project_id '{}'",
-                path.display(),
-                project_id
-            ),
-        });
-    }
-    fs::remove_file(&path).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to remove enrollment marker '{}': {e}",
-            path.display()
-        ),
-    })?;
-    Ok(true)
-}
-
 /// The repository-wide identity marker shared by every checkout of a
 /// repository, including detached linked worktrees.
 ///
@@ -108,6 +52,14 @@ pub fn remove_enrollment_marker(project_root: &Path, project_id: &str) -> Result
 pub fn repository_identity_path(project_root: &Path) -> Option<PathBuf> {
     crate::worktree::git_common_dir(project_root)
         .map(|common_dir| common_dir.join(REPOSITORY_IDENTITY_FILENAME))
+}
+
+/// Whether this checkout's repository carries a `.git/`-side identity marker.
+///
+/// Presence-only probe for discovery walks; identity resolution goes through
+/// [`read_repository_identity_marker`], which also validates the contents.
+pub fn has_repository_identity_marker(project_root: &Path) -> bool {
+    repository_identity_path(project_root).is_some_and(|path| path.is_file())
 }
 
 pub fn read_repository_identity_marker(
@@ -227,6 +179,46 @@ fn stored_dir_marker_names_project(stored_common_dir: &Path, expected_project_id
         return false;
     };
     value.get("project_id").and_then(serde_json::Value::as_str) == Some(expected_project_id)
+}
+
+/// Pins a fixture checkout's identity in the sanctioned `.git/` repository
+/// identity marker, initializing a real git repository first when the fixture
+/// root does not already have one.
+///
+/// Test-support only: production identity minting flows through init/open and
+/// the registry. Fixtures use this instead of fabricating any working-tree
+/// state.
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+pub fn pin_fixture_repository_identity(project_root: &Path, project_id: &str) -> Result<()> {
+    if crate::worktree::git_common_dir(project_root).is_none() {
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(project_root)
+            .status()
+            .map_err(|e| TraceDecayError::Config {
+                message: format!(
+                    "failed to run git init in fixture '{}': {e}",
+                    project_root.display()
+                ),
+            })?;
+        if !status.success() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "git init failed in fixture '{}': {status}",
+                    project_root.display()
+                ),
+            });
+        }
+    }
+    if !write_repository_identity_marker(project_root, project_id)? {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "fixture '{}' did not accept a repository identity marker",
+                project_root.display()
+            ),
+        });
+    }
+    Ok(())
 }
 
 pub fn write_repository_identity_marker(project_root: &Path, project_id: &str) -> Result<bool> {

@@ -121,10 +121,10 @@ async fn await_lsp_route_rejoin<Output>(
     tokio::pin!(route_read);
     tokio::select! {
         biased;
-        _ = request_cancellation.cancelled() => {
+        () = request_cancellation.cancelled() => {
             Err(tracedecay_application::ApplicationProblem::cancelled_before_admission())
         }
-        _ = &mut sleep => {
+        () = &mut sleep => {
             Err(tracedecay_application::ApplicationProblem::timed_out_before_admission())
         }
         output = &mut route_read => {
@@ -760,7 +760,7 @@ mod semantic_control_tests {
                     Some(&request_cancellation),
                     async move {
                         let _ = started_tx.send(());
-                        std::future::pending::<()>().await
+                        std::future::pending::<()>().await;
                     },
                 )
                 .await
@@ -819,7 +819,7 @@ mod semantic_control_tests {
                     Some(&request_cancellation),
                     async move {
                         let _ = started_tx.send(());
-                        std::future::pending::<()>().await
+                        std::future::pending::<()>().await;
                     },
                 )
                 .await

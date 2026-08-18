@@ -465,11 +465,12 @@ pub(super) fn line_for_byte_offset(source: &str, byte_offset: u64) -> Result<u32
             source.len()
         )));
     }
+    // Newline count = separator count, so one less than the split segments.
     u32::try_from(
         source.as_bytes()[..offset]
-            .iter()
-            .filter(|byte| **byte == b'\n')
-            .count(),
+            .split(|byte| *byte == b'\n')
+            .count()
+            .saturating_sub(1),
     )
     .map_err(|_| graph_symbol_corrupt("graph evidence line exceeds u32".to_owned()))
 }

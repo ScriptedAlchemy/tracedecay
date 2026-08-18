@@ -133,15 +133,6 @@ impl RegisteredGlobalDbTestRuntime {
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         let project_root = project_root.as_ref();
         std::fs::create_dir_all(project_root)?;
-        if tracedecay_runtime_core::storage::read_enrollment_marker(project_root)?.is_none() {
-            tracedecay_runtime_core::storage::write_enrollment_marker(
-                project_root,
-                &tracedecay_runtime_core::storage::EnrollmentMarker {
-                    project_id: project_id.as_str().to_owned(),
-                    storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-                },
-            )?;
-        }
         Self::open(profile_root.as_ref(), Some((project_root, project_id))).await
     }
 

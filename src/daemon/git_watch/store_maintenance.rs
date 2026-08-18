@@ -240,6 +240,94 @@ fn log_semantic_vector_retention_degraded(failure: &str) {
     );
 }
 
+/// Vector protection inventory for one code-generation retention pass.
+///
+/// `Online` carries the exact vector pin set read from the mounted code
+/// graph plus the authorities needed to re-verify it under the writer freeze.
+/// `Offline` is a typed degradation for an unavailable vector runtime; the
+/// pass then plans against the offline protection set. `Refused` is
+/// fail-closed: the vector authority reported reset/corrupt/denied and no
+/// sweep may run.
+enum VectorRetentionInventoryV1 {
+    Online {
+        sources: std::collections::BTreeSet<tracedecay_domain::CodeGenerationId>,
+        configuration:
+            tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+        expected_vector_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+    },
+    Offline {
+        reason: String,
+    },
+    Refused {
+        reason: String,
+    },
+}
+
+async fn resolve_vector_retention_inventory(
+    graph: &TraceDecay,
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+) -> VectorRetentionInventoryV1 {
+    let expected_vector_revision =
+        match observations.semantic_vector_retention_read(graph.project_root()) {
+            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Observed { receipt } => {
+                receipt.revision
+            }
+            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Unknown
+            | crate::daemon::maintenance::SemanticVectorRetentionReadV1::Scanning => {
+                return VectorRetentionInventoryV1::Offline {
+                    reason: "vector_census_incomplete".to_owned(),
+                };
+            }
+        };
+    let Some(configuration) = graph
+        .configuration_runtime()
+        .semantic_configuration_inventory_authority()
+    else {
+        return VectorRetentionInventoryV1::Offline {
+            reason: "configuration_inventory_unavailable".to_owned(),
+        };
+    };
+    let project_root = graph.hook_store_layout().project_root.clone();
+    match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
+        schedulers,
+        &project_root,
+        &configuration,
+        expected_vector_revision,
+    )
+    .await
+    {
+        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
+            sources,
+            ..
+        } => VectorRetentionInventoryV1::Online {
+            sources,
+            configuration,
+            expected_vector_revision,
+        },
+        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
+            reason,
+        ) => VectorRetentionInventoryV1::Offline {
+            reason: format!("vector_graph_unavailable:{reason}"),
+        },
+        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
+            reason,
+        ) => VectorRetentionInventoryV1::Refused {
+            reason: format!("vector_graph_reset_required:{reason}"),
+        },
+        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
+            reason,
+        ) => VectorRetentionInventoryV1::Refused {
+            reason: format!("vector_graph_corrupt:{reason}"),
+        },
+        crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
+            reason,
+        ) => VectorRetentionInventoryV1::Refused {
+            reason: format!("vector_graph_denied:{reason}"),
+        },
+    }
+}
+
 /// Collect superseded code-index generations for one mounted project.
 ///
 /// Sealed generations are ordinary files, so no database retention or
@@ -248,10 +336,13 @@ fn log_semantic_vector_retention_degraded(failure: &str) {
 /// sat inside legacy vector migration, so a profile with semantic search
 /// disabled never collected anything and grew without bound.
 ///
-/// Vector-readable source generations are pinned, so the inventory read is
-/// required before any sweep. When the inventory cannot be read this pass
-/// reports failure and collects nothing rather than sweeping with an empty
-/// protection set, which would delete generations vectors still read from.
+/// Vector-readable source generations are pinned through the mounted code
+/// graph when it is resolvable. When the graph runtime is unavailable —
+/// saturated capacity, failed activation, or nothing serving — the pass
+/// degrades to the offline protection set (active pointer head, durable
+/// pointer index, rollback floor, and the serving generation) so sealed files
+/// cannot grow without bound while the graph is dark. Reset, corrupt, and
+/// denied vector authorities stay fail-closed and collect nothing.
 pub(super) async fn run_code_generation_retention(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -266,80 +357,39 @@ pub(super) async fn run_code_generation_retention(
         log_code_generation_retention_degraded("retention_cancelled");
         return false;
     }
-    let expected_vector_revision =
-        match observations.semantic_vector_retention_read(graph.project_root()) {
-            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Observed { receipt } => {
-                receipt.revision
-            }
-            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Unknown
-            | crate::daemon::maintenance::SemanticVectorRetentionReadV1::Scanning => {
-                log_code_generation_retention_degraded("vector_census_incomplete");
-                return false;
-            }
-        };
-    let Some(configuration) = graph
-        .configuration_runtime()
-        .semantic_configuration_inventory_authority()
-    else {
-        log_code_generation_retention_degraded("configuration_inventory_unavailable");
-        return false;
-    };
     let layout = graph.hook_store_layout();
     let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
     // No published generation means nothing has been sealed for this project.
     if !store_root.join("active-code-generation-v1.json").is_file() {
         return true;
     }
-    // Published vectors live in the mounted code graph. Without a resolvable
-    // graph the protection set cannot be proven, so this pass collects
-    // nothing rather than sweeping with an empty set, which would delete
-    // generations vectors still read from.
-    let vector_readable_sources =
-        match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
-            schedulers,
-            &layout.project_root,
-            &configuration,
-            expected_vector_revision,
-        )
-        .await
-        {
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
-                sources,
-                ..
-            } => sources,
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_graph_reset_required:{reason}"
-                ));
-                return false;
+    // Published vectors live in the mounted code graph. When the graph is
+    // resolvable, its inventory is the exact vector pin set. When the vector
+    // runtime is unavailable — nothing is serving, the graph capacity budget
+    // is saturated, or activation keeps failing — the pass degrades to the
+    // offline protection set (active pointer head, durable pointer index,
+    // rollback floor, plus the serving generation) instead of letting sealed
+    // files grow without bound while the graph is dark. Reset, corrupt, and
+    // denied vector authorities stay fail-closed.
+    let vector_inventory =
+        resolve_vector_retention_inventory(graph, schedulers, observations).await;
+    let vector_readable_sources = match &vector_inventory {
+        VectorRetentionInventoryV1::Online { sources, .. } => sources.clone(),
+        VectorRetentionInventoryV1::Offline { reason } => {
+            log_code_generation_retention_degraded(&format!("vector_inventory_offline:{reason}"));
+            let mut pins = std::collections::BTreeSet::new();
+            if let Some(scope) = schedulers.serving_code_scope(&layout.project_root).await
+                && let Some(serving) = scope.serving_generation
+            {
+                pins.insert(serving.manifest().generation_id.clone());
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_graph_corrupt:{reason}"
-                ));
-                return false;
-            }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_graph_unavailable:{reason}"
-                ));
-                return false;
-            }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_graph_denied:{reason}"
-                ));
-                return false;
-            }
-        };
+            pins
+        }
+        VectorRetentionInventoryV1::Refused { reason } => {
+            log_code_generation_retention_degraded(reason);
+            return false;
+        }
+    };
     // Full digest verification routinely reads several GiB. Run it before
     // entering the graph transaction and preserve the daemon shutdown token
     // through the blocking boundary; the planner checks it after every bounded
@@ -373,13 +423,23 @@ pub(super) async fn run_code_generation_retention(
             return false;
         }
     };
+    // A failed replay reconcile in offline mode keeps its journaled release
+    // evidence for a later graph-available pass; deletion of newly planned
+    // files stays safe, but the pass reports degraded so the retry cadence
+    // stays short.
+    let mut offline_replay_reconcile_failed = false;
     match graph_replay::reconcile_graph_replay_releases(graph, &store_root, cancellation).await {
         graph_replay::ReconcileOutcome::Complete => {}
         graph_replay::ReconcileOutcome::Retained => return true,
-        graph_replay::ReconcileOutcome::Failed => return false,
+        graph_replay::ReconcileOutcome::Failed => {
+            if matches!(&vector_inventory, VectorRetentionInventoryV1::Online { .. }) {
+                return false;
+            }
+            offline_replay_reconcile_failed = true;
+        }
     }
     if plan.collectable_generations.is_empty() {
-        return true;
+        return !offline_replay_reconcile_failed;
     }
     if cancellation.is_cancelled() {
         log_code_generation_retention_degraded("retention_cancelled");
@@ -389,125 +449,136 @@ pub(super) async fn run_code_generation_retention(
     // Freeze the vector writer, then re-read the committed active+rollback
     // identities and their exact source generations. Graph head order is not
     // retention authority: a newer unactivated candidate must not displace
-    // the configured generation from this fence.
-    let Some(vector_runtime) =
-        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
-            &layout.project_root,
-        )
-    else {
-        log_code_generation_retention_degraded("vector_writer_unavailable");
-        return false;
-    };
-    let vector_writer_freeze = vector_runtime.freeze_vector_mutations().await;
-    let pinned_vector_sources =
-        match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
-            schedulers,
-            &layout.project_root,
-            &configuration,
-            expected_vector_revision,
-        )
-        .await
-        {
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
-                sources,
-                ..
-            } => sources,
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_inventory_reset_required:{reason}"
-                ));
-                return false;
-            }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_inventory_corrupt:{reason}"
-                ));
-                return false;
-            }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_inventory_unavailable:{reason}"
-                ));
-                return false;
-            }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_inventory_denied:{reason}"
-                ));
-                return false;
-            }
+    // the configured generation from this fence. The offline protection set
+    // has no vector inventory to fence, so no freeze is taken there.
+    let vector_writer_freeze = if let VectorRetentionInventoryV1::Online {
+        configuration,
+        expected_vector_revision,
+        ..
+    } = &vector_inventory
+    {
+        let Some(vector_runtime) =
+            tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                &layout.project_root,
+            )
+        else {
+            log_code_generation_retention_degraded("vector_writer_unavailable");
+            return false;
         };
-    if pinned_vector_sources != vector_readable_sources {
-        log_code_generation_retention_degraded("vector_inventory_changed");
-        return false;
-    }
-    tracedecay_usecases::semantic_runtime::retain_project_semantic_code_sources(
-        &layout.project_root,
-        &pinned_vector_sources,
-    );
-    for generation in &plan.collectable_generations {
-        match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_source_generation_is_live(
-            schedulers,
+        let vector_writer_freeze = vector_runtime.freeze_vector_mutations().await;
+        let pinned_vector_sources =
+            match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
+                schedulers,
+                &layout.project_root,
+                configuration,
+                *expected_vector_revision,
+            )
+            .await
+            {
+                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
+                    sources,
+                    ..
+                } => sources,
+                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
+                    reason,
+                ) => {
+                    log_code_generation_retention_degraded(&format!(
+                        "vector_inventory_reset_required:{reason}"
+                    ));
+                    return false;
+                }
+                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
+                    reason,
+                ) => {
+                    log_code_generation_retention_degraded(&format!(
+                        "vector_inventory_corrupt:{reason}"
+                    ));
+                    return false;
+                }
+                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
+                    reason,
+                ) => {
+                    log_code_generation_retention_degraded(&format!(
+                        "vector_inventory_unavailable:{reason}"
+                    ));
+                    return false;
+                }
+                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
+                    reason,
+                ) => {
+                    log_code_generation_retention_degraded(&format!(
+                        "vector_inventory_denied:{reason}"
+                    ));
+                    return false;
+                }
+            };
+        if pinned_vector_sources != vector_readable_sources {
+            log_code_generation_retention_degraded("vector_inventory_changed");
+            return false;
+        }
+        tracedecay_usecases::semantic_runtime::retain_project_semantic_code_sources(
             &layout.project_root,
-            &generation.generation_id,
-            expected_vector_revision,
-        )
-        .await
-        {
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(
-                true,
-            ) => {
-                // A pending, ready, published, or base-linked vector stage still
-                // reads this exact source. It was absent from the root-only
-                // planning inventory, so retain it and let vector convergence
-                // make the next maintenance tick eligible.
-                return true;
-            }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(
-                false,
-            ) => {}
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Unavailable(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_source_liveness_unavailable:{reason}"
-                ));
-                return false;
-            }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Denied(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_source_liveness_denied:{reason}"
-                ));
-                return false;
-            }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::ResetRequired(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_source_liveness_reset_required:{reason}"
-                ));
-                return false;
-            }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Corrupt(
-                reason,
-            ) => {
-                log_code_generation_retention_degraded(&format!(
-                    "vector_source_liveness_corrupt:{reason}"
-                ));
-                return false;
+            &pinned_vector_sources,
+        );
+        for generation in &plan.collectable_generations {
+            match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_source_generation_is_live(
+                schedulers,
+                &layout.project_root,
+                &generation.generation_id,
+                *expected_vector_revision,
+            )
+            .await
+            {
+                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(
+                    true,
+                ) => {
+                    // A pending, ready, published, or base-linked vector stage still
+                    // reads this exact source. It was absent from the root-only
+                    // planning inventory, so retain it and let vector convergence
+                    // make the next maintenance tick eligible.
+                    return true;
+                }
+                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Ready(
+                    false,
+                ) => {}
+                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Unavailable(
+                    reason,
+                ) => {
+                    log_code_generation_retention_degraded(&format!(
+                        "vector_source_liveness_unavailable:{reason}"
+                    ));
+                    return false;
+                }
+                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Denied(
+                    reason,
+                ) => {
+                    log_code_generation_retention_degraded(&format!(
+                        "vector_source_liveness_denied:{reason}"
+                    ));
+                    return false;
+                }
+                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::ResetRequired(
+                    reason,
+                ) => {
+                    log_code_generation_retention_degraded(&format!(
+                        "vector_source_liveness_reset_required:{reason}"
+                    ));
+                    return false;
+                }
+                crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectSemanticVectorSourceLiveness::Corrupt(
+                    reason,
+                ) => {
+                    log_code_generation_retention_degraded(&format!(
+                        "vector_source_liveness_corrupt:{reason}"
+                    ));
+                    return false;
+                }
             }
         }
-    }
+        Some(vector_writer_freeze)
+    } else {
+        None
+    };
     if cancellation.is_cancelled() {
         log_code_generation_retention_degraded("retention_cancelled");
         return false;
@@ -538,10 +609,16 @@ pub(super) async fn run_code_generation_retention(
                 |receipt| receipt.reclaimed_bytes,
             );
             if reclaimed > 0 {
+                let mode = match &vector_inventory {
+                    VectorRetentionInventoryV1::Online { .. } => "online",
+                    VectorRetentionInventoryV1::Offline { .. } => "offline",
+                    VectorRetentionInventoryV1::Refused { .. } => "refused",
+                };
                 log_daemon_event(
                     "retention_code_generations",
                     &[
                         ("store", "code-index-v1".to_string()),
+                        ("mode", mode.to_string()),
                         ("bytes_reclaimed", reclaimed.to_string()),
                         (
                             "generations_collected",
@@ -553,6 +630,7 @@ pub(super) async fn run_code_generation_retention(
             graph_replay::reconcile_graph_replay_releases(graph, &store_root, cancellation)
                 .await
                 .succeeded()
+                && !offline_replay_reconcile_failed
         }
         Ok(Err(_)) => {
             log_code_generation_retention_degraded("retention_pass_failed");

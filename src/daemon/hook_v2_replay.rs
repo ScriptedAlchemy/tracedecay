@@ -344,14 +344,14 @@ async fn drain_hook_delivery_receipts(
 
     let mut settled = Vec::new();
     for receipt in receipts {
-        let source_receipt_ref = format!(
-            "hook:delivery:{}",
-            receipt
-                .receipt_id
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        );
+        let receipt_hex = receipt
+            .receipt_id
+            .iter()
+            .fold(String::new(), |mut hex, byte| {
+                let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{byte:02x}"));
+                hex
+            });
+        let source_receipt_ref = format!("hook:delivery:{receipt_hex}");
         if authority
             .begin_receipted(&receipt.settlement.attempt, &source_receipt_ref)
             .await

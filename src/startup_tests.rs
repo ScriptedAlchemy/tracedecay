@@ -1,12 +1,14 @@
 use super::{
-    AnalyticsAction, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
+    AnalyticsAction, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
     DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, GitAction, GitProjectArgs, HostBundleCliOptions,
-    MAX_ASYNC_WORKER_THREADS, MAX_BLOCKING_THREADS, PackageHookAction, RAYON_NUM_THREADS_ENV,
-    ScoopPackageHookAction, SilentReinstallAction, StderrTracingDefault, async_worker_threads,
-    daemon_cpu_threads_from, is_daemon_run, is_extract_worker, is_local_install_command,
-    should_skip_agent_install_maintenance, should_skip_startup_maintenance,
-    silent_reinstall_action, stderr_tracing_default, validate_host_bundle_options,
+    HostBundleComponentArg, MAX_ASYNC_WORKER_THREADS, MAX_BLOCKING_THREADS, PackageHookAction,
+    ProfileStorageAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, SilentReinstallAction,
+    StderrTracingDefault, async_worker_threads, daemon_cpu_threads_from, is_daemon_run,
+    is_extract_worker, is_local_install_command, should_skip_agent_install_maintenance,
+    should_skip_startup_maintenance, silent_reinstall_action, stderr_tracing_default,
+    validate_host_bundle_options,
 };
+use clap::Parser;
 use std::path::PathBuf;
 use tracedecay::user_config::UserConfig;
 
@@ -39,6 +41,110 @@ fn wipe_still_rejects_component_and_dry_run() {
         adopt: false,
     };
     assert!(validate_host_bundle_options(&command, family, &dry_run).is_err());
+}
+
+/// The storage reset commands REQUIRE `--yes` (their handlers refuse to run
+/// without it), so the pre-dispatch validator must accept the flag instead of
+/// rejecting the exact invocation the refusal message recommends. This parses
+/// the real command line end to end, exactly as the live recovery ran it:
+/// `tracedecay storage reset-project-store --project-root <root> --yes`.
+#[test]
+fn storage_reset_project_store_parses_and_accepts_the_confirmation_flag() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "storage",
+        "reset-project-store",
+        "--project-root",
+        "/tmp/some-project",
+        "--yes",
+    ])
+    .expect("the documented reset invocation must parse");
+    let options = HostBundleCliOptions {
+        component: cli.component,
+        dry_run: cli.dry_run,
+        yes: cli.yes,
+        adopt: cli.adopt,
+    };
+    assert!(options.yes, "--yes must reach the storage dispatcher");
+    let command = cli.command.expect("subcommand parsed");
+    assert!(matches!(
+        command,
+        Commands::Storage {
+            action: ProfileStorageAction::ResetProjectStore { .. }
+        }
+    ));
+    validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
+        .expect("storage reset-project-store --yes must be accepted");
+}
+
+/// `storage reset-authority` carries the same required `--yes` confirmation.
+#[test]
+fn storage_reset_authority_accepts_the_confirmation_flag() {
+    let command = Commands::Storage {
+        action: ProfileStorageAction::ResetAuthority {
+            authority: "observations".to_string(),
+            db: None,
+        },
+    };
+    let options = HostBundleCliOptions {
+        component: None,
+        dry_run: false,
+        yes: true,
+        adopt: false,
+    };
+    validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
+        .expect("storage reset-authority --yes must be accepted");
+}
+
+/// The storage resets own no host component and have no preview, so the other
+/// two global lifecycle flags stay rejected on them.
+#[test]
+fn storage_resets_still_reject_component_and_dry_run() {
+    let command = Commands::Storage {
+        action: ProfileStorageAction::ResetProjectStore {
+            project_root: Some("/tmp/some-project".to_string()),
+            project_id: None,
+        },
+    };
+    let family = CommandFamily::for_command(&command);
+    let dry_run = HostBundleCliOptions {
+        component: None,
+        dry_run: true,
+        yes: true,
+        adopt: false,
+    };
+    assert!(validate_host_bundle_options(&command, family, &dry_run).is_err());
+    let component = HostBundleCliOptions {
+        component: Some(HostBundleComponentArg::Core),
+        dry_run: false,
+        yes: true,
+        adopt: false,
+    };
+    assert!(validate_host_bundle_options(&command, family, &component).is_err());
+}
+
+/// The read-only storage report has nothing to confirm, so the confirmation
+/// flag stays rejected there — the reset carve-out must not leak family-wide.
+#[test]
+fn storage_report_still_rejects_the_confirmation_flag() {
+    let command = Commands::Storage {
+        action: ProfileStorageAction::StorageReport {
+            profile_root: None,
+            project_id: None,
+            project_root: None,
+            json: false,
+        },
+    };
+    let options = HostBundleCliOptions {
+        component: None,
+        dry_run: false,
+        yes: true,
+        adopt: false,
+    };
+    assert!(
+        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
+            .is_err()
+    );
 }
 
 /// The confirmation flag must not leak onto the other project commands, which

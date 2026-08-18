@@ -584,18 +584,18 @@ impl DaemonSessionSyncService {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(session_sync_project_key(scope), Arc::clone(&previous));
-        if let Some(database) = database {
-            if let Err(error) = self.recover_project(&previous, &database).await {
-                previous.retire_project_sessions();
-                let drain = self.drain_project_tasks(scope).await;
-                self.remove_context_if_same(scope, &previous);
-                return Err(match drain {
-                    Ok(()) => format!("prior session sync recovery failed: {error}"),
-                    Err(drain_error) => format!(
-                        "prior session sync recovery failed: {error}; rollback failed: {drain_error}"
-                    ),
-                });
-            }
+        if let Some(database) = database
+            && let Err(error) = self.recover_project(&previous, &database).await
+        {
+            previous.retire_project_sessions();
+            let drain = self.drain_project_tasks(scope).await;
+            self.remove_context_if_same(scope, &previous);
+            return Err(match drain {
+                Ok(()) => format!("prior session sync recovery failed: {error}"),
+                Err(drain_error) => format!(
+                    "prior session sync recovery failed: {error}; rollback failed: {drain_error}"
+                ),
+            });
         }
         Ok(())
     }

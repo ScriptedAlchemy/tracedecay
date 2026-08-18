@@ -6,7 +6,11 @@ use super::StoreTelemetrySamplingRegistry;
 ///
 /// Vector generations converge before their source code generations can be
 /// collected. Scope deletion is admitted only from a complete
-/// post-convergence vector census.
+/// post-convergence vector census. Code-generation retention still runs when
+/// vector retention failed: it resolves its own vector protection inventory
+/// and degrades to the offline protection set when the graph runtime is
+/// unavailable, so sealed files cannot grow without bound while the graph is
+/// dark.
 pub(in crate::daemon) async fn run_project_generation_maintenance(
     graph: &crate::tracedecay::TraceDecay,
     code_index_schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
@@ -22,7 +26,7 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
             cancellation,
         )
         .await;
-    if super::code_generation_retention_is_eligible(unit_succeeded, cancellation.is_cancelled()) {
+    if !cancellation.is_cancelled() {
         unit_succeeded &= crate::daemon::store_maintenance::run_code_generation_retention(
             graph,
             code_index_schedulers,

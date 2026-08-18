@@ -509,7 +509,7 @@ pub(super) async fn execute_git_preview(
     .await
     {
         Ok(Ok(prepared)) => prepared,
-        Ok(Err(response)) => return response,
+        Ok(Err(response)) => return *response,
         Err(_) => {
             return DaemonInvocationResponse::problem(
                 join_id,
@@ -539,7 +539,7 @@ pub(super) async fn execute_git_apply(
     .await
     {
         Ok(Ok(prepared)) => prepared,
-        Ok(Err(response)) => return response,
+        Ok(Err(response)) => return *response,
         Err(_) => {
             return DaemonInvocationResponse::problem(
                 join_id,
@@ -568,22 +568,32 @@ fn prepare_git_preview(
     request: GitPreviewSurfaceRequest,
     deadline: Deadline,
     cancellation: CancellationContext,
-) -> Result<Box<PreparedGitPreview>, DaemonInvocationResponse> {
+) -> Result<Box<PreparedGitPreview>, Box<DaemonInvocationResponse>> {
     let service = Arc::clone(&owner.service);
     let operation = request.operation;
     let authority = owner.current_authority(operation).map_err(|error| {
-        application_problem(wire_request_id.clone(), map_git_port_problem(error))
+        Box::new(application_problem(
+            wire_request_id.clone(),
+            map_git_port_problem(error),
+        ))
     })?;
     let preview_input = match operation {
         GitIndexTransactionOperationV1::CommitIndex => {
             let Some(commit_intent) = request.commit_intent.clone() else {
-                return Err(application_problem(wire_request_id, invalid_git_request()));
+                return Err(Box::new(application_problem(
+                    wire_request_id,
+                    invalid_git_request(),
+                )));
             };
             if request.preview_input_id.is_some() || !request.selected_hunk_digests.is_empty() {
-                return Err(application_problem(wire_request_id, invalid_git_request()));
+                return Err(Box::new(application_problem(
+                    wire_request_id,
+                    invalid_git_request(),
+                )));
             }
-            let preview_id = mint_git_preview_id()
-                .map_err(|problem| application_problem(wire_request_id.clone(), problem))?;
+            let preview_id = mint_git_preview_id().map_err(|problem| {
+                Box::new(application_problem(wire_request_id.clone(), problem))
+            })?;
             let snapshot = capture_exact_snapshot(
                 &owner.repository_root,
                 authority.scope.project_id.clone(),
@@ -592,7 +602,10 @@ fn prepare_git_preview(
                 authority.evaluated_at,
             )
             .map_err(|error| {
-                application_problem(wire_request_id.clone(), map_git_port_problem(error))
+                Box::new(application_problem(
+                    wire_request_id.clone(),
+                    map_git_port_problem(error),
+                ))
             })?;
             let input = GitIndexPreviewInputV1::new_commit(
                 preview_id,
@@ -601,34 +614,48 @@ fn prepare_git_preview(
                 authority.evaluated_at,
                 UtcMicros(authority.evaluated_at.0.saturating_add(30_000_000)),
             )
-            .map_err(|_| application_problem(wire_request_id.clone(), invalid_git_request()))?;
+            .map_err(|_| {
+                Box::new(application_problem(
+                    wire_request_id.clone(),
+                    invalid_git_request(),
+                ))
+            })?;
             service.save_preview_input(input.clone()).map_err(|error| {
-                application_problem(wire_request_id.clone(), map_git_port_problem(error))
+                Box::new(application_problem(
+                    wire_request_id.clone(),
+                    map_git_port_problem(error),
+                ))
             })?;
             input
         }
         GitIndexTransactionOperationV1::StageHunks
         | GitIndexTransactionOperationV1::UnstageHunks => {
             if request.commit_intent.is_some() || request.selected_hunk_digests.is_empty() {
-                return Err(application_problem(wire_request_id, invalid_git_request()));
+                return Err(Box::new(application_problem(
+                    wire_request_id,
+                    invalid_git_request(),
+                )));
             }
             let Some(preview_input_id) = request.preview_input_id.clone() else {
-                return Err(application_problem(wire_request_id, invalid_git_request()));
+                return Err(Box::new(application_problem(
+                    wire_request_id,
+                    invalid_git_request(),
+                )));
             };
             match service.read_preview_input(&preview_input_id, authority.evaluated_at) {
                 Ok(input) if input.operation == operation => input,
-                Ok(_) => return Err(concealed_application_problem(wire_request_id)),
+                Ok(_) => return Err(Box::new(concealed_application_problem(wire_request_id))),
                 Err(error) => {
-                    return Err(application_problem(
+                    return Err(Box::new(application_problem(
                         wire_request_id,
                         map_git_port_problem(error),
-                    ));
+                    )));
                 }
             }
         }
     };
     if preview_input.repository_snapshot.project_id != owner.project_id {
-        return Err(concealed_application_problem(wire_request_id));
+        return Err(Box::new(concealed_application_problem(wire_request_id)));
     }
     let request = build_git_preview_request(
         &wire_request_id,
@@ -638,7 +665,7 @@ fn prepare_git_preview(
         deadline,
         cancellation,
     )
-    .map_err(|problem| application_problem(wire_request_id.clone(), problem))?;
+    .map_err(|problem| Box::new(application_problem(wire_request_id.clone(), problem)))?;
     Ok(Box::new(PreparedGitPreview {
         wire_request_id,
         service,
@@ -652,20 +679,26 @@ fn prepare_git_apply(
     request: GitApplySurfaceRequest,
     deadline: Deadline,
     cancellation: CancellationContext,
-) -> Result<Box<PreparedGitApply>, DaemonInvocationResponse> {
+) -> Result<Box<PreparedGitApply>, Box<DaemonInvocationResponse>> {
     let service = Arc::clone(&owner.service);
     let preview = service.read_preview(&request.preview_id).map_err(|error| {
-        application_problem(wire_request_id.clone(), map_git_port_problem(error))
+        Box::new(application_problem(
+            wire_request_id.clone(),
+            map_git_port_problem(error),
+        ))
     })?;
     if preview.preview_digest != request.preview_digest
         || preview.repository_snapshot.project_id != owner.project_id
     {
-        return Err(concealed_application_problem(wire_request_id));
+        return Err(Box::new(concealed_application_problem(wire_request_id)));
     }
     let authority = owner
         .current_authority(preview.operation)
         .map_err(|error| {
-            application_problem(wire_request_id.clone(), map_git_port_problem(error))
+            Box::new(application_problem(
+                wire_request_id.clone(),
+                map_git_port_problem(error),
+            ))
         })?;
     let request = build_git_apply_request(
         &wire_request_id,
@@ -675,7 +708,7 @@ fn prepare_git_apply(
         deadline,
         cancellation,
     )
-    .map_err(|problem| application_problem(wire_request_id.clone(), problem))?;
+    .map_err(|problem| Box::new(application_problem(wire_request_id.clone(), problem)))?;
     Ok(Box::new(PreparedGitApply {
         wire_request_id,
         service,

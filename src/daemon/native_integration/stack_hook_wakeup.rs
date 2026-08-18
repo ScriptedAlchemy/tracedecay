@@ -1,4 +1,4 @@
-//! CursorDesktop's opaque, authenticated availability wakeup for stack delivery.
+//! `CursorDesktop`'s opaque, authenticated availability wakeup for stack delivery.
 //!
 //! This is only an in-process lookup for a mounted project runtime. The
 //! registered database remains the durable queue authority; Hook V2 learns no
@@ -31,7 +31,7 @@ pub(crate) fn register_github_stack_hook_runtime(
     }
 }
 
-/// Returns only whether an authenticated CursorDesktop hook should wake its
+/// Returns only whether an authenticated `CursorDesktop` hook should wake its
 /// user. Store failures suppress a wakeup; durable `host_pending` rows remain
 /// available for a later hook admission and MCP expansion.
 pub(crate) fn github_stack_hook_available(project_id: [u8; 16], worktree_id: [u8; 16]) -> bool {

@@ -104,14 +104,6 @@ async fn project_runtime_at(
         tracedecay::storage::write_repository_identity_marker(project_root, project_id.as_str())
             .unwrap()
     );
-    tracedecay::storage::write_enrollment_marker(
-        project_root,
-        &tracedecay::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: tracedecay::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
     HostAdmissionTestRuntimeV1::project(
         tmp.path().join(".tracedecay"),
         project_root,

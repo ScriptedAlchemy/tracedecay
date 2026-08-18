@@ -5,10 +5,12 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 
 use sha2::{Digest, Sha256};
+use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
 use tracedecay_domain::{ProjectId, RepositoryId};
 use tracedecay_graph_db::{
-    GraphDbError, GraphGenerationManifest, GraphGenerationManifestProvider, GraphNamespace,
-    GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision, SealedCodeGenerationReplay,
+    GraphBudgetKind, GraphDbError, GraphGenerationManifest, GraphGenerationManifestProvider,
+    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
+    SealedCodeGenerationReplay,
 };
 use tracedecay_store::{GraphProjectionIdentityV1, StoreShardIdV1};
 
@@ -354,9 +356,24 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
             &GraphProjectorRevision::try_from(source.projector_revision.as_str().to_owned())?,
             check,
         )
-        .map_err(|error| GraphDbError::Corrupt {
-            message: format!("sealed code generation graph projection is invalid: {error}"),
-        })
+        .map_err(classify_sealed_projection_build_error)
+    }
+}
+
+/// Interruptions from the caller's `check` probe are transport states, not
+/// evidence about the sealed payload. Classifying them as corruption would
+/// fault-retain the graph slot in the shared capacity-bounded registry and
+/// poison later retries of the same immutable artifact.
+fn classify_sealed_projection_build_error(error: CodeGraphProjectionError) -> GraphDbError {
+    match error {
+        CodeGraphProjectionError::Cancelled => GraphDbError::Cancelled,
+        CodeGraphProjectionError::DeadlineExceeded => GraphDbError::DeadlineExceeded,
+        CodeGraphProjectionError::BudgetExhausted => {
+            GraphDbError::budget_exhausted(GraphBudgetKind::Read, u64::MAX)
+        }
+        other => GraphDbError::Corrupt {
+            message: format!("sealed code generation graph projection is invalid: {other}"),
+        },
     }
 }
 
@@ -516,6 +533,32 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, GraphDbError::Corrupt { .. }));
+    }
+
+    #[test]
+    fn sealed_projection_build_interruptions_stay_typed_and_never_read_as_corruption() {
+        use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
+
+        use super::classify_sealed_projection_build_error;
+
+        assert_eq!(
+            classify_sealed_projection_build_error(CodeGraphProjectionError::DeadlineExceeded),
+            GraphDbError::DeadlineExceeded
+        );
+        assert_eq!(
+            classify_sealed_projection_build_error(CodeGraphProjectionError::Cancelled),
+            GraphDbError::Cancelled
+        );
+        assert!(matches!(
+            classify_sealed_projection_build_error(CodeGraphProjectionError::BudgetExhausted),
+            GraphDbError::BudgetExhausted { .. }
+        ));
+        assert!(matches!(
+            classify_sealed_projection_build_error(CodeGraphProjectionError::Contract(
+                "entity payload is malformed".to_owned()
+            )),
+            GraphDbError::Corrupt { .. }
+        ));
     }
 
     #[test]

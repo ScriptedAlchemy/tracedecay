@@ -251,7 +251,7 @@ pub(crate) async fn invoke_workflow_operation(
                 operation,
                 request_id,
                 controls,
-                WorkflowApplicationInvocation::StartRun(decoded),
+                WorkflowApplicationInvocation::StartRun(Box::new(decoded)),
                 start_run_outcome,
             )
             .await

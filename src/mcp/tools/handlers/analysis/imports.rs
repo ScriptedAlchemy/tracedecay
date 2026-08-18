@@ -231,8 +231,7 @@ pub(crate) async fn handle_unused_imports(
         scanned_files += 1;
         let use_symbols = use_symbols_by_file
             .get(&file_path)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
+            .map_or(&[][..], Vec::as_slice);
         let file_unused = unused_imports_in_file(project_root, &file_path, use_symbols)?;
         if !file_unused.is_empty() {
             touched.push(file_path.clone());

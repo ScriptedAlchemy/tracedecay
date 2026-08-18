@@ -188,7 +188,7 @@ pub(crate) async fn handle_unsafe_patterns(
             let line_no = (idx as u32) + 1;
             for kind in &kinds {
                 if line_matches_unsafe_kind(masked_line, kind) {
-                    let nodes = symbols_by_file.get(file).map(Vec::as_slice).unwrap_or(&[]);
+                    let nodes = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
                     let enclosing = nodes
                         .iter()
                         .filter(|n| n.metadata.start_line <= line_no && line_no <= n.end_line())

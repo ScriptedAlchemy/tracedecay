@@ -1543,7 +1543,7 @@ fn quarantine_restores_same_second_manifest_mutation() {
     );
 }
 
-/// SQLite pages can change in place without changing the parent directory.
+/// `SQLite` pages can change in place without changing the parent directory.
 /// Hashing the opened child handles makes that post-census mutation visible at
 /// the recovery boundary even when the writer resets the database mtime.
 #[test]
@@ -2620,8 +2620,7 @@ mod durable_inventory {
                     unbounded_collection_control(),
                 ),
                 DurableDatabaseInventoryV1::Unverifiable,
-                "graph path {:?} must not escape the store",
-                graph_path
+                "graph path {graph_path:?} must not escape the store"
             );
         }
 

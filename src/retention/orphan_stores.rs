@@ -401,7 +401,7 @@ impl<'a> CollectionControl<'a> {
         }
     }
 
-    /// Adapt the retention admission to the canonical SQLite read-snapshot
+    /// Adapt the retention admission to the canonical `SQLite` read-snapshot
     /// control. The snapshot layer may copy/materialize a foreign database in
     /// `spawn_blocking`, so it must observe the same live cancellation and
     /// deadline rather than an unbounded root-shim control.
@@ -415,7 +415,7 @@ impl<'a> CollectionControl<'a> {
         )
     }
 
-    /// Race an awaitable inspection or SQLite command against the admission's
+    /// Race an awaitable inspection or `SQLite` command against the admission's
     /// cancellation/deadline. Losing the race never authorizes the following
     /// destructive phase: callers retain their quarantine journal and let a
     /// later reconciliation inspect the durable state afresh.
@@ -443,7 +443,7 @@ fn unbounded_collection_control() -> CollectionControl<'static> {
     static CANCELLATION: std::sync::OnceLock<CancellationToken> = std::sync::OnceLock::new();
     CollectionControl::new(
         CANCELLATION.get_or_init(CancellationToken::new),
-        MonotonicDeadline::at(Instant::now() + std::time::Duration::from_secs(86_400)),
+        MonotonicDeadline::at(Instant::now() + std::time::Duration::from_hours(24)),
     )
 }
 

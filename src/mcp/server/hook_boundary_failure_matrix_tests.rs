@@ -1,7 +1,7 @@
 //! hook-boundary failure matrix at the daemon host-admission spool.
 //!
 //! Each row proves typed failure dispositions do not corrupt the durable
-//! reconcile_sink frontier (pending watermark / replay backlog) and do not invent a
+//! `reconcile_sink` frontier (pending watermark / replay backlog) and do not invent a
 //! default-success commit.
 
 use std::path::PathBuf;

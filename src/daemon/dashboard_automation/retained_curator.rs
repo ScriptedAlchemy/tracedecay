@@ -131,7 +131,7 @@ pub(crate) async fn execute_retained_memory_curator(
 }
 
 fn automation_problem(
-    problem: crate::daemon::automation_effect::AutomationSettledProblem,
+    problem: Box<crate::daemon::automation_effect::AutomationSettledProblem>,
 ) -> RetainedSurfaceExecutionErrorV1 {
     RetainedSurfaceExecutionErrorV1::ApplicationProblem(problem.problem.problem.source().clone())
 }

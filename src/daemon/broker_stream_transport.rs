@@ -529,9 +529,8 @@ mod peer_close_tests {
 
         drop(fixture.recorder);
         drop(fixture.authority);
-        let producer = match Arc::try_unwrap(fixture.producer) {
-            Ok(producer) => producer,
-            Err(_) => panic!("settlement authority releases producer"),
+        let Ok(producer) = Arc::try_unwrap(fixture.producer) else {
+            panic!("settlement authority releases producer")
         };
         producer
             .shutdown()

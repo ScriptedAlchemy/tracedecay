@@ -174,11 +174,13 @@ tracedecay gitignore on           # enable (default)
 tracedecay gitignore off          # disable — index everything
 ```
 
-Don't forget to add `.tracedecay` to your `.gitignore` so enrollment markers do not get committed:
-
-```bash
-echo .tracedecay >> .gitignore
-```
+TraceDecay never creates files inside your repository's working tree: all
+project data lives under `~/.tracedecay`, and a git repository additionally
+carries an identity marker inside `.git/` (never committed). If a project was
+enrolled by an older TraceDecay, it may still have a leftover
+`.tracedecay/enrollment.json` in the repository — its identity is adopted into
+the profile registry the first time the project is opened, after which the
+file is ignored and you can safely delete the `.tracedecay/` directory.
 
 ---
 
@@ -916,12 +918,13 @@ user-preference writes here; projectless Codex and Cursor hooks recall from it.
 
 ### Active project store
 
-Projects enroll one daemon-owned project authority. An explicit local
-`.tracedecay/` directory is only a location choice; profile-backed storage may
-keep the final Grafeo/SQLite stores under a private profile root, with an
-enrollment marker in the repository. Project facts, sessions, and lossless LCM
-are project-wide across branches and linked worktrees. Code graphs are indexed
-as immutable generations with exact repository, checkout, worktree, ref,
+Projects enroll one daemon-owned project authority. Profile-backed storage
+keeps the final Grafeo/SQLite stores under the private profile root
+(`~/.tracedecay/projects/<project-id>`); a git repository additionally carries
+its identity in `.git/tracedecay-project.json`. Nothing is written into the
+visible working tree. Project facts, sessions, and lossless LCM are
+project-wide across branches and linked worktrees. Code graphs are indexed as
+immutable generations with exact repository, checkout, worktree, ref,
 commit/tree, snapshot, and generation provenance.
 
 The user-level registry database records enrollment and routing metadata; it is
@@ -929,8 +932,9 @@ not a fact authority. Retention, compaction, payload quarantine, and rebuilds
 are separate daemon operations with receipts. Hosts and clients never become a
 storage authority or open a database directly.
 
-Add the explicit local enrollment marker to your `.gitignore` if your setup uses
-one, but do not copy or edit store files.
+A leftover repo-local `.tracedecay/enrollment.json` from an older TraceDecay is
+adopted into the registry on first open and then ignored; you can delete it.
+Do not copy or edit store files.
 
 An incompatible persisted shape or incomplete privacy remediation returns
 `ResetRequired`/`reset_required`. Follow the daemon's remediation or explicitly

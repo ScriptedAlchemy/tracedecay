@@ -1963,7 +1963,6 @@ async fn run_user_jobs_scheduler_pass(
                 profile_root: Some(profile_root.to_path_buf()),
                 project_root: Some(project_path.to_path_buf()),
                 occurrence_anchor_run_id: occurrence_anchor_run_id.clone(),
-                ..tracedecay_agent_hosts::automation::jobs::UserJobRunOptions::default()
             },
         )
         .await;
@@ -1982,7 +1981,7 @@ async fn run_user_jobs_scheduler_pass(
                 } else {
                     crate::daemon::automation_effect::RetainedAutomationSettlementProjection::Run {
                         record: run.ledger_record,
-                        committed: run.committed_receipt,
+                        committed: run.committed_receipt.map(Box::new),
                     }
                 }
             },
@@ -2013,7 +2012,7 @@ async fn run_user_jobs_scheduler_pass(
     }
 }
 
-/// Mints the scheduler occurrence run_id for one user job and returns the
+/// Mints the scheduler occurrence `run_id` for one user job and returns the
 /// ledger anchor it was derived from.
 ///
 /// The anchor is the latest scheduler-effectful terminal in the SAME snapshot

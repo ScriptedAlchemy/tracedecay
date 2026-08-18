@@ -544,13 +544,17 @@ impl LocalStoreRuntimeResolverV1 {
             })?;
         require_local_filesystem(&canonical_project_root, filesystem_safety)?;
 
-        // This is lightweight enrollment metadata, not a store read. The typed
-        // project ID is compared before any layout-derived path is accepted.
-        let marker = read_matching_enrollment(&canonical_project_root, project_id)?;
+        // This is lightweight repository-identity metadata, not a store read.
+        // The typed project ID is compared before any layout-derived path is
+        // accepted.
+        require_matching_repository_identity(&canonical_project_root, project_id)?;
         let layout = storage::profile_sharded_layout(
             &canonical_project_root,
             canonical_profile_root,
-            &marker,
+            &storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: storage::StorageMode::ProfileSharded,
+            },
         )
         .map_err(|_| LocalStoreLocatorUnavailableReasonV1::InvalidEnrollment)?;
         let expected_store_root =
@@ -765,10 +769,8 @@ pub enum LocalStoreLocatorUnavailableReasonV1 {
     MissingCodeStoreAuthority,
     CodeDatabaseUnavailable,
     ProjectEnrollmentRootUnavailable,
-    MissingEnrollment,
     InvalidEnrollment,
     EnrollmentProjectMismatch,
-    EnrollmentStorageModeMismatch,
     UnsafeLocatorPath,
     /// The probed path does not exist. This is a complete answer about the
     /// path, not a failure to obtain one.
@@ -793,10 +795,7 @@ pub enum LocalStoreLocatorUnavailableReasonV1 {
 
 impl LocalStoreLocatorUnavailableReasonV1 {
     fn allows_alias_fallback(&self) -> bool {
-        matches!(
-            self,
-            Self::ProjectEnrollmentRootUnavailable | Self::MissingEnrollment
-        )
+        matches!(self, Self::ProjectEnrollmentRootUnavailable)
     }
 }
 
@@ -817,13 +816,9 @@ impl fmt::Display for LocalStoreLocatorUnavailableReasonV1 {
             Self::ProjectEnrollmentRootUnavailable => {
                 formatter.write_str("project enrollment root is unavailable")
             }
-            Self::MissingEnrollment => formatter.write_str("project enrollment is missing"),
             Self::InvalidEnrollment => formatter.write_str("project enrollment is invalid"),
             Self::EnrollmentProjectMismatch => {
-                formatter.write_str("project enrollment does not match typed project identity")
-            }
-            Self::EnrollmentStorageModeMismatch => {
-                formatter.write_str("project enrollment does not use profile-sharded storage")
+                formatter.write_str("repository identity does not match typed project identity")
             }
             Self::UnsafeLocatorPath => formatter.write_str("locator path is unsafe"),
             Self::MissingLocatorPath { path } => {
@@ -856,33 +851,26 @@ impl fmt::Display for LocalStoreLocatorUnavailableReasonV1 {
 
 type LocalStoreLocatorResult<T> = Result<T, LocalStoreLocatorUnavailableReasonV1>;
 
-fn read_matching_enrollment(
-    project_root: &Path,
+/// Rejects an enrollment root whose repository-side identity names a
+/// different project.
+///
+/// `TraceDecay` persists no identity inside a working tree, so the only
+/// root-side evidence is the `.git/` repository identity marker. A root
+/// without one (a non-git project, or a registry-attested alias) is accepted:
+/// the typed [`LocalProjectEnrollmentAuthorityV1`] itself is the enrollment
+/// authority, registered by the daemon after registry-backed identity
+/// resolution, and every store path is still derived from the typed project
+/// id — never from the root.
+fn require_matching_repository_identity(
+    canonical_project_root: &Path,
     expected_project_id: &ProjectId,
-) -> LocalStoreLocatorResult<storage::EnrollmentMarker> {
-    let marker_path = storage::enrollment_marker_path(project_root);
-    reject_symlink_components_below(project_root, &marker_path)?;
-    match fs::symlink_metadata(&marker_path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
-            return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(LocalStoreLocatorUnavailableReasonV1::MissingEnrollment);
-        }
-        Err(error) => return Err(filesystem_probe_failure(&marker_path, &error)),
+) -> LocalStoreLocatorResult<()> {
+    match storage::read_repository_identity_marker(canonical_project_root) {
+        Ok(Some(marker)) if marker.project_id == expected_project_id.as_str() => Ok(()),
+        Ok(Some(_)) => Err(LocalStoreLocatorUnavailableReasonV1::EnrollmentProjectMismatch),
+        Ok(None) => Ok(()),
+        Err(_) => Err(LocalStoreLocatorUnavailableReasonV1::InvalidEnrollment),
     }
-
-    let marker = storage::read_enrollment_marker(project_root)
-        .map_err(|_| LocalStoreLocatorUnavailableReasonV1::InvalidEnrollment)?
-        .ok_or(LocalStoreLocatorUnavailableReasonV1::MissingEnrollment)?;
-    if marker.storage_mode != storage::StorageMode::ProfileSharded {
-        return Err(LocalStoreLocatorUnavailableReasonV1::EnrollmentStorageModeMismatch);
-    }
-    if marker.project_id != expected_project_id.as_str() {
-        return Err(LocalStoreLocatorUnavailableReasonV1::EnrollmentProjectMismatch);
-    }
-    Ok(marker)
 }
 
 /// Classifies a failed filesystem probe without conflating absence with an
@@ -1488,16 +1476,6 @@ mod tests {
             fs::create_dir_all(&first_alias).expect("first alias");
             fs::create_dir_all(&second_alias).expect("second alias");
             let project_id = id::<ProjectId>("project.canonical");
-            for project_root in [&first_alias, &second_alias] {
-                storage::write_enrollment_marker(
-                    project_root,
-                    &storage::EnrollmentMarker {
-                        project_id: project_id.as_str().to_owned(),
-                        storage_mode: storage::StorageMode::ProfileSharded,
-                    },
-                )
-                .expect("write enrollment marker");
-            }
             Self {
                 _temporary: temporary,
                 root,
@@ -1788,55 +1766,11 @@ mod tests {
         );
     }
 
-    /// Reproduces the intermittent enrollment race: several independent paths
-    /// (CLI init, daemon first-touch open, enrollment-root repair) each write
-    /// the same marker file, and the resolver may read concurrently. The write
-    /// must be atomic — a reader must never observe a present-but-empty or
-    /// partially written marker as `InvalidEnrollment`/`MissingEnrollment`.
+    /// A root whose repository identity marker names a different project is
+    /// evidence of a bad authority mapping and must fail closed, not fall
+    /// through to an alias.
     #[test]
-    fn concurrent_marker_rewrites_never_deny_an_enrolled_project() {
-        let fixture = Fixture::new();
-        let resolver = fixture.resolver_for([fixture.first_alias.clone()]);
-        let key = StoreRuntimeKey::new(fixture.shard(), incarnation());
-        let marker = storage::EnrollmentMarker {
-            project_id: fixture.project_id.as_str().to_owned(),
-            storage_mode: storage::StorageMode::ProfileSharded,
-        };
-
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let writer = {
-            let project_root = fixture.first_alias.clone();
-            let marker = marker.clone();
-            let stop = Arc::clone(&stop);
-            std::thread::spawn(move || {
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    storage::write_enrollment_marker(&project_root, &marker)
-                        .expect("rewrite enrollment marker");
-                }
-            })
-        };
-
-        let mut denial = None;
-        for _ in 0..20_000 {
-            match resolve_as_local(&resolver, &key) {
-                LocalStoreLocatorResolutionV1::Resolved(_) => {}
-                LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
-                    denial = Some(unavailable.reason);
-                    break;
-                }
-            }
-        }
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        writer.join().expect("marker writer thread");
-
-        assert!(
-            denial.is_none(),
-            "an enrolled project was denied during a concurrent marker rewrite: {denial:?}"
-        );
-    }
-
-    #[test]
-    fn missing_enrollment_is_typed_unavailable() {
+    fn mismatched_repository_identity_is_typed_unavailable() {
         let temporary = tempfile::tempdir().expect("temporary fixture root");
         let root = temporary
             .path()
@@ -1846,7 +1780,19 @@ mod tests {
         let project_root = root.join("project");
         fs::create_dir_all(&profile_root).expect("profile root");
         fs::create_dir_all(&project_root).expect("project root");
-        let project_id = id::<ProjectId>("project.missing-enrollment");
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&project_root)
+            .status()
+            .expect("run git init");
+        assert!(init.success(), "the fixture repository must initialize");
+        assert!(
+            storage::write_repository_identity_marker(&project_root, "project.other")
+                .expect("write repository identity marker"),
+            "the fixture repository must accept an identity marker"
+        );
+
+        let project_id = id::<ProjectId>("project.mismatched-identity");
         let shard = StoreShardIdV1::project(
             id::<BrainId>("brain.local-resolver"),
             id::<UserProfileId>("profile.local-resolver"),
@@ -1866,7 +1812,7 @@ mod tests {
         assert!(matches!(
             resolve_as_local(&resolver, &StoreRuntimeKey::new(shard, incarnation())),
             LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
-                reason: LocalStoreLocatorUnavailableReasonV1::MissingEnrollment,
+                reason: LocalStoreLocatorUnavailableReasonV1::EnrollmentProjectMismatch,
                 ..
             })
         ));

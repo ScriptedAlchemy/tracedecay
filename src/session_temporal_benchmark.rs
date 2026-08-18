@@ -33,8 +33,7 @@ use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistry
 use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::storage::{
-    EnrollmentMarker, StorageMode, read_repository_identity_marker, write_enrollment_marker,
-    write_repository_identity_marker,
+    read_repository_identity_marker, write_repository_identity_marker,
 };
 use tracedecay_runtime_core::timeutil::nearest_rank;
 use tracedecay_sessions::observation::ObservationCancellation;
@@ -458,7 +457,7 @@ fn validate_current_result(root: &Path, workload_path: &Path, workload: &Value) 
     )?;
     require_json_value(
         &result["workload_manifest_sha256"],
-        json!(sha256_file(&workload_path)?),
+        json!(sha256_file(workload_path)?),
         "workload manifest hash",
     )?;
     require_json_value(
@@ -961,14 +960,6 @@ fn enroll_benchmark_project(project: &Path) -> BenchResult<ProjectId> {
     {
         return Err("repository identity marker was not written".to_owned());
     }
-    write_enrollment_marker(
-        project,
-        &EnrollmentMarker {
-            project_id: BENCHMARK_PROJECT_ID.to_owned(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .map_err(|error| format!("write enrollment marker: {error}"))?;
     let marker = read_repository_identity_marker(project)
         .map_err(|error| format!("read identity marker: {error}"))?
         .ok_or_else(|| "repository identity marker missing after write".to_owned())?;

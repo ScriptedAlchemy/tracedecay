@@ -79,15 +79,17 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
 
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&primary, &client_identity).await;
+    // A user leftover from before the working-tree cutover: a stale legacy
+    // enrollment file inside the linked worktree. Nothing writes these
+    // anymore; routing must ignore it because the repository identity
+    // resolves first.
     let stale_project_id = "proj_stale_linked_worktree";
-    crate::storage::write_enrollment_marker(
-        &linked,
-        &crate::storage::EnrollmentMarker {
-            project_id: stale_project_id.to_owned(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
-        },
+    std::fs::create_dir_all(linked.join(".tracedecay")).expect("legacy marker dir");
+    std::fs::write(
+        linked.join(".tracedecay/enrollment.json"),
+        format!("{{\"project_id\":\"{stale_project_id}\",\"storage_mode\":\"profile_sharded\"}}"),
     )
-    .expect("write stale linked-worktree marker");
+    .expect("write stale legacy linked-worktree marker");
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "shared worktree authority");
     let engine = test_daemon_engine_for_profile(&profile_root);
@@ -340,10 +342,10 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             | crate::dashboard::AutomationSchedulerReconcileOutcome::Exiting
     ));
     assert!(
-        crate::storage::read_enrollment_marker(&linked)
-            .expect("read linked marker")
+        crate::storage::read_legacy_enrollment_marker(&linked)
+            .expect("read linked legacy marker")
             .is_some_and(|marker| marker.project_id == stale_project_id),
-        "routing must ignore, not rewrite, a stale worktree-local marker"
+        "routing must ignore, not rewrite or delete, a stale legacy worktree-local marker"
     );
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await

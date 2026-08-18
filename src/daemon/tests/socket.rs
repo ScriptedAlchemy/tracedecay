@@ -1316,9 +1316,9 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         crate::db::enter_daemon_database_scope(&profile_root, 1, "linked-worktree-route-test")
             .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
-    let project_id = crate::storage::read_enrollment_marker(&primary)
-        .expect("read primary enrollment")
-        .expect("primary enrollment")
+    let project_id = crate::storage::read_repository_identity_marker(&primary)
+        .expect("read primary repository identity")
+        .expect("primary repository identity")
         .project_id;
     let registry = engine
         .store_administration

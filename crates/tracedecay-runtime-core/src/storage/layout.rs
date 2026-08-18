@@ -7,7 +7,7 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     EnrollmentMarker, ProjectIdentity, STORE_MANIFEST_FILENAME, StorageMode, StoreKind,
-    StoreLayout, read_enrollment_marker, read_repository_identity_marker, validate_project_id,
+    StoreLayout, read_repository_identity_marker, validate_project_id,
 };
 
 pub fn profile_sharded_data_root(profile_root: &Path, project_id: &str) -> PathBuf {
@@ -123,8 +123,8 @@ pub fn resolve_persisted_layout(
 ) -> Result<Option<StoreLayout>> {
     // A linked worktree has its own checkout root but shares the repository
     // identity stored in Git's common directory. That authority must win over
-    // any stale marker left inside an individual worktree, or one repository
-    // can acquire two project stores and two mutable writer lanes.
+    // any path-derived guess, or one repository can acquire two project
+    // stores and two mutable writer lanes.
     if let Some(marker) = read_repository_identity_marker(project_root)? {
         return profile_sharded_layout(
             project_root,
@@ -137,20 +137,24 @@ pub fn resolve_persisted_layout(
         .map(Some);
     }
 
-    let enrollment_root = crate::worktree::repository_identity_root(project_root)
-        .unwrap_or_else(|| project_root.to_path_buf());
-    if let Some(marker) = read_enrollment_marker(&enrollment_root)? {
-        if marker.storage_mode != StorageMode::ProfileSharded {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "unsupported storage_mode={:?} in enrollment marker for '{}'; \
-                     reset the project store before reopening it",
-                    marker.storage_mode,
-                    enrollment_root.display()
-                ),
-            });
-        }
-        return profile_sharded_layout(project_root, profile_root, &marker).map(Some);
+    // Without a repository-side marker (a non-git project, or a repository
+    // whose `.git/` marker was lost), the persisted evidence is the profile
+    // shard itself: a store minted for this root's deterministic identity.
+    // Nothing in the working tree carries identity.
+    let project_id = default_profile_project_id(project_root);
+    let data_root = profile_sharded_data_root(profile_root, &project_id);
+    let store_exists = data_root.join(config::db_filename(&data_root)).exists()
+        || data_root.join(STORE_MANIFEST_FILENAME).is_file();
+    if store_exists {
+        return profile_sharded_layout(
+            project_root,
+            profile_root,
+            &EnrollmentMarker {
+                project_id,
+                storage_mode: StorageMode::ProfileSharded,
+            },
+        )
+        .map(Some);
     }
     Ok(None)
 }

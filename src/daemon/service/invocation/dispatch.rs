@@ -704,7 +704,7 @@ impl DaemonInvocationService {
                     observability_producer,
                     project_root.map(Path::to_path_buf),
                     request_id,
-                    request,
+                    *request,
                     observed_at,
                     deadline,
                     cancellation,

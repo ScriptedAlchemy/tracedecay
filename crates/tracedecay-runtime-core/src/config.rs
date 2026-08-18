@@ -143,16 +143,16 @@ pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     let worktree_root = crate::worktree::git_worktree_root(start);
     loop {
+        let at_worktree_root = worktree_root
+            .as_ref()
+            .is_some_and(|root| paths_same(&dir, root));
         if has_project_database(&dir)
-            || crate::storage::has_enrollment_marker(&dir)
             || crate::storage::has_path_local_profile_store(&dir)
+            || (at_worktree_root && crate::storage::has_repository_identity_marker(&dir))
         {
             return Some(dir);
         }
-        if worktree_root
-            .as_ref()
-            .is_some_and(|root| paths_same(&dir, root))
-        {
+        if at_worktree_root {
             return None;
         }
         if !dir.pop() {

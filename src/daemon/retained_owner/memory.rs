@@ -952,14 +952,14 @@ where
     tokio::select! {
         biased;
         outcome = &mut future => classify_memory_settlement(context, outcome),
-        _ = context.cancellation_signal.cancelled() => {
+        () = context.cancellation_signal.cancelled() => {
             if context.cancellation_signal.commit_started() {
                 classify_memory_settlement(context, future.await)
             } else {
                 Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::BeforeEffect))
             }
         }
-        _ = tokio::time::sleep(remaining) => {
+        () = tokio::time::sleep(remaining) => {
             if context.cancellation_signal.commit_started() {
                 classify_memory_settlement(context, future.await)
             } else {

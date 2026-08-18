@@ -1387,8 +1387,6 @@ mod work_evidence_mount_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod lcm_claude_recall_tests;
 
 mod project_host_admission_replay;

@@ -258,15 +258,12 @@ impl TraceDecay {
         )
         .await?;
         let project_id = Self::registered_project_id(&store_layout)?;
-        let enrollment_root = crate::worktree::repository_identity_root(project_root)
-            .unwrap_or_else(|| project_root.to_path_buf());
-        crate::storage::write_enrollment_marker(
-            &enrollment_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )?;
+        // Persist the minted identity in the sanctioned repo-adjacent anchor:
+        // the `.git/` repository identity marker. A non-git root persists
+        // nothing here — its identity is deterministic from the canonical
+        // path and durably owned by the profile registry. TraceDecay never
+        // creates files inside a project's working tree.
+        crate::storage::write_repository_identity_marker(project_root, project_id.as_str())?;
         let configuration_database = runtime_registry
             .project_sessions(project_id, [project_root.to_path_buf()])
             .await?;

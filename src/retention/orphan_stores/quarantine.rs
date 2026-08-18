@@ -327,9 +327,7 @@ pub(super) fn quarantine_store_for_verified_collection(
         None,
         CollectionControl::new(
             &cancellation,
-            MonotonicDeadline::at(
-                std::time::Instant::now() + std::time::Duration::from_secs(86_400),
-            ),
+            MonotonicDeadline::at(std::time::Instant::now() + std::time::Duration::from_hours(24)),
         ),
     )
 }
@@ -370,7 +368,8 @@ fn reserve_quarantine_name(parent: &Dir, original: &OsStr) -> Option<String> {
         );
         match parent.symlink_metadata(&candidate) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(candidate),
-            Ok(_) | Err(_) => continue,
+            // The candidate name is taken or unreadable; try the next sequence.
+            Ok(_) | Err(_) => {}
         }
     }
     None
@@ -475,7 +474,7 @@ pub(super) fn recover_existing_store_quarantine(
             continue;
         }
         if let Some(outcome) =
-            recover_named_store_quarantine(profile_root, data_root, &file_name, &parent_path)?
+            recover_named_store_quarantine(profile_root, data_root, &file_name, parent_path)?
         {
             outcomes.push(outcome);
         }
@@ -713,7 +712,7 @@ fn rename_noreplace(parent: &Dir, from: &OsStr, to: &OsStr) -> std::io::Result<(
         if result == 0 {
             return Ok(());
         }
-        return Err(std::io::Error::last_os_error());
+        Err(std::io::Error::last_os_error())
     }
     #[cfg(windows)]
     {

@@ -261,31 +261,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::shared_git_evidence_publication_lock_for_identity;
-    use std::sync::Arc;
-
-    #[test]
-    fn publication_lock_registry_is_exact_identity_scoped() {
-        let first = shared_git_evidence_publication_lock_for_identity(
-            "git-evidence-lock-test:shared".to_owned(),
-        )
-        .unwrap();
-        let same = shared_git_evidence_publication_lock_for_identity(
-            "git-evidence-lock-test:shared".to_owned(),
-        )
-        .unwrap();
-        let foreign = shared_git_evidence_publication_lock_for_identity(
-            "git-evidence-lock-test:foreign".to_owned(),
-        )
-        .unwrap();
-
-        assert!(Arc::ptr_eq(&first, &same));
-        assert!(!Arc::ptr_eq(&first, &foreign));
-    }
-}
-
 impl<D> GitCorrelationSessionStore for GlobalDbGitCorrelationStore<D>
 where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
@@ -328,5 +303,30 @@ where
                     "registered project graph runtime is not mounted".to_owned(),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shared_git_evidence_publication_lock_for_identity;
+    use std::sync::Arc;
+
+    #[test]
+    fn publication_lock_registry_is_exact_identity_scoped() {
+        let first = shared_git_evidence_publication_lock_for_identity(
+            "git-evidence-lock-test:shared".to_owned(),
+        )
+        .unwrap();
+        let same = shared_git_evidence_publication_lock_for_identity(
+            "git-evidence-lock-test:shared".to_owned(),
+        )
+        .unwrap();
+        let foreign = shared_git_evidence_publication_lock_for_identity(
+            "git-evidence-lock-test:foreign".to_owned(),
+        )
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &foreign));
     }
 }

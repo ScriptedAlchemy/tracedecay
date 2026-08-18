@@ -322,7 +322,7 @@ fn complete_after_pending_removal_with(
         })?;
         let digest = canonical_digest_body(&closure.source_digest)?;
         let retired_path = retired_path_for_digest(parent_path, digest);
-        let captured = read_retirement_bytes(&capture_path, "captured source")?;
+        let captured = read_retirement_bytes(capture_path, "captured source")?;
         let retired = read_retirement_bytes(&retired_path, "retired source witness")?;
         match (captured, retired) {
             (Some(captured), None) => {
@@ -349,7 +349,7 @@ fn complete_after_pending_removal_with(
                         contract_error("retired shipped proposal witness disappeared")
                     })?;
                 require_digest(&retired, &closure.source_digest)?;
-                if read_retirement_bytes(&capture_path, "captured source")?.is_some() {
+                if read_retirement_bytes(capture_path, "captured source")?.is_some() {
                     return Err(contract_error(
                         "captured shipped proposal source remained after retirement",
                     ));
@@ -374,7 +374,7 @@ fn complete_after_pending_removal_with(
     });
     match (result, unlock) {
         (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
         (Ok(()), Ok(())) => Ok(()),
     }
 }
@@ -656,7 +656,7 @@ fn restore_existing_capture(source_path: &Path, captured_path: &Path) -> Result<
     });
     match (result, unlock) {
         (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
         (Ok(()), Ok(())) => Ok(()),
     }
 }
@@ -827,11 +827,11 @@ fn rename_noreplace(parent: &Dir, from: &OsStr, to: &OsStr) -> std::io::Result<(
                 libc::RENAME_EXCL,
             )
         };
-        return if result == 0 {
+        if result == 0 {
             Ok(())
         } else {
             Err(std::io::Error::last_os_error())
-        };
+        }
     }
     #[cfg(windows)]
     {

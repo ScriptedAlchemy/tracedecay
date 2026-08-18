@@ -115,6 +115,7 @@ pub(crate) struct ProjectRuntime {
     feedback: Option<RegisteredFeedbackRuntime>,
     advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
     advisory: Option<RegisteredAdvisoryRuntimeV1>,
+    delivery_read: Option<RegisteredDeliveryReadAuthorityV1>,
     feedback_cycle: Option<Arc<FeedbackCycleRuntime>>,
     feedback_cycle_input: Option<Arc<SwitchableFeedbackCycleRuntimeV1>>,
     primitive: Option<PrimitiveProjectRuntime>,
@@ -148,6 +149,7 @@ impl ProjectRuntime {
             || self.feedback.is_some()
             || self.advisory_cycle.is_some()
             || self.advisory.is_some()
+            || self.delivery_read.is_some()
             || self.feedback_cycle.is_some()
             || self.feedback_cycle_input.is_some()
             || self.primitive.is_some()
@@ -207,6 +209,7 @@ project_runtime_components!(
     RegisteredFeedbackRuntime => feedback,
     DaemonAdvisoryCycleInvocationOwner => advisory_cycle,
     RegisteredAdvisoryRuntimeV1 => advisory,
+    RegisteredDeliveryReadAuthorityV1 => delivery_read,
     Arc<FeedbackCycleRuntime> => feedback_cycle,
     Arc<SwitchableFeedbackCycleRuntimeV1> => feedback_cycle_input,
     PrimitiveProjectRuntime => primitive,
@@ -364,6 +367,7 @@ impl ProjectRuntimePublication {
                 move_component!(feedback);
                 move_component!(advisory_cycle);
                 move_component!(advisory);
+                move_component!(delivery_read);
                 move_component!(feedback_cycle);
                 move_component!(feedback_cycle_input);
                 move_component!(primitive);
@@ -406,28 +410,19 @@ pub(crate) struct ProjectRuntimeAlreadyRegistered;
 #[derive(Clone)]
 pub(crate) struct RegisteredAdvisoryRuntimeV1 {
     _owner: Arc<dyn Any + Send + Sync>,
-    delivery_read: Option<RegisteredDeliveryReadAuthorityV1>,
 }
 
 impl RegisteredAdvisoryRuntimeV1 {
-    pub(crate) fn new(
-        owner: Arc<dyn Any + Send + Sync>,
-        delivery_read: Option<RegisteredDeliveryReadAuthorityV1>,
-    ) -> Self {
-        Self {
-            _owner: owner,
-            delivery_read,
-        }
-    }
-
-    pub(crate) fn delivery_read(&self) -> Option<RegisteredDeliveryReadAuthorityV1> {
-        self.delivery_read.clone()
+    pub(crate) fn new(owner: Arc<dyn Any + Send + Sync>) -> Self {
+        Self { _owner: owner }
     }
 }
 
-/// Exact project Delivery authority retained for the advisory runtime's whole
-/// published lifetime. Request admission is refreshed from current
-/// configuration instead of retaining project-open's bounded grant snapshot.
+/// Exact project Delivery authority registered as its own project-open
+/// component so the typed provider mount gate stays readable even while the
+/// feedback/advisory owners are still deferred behind a sealed code-index
+/// generation. Request admission is refreshed from current configuration
+/// instead of retaining project-open's bounded grant snapshot.
 #[derive(Clone)]
 pub(crate) struct RegisteredDeliveryReadAuthorityV1 {
     project_root: PathBuf,

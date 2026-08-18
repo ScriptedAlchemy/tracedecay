@@ -313,7 +313,6 @@ async fn frozen_temporal_page_returns_projected_occurrences_and_lineage() {
     assert!(page.next_after_occurrence_id().is_none());
 
     let expected_copies = page.copies().to_vec();
-    drop(store);
     drop(observation_store);
     drop(runtime);
 

@@ -170,36 +170,6 @@ fn test_is_in_gitignore_among_other_entries() {
     assert!(is_in_gitignore(dir.path()));
 }
 
-// ── add_to_gitignore ────────────────────────────────────────────────────────
-
-#[test]
-fn test_add_to_gitignore_creates_file() {
-    let dir = TempDir::new().unwrap();
-    add_to_gitignore(dir.path());
-    let content = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
-    assert!(content.contains(".tracedecay"));
-    assert!(content.ends_with('\n'));
-}
-
-#[test]
-fn test_add_to_gitignore_appends() {
-    let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
-    add_to_gitignore(dir.path());
-    let content = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
-    assert!(content.contains("target/"));
-    assert!(content.contains(".tracedecay"));
-}
-
-#[test]
-fn test_add_to_gitignore_adds_newline_if_missing() {
-    let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join(".gitignore"), "target/").unwrap();
-    add_to_gitignore(dir.path());
-    let content = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
-    assert!(content.contains("target/\n.tracedecay\n"));
-}
-
 // ── resolve_path ────────────────────────────────────────────────────────────
 
 #[test]

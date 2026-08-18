@@ -654,6 +654,25 @@ fn validate_host_bundle_options(
         }
         return Ok(());
     }
+    // The scoped storage resets destroy refused store state, so they REQUIRE
+    // the same `--yes` confirmation (their handlers refuse to run without it).
+    // Like `wipe`, they own no host component and have no preview.
+    if matches!(
+        command,
+        Commands::Storage {
+            action: ProfileStorageAction::ResetAuthority { .. }
+                | ProfileStorageAction::ResetProjectStore { .. },
+        }
+    ) {
+        if host_bundle.component.is_some() || host_bundle.dry_run {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "storage resets accept --yes to confirm; --component and --dry-run are \
+                          only valid with install, update-plugin, reinstall, or uninstall"
+                    .to_string(),
+            });
+        }
+        return Ok(());
+    }
     // `--component`, `--dry-run`, and `--yes` are declared as global flags so
     // clap accepts them before the subcommand is known, but they are only
     // meaningful for the agent-lifecycle commands. Enforcing that scope here

@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(
             sessions
                 .iter()
-                .map(|session| session.as_str())
+                .map(tracedecay_domain::SessionId::as_str)
                 .collect::<BTreeSet<_>>()
                 .len(),
             ROOT_RELATION_PARTICIPANT_COUNT

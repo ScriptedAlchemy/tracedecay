@@ -166,8 +166,8 @@ pub async fn hook_codex_subagent_start() -> i32 {
         "{}",
         codex_subagent_start_log_line(&event, count, output.is_some())
     );
-    if let Some(output) = output {
-        if !super::write_hook_output(
+    if let Some(output) = output
+        && !super::write_hook_output(
             root.as_deref(),
             tracedecay_hooks::HookHostV1::Codex,
             &event,
@@ -175,9 +175,8 @@ pub async fn hook_codex_subagent_start() -> i32 {
             Some(&_hook_telemetry),
         )
         .await
-        {
-            return 1;
-        }
+    {
+        return 1;
     }
     0
 }
@@ -208,8 +207,8 @@ pub async fn hook_codex_post_tool_use() -> i32 {
     .await
     .into_recorded_guidance(&hook_telemetry)
     .flatten();
-    if let Some(guidance) = guidance {
-        if !super::write_hook_output(
+    if let Some(guidance) = guidance
+        && !super::write_hook_output(
             root.as_deref(),
             tracedecay_hooks::HookHostV1::Codex,
             &event,
@@ -217,9 +216,8 @@ pub async fn hook_codex_post_tool_use() -> i32 {
             Some(&hook_telemetry),
         )
         .await
-        {
-            return 1;
-        }
+    {
+        return 1;
     }
     0
 }
@@ -824,14 +822,8 @@ mod tests {
         let project_root = project.path().canonicalize().unwrap();
         let profile_root = profile.path().canonicalize().unwrap();
         let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-        crate::storage::write_enrollment_marker(
-            &project_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: "proj_hook_codex_prompt".to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
+        crate::storage::pin_fixture_repository_identity(&project_root, "proj_hook_codex_prompt")
+            .unwrap();
         let layout = crate::storage::resolve_layout_for_current_profile(&project_root).unwrap();
         std::fs::create_dir_all(&layout.data_root).unwrap();
         let event = serde_json::json!({
@@ -872,7 +864,13 @@ mod tests {
             .await
             .unwrap();
         drop(graph);
-        crate::storage::remove_enrollment_marker(&project_root, project_id).unwrap();
+        // Model a global-only repo: identity resolvable through the registry
+        // alone, with no repo-side marker.
+        if let Some(marker_path) = crate::storage::repository_identity_path(&project_root)
+            && marker_path.exists()
+        {
+            std::fs::remove_file(marker_path).unwrap();
+        }
 
         let event = serde_json::json!({ "cwd": project_root.to_string_lossy() }).to_string();
         let (_context, status) = codex_session_context_for_event(&event).await;

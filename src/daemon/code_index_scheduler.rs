@@ -1603,6 +1603,37 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     IgnoredDependency(#[from] CodeIndexIgnoredDependencyRefusalV1),
 }
 
+impl CodeIndexSchedulerErrorV1 {
+    /// An activation failure that leaves the sealed artifact intact and can
+    /// succeed on a later attempt (deadline, cancellation, budget, or an
+    /// unavailable/saturated graph runtime). The worker retries activation of
+    /// the same sealed generation with backoff for these instead of resealing
+    /// a duplicate; payload corruption and identity failures stay terminal so
+    /// reconcile can rebuild.
+    pub(super) fn is_retryable_activation(&self) -> bool {
+        match self {
+            Self::GraphProjection(error) => matches!(
+                error,
+                CodeGraphProjectionError::Cancelled
+                    | CodeGraphProjectionError::BudgetExhausted
+                    | CodeGraphProjectionError::DeadlineExceeded
+                    | CodeGraphProjectionError::Unavailable(_)
+                    | CodeGraphProjectionError::Closed
+            ),
+            Self::GraphActivation(_) => true,
+            Self::Git(_)
+            | Self::Io(_)
+            | Self::Identity(_)
+            | Self::Production(_)
+            | Self::ProductionOpen(_)
+            | Self::Privacy(_)
+            | Self::SemanticSchedule(_)
+            | Self::PublicationConflict(_)
+            | Self::IgnoredDependency(_) => false,
+        }
+    }
+}
+
 /// Counts in-flight owner passes (retained activation or reconcile). A
 /// counter rather than a flag so the background worker can hold the state
 /// across an entire pass — claim of the pending wake through arrival restore —

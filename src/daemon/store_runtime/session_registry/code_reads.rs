@@ -76,11 +76,13 @@ impl DaemonSessionRuntimeRegistryV1 {
                         "Project runtime is already opening",
                     ));
                 }
-                Some(super::ProjectRuntimeOwnerStateV1::Retiring)
-                | Some(super::ProjectRuntimeOwnerStateV1::ReplacingSessions)
-                | Some(super::ProjectRuntimeOwnerStateV1::Recovering)
-                | Some(super::ProjectRuntimeOwnerStateV1::RecoveryRequired(_))
-                | Some(super::ProjectRuntimeOwnerStateV1::Faulted(_)) => {
+                Some(
+                    super::ProjectRuntimeOwnerStateV1::Retiring
+                    | super::ProjectRuntimeOwnerStateV1::ReplacingSessions
+                    | super::ProjectRuntimeOwnerStateV1::Recovering
+                    | super::ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
+                    | super::ProjectRuntimeOwnerStateV1::Faulted(_),
+                ) => {
                     return Err(TraceDecayError::project_route(
                         "project_runtime_retiring",
                         true,

@@ -551,13 +551,17 @@ pub(crate) enum DaemonAdvisoryRuntimeRegistrationError {
 impl From<FeedbackCyclePublicationError> for DaemonAdvisoryRuntimeRegistrationError {
     fn from(error: FeedbackCyclePublicationError) -> Self {
         match error {
-            FeedbackCyclePublicationError::Registry(
-                ProjectRuntimeRegistryError::AlreadyRegistered,
-            ) => Self::AlreadyRegistered,
-            FeedbackCyclePublicationError::Registry(ProjectRuntimeRegistryError::Closed) => {
-                Self::RegistryClosed
-            }
+            FeedbackCyclePublicationError::Registry(registry) => registry.into(),
             FeedbackCyclePublicationError::RouterUnavailable => Self::MissingFeedbackRuntime,
+        }
+    }
+}
+
+impl From<ProjectRuntimeRegistryError> for DaemonAdvisoryRuntimeRegistrationError {
+    fn from(error: ProjectRuntimeRegistryError) -> Self {
+        match error {
+            ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
+            ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
         }
     }
 }
@@ -608,7 +612,6 @@ impl DaemonAdvisoryRuntimeRegistrar {
         &self,
         project_root: &Path,
         registration: Arc<dyn Any + Send + Sync>,
-        delivery_read: Option<super::super::project_runtime::RegisteredDeliveryReadAuthorityV1>,
         advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
         feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
     ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
@@ -616,13 +619,26 @@ impl DaemonAdvisoryRuntimeRegistrar {
             .project_runtimes
             .publish_advisory_atomically(
                 project_root,
-                super::super::project_runtime::RegisteredAdvisoryRuntimeV1::new(
-                    registration,
-                    delivery_read,
-                ),
+                super::super::project_runtime::RegisteredAdvisoryRuntimeV1::new(registration),
                 advisory_cycle,
                 feedback_input,
             )
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Registers the daemon-owned Delivery read authority as its own
+    /// project-open component. Each project open recomputes the same
+    /// daemon-owned authority for this root, so the newest open's observation
+    /// replaces a displaced incumbent instead of wedging a stale gate.
+    pub(crate) async fn publish_delivery_read(
+        &self,
+        project_root: &Path,
+        authority: super::super::project_runtime::RegisteredDeliveryReadAuthorityV1,
+    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
+        self.service
+            .project_runtimes
+            .publish(project_root.to_path_buf(), authority)
             .await
             .map_err(Into::into)
     }

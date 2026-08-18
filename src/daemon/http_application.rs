@@ -54,7 +54,7 @@ const HTTP_APPLICATION_COLD_RESOLUTION_DEADLINE: Duration = Duration::from_secs(
 const MAX_REMOTE_BRAIN_TLS_CONNECTIONS: usize = 128;
 const MAX_REMOTE_BRAIN_TLS_HEADER_BYTES: usize = 64 * 1024;
 const REMOTE_BRAIN_TLS_READ_IDLE_DEADLINE: Duration = Duration::from_secs(5);
-const REMOTE_BRAIN_TLS_REQUEST_READ_DEADLINE: Duration = Duration::from_secs(60);
+const REMOTE_BRAIN_TLS_REQUEST_READ_DEADLINE: Duration = Duration::from_mins(1);
 const REMOTE_BRAIN_TLS_WRITE_IDLE_DEADLINE: Duration = Duration::from_secs(5);
 const REMOTE_BRAIN_TLS_RESPONSE_DEADLINE: Duration = Duration::from_secs(30);
 const REMOTE_BRAIN_TLS_CLOSE_DEADLINE: Duration = Duration::from_secs(5);
@@ -1074,7 +1074,7 @@ async fn serve_remote_brain_tls_connection(
     tokio::pin!(connection);
     let result = tokio::select! {
         result = &mut connection => result,
-        _ = graceful.cancelled() => {
+        () = graceful.cancelled() => {
             connection.as_mut().graceful_shutdown();
             connection.await
         }
@@ -1094,7 +1094,7 @@ fn observe_remote_brain_connection_join(joined: std::result::Result<(), tokio::t
 
 enum RemoteBrainTlsTransport {
     Handshaking(Pin<Box<tokio_rustls::Accept<tokio::net::TcpStream>>>),
-    Streaming(tokio_rustls::server::TlsStream<tokio::net::TcpStream>),
+    Streaming(Box<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>),
     Failed,
 }
 
@@ -1294,7 +1294,7 @@ impl RemoteBrainTlsIo {
         match handshake.as_mut().poll(context) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(stream)) => {
-                self.transport = RemoteBrainTlsTransport::Streaming(stream);
+                self.transport = RemoteBrainTlsTransport::Streaming(Box::new(stream));
                 let now = tokio::time::Instant::now();
                 self.read_idle_deadline
                     .as_mut()

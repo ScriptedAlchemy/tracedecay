@@ -30,7 +30,7 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         combine_due_tasks: false,
-        tasks: Default::default(),
+        tasks: tracedecay_domain::AutomationTaskSetV1::default(),
         ..AutomationConfig::default()
     };
     config.tasks.memory_curator = AutomationTaskConfig {

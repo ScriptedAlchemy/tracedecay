@@ -1,5 +1,7 @@
 //! Retained LCM request mapping over admitted daemon temporal retrieval.
 
+use std::collections::BTreeMap;
+
 use tracedecay_application::retained_surfaces::{
     LcmDescribeRequestV1, LcmDescribeResultV1, LcmDescribeTargetV1, LcmExpandQueryRequestV1,
     LcmExpandRequestV1, LcmExpandResultV1, LcmExpandTargetV1, LcmGrepRequestV1, LcmGrepResultV1,
@@ -76,9 +78,9 @@ pub(super) async fn execute_load_session(
     if roles.iter().any(|role| role.trim().is_empty()) {
         return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }
-    roles
-        .iter_mut()
-        .for_each(|role| *role = role.trim().to_owned());
+    for role in &mut roles {
+        *role = role.trim().to_owned();
+    }
     if let Some(role) = trimmed(request.role.as_deref())?
         && !roles.iter().any(|candidate| candidate == role)
     {
@@ -229,7 +231,7 @@ pub(super) async fn execute_grep(
             sort: Some("relevance".to_owned()),
             relationship_scope: Some(relationship_scope.as_str().to_owned()),
             message_type: Some(message_type.as_str().to_owned()),
-            capped_sessions: Some(Default::default()),
+            capped_sessions: Some(BTreeMap::default()),
             omitted: Some(omitted),
             temporal: Some(output::temporal_fields(temporal)),
             error: None,
@@ -919,8 +921,8 @@ async fn expand_query_from_nodes(
 /// `ContextBudget::max_bytes` exceeds `APPLICATION_RETRIEVAL_MAX_BYTES`, and
 /// that rejection is terminal (`BudgetExhausted` -> `Saturated`), not a partial
 /// answer. A caller-supplied assembly budget therefore must not be forwarded to
-/// retrieval unclamped: `context_max_tokens` defaults to 32_000 tokens, which
-/// is 128_000 estimated bytes and twice the admitted ceiling, so every default
+/// retrieval unclamped: `context_max_tokens` defaults to `32_000` tokens, which
+/// is `128_000` estimated bytes and twice the admitted ceiling, so every default
 /// `lcm_expand_query` would be refused before it read a single message. The
 /// assembly budget stays whole; only the retrieval window is bounded here.
 fn admitted_context_budget(requested_tokens: usize) -> ContextBudget {

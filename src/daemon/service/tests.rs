@@ -659,7 +659,7 @@ fn launchd_command_plans_map_start_and_uninstall_sequences() {
                     "gui/501",
                     "/Users/me/Library/LaunchAgents/com.tracedecay.daemon.plist"
                 ],
-                LaunchctlFailureMode::Fail
+                LaunchctlFailureMode::RetryTransientBootstrap
             ),
             LaunchdCommand::new(
                 &["kickstart", "-k", "gui/501/com.tracedecay.daemon"],
@@ -680,6 +680,127 @@ fn launchd_command_plans_map_start_and_uninstall_sequences() {
             ),
         ]
     );
+}
+
+#[test]
+fn transient_bootstrap_matcher_covers_only_the_eio_race() {
+    assert!(
+        super::runner::launchctl_output_is_transient_bootstrap_failure(
+            "Bootstrap failed: 5: Input/output error"
+        )
+    );
+    // Non-transient bootstrap failures (bad plist, permissions, unknown
+    // domain) must fail immediately instead of being retried.
+    assert!(
+        !super::runner::launchctl_output_is_transient_bootstrap_failure(
+            "Bootstrap failed: 125: Domain does not support specified action"
+        )
+    );
+    assert!(
+        !super::runner::launchctl_output_is_transient_bootstrap_failure(
+            "Boot-out failed: 5: Input/output error"
+        )
+    );
+    assert!(!super::runner::launchctl_output_is_transient_bootstrap_failure(""));
+}
+
+#[cfg(unix)]
+mod transient_bootstrap_retry {
+    use std::cell::RefCell;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+    use std::time::Duration;
+
+    fn output(code: i32, stderr: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(code << 8),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    fn eio() -> Output {
+        output(5, "Bootstrap failed: 5: Input/output error")
+    }
+
+    /// The re-bootstrap race resolves once the booted-out job drains, so a
+    /// transient EIO retries with backoff and the eventual success wins.
+    #[test]
+    fn retries_the_eio_race_until_bootstrap_succeeds() {
+        let outputs = RefCell::new(vec![output(0, ""), eio(), eio()]);
+        let sleeps = RefCell::new(Vec::new());
+
+        super::super::runner::retry_transient_bootstrap(
+            &["bootstrap", "gui/501", "plist"],
+            || Ok(outputs.borrow_mut().pop().expect("scripted output")),
+            |backoff| sleeps.borrow_mut().push(backoff),
+        )
+        .expect("transient bootstrap race must recover");
+
+        assert!(
+            outputs.borrow().is_empty(),
+            "all scripted attempts consumed"
+        );
+        assert_eq!(
+            sleeps.borrow().as_slice(),
+            [Duration::from_millis(200), Duration::from_millis(400)],
+            "backoff must grow between transient retries"
+        );
+    }
+
+    /// Any other bootstrap failure is not the drain race and must propagate
+    /// on the first attempt without sleeping.
+    #[test]
+    fn non_transient_bootstrap_failure_fails_immediately() {
+        let mut attempts = 0;
+
+        let error = super::super::runner::retry_transient_bootstrap(
+            &["bootstrap", "gui/501", "plist"],
+            || {
+                attempts += 1;
+                Ok(output(
+                    125,
+                    "Bootstrap failed: 125: Domain does not support specified action",
+                ))
+            },
+            |_| panic!("non-transient failures must not back off"),
+        )
+        .expect_err("non-transient bootstrap failure must propagate");
+
+        assert_eq!(attempts, 1);
+        assert!(error.to_string().contains("Bootstrap failed: 125"));
+    }
+
+    /// The retry is bounded: a persistent EIO surfaces the real failure
+    /// after the attempt budget instead of spinning forever.
+    #[test]
+    fn persistent_eio_fails_after_the_bounded_attempts() {
+        let mut attempts = 0;
+        let sleeps = RefCell::new(Vec::new());
+
+        let error = super::super::runner::retry_transient_bootstrap(
+            &["bootstrap", "gui/501", "plist"],
+            || {
+                attempts += 1;
+                Ok(eio())
+            },
+            |backoff| sleeps.borrow_mut().push(backoff),
+        )
+        .expect_err("persistent EIO must eventually propagate");
+
+        assert_eq!(attempts, 5);
+        assert_eq!(
+            sleeps.borrow().as_slice(),
+            [
+                Duration::from_millis(200),
+                Duration::from_millis(400),
+                Duration::from_millis(800),
+                Duration::from_millis(1600),
+            ],
+            "backoff doubles and caps below the final failed attempt"
+        );
+        assert!(error.to_string().contains("Bootstrap failed: 5"));
+    }
 }
 
 #[test]

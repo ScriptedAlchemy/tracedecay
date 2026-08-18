@@ -690,9 +690,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
     {
         let settlement = crate::hint_outcomes::settle_project_hint_outcomes(
             accounting_db,
-            session_authorities
-                .project
-                .map(|database| database.as_ref()),
+            session_authorities.project.map(std::convert::AsRef::as_ref),
             crate::analytics_bridge::hook_import_sources(Some(cg.project_root())),
             cg.project_root(),
             crate::tracedecay::current_timestamp(),

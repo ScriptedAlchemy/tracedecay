@@ -8,7 +8,7 @@
 //! whichever optional fields the outcome carries.
 //!
 //! `payload_route` is part of the key because a provider can be reached two
-//! ways: TraceDecay scanning the host's own on-disk sources, or the host
+//! ways: `TraceDecay` scanning the host's own on-disk sources, or the host
 //! inlining a turn's messages in the request. Both are capture routes and both
 //! belong in the registry — expressing the second one as a branch above the
 //! lookup is what previously let it skip admission entirely.
@@ -47,7 +47,7 @@ use super::{
 /// class entry rather than a branch that bypasses the registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TranscriptPayloadRouteV1 {
-    /// TraceDecay scans the host's own on-disk transcript sources.
+    /// `TraceDecay` scans the host's own on-disk transcript sources.
     SourceScan,
     /// The host inlined this turn's messages in the request.
     InlineMessages,

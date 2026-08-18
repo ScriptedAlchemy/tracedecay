@@ -835,7 +835,13 @@ mod tests {
             .unwrap();
         let graph_db_path = graph.store_layout().graph_db_path.clone();
         drop(graph);
-        crate::storage::remove_enrollment_marker(&project_root, project_id).unwrap();
+        // Model a global-only repo: identity resolvable through the registry
+        // alone, with no repo-side marker.
+        if let Some(marker_path) = crate::storage::repository_identity_path(&project_root)
+            && marker_path.exists()
+        {
+            std::fs::remove_file(marker_path).unwrap();
+        }
 
         let nested = project_root.join("crates/inner");
         std::fs::create_dir_all(&nested).unwrap();

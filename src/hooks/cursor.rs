@@ -56,8 +56,8 @@ pub async fn hook_cursor_subagent_start() -> i32 {
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "subagentStart", &event);
-    if let Some(decision) = evaluate_cursor_subagent_start(&event) {
-        if !super::write_hook_output(
+    if let Some(decision) = evaluate_cursor_subagent_start(&event)
+        && !super::write_hook_output(
             root.as_deref(),
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
@@ -65,9 +65,8 @@ pub async fn hook_cursor_subagent_start() -> i32 {
             Some(&_hook_telemetry),
         )
         .await
-        {
-            return 1;
-        }
+    {
+        return 1;
     }
     0
 }
@@ -88,8 +87,8 @@ pub async fn hook_cursor_post_tool_use() -> i32 {
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "postToolUse", &event);
-    if let Some(decision) = cursor_post_tool_use_decision(&event) {
-        if !super::write_hook_output(
+    if let Some(decision) = cursor_post_tool_use_decision(&event)
+        && !super::write_hook_output(
             root.as_deref(),
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
@@ -97,9 +96,8 @@ pub async fn hook_cursor_post_tool_use() -> i32 {
             Some(&_hook_telemetry),
         )
         .await
-        {
-            return 1;
-        }
+    {
+        return 1;
     }
     0
 }
@@ -268,8 +266,8 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
         .await
         .into_recorded_guidance(&hook_telemetry)
     {
-        if let Some(guidance) = guidance {
-            if !super::write_hook_output(
+        if let Some(guidance) = guidance
+            && !super::write_hook_output(
                 Some(root),
                 tracedecay_hooks::HookHostV1::CursorDesktop,
                 &event,
@@ -277,15 +275,14 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
                 Some(&hook_telemetry),
             )
             .await
-            {
-                return 1;
-            }
+        {
+            return 1;
         }
         return 0;
     }
     notify_cursor_after_file_edit(&parsed, &hook_telemetry).await;
-    if let Some(decision) = cursor_after_file_edit_decision(&event) {
-        if !super::write_hook_output(
+    if let Some(decision) = cursor_after_file_edit_decision(&event)
+        && !super::write_hook_output(
             root.as_deref(),
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
@@ -293,9 +290,8 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
             Some(&hook_telemetry),
         )
         .await
-        {
-            return 1;
-        }
+    {
+        return 1;
     }
     0
 }
@@ -993,7 +989,13 @@ mod tests {
             .await
             .unwrap();
         drop(graph);
-        crate::storage::remove_enrollment_marker(&project_root, project_id).unwrap();
+        // Model a global-only repo: identity resolvable through the registry
+        // alone, with no repo-side marker.
+        if let Some(marker_path) = crate::storage::repository_identity_path(&project_root)
+            && marker_path.exists()
+        {
+            std::fs::remove_file(marker_path).unwrap();
+        }
 
         let nested = project_root.join("src/deep");
         std::fs::create_dir_all(&nested).unwrap();
@@ -1127,12 +1129,9 @@ mod tests {
         let project_root = project.path().canonicalize().unwrap();
         let profile_root = profile.path().canonicalize().unwrap();
         let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-        crate::storage::write_enrollment_marker(
+        crate::storage::pin_fixture_repository_identity(
             &project_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: "proj_hook_cursor_after_edit".to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
+            "proj_hook_cursor_after_edit",
         )
         .unwrap();
         let layout = crate::storage::resolve_layout_for_current_profile(&project_root).unwrap();

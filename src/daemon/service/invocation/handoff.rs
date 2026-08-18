@@ -122,8 +122,7 @@ fn current_feedback_finding(
     let result = match result {
         Ok(FeedbackReadInvocationResultV1::Get(result)) => result,
         Ok(_)
-        | Err(FeedbackReadOwnerErrorV1::Unavailable)
-        | Err(FeedbackReadOwnerErrorV1::Contract(_)) => {
+        | Err(FeedbackReadOwnerErrorV1::Unavailable | FeedbackReadOwnerErrorV1::Contract(_)) => {
             return Err(HandoffOpenTargetError::Unavailable);
         }
         Err(FeedbackReadOwnerErrorV1::NotFoundOrNotAuthorized) => return Ok(None),
@@ -512,7 +511,7 @@ fn handoff_evidence(
                     field: "handoff list sort contract",
                 }
             })?,
-            tracedecay_application::MAX_HANDOFF_LIST_RESULTS_V1.into(),
+            tracedecay_application::MAX_HANDOFF_LIST_RESULTS_V1,
             (!result.truncated).then_some(returned),
             returned,
         )?,

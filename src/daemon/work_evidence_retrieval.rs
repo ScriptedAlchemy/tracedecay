@@ -1,6 +1,6 @@
 //! Work evidence adapters over the daemon's mounted retrieval authorities.
 //!
-//! Work admits the exact task/version/accepted-attempt root. The TaskSession
+//! Work admits the exact task/version/accepted-attempt root. The `TaskSession`
 //! path then borrows one canonical Plan-23 snapshot, ranks its compact anchors
 //! through the active evaluated federated profile, reauthorizes Work on both
 //! sides of selection, and hydrates only the globally selected anchors.

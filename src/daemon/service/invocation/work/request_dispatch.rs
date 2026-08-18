@@ -78,7 +78,8 @@ pub(super) async fn dispatch_work_application(
             );
         }
     };
-    let response = match request {
+
+    match request {
         WorkApplicationInvocationV1::GenerateProposal(request) => {
             let result = intelligence::generate_proposal(
                 &registered,
@@ -162,7 +163,7 @@ pub(super) async fn dispatch_work_application(
             let result = preparation::decide_product_proposal(
                 &registered,
                 &context,
-                *capability,
+                capability,
                 &use_case,
                 request,
                 false,
@@ -206,7 +207,7 @@ pub(super) async fn dispatch_work_application(
             let result = preparation::decide_product_proposal(
                 &registered,
                 &context,
-                *capability,
+                capability,
                 &use_case,
                 command,
                 true,
@@ -713,7 +714,7 @@ pub(super) async fn dispatch_work_application(
                 input_digest,
                 observed_at,
                 deadline,
-                *capability,
+                capability,
                 request,
             )
             .await
@@ -728,14 +729,14 @@ pub(super) async fn dispatch_work_application(
             input_digest,
             observed_at,
             deadline,
-            *capability,
+            capability,
             request,
         ),
         WorkApplicationInvocationV1::PrepareGraphMutation(request) => {
             let prepared = preparation::prepare_graph_mutation(
                 &registered,
                 &context,
-                *capability,
+                capability,
                 &use_case,
                 request,
                 &canonical_request_id,
@@ -932,6 +933,5 @@ pub(super) async fn dispatch_work_application(
                 WorkApplicationOutcomeV1::ReleasePlacement,
             )
         }
-    };
-    response
+    }
 }

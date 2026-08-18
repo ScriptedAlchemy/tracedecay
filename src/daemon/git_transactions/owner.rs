@@ -134,7 +134,7 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
             .map_err(|_| GitIndexTransactionPortError::PolicyDenied)?;
         let resolution = resolve_restrictive_capabilities(
             granted_capabilities,
-            &access_rules,
+            access_rules,
             &CapabilityResolutionContextV1 {
                 actor: self.access.requester.clone(),
                 operation: None,

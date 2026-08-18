@@ -666,7 +666,7 @@ impl DaemonSessionRetrievalService {
                     PageRenderingResult::Omitted(HydrationStateV1::RetainedButUnavailable)
                 };
                 let result = match rendering {
-                    PageRenderingResult::Rendered(result) => result,
+                    PageRenderingResult::Rendered(result) => *result,
                     PageRenderingResult::Omitted(reason) => {
                         skipped = skipped.saturating_add(1);
                         rendering_omitted = rendering_omitted.saturating_add(1);
@@ -765,31 +765,33 @@ impl DaemonSessionRetrievalService {
                 HydrationStateV1::RetainedButUnavailable,
             ));
         };
-        Ok(PageRenderingResult::Rendered(SessionMessageSearchResult {
-            session,
-            message: tracedecay_sessions::runtime::SessionMessageRecord {
-                provider,
-                message_id: summary_id,
-                session_id,
-                role: "summary".to_string(),
-                timestamp: Some(ranked.knowledge_at_micros),
-                ordinal: 0,
-                text,
-                kind: Some("summary".to_string()),
-                model: None,
-                tool_names: None,
-                source_path: None,
-                source_offset: None,
-                metadata_json: Some(
-                    json!({
-                        "retrieval_anchor_id": ranked.anchor_id,
-                        "retrieval_kind": "summary_node",
-                    })
-                    .to_string(),
-                ),
+        Ok(PageRenderingResult::Rendered(Box::new(
+            SessionMessageSearchResult {
+                session,
+                message: tracedecay_sessions::runtime::SessionMessageRecord {
+                    provider,
+                    message_id: summary_id,
+                    session_id,
+                    role: "summary".to_string(),
+                    timestamp: Some(ranked.knowledge_at_micros),
+                    ordinal: 0,
+                    text,
+                    kind: Some("summary".to_string()),
+                    model: None,
+                    tool_names: None,
+                    source_path: None,
+                    source_offset: None,
+                    metadata_json: Some(
+                        json!({
+                            "retrieval_anchor_id": ranked.anchor_id,
+                            "retrieval_kind": "summary_node",
+                        })
+                        .to_string(),
+                    ),
+                },
+                score: ranked.normalized_score_micros as f64 / 1_000_000.0,
             },
-            score: ranked.normalized_score_micros as f64 / 1_000_000.0,
-        }))
+        )))
     }
 
     fn hydrate_non_summary_result(
@@ -804,16 +806,18 @@ impl DaemonSessionRetrievalService {
         let SessionPageReconstruction::Occurrence { session, message } = reconstruction else {
             return Err(SessionTemporalExecutionError::Unavailable);
         };
-        Ok(PageRenderingResult::Rendered(SessionMessageSearchResult {
-            session,
-            message: *message,
-            score: ranked.normalized_score_micros as f64 / 1_000_000.0,
-        }))
+        Ok(PageRenderingResult::Rendered(Box::new(
+            SessionMessageSearchResult {
+                session,
+                message: *message,
+                score: ranked.normalized_score_micros as f64 / 1_000_000.0,
+            },
+        )))
     }
 }
 
 enum PageRenderingResult {
-    Rendered(SessionMessageSearchResult),
+    Rendered(Box<SessionMessageSearchResult>),
     Omitted(HydrationStateV1),
 }
 

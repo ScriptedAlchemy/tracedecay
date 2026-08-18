@@ -158,15 +158,18 @@ impl DaemonWorkDeliveryDescriptorV1 {
         request: &DaemonInvocationRequest,
         handshake: &DaemonHandshake,
     ) -> Option<Self> {
-        let (operation, observed_at, event_class, kind, attempt_identity) = match &request.payload {
-            DaemonInvocationPayload::WorkApplication {
-                request:
-                    request @ crate::daemon_contract::WorkApplicationInvocationV1::StartAttempt(command),
-                observed_at,
-                ..
-            } => (
-                request.operation_key(),
-                *observed_at,
+        let DaemonInvocationPayload::WorkApplication {
+            request: work_request,
+            observed_at,
+            ..
+        } = &request.payload
+        else {
+            return None;
+        };
+        let observed_at = *observed_at;
+        let (operation, event_class, kind, attempt_identity) = match work_request.as_ref() {
+            crate::daemon_contract::WorkApplicationInvocationV1::StartAttempt(command) => (
+                work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
                 DaemonWorkDeliveryKindV1::Attempt,
                 tracedecay_domain::WorkAttemptIdentityV1::new(
@@ -176,15 +179,8 @@ impl DaemonWorkDeliveryDescriptorV1 {
                 )
                 .ok(),
             ),
-            DaemonInvocationPayload::WorkApplication {
-                request:
-                    request
-                    @ crate::daemon_contract::WorkApplicationInvocationV1::AttemptStatus(command),
-                observed_at,
-                ..
-            } => (
-                request.operation_key(),
-                *observed_at,
+            crate::daemon_contract::WorkApplicationInvocationV1::AttemptStatus(command) => (
+                work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
                 DaemonWorkDeliveryKindV1::Attempt,
                 tracedecay_domain::WorkAttemptIdentityV1::new(
@@ -194,15 +190,8 @@ impl DaemonWorkDeliveryDescriptorV1 {
                 )
                 .ok(),
             ),
-            DaemonInvocationPayload::WorkApplication {
-                request:
-                    request
-                    @ crate::daemon_contract::WorkApplicationInvocationV1::CancelAttempt(command),
-                observed_at,
-                ..
-            } => (
-                request.operation_key(),
-                *observed_at,
+            crate::daemon_contract::WorkApplicationInvocationV1::CancelAttempt(command) => (
+                work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
                 DaemonWorkDeliveryKindV1::Attempt,
                 tracedecay_domain::WorkAttemptIdentityV1::new(
@@ -212,14 +201,8 @@ impl DaemonWorkDeliveryDescriptorV1 {
                 )
                 .ok(),
             ),
-            DaemonInvocationPayload::WorkApplication {
-                request:
-                    request @ crate::daemon_contract::WorkApplicationInvocationV1::HydrateArtifacts(_),
-                observed_at,
-                ..
-            } => (
-                request.operation_key(),
-                *observed_at,
+            crate::daemon_contract::WorkApplicationInvocationV1::HydrateArtifacts(_) => (
+                work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::Activity,
                 DaemonWorkDeliveryKindV1::ArtifactPage,
                 None,
@@ -263,15 +246,14 @@ impl DaemonWorkDeliveryDescriptorV1 {
         match (&self.kind, &response.outcome) {
             (
                 DaemonWorkDeliveryKindV1::Attempt,
-                DaemonInvocationOutcome::WorkApplication { outcome, .. },
-            ) => match outcome {
-                WorkApplicationOutcomeV1::StartAttempt(outcome)
-                | WorkApplicationOutcomeV1::AttemptStatus(outcome)
-                | WorkApplicationOutcomeV1::CancelAttempt(outcome) => {
-                    application_outcome_payload(outcome).is_some()
-                }
-                _ => false,
-            },
+                DaemonInvocationOutcome::WorkApplication {
+                    outcome:
+                        WorkApplicationOutcomeV1::StartAttempt(outcome)
+                        | WorkApplicationOutcomeV1::AttemptStatus(outcome)
+                        | WorkApplicationOutcomeV1::CancelAttempt(outcome),
+                    ..
+                },
+            ) => application_outcome_payload(outcome).is_some(),
             (
                 DaemonWorkDeliveryKindV1::ArtifactPage,
                 DaemonInvocationOutcome::WorkApplication {
@@ -297,7 +279,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
     ) -> Vec<tracedecay_domain::DeliverySettlementAttemptV1> {
         let identities = self.attempt_identities(response);
         if identities.is_empty() {
-            return vec![self.into_attempt(self.owner_event_id.clone(), None)];
+            return vec![self.settlement_attempt(self.owner_event_id.clone(), None)];
         }
         let mut attempts = Vec::with_capacity(identities.len());
         for identity in identities {
@@ -310,7 +292,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
             )) else {
                 continue;
             };
-            attempts.push(self.into_attempt(
+            attempts.push(self.settlement_attempt(
                 format!(
                     "work:fan-out-response:{}",
                     owner.as_str().trim_start_matches("sha256:")
@@ -321,7 +303,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
         attempts
     }
 
-    fn into_attempt(
+    fn settlement_attempt(
         &self,
         owner_event_id: String,
         work_attempt: Option<tracedecay_domain::WorkAttemptIdentityV1>,
@@ -508,43 +490,6 @@ where
         () = &mut draining => Ok(DaemonDeliveryAckWait::Draining),
         () = tokio::time::sleep(timeout) => Ok(DaemonDeliveryAckWait::Deadline),
         () = &mut cancellation_wait => Ok(DaemonDeliveryAckWait::Cancelled),
-    }
-}
-
-#[cfg(test)]
-mod delivery_ack_tests {
-    use super::{
-        DaemonDeliveryAckWait, await_daemon_delivery_ack, classify_daemon_delivery_ack_wait,
-    };
-    use crate::mcp::transport::ChannelTransport;
-    use std::time::Duration;
-
-    #[tokio::test(start_paused = true)]
-    async fn delivery_ack_wait_uses_the_exact_deadline_budget() {
-        let (mut transport, _input, _output) = ChannelTransport::new();
-        let wait = await_daemon_delivery_ack(
-            &mut transport,
-            Duration::from_secs(3),
-            None,
-            std::future::pending::<()>(),
-        );
-        tokio::pin!(wait);
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(3)).await;
-
-        assert!(matches!(wait.await, Ok(DaemonDeliveryAckWait::Deadline)));
-    }
-
-    #[test]
-    fn withheld_ack_terminalizes_as_deadline_drop() {
-        assert_eq!(
-            classify_daemon_delivery_ack_wait(DaemonDeliveryAckWait::Deadline),
-            Err(tracedecay_domain::DeliveryDropReasonV1::Deadline)
-        );
-        assert_eq!(
-            classify_daemon_delivery_ack_wait(DaemonDeliveryAckWait::Cancelled),
-            Err(tracedecay_domain::DeliveryDropReasonV1::Cancelled)
-        );
     }
 }
 
@@ -852,7 +797,7 @@ async fn serve_broker_socket_client(
                         .and_then(crate::daemon::request_cancellation::register);
                     let cancellation = delivery_cancellation
                         .as_ref()
-                        .map(|lease| lease.token());
+                        .map(super::request_cancellation::Lease::token);
                     let ack_line = match await_daemon_delivery_ack(
                         &mut transport,
                         ack_timeout,
@@ -1455,7 +1400,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                         .and_then(crate::daemon::request_cancellation::register);
                     let cancellation = delivery_cancellation
                         .as_ref()
-                        .map(|lease| lease.token());
+                        .map(super::request_cancellation::Lease::token);
                     let ack_line = match await_daemon_delivery_ack(
                         &mut transport,
                         ack_timeout,
@@ -1722,4 +1667,41 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod delivery_ack_tests {
+    use super::{
+        DaemonDeliveryAckWait, await_daemon_delivery_ack, classify_daemon_delivery_ack_wait,
+    };
+    use crate::mcp::transport::ChannelTransport;
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn delivery_ack_wait_uses_the_exact_deadline_budget() {
+        let (mut transport, _input, _output) = ChannelTransport::new();
+        let wait = await_daemon_delivery_ack(
+            &mut transport,
+            Duration::from_secs(3),
+            None,
+            std::future::pending::<()>(),
+        );
+        tokio::pin!(wait);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+
+        assert!(matches!(wait.await, Ok(DaemonDeliveryAckWait::Deadline)));
+    }
+
+    #[test]
+    fn withheld_ack_terminalizes_as_deadline_drop() {
+        assert_eq!(
+            classify_daemon_delivery_ack_wait(DaemonDeliveryAckWait::Deadline),
+            Err(tracedecay_domain::DeliveryDropReasonV1::Deadline)
+        );
+        assert_eq!(
+            classify_daemon_delivery_ack_wait(DaemonDeliveryAckWait::Cancelled),
+            Err(tracedecay_domain::DeliveryDropReasonV1::Cancelled)
+        );
+    }
 }

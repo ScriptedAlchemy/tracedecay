@@ -666,7 +666,7 @@ impl StackDeliveryAuthorizationPort for StackRuntimePortsV1 {
             Err(_) => return StackDeliveryAuthorizationV1::Unavailable,
         }
         match self.store.recipient_state(&signal.signal_id, recipient) {
-            Ok(Some(GitHubStackDeliveryStateV1::AuthorizationLost)) | Ok(None) => {
+            Ok(Some(GitHubStackDeliveryStateV1::AuthorizationLost) | None) => {
                 StackDeliveryAuthorizationV1::Denied
             }
             Ok(Some(_)) => StackDeliveryAuthorizationV1::Authorized,
@@ -801,7 +801,7 @@ impl DaemonGitHubStackRuntimeV1 {
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
-                        _ = cancellation.cancelled() => break,
+                        () = cancellation.cancelled() => break,
                         _ = interval.tick() => {
                             let coordinator = Arc::clone(&coordinator);
                             let ports = tick_ports.clone();

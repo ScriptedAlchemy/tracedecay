@@ -34,7 +34,7 @@ pub(super) fn offer_work_blocked_interval_receipts(
         let _ = tracedecay_usecases::observability::record_work_blocked_interval_observation(
             Some(producer),
             canonical_project_scope,
-            &receipt,
+            receipt,
         );
     }
 }

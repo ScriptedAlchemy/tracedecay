@@ -376,11 +376,11 @@ struct DaemonInvocationConnection {
     writer: WriteHalf<crate::daemon::transport::BrokerStream>,
 }
 
-/// Client-owned dispatch ceiling for native FastEmbed current+10x evaluation.
+/// Client-owned dispatch ceiling for native `FastEmbed` current+10x evaluation.
 ///
 /// The daemon honors this deadline on `semantic_evaluate_and_publish`; it is
 /// not a journey-harness timeout. Sized from a quieter-host measurement of
-/// 625s for the pinned 1x+10x FastEmbed workload (load 23→18 on 96 cores,
+/// 625s for the pinned 1x+10x `FastEmbed` workload (load 23→18 on 96 cores,
 /// isolated `CARGO_TARGET_DIR=/tmp/semantic-rerun-target`) plus margin.
 pub const SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS: i64 = 900_000_000;
 
@@ -1268,10 +1268,12 @@ mod tests {
             SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
             1_800_000_000
         );
-        assert!(
-            SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS
-                > SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS
-        );
+        const {
+            assert!(
+                SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS
+                    > SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS
+            );
+        }
     }
 
     #[test]

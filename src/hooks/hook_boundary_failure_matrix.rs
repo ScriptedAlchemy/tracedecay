@@ -43,14 +43,7 @@ impl Drop for EnvGuard {
 }
 
 fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
-    crate::storage::write_enrollment_marker(
-        project_root,
-        &crate::storage::EnrollmentMarker {
-            project_id: project_id.to_string(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
+    crate::storage::pin_fixture_repository_identity(project_root, project_id).unwrap();
     let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     // Hook telemetry is fail-closed: the timing span only records a

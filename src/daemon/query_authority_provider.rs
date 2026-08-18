@@ -574,7 +574,7 @@ impl DaemonQueryAuthorityProviderV1 {
     }
 
     /// Resolve the active evaluated all-lane profile for owning-source
-    /// TaskSession selection. The fallback/rollback profile never satisfies
+    /// `TaskSession` selection. The fallback/rollback profile never satisfies
     /// this boundary, and key material remains inside the returned authority.
     fn federated_authority_for_profile(
         &self,

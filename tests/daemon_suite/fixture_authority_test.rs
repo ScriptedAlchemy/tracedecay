@@ -54,9 +54,9 @@ async fn enrolled_layout_comes_from_the_opened_graph() {
         project.graph_db_path().starts_with(project.data_root()),
         "the graph database must live in the reported data root"
     );
-    let marker = storage::read_enrollment_marker(project.root())
-        .expect("enrollment marker is readable")
-        .expect("enrolling writes a marker");
+    let marker = storage::read_repository_identity_marker(project.root())
+        .expect("repository identity marker is readable")
+        .expect("enrolling writes the .git/ identity marker");
     assert_eq!(
         marker.project_id,
         project.project_id(),
@@ -80,13 +80,13 @@ async fn linked_worktree_collapses_onto_the_primary_checkout() {
 }
 
 #[tokio::test]
-async fn committing_a_fixture_tree_never_stages_enrollment_state() {
+async fn enrolling_a_fixture_never_touches_the_working_tree() {
     let profile = TestProfile::acquire().await;
     let repo = GitFixture::primary(profile.path("project"));
     let project = profile.enroll(repo.root()).await;
     assert!(
-        storage::enrollment_marker_path(project.root()).is_file(),
-        "the fixture must have an enrollment marker to exclude"
+        !project.root().join(".tracedecay").exists(),
+        "enrollment must not create working-tree state"
     );
 
     std::fs::write(repo.root().join("lib.rs"), "pub fn after_enrollment() {}\n").unwrap();
@@ -106,9 +106,7 @@ async fn unenrolled_root_stays_unenrolled() {
     let unenrolled = profile.unenrolled("never-enrolled");
 
     assert!(
-        storage::read_enrollment_marker(unenrolled.root())
-            .expect("enrollment marker is readable")
-            .is_none(),
+        !storage::has_repository_identity_marker(unenrolled.root()),
         "the unenrolled negative case must not acquire a marker"
     );
 }

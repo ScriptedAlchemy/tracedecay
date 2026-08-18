@@ -272,7 +272,7 @@ fn capture_file_identity(
         return Err(unsafe_store_entry_error());
     }
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         check_control_io(control)?;
         let read = file.read(&mut buffer)?;

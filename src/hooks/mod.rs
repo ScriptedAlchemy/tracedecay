@@ -332,8 +332,8 @@ pub async fn hook_kimi_event() -> i32 {
     let Some(root) = native_event_project_root(&event).await else {
         return 0;
     };
-    if let Some(guidance) = dispatch_kimi_event(&event, &root).await {
-        if !write_hook_output(
+    if let Some(guidance) = dispatch_kimi_event(&event, &root).await
+        && !write_hook_output(
             Some(&root),
             tracedecay_hooks::HookHostV1::KimiCode,
             &event,
@@ -341,9 +341,8 @@ pub async fn hook_kimi_event() -> i32 {
             None,
         )
         .await
-        {
-            return 1;
-        }
+    {
+        return 1;
     }
     0
 }
@@ -353,8 +352,8 @@ pub async fn hook_opencode_event() -> i32 {
     let Some(root) = native_event_project_root(&event).await else {
         return 0;
     };
-    if let Some(guidance) = dispatch_opencode_event(&event, &root).await {
-        if !write_hook_output(
+    if let Some(guidance) = dispatch_opencode_event(&event, &root).await
+        && !write_hook_output(
             Some(&root),
             tracedecay_hooks::HookHostV1::OpenCode,
             &event,
@@ -362,9 +361,8 @@ pub async fn hook_opencode_event() -> i32 {
             None,
         )
         .await
-        {
-            return 1;
-        }
+    {
+        return 1;
     }
     0
 }
@@ -374,8 +372,8 @@ pub async fn hook_opencode_tool_after() -> i32 {
     let Some(root) = native_event_project_root(&event).await else {
         return 0;
     };
-    if let Some(guidance) = dispatch_opencode_tool_after(&event, &root).await {
-        if !write_hook_output(
+    if let Some(guidance) = dispatch_opencode_tool_after(&event, &root).await
+        && !write_hook_output(
             Some(&root),
             tracedecay_hooks::HookHostV1::OpenCode,
             &event,
@@ -383,9 +381,8 @@ pub async fn hook_opencode_tool_after() -> i32 {
             None,
         )
         .await
-        {
-            return 1;
-        }
+    {
+        return 1;
     }
     0
 }
@@ -598,27 +595,25 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
     .await
     .into_recorded_guidance(&hook_telemetry)
     .flatten();
-    if guidance.is_none() {
-        if let Ok(event) = serde_json::from_value::<DaemonHookEvent>(parsed) {
-            if event.agent == "hermes"
-                && matches!(
-                    event.event.as_str(),
-                    "terminalReceipt" | "turnCompleted" | "turnIngested"
-                )
-                && event.receipt.is_some()
-            {
-                if let Some(project_root) = project_root.as_ref() {
-                    notify_hook_event_with_telemetry(project_root, event, &hook_telemetry).await;
-                } else if let Err(error) = daemon_hook_action(
-                    None,
-                    serde_json::json!({ "action": "hermes_receipt", "event": event }),
-                    Some(&hook_telemetry),
-                )
-                .await
-                {
-                    tracing::warn!(%error, "user Hermes receipt daemon call failed");
-                }
-            }
+    if guidance.is_none()
+        && let Ok(event) = serde_json::from_value::<DaemonHookEvent>(parsed)
+        && event.agent == "hermes"
+        && matches!(
+            event.event.as_str(),
+            "terminalReceipt" | "turnCompleted" | "turnIngested"
+        )
+        && event.receipt.is_some()
+    {
+        if let Some(project_root) = project_root.as_ref() {
+            notify_hook_event_with_telemetry(project_root, event, &hook_telemetry).await;
+        } else if let Err(error) = daemon_hook_action(
+            None,
+            serde_json::json!({ "action": "hermes_receipt", "event": event }),
+            Some(&hook_telemetry),
+        )
+        .await
+        {
+            tracing::warn!(%error, "user Hermes receipt daemon call failed");
         }
     }
     let output = guidance.map_or_else(

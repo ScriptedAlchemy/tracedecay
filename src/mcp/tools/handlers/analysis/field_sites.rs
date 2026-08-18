@@ -56,7 +56,7 @@ pub(crate) async fn handle_field_sites(
         if sites.is_empty() {
             continue;
         }
-        let nodes = symbols_by_file.get(file).map(Vec::as_slice).unwrap_or(&[]);
+        let nodes = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
 
         for site in sites {
             let line_text = line_at(&source, site.byte).unwrap_or("");

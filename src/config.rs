@@ -1619,24 +1619,12 @@ pub fn load_config_from_path(project_root: &Path, config_path: &Path) -> Result<
     Ok(config)
 }
 
-/// Writes a legacy configuration fixture using an atomic write.
+/// Writes a legacy configuration fixture to an explicit path using an atomic
+/// write.
 ///
 /// Production runtime code must use the daemon control plane instead of this
 /// compatibility helper. It remains for fixtures and legacy-input tests while
 /// callers complete their migration.
-pub fn save_config(project_root: &Path, config: &TraceDecayConfig) -> Result<()> {
-    let config_path = get_config_path(project_root);
-    save_config_to_path(&config_path, config)
-}
-
-pub async fn save_config_with_identity(
-    project_root: &Path,
-    config: &TraceDecayConfig,
-) -> Result<()> {
-    let config_path = get_config_path_with_identity(project_root).await;
-    save_config_to_path(&config_path, config)
-}
-
 pub fn save_config_to_path(config_path: &Path, config: &TraceDecayConfig) -> Result<()> {
     let data_dir = config_path
         .parent()
@@ -1782,23 +1770,6 @@ fn is_in_local_gitignore(project_path: &Path) -> bool {
                 || trimmed == format!("/{dir_name}")
         }),
         Err(_) => false,
-    }
-}
-
-/// Appends the project marker dir name (`.tracedecay`) to the project's
-/// `.gitignore`, creating the file if needed. Ensures the entry starts on its
-/// own line (adds a trailing newline to existing content if missing).
-pub fn add_to_gitignore(project_path: &Path) {
-    let dir_name = active_data_dir_name(project_path);
-    let gitignore = project_path.join(".gitignore");
-    let mut content = fs::read_to_string(&gitignore).unwrap_or_default();
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
-    content.push_str(dir_name);
-    content.push('\n');
-    if let Err(e) = fs::write(&gitignore, content) {
-        eprintln!("warning: failed to update .gitignore: {e}");
     }
 }
 

@@ -314,8 +314,7 @@ pub(super) fn remote_tls_from_service_unit(
 ) -> Result<Option<super::super::RemoteBrainTlsConfig>> {
     let Some(exec_start) = unit
         .lines()
-        .filter_map(|line| line.trim().strip_prefix("ExecStart="))
-        .next()
+        .find_map(|line| line.trim().strip_prefix("ExecStart="))
     else {
         return Ok(None);
     };

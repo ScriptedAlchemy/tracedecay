@@ -351,7 +351,7 @@ async fn track_exact_worktree_branch_with_lifecycle(
         match await_exact_branch_generation(schedulers, &canonical_worktree_root, &source).await {
             Ok(generation) => generation,
             Err(error) => {
-                rollback_failed_branch_tracking(&data_root, prepared.as_ref(), None, &error)
+                rollback_failed_branch_tracking(&data_root, prepared.as_deref(), None, &error)
                     .await?;
                 return Err(error);
             }
@@ -368,7 +368,7 @@ async fn track_exact_worktree_branch_with_lifecycle(
                 canonical_worktree_root.display()
             ),
         );
-        rollback_failed_branch_tracking(&data_root, prepared.as_ref(), None, &error).await?;
+        rollback_failed_branch_tracking(&data_root, prepared.as_deref(), None, &error).await?;
         return Err(error);
     };
     let publication = crate::branch_meta::publish_graph_source(
@@ -395,14 +395,11 @@ async fn track_exact_worktree_branch_with_lifecycle(
                     let error = TraceDecayError::project_route(
                         CODE_INDEX_ACTIVATION_UNAVAILABLE,
                         true,
-                        format!(
-                            "serving generation changed while publishing branch '{}'",
-                            branch
-                        ),
+                        format!("serving generation changed while publishing branch '{branch}'"),
                     );
                     rollback_failed_branch_tracking(
                         &data_root,
-                        prepared.as_ref(),
+                        prepared.as_deref(),
                         Some(&publication),
                         &error,
                     )
@@ -421,8 +418,7 @@ async fn track_exact_worktree_branch_with_lifecycle(
                     CODE_INDEX_ACTIVATION_UNAVAILABLE,
                     true,
                     format!(
-                        "serving generation changed before exact branch replay completed for '{}'",
-                        branch
+                        "serving generation changed before exact branch replay completed for '{branch}'"
                     ),
                 )),
             }
@@ -438,8 +434,7 @@ async fn track_exact_worktree_branch_with_lifecycle(
                 CODE_INDEX_ACTIVATION_UNAVAILABLE,
                 true,
                 format!(
-                    "serving generation changed before exact branch replay completed for '{}'",
-                    branch
+                    "serving generation changed before exact branch replay completed for '{branch}'"
                 ),
             )),
         },
@@ -454,14 +449,14 @@ async fn track_exact_worktree_branch_with_lifecycle(
             let _ = schedulers
                 .commit_serving_generation_installation(&canonical_worktree_root, installation)
                 .await;
-            rollback_failed_branch_tracking(&data_root, prepared.as_ref(), None, &error).await?;
+            rollback_failed_branch_tracking(&data_root, prepared.as_deref(), None, &error).await?;
             Err(error)
         }
         Err(error) => {
             let _ = schedulers
                 .commit_serving_generation_installation(&canonical_worktree_root, installation)
                 .await;
-            rollback_failed_branch_tracking(&data_root, prepared.as_ref(), None, &error).await?;
+            rollback_failed_branch_tracking(&data_root, prepared.as_deref(), None, &error).await?;
             Err(error)
         }
     }

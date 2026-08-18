@@ -319,8 +319,8 @@ where
             if let Some(unavailable) = graph_evidence.unavailable() {
                 output["verified_graph_evidence"] = unavailable.clone();
             }
-            if dependency_hints::should_check_external_import_hint(result_count, limit) {
-                if let Some(hint) = graph_evidence
+            if dependency_hints::should_check_external_import_hint(result_count, limit)
+                && let Some(hint) = graph_evidence
                     .external_import_hint(
                         query,
                         limit,
@@ -329,9 +329,8 @@ where
                         cancellation.as_ref(),
                     )
                     .await
-                {
-                    output["external_import_hint"] = hint;
-                }
+            {
+                output["external_import_hint"] = hint;
             }
             let output = output;
             Ok(rendered_tool_result(

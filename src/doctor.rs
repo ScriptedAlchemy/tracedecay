@@ -820,10 +820,8 @@ fn report_daemon_diagnostics_unavailable(
 }
 
 fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
-    if let Ok(Some(marker)) = crate::storage::read_enrollment_marker(project_path)
-        && let Ok(profile_root) = crate::storage::default_profile_root()
-        && let Ok(layout) =
-            crate::storage::profile_sharded_layout(project_path, &profile_root, &marker)
+    if let Ok(Some(layout)) =
+        crate::storage::resolve_enrolled_layout_for_current_profile(project_path)
     {
         return Some(layout.graph_db_path);
     }

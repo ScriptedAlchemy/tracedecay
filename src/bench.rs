@@ -2,7 +2,7 @@
 //!
 //! The command surface is retained while the benchmark is remounted on the
 //! admitted code-graph authority. It currently fails closed with a typed
-//! unavailable state instead of reading the retired SQLite graph.
+//! unavailable state instead of reading the retired `SQLite` graph.
 
 use std::fmt::Write as _;
 use std::path::Path;

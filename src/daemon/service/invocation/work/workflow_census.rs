@@ -501,7 +501,7 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
                                     "workflow census durable marker remains pending"
                                 ),
                                 Err(error) => {
-                                    tracing::warn!(?error, "workflow census marker worker failed")
+                                    tracing::warn!(?error, "workflow census marker worker failed");
                                 }
                             }
                         }

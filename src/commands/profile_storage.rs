@@ -91,11 +91,18 @@ fn handle_reset_project_store(
     )?;
     let outcome = reset_refused_project_graph_store(&profile_root, &project_id)?;
     println!(
-        "reset the refused project graph store for '{project_id}' \
-         (schema v{} -> fresh v{} at the next open)",
-        outcome.previous_schema_version, outcome.canonical_schema_version
+        "reset {} refused graph database(s) in the project store for '{project_id}' \
+         (fresh v{} at the next open)",
+        outcome.reset_graph_dbs.len(),
+        outcome.canonical_schema_version
     );
-    println!("  removed {}", outcome.graph_db_path.display());
+    for reset_db in &outcome.reset_graph_dbs {
+        println!(
+            "  removed {} (was schema v{})",
+            reset_db.path.display(),
+            reset_db.previous_schema_version
+        );
+    }
     println!(
         "  preserved the store directory, session archive, and provider transcripts \
          under {}",
@@ -112,32 +119,61 @@ fn handle_reset_project_store(
 #[derive(Debug)]
 struct ResetProjectGraphStoreOutcome {
     data_root: PathBuf,
-    graph_db_path: PathBuf,
-    previous_schema_version: i64,
+    reset_graph_dbs: Vec<ResetGraphDb>,
     canonical_schema_version: u32,
 }
 
-/// Verifies the project graph store under `profile_root` is genuinely refused
-/// — a real SQLite database stamped with a schema version this binary does
-/// not create — and deletes exactly that database and its WAL/SHM sidecars.
-/// A store already at the canonical schema (or a file that is not a SQLite
-/// database) is refused untouched, so this cannot wipe a healthy store.
-fn reset_refused_project_graph_store(
-    profile_root: &Path,
-    project_id: &str,
-) -> tracedecay::errors::Result<ResetProjectGraphStoreOutcome> {
-    let data_root = tracedecay::storage::profile_sharded_data_root(profile_root, project_id);
-    let graph_db_path = data_root.join(tracedecay::config::db_filename(&data_root));
-    if !graph_db_path.is_file() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "no project graph store exists at {}; nothing to reset",
-                graph_db_path.display()
-            ),
-        });
+#[derive(Debug)]
+struct ResetGraphDb {
+    path: PathBuf,
+    previous_schema_version: i64,
+}
+
+/// Every graph database a project store can carry: the root graph DB plus one
+/// per tracked branch under `branches/`. Session archives and transcripts
+/// share the store directory but are never graph databases, so they are never
+/// candidates. Ordering is deterministic (root first, branches sorted).
+fn project_store_graph_db_paths(data_root: &Path) -> tracedecay::errors::Result<Vec<PathBuf>> {
+    let mut candidates = Vec::new();
+    let root_db = data_root.join(tracedecay::config::db_filename(data_root));
+    if root_db.is_file() {
+        candidates.push(root_db);
     }
+    let branches_dir = data_root.join("branches");
+    if branches_dir.is_dir() {
+        let entries = std::fs::read_dir(&branches_dir).map_err(|error| {
+            tracedecay::errors::TraceDecayError::Config {
+                message: format!(
+                    "could not enumerate branch graph databases under {}: {error}",
+                    branches_dir.display()
+                ),
+            }
+        })?;
+        let mut branch_dbs = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| tracedecay::errors::TraceDecayError::Config {
+                message: format!(
+                    "could not enumerate branch graph databases under {}: {error}",
+                    branches_dir.display()
+                ),
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("db") && path.is_file() {
+                branch_dbs.push(path);
+            }
+        }
+        branch_dbs.sort();
+        candidates.extend(branch_dbs);
+    }
+    Ok(candidates)
+}
+
+/// Reads the SQLite `user_version` of one graph database after the same
+/// fail-closed header verification the daemon's refusal performs. A file that
+/// is not a SQLite database is a typed error, never a deletion candidate.
+fn verified_graph_db_schema_version(graph_db_path: &Path) -> tracedecay::errors::Result<i64> {
     let has_header =
-        tracedecay::storage::has_sqlite_database_header(&graph_db_path).map_err(|error| {
+        tracedecay::storage::has_sqlite_database_header(graph_db_path).map_err(|error| {
             tracedecay::errors::TraceDecayError::Config {
                 message: format!(
                     "could not verify the store header at {}: {error}",
@@ -155,52 +191,89 @@ fn reset_refused_project_graph_store(
         });
     }
     let connection = rusqlite::Connection::open_with_flags(
-        &graph_db_path,
+        graph_db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|error| tracedecay::errors::TraceDecayError::Database {
         operation: "open project graph store for reset verification".to_string(),
         message: error.to_string(),
     })?;
-    let previous_schema_version: i64 = connection
+    connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|error| tracedecay::errors::TraceDecayError::Database {
             operation: "read project graph store schema version".to_string(),
             message: error.to_string(),
-        })?;
-    drop(connection);
-    let canonical_schema_version = tracedecay::db::migrations::SCHEMA_VERSION;
-    if previous_schema_version == i64::from(canonical_schema_version) {
+        })
+}
+
+/// Verifies every graph database in the project store under `profile_root` —
+/// the root graph DB and each per-branch graph DB under `branches/` — and
+/// deletes exactly the refused ones (a real SQLite database stamped with a
+/// schema version this binary does not create) with their WAL/SHM sidecars.
+/// Verification is completed for the whole set before anything is deleted, so
+/// an unrecognized file aborts the reset without partial removal. Databases
+/// already at the canonical schema are preserved, and a store with nothing
+/// refused is a typed error — this cannot wipe a healthy store.
+fn reset_refused_project_graph_store(
+    profile_root: &Path,
+    project_id: &str,
+) -> tracedecay::errors::Result<ResetProjectGraphStoreOutcome> {
+    let data_root = tracedecay::storage::profile_sharded_data_root(profile_root, project_id);
+    let candidates = project_store_graph_db_paths(&data_root)?;
+    if candidates.is_empty() {
         return Err(tracedecay::errors::TraceDecayError::Config {
             message: format!(
-                "the project graph store at {} is already at the canonical schema \
-                 v{canonical_schema_version}; it is not refused and nothing was reset",
-                graph_db_path.display()
+                "no project graph store exists at {}; nothing to reset",
+                data_root
+                    .join(tracedecay::config::db_filename(&data_root))
+                    .display()
             ),
         });
     }
-    for sidecar_suffix in ["", "-wal", "-shm"] {
-        let path = if sidecar_suffix.is_empty() {
-            graph_db_path.clone()
-        } else {
-            let mut file_name = graph_db_path.file_name().unwrap_or_default().to_os_string();
-            file_name.push(sidecar_suffix);
-            graph_db_path.with_file_name(file_name)
-        };
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: format!("failed to remove {}: {error}", path.display()),
-                });
+    let canonical_schema_version = tracedecay::db::migrations::SCHEMA_VERSION;
+    let mut refused = Vec::new();
+    for graph_db_path in candidates {
+        let previous_schema_version = verified_graph_db_schema_version(&graph_db_path)?;
+        if previous_schema_version != i64::from(canonical_schema_version) {
+            refused.push(ResetGraphDb {
+                path: graph_db_path,
+                previous_schema_version,
+            });
+        }
+    }
+    if refused.is_empty() {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "every graph database in the project store at {} is already at the \
+                 canonical schema v{canonical_schema_version}; nothing is refused and \
+                 nothing was reset",
+                data_root.display()
+            ),
+        });
+    }
+    for reset_db in &refused {
+        for sidecar_suffix in ["", "-wal", "-shm"] {
+            let path = if sidecar_suffix.is_empty() {
+                reset_db.path.clone()
+            } else {
+                let mut file_name = reset_db.path.file_name().unwrap_or_default().to_os_string();
+                file_name.push(sidecar_suffix);
+                reset_db.path.with_file_name(file_name)
+            };
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(tracedecay::errors::TraceDecayError::Config {
+                        message: format!("failed to remove {}: {error}", path.display()),
+                    });
+                }
             }
         }
     }
     Ok(ResetProjectGraphStoreOutcome {
         data_root,
-        graph_db_path,
-        previous_schema_version,
+        reset_graph_dbs: refused,
         canonical_schema_version,
     })
 }
@@ -558,21 +631,25 @@ fn handle_rehearse_profile_backup(
 mod reset_project_store_tests {
     use super::*;
 
-    fn write_store_with_user_version(
-        profile_root: &Path,
-        project_id: &str,
-        version: u32,
-    ) -> PathBuf {
-        let data_root = tracedecay::storage::profile_sharded_data_root(profile_root, project_id);
-        std::fs::create_dir_all(&data_root).expect("store dir");
-        let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
-        let connection = rusqlite::Connection::open(&db_path).expect("create store");
+    fn write_graph_db_with_user_version(db_path: &Path, version: u32) {
+        std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("db dir");
+        let connection = rusqlite::Connection::open(db_path).expect("create store");
         connection
             .execute_batch(&format!(
                 "PRAGMA user_version = {version}; CREATE TABLE anchor (id INTEGER);"
             ))
             .expect("stamp store");
         drop(connection);
+    }
+
+    fn write_store_with_user_version(
+        profile_root: &Path,
+        project_id: &str,
+        version: u32,
+    ) -> PathBuf {
+        let data_root = tracedecay::storage::profile_sharded_data_root(profile_root, project_id);
+        let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+        write_graph_db_with_user_version(&db_path, version);
         db_path
     }
 
@@ -590,7 +667,9 @@ mod reset_project_store_tests {
 
         let outcome = reset_refused_project_graph_store(&profile_root, "proj_refused_v18").unwrap();
 
-        assert_eq!(outcome.previous_schema_version, 18);
+        assert_eq!(outcome.reset_graph_dbs.len(), 1);
+        assert_eq!(outcome.reset_graph_dbs[0].previous_schema_version, 18);
+        assert_eq!(outcome.reset_graph_dbs[0].path, db_path);
         assert!(!db_path.exists(), "refused graph database must be removed");
         assert!(!wal_path.exists(), "WAL sidecar must be removed");
         assert!(
@@ -601,6 +680,111 @@ mod reset_project_store_tests {
             data_root.exists(),
             "the store directory itself must survive"
         );
+    }
+
+    /// A store can carry per-branch graph databases at the same refused schema
+    /// version. The reset must cover all of them — resetting only the root
+    /// left the next open refusing on `branches/develop.db` and recovery
+    /// still failed.
+    #[test]
+    fn refused_branch_graph_dbs_are_reset_with_the_root() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        let root_db = write_store_with_user_version(&profile_root, "proj_branches", 18);
+        let data_root = root_db.parent().unwrap().to_path_buf();
+        let refused_branch_db = data_root.join("branches").join("develop.db");
+        write_graph_db_with_user_version(&refused_branch_db, 18);
+        let branch_wal = refused_branch_db.with_file_name("develop.db-wal");
+        std::fs::write(&branch_wal, b"wal").unwrap();
+        let canonical_branch_db = data_root.join("branches").join("main.db");
+        write_graph_db_with_user_version(
+            &canonical_branch_db,
+            tracedecay::db::migrations::SCHEMA_VERSION,
+        );
+        let sessions_path = data_root.join("sessions.db");
+        std::fs::write(&sessions_path, b"session archive").unwrap();
+
+        let outcome = reset_refused_project_graph_store(&profile_root, "proj_branches").unwrap();
+
+        let reset_paths: Vec<_> = outcome
+            .reset_graph_dbs
+            .iter()
+            .map(|reset| reset.path.clone())
+            .collect();
+        assert_eq!(
+            reset_paths,
+            vec![root_db.clone(), refused_branch_db.clone()]
+        );
+        assert!(
+            outcome
+                .reset_graph_dbs
+                .iter()
+                .all(|reset| reset.previous_schema_version == 18)
+        );
+        assert!(!root_db.exists(), "refused root graph DB must be removed");
+        assert!(
+            !refused_branch_db.exists(),
+            "refused branch graph DB must be removed"
+        );
+        assert!(!branch_wal.exists(), "branch WAL sidecar must be removed");
+        assert!(
+            canonical_branch_db.exists(),
+            "a branch graph DB already at the canonical schema must survive"
+        );
+        assert!(
+            sessions_path.exists(),
+            "the session archive is a durable re-ingest input and must survive"
+        );
+    }
+
+    /// A refused branch graph DB must be recoverable even when the root graph
+    /// DB is healthy (e.g. a prior partial reset already recreated the root).
+    #[test]
+    fn refused_branch_db_is_reset_when_root_is_canonical() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        let root_db = write_store_with_user_version(
+            &profile_root,
+            "proj_branch_only",
+            tracedecay::db::migrations::SCHEMA_VERSION,
+        );
+        let data_root = root_db.parent().unwrap().to_path_buf();
+        let refused_branch_db = data_root.join("branches").join("develop.db");
+        write_graph_db_with_user_version(&refused_branch_db, 18);
+
+        let outcome = reset_refused_project_graph_store(&profile_root, "proj_branch_only").unwrap();
+
+        assert_eq!(outcome.reset_graph_dbs.len(), 1);
+        assert_eq!(outcome.reset_graph_dbs[0].path, refused_branch_db);
+        assert!(!refused_branch_db.exists());
+        assert!(root_db.exists(), "a healthy root graph DB must survive");
+    }
+
+    /// Verification covers the whole graph DB set before anything is deleted:
+    /// an unrecognized file among the branch DBs aborts the reset with the
+    /// refused root still intact (no partial removal).
+    #[test]
+    fn unrecognized_branch_file_aborts_before_any_deletion() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        let root_db = write_store_with_user_version(&profile_root, "proj_mixed", 18);
+        let data_root = root_db.parent().unwrap().to_path_buf();
+        let branches_dir = data_root.join("branches");
+        std::fs::create_dir_all(&branches_dir).unwrap();
+        let bogus_branch_db = branches_dir.join("develop.db");
+        std::fs::write(&bogus_branch_db, b"not a database").unwrap();
+
+        let error = reset_refused_project_graph_store(&profile_root, "proj_mixed").unwrap_err();
+
+        assert!(
+            error.to_string().contains("is not a SQLite database"),
+            "unexpected refusal: {error}"
+        );
+        assert!(
+            root_db.exists(),
+            "the refused root must survive an aborted reset"
+        );
+        assert!(bogus_branch_db.exists());
     }
 
     #[test]

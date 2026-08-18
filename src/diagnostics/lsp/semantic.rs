@@ -1,7 +1,7 @@
 //! Production LSP semantic routing over retained language analyzers.
 //!
 //! Code-graph semantics must arrive through a current admitted application
-//! query port. The retired SQLite graph facade is deliberately absent here;
+//! query port. The retired `SQLite` graph facade is deliberately absent here;
 //! until that port is injected, missing and ambiguous analyzer routes expose
 //! the protocol's typed unavailable provider.
 

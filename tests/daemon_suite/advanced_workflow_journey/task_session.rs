@@ -587,10 +587,7 @@ fn read_active_code_generation(
     home: &Path,
     project: &Path,
 ) -> Option<tracedecay_code_index::production::CodeIndexPublishedGenerationV1> {
-    let marker = tracedecay::storage::read_enrollment_marker(project).ok()??;
-    let layout =
-        tracedecay::storage::profile_sharded_layout(project, &home.join(".tracedecay"), &marker)
-            .ok()?;
+    let layout = tracedecay::storage::resolve_layout(project, &home.join(".tracedecay")).ok()?;
     let scope = scoped_code_index_store_root(&layout.data_root.join("code-index-v1"), project);
     let pointer = serde_json::from_slice::<DurablePublicationPointerV1>(
         &std::fs::read(scope.join("active-code-generation-v1.json")).ok()?,
@@ -773,16 +770,28 @@ fn semantic_runtime_status(home: &Path, project: &Path) -> Option<SemanticRuntim
     serde_json::from_value(value["semantic_runtime"].clone()).ok()
 }
 
+/// The exact Work evidence scope one TaskSession availability sweep reads:
+/// the product selection, task, verified graph version, and attempt identity.
+pub(super) struct TaskSessionEvidenceScope<'a> {
+    pub(super) selection: &'a WorkProductSelectionScopeV1,
+    pub(super) task_id: &'a TaskId,
+    pub(super) verified_version: &'a VerifiedWorkGraphVersionV1,
+    pub(super) identity: &'a WorkAttemptIdentityV1,
+}
+
 pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
     home: &Path,
     project: &Path,
     client: &Client,
     dashboard: &DashboardProcess,
-    selection: &WorkProductSelectionScopeV1,
-    task_id: &TaskId,
-    verified_version: &VerifiedWorkGraphVersionV1,
-    identity: &WorkAttemptIdentityV1,
+    scope: TaskSessionEvidenceScope<'_>,
 ) -> WorkTaskSessionEvidenceV1 {
+    let TaskSessionEvidenceScope {
+        selection,
+        task_id,
+        verified_version,
+        identity,
+    } = scope;
     let mut current = None;
     for temporal in [
         TemporalModeV1::Current,
@@ -1185,6 +1194,13 @@ fn serve_tool_call(home: &Path, project: &Path, tool_name: &str, arguments: Valu
         .unwrap_or_else(|| panic!("MCP tool response omitted JSON content: {response}"))
 }
 
+/// One attempt's receipt, TaskSession evidence, and omissions from a page.
+type AttemptEvidencePage = (
+    Option<WorkAttemptReceiptV1>,
+    Option<WorkTaskSessionEvidenceV1>,
+    Vec<tracedecay_application::WorkEvidenceOmissionV1>,
+);
+
 fn retrieve(
     client: &Client,
     selection: &WorkProductSelectionScopeV1,
@@ -1192,14 +1208,7 @@ fn retrieve(
     verified_version: &VerifiedWorkGraphVersionV1,
     identity: &WorkAttemptIdentityV1,
     temporal: TemporalModeV1,
-) -> Result<
-    (
-        Option<WorkAttemptReceiptV1>,
-        Option<WorkTaskSessionEvidenceV1>,
-        Vec<tracedecay_application::WorkEvidenceOmissionV1>,
-    ),
-    String,
-> {
+) -> Result<AttemptEvidencePage, String> {
     let result = client
         .execute::<WorkRetrieveEvidence>(&WorkEvidenceRetrieveRequestV1 {
             selection: selection.clone(),

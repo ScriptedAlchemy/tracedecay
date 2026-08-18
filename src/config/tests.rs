@@ -1224,14 +1224,8 @@ mod runtime_configuration_cutover {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
         let project_id = project_id("project.configuration-runtime-drift");
-        crate::storage::write_enrollment_marker(
-            root.path(),
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .expect("write enrollment marker");
+        crate::storage::pin_fixture_repository_identity(root.path(), project_id.as_str())
+            .expect("write enrollment marker");
         let layout = crate::storage::resolve_layout_for_current_profile(root.path())
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
@@ -1309,12 +1303,9 @@ mod runtime_configuration_cutover {
     async fn ensure_runtime_configuration_persists_initial_resolution_when_cache_is_empty() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
-        crate::storage::write_enrollment_marker(
+        crate::storage::pin_fixture_repository_identity(
             root.path(),
-            &crate::storage::EnrollmentMarker {
-                project_id: "proj_ensure_runtime_bootstrap".to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
+            "proj_ensure_runtime_bootstrap",
         )
         .expect("write enrollment marker");
         let layout = crate::storage::resolve_layout_for_current_profile(root.path())
@@ -1387,14 +1378,8 @@ mod runtime_configuration_cutover {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
         let project_id = project_id("proj_runtime_binding_required");
-        crate::storage::write_enrollment_marker(
-            root.path(),
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .expect("write enrollment marker");
+        crate::storage::pin_fixture_repository_identity(root.path(), project_id.as_str())
+            .expect("write enrollment marker");
         let layout = crate::storage::resolve_layout_for_current_profile(root.path())
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
@@ -1477,14 +1462,8 @@ mod runtime_configuration_cutover {
         );
 
         let project_id = project_id("proj_runtime_linked_binding");
-        crate::storage::write_enrollment_marker(
-            &primary,
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .expect("write enrollment marker");
+        crate::storage::pin_fixture_repository_identity(&primary, project_id.as_str())
+            .expect("write enrollment marker");
         let layout = crate::storage::resolve_layout_for_current_profile(&primary)
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
@@ -1543,14 +1522,8 @@ mod runtime_configuration_cutover {
         let renamed = root.path().join("checkout-renamed");
         std::fs::create_dir_all(&original).expect("create original checkout");
         let project_id = project_id("proj_runtime_rebind_rename");
-        crate::storage::write_enrollment_marker(
-            &original,
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .expect("write enrollment marker");
+        crate::storage::pin_fixture_repository_identity(&original, project_id.as_str())
+            .expect("write enrollment marker");
         let layout = crate::storage::resolve_layout_for_current_profile(&original)
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
@@ -1602,14 +1575,8 @@ mod runtime_configuration_cutover {
         std::fs::create_dir_all(&elsewhere).expect("create foreign locator root");
         let other_project = project_id("proj_runtime_rebind_other");
         let project_id = project_id("proj_runtime_rebind_denied");
-        crate::storage::write_enrollment_marker(
-            &checkout,
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .expect("write enrollment marker");
+        crate::storage::pin_fixture_repository_identity(&checkout, project_id.as_str())
+            .expect("write enrollment marker");
         let layout = crate::storage::resolve_layout_for_current_profile(&checkout)
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
@@ -1688,14 +1655,8 @@ mod runtime_configuration_cutover {
     async fn resolve_runtime_configuration_pins_registered_project_when_cache_is_cold() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
-        crate::storage::write_enrollment_marker(
-            root.path(),
-            &crate::storage::EnrollmentMarker {
-                project_id: "proj_resolve_cold_cache".to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .expect("write enrollment marker");
+        crate::storage::pin_fixture_repository_identity(root.path(), "proj_resolve_cold_cache")
+            .expect("write enrollment marker");
         let layout = crate::storage::resolve_layout_for_current_profile(root.path())
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
@@ -1744,14 +1705,8 @@ mod runtime_configuration_cutover {
     async fn resolve_runtime_configuration_errors_typed_when_authority_is_unresolvable() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
-        crate::storage::write_enrollment_marker(
-            root.path(),
-            &crate::storage::EnrollmentMarker {
-                project_id: "proj_resolve_unresolvable".to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .expect("write enrollment marker");
+        crate::storage::pin_fixture_repository_identity(root.path(), "proj_resolve_unresolvable")
+            .expect("write enrollment marker");
         let mut layout = crate::storage::resolve_layout_for_current_profile(root.path())
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
@@ -1782,12 +1737,9 @@ mod runtime_configuration_cutover {
     async fn read_only_open_rejects_an_uninitialized_store_without_fabricated_defaults() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
-        crate::storage::write_enrollment_marker(
+        crate::storage::pin_fixture_repository_identity(
             root.path(),
-            &crate::storage::EnrollmentMarker {
-                project_id: "proj_read_only_uninitialized".to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
+            "proj_read_only_uninitialized",
         )
         .expect("write enrollment marker");
         let layout = crate::storage::resolve_layout_for_current_profile(root.path())

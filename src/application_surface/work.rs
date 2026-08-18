@@ -106,6 +106,38 @@ pub(crate) async fn invoke_work_operation(
     } = request;
 
     macro_rules! core {
+        // Same as the plain arm, for outcome variants whose payload is boxed
+        // to keep the wire outcome enum compact.
+        (boxed $request_ty:ty, $variant:ident, $output:ty) => {{
+            let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
+                return tracedecay_api::work_invalid_request_response(request_id);
+            };
+            let invocation = crate::daemon_contract::DaemonInvocationRequest::work_application(
+                request_id.as_str(),
+                WorkApplicationInvocationV1::$variant(decoded),
+                crate::daemon_client::invocation_now_micros(),
+                controls.deadline.clone(),
+                controls.cancellation.context(),
+            );
+            let Some(executor) = executor else {
+                return super::registered_executor_unavailable::<$output, _>(operation, request_id);
+            };
+            invoke_registered_http::<$output, _>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                invocation,
+                |outcome| match outcome {
+                    crate::daemon_contract::DaemonInvocationOutcome::WorkApplication {
+                        scope,
+                        outcome: WorkApplicationOutcomeV1::$variant(outcome),
+                    } => Some((scope, *outcome)),
+                    _ => None,
+                },
+            )
+            .await
+        }};
         ($request_ty:ty, $variant:ident, $output:ty) => {{
             let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
                 return tracedecay_api::work_invalid_request_response(request_id);
@@ -194,7 +226,7 @@ pub(crate) async fn invoke_work_operation(
             )
         }
         WorkOperation::RetryAttempt => core!(
-            RetryWorkAttemptCommandV1,
+            boxed RetryWorkAttemptCommandV1,
             RetryAttempt,
             tracedecay_application::WorkRetryAttemptOutcomeV1
         ),

@@ -47,8 +47,9 @@ enum ProjectDirectoryWorkV1 {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum UnregisteredSweepCompletionV1 {
+    #[default]
     Complete,
     Cancelled,
     DeadlineExceeded,
@@ -87,12 +88,6 @@ pub(crate) struct UnregisteredStoreSweepReport {
     pub(crate) outcome: CollectionOutcome,
     pub(crate) next_cursor: Option<String>,
     pub(crate) completion: UnregisteredSweepCompletionV1,
-}
-
-impl Default for UnregisteredSweepCompletionV1 {
-    fn default() -> Self {
-        Self::Complete
-    }
 }
 
 /// Performs the full inspection → confirmation → apply journey for one page,
@@ -187,8 +182,8 @@ fn interrupted_report(
     outcome: CollectionOutcome,
 ) -> UnregisteredStoreSweepReport {
     UnregisteredStoreSweepReport {
-        completion,
         outcome,
+        completion,
         ..UnregisteredStoreSweepReport::default()
     }
 }

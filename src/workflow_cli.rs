@@ -104,7 +104,7 @@ fn decode_workflow_invocation(
             .map(WorkflowApplicationInvocation::HandoffRedeem),
         WorkflowOperation::StartRun => {
             decode::<tracedecay_application::WorkflowRunStartRequest>(body)
-                .map(WorkflowApplicationInvocation::StartRun)
+                .map(|request| WorkflowApplicationInvocation::StartRun(Box::new(request)))
         }
         WorkflowOperation::PauseRun => {
             decode::<tracedecay_application::WorkflowRunPauseRequest>(body)

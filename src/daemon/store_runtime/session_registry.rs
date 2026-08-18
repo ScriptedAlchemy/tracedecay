@@ -221,7 +221,7 @@ impl ProjectRuntimeOwnerRegistryV1 {
                 candidate_sessions: None,
                 memory: None,
                 phase: ProjectSessionRecoveryPhaseV1::Terminal(
-                    ProjectSessionTerminalProofV1::Durable(proof),
+                    ProjectSessionTerminalProofV1::Durable(Box::new(proof)),
                 ),
             }),
         );
@@ -508,8 +508,8 @@ impl ProjectSessionTerminalVacancyAuthorityV1 {
 /// A terminal vacancy is proven either by the live, non-cloneable Graph/Store
 /// receipts or by their durable journal authority after process restart.
 enum ProjectSessionTerminalProofV1 {
-    Live(ProjectSessionClosedRetirementProofV1),
-    Durable(ProjectSessionTerminalVacancyAuthorityV1),
+    Live(Box<ProjectSessionClosedRetirementProofV1>),
+    Durable(Box<ProjectSessionTerminalVacancyAuthorityV1>),
 }
 
 impl ProjectSessionTerminalProofV1 {
@@ -523,7 +523,7 @@ impl ProjectSessionTerminalProofV1 {
     fn durable_authority(&self) -> ProjectSessionTerminalVacancyAuthorityV1 {
         match self {
             Self::Live(proof) => proof.durable_authority(),
-            Self::Durable(authority) => authority.clone(),
+            Self::Durable(authority) => authority.as_ref().clone(),
         }
     }
 }
@@ -650,7 +650,7 @@ impl ProjectRuntimeFaultedOwnersV1 {
 
 enum ProjectRuntimeOwnerAdmissionV1 {
     Existing,
-    Opening(ProjectRuntimeOwnerOpeningReservationV1),
+    Opening(Box<ProjectRuntimeOwnerOpeningReservationV1>),
 }
 
 /// A project slot enters `Opening` before any runtime publication.  It keeps
@@ -923,7 +923,7 @@ struct ProjectSessionReplacementReservationV1 {
     memory: Option<MemoryStoreOwnerV1>,
     /// A candidate is only retried after the previous owner has exact paired
     /// terminal proofs. Reversible retirement must keep both this proof and
-    /// the candidate in RecoveryRequired; it must never reopen the candidate.
+    /// the candidate in `RecoveryRequired`; it must never reopen the candidate.
     recovery_proof: Option<ProjectSessionTerminalProofV1>,
     armed: bool,
 }
@@ -1226,7 +1226,7 @@ impl ProjectSessionReplacementReservationV1 {
         };
         if !proof.verify() {
             self.commit_recovery_required(ProjectSessionRecoveryPhaseV1::Terminal(
-                ProjectSessionTerminalProofV1::Live(proof),
+                ProjectSessionTerminalProofV1::Live(Box::new(proof)),
             ))?;
             return Err(session_registry_error(
                 "vacate replacing project session owner",
@@ -1258,7 +1258,7 @@ impl ProjectSessionReplacementReservationV1 {
             owners: self.owners.clone(),
             project_id: self.project_id.clone(),
             memory: self.memory.take(),
-            proof: Some(ProjectSessionTerminalProofV1::Live(proof)),
+            proof: Some(ProjectSessionTerminalProofV1::Live(Box::new(proof))),
             armed: true,
         })
     }
@@ -2204,8 +2204,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 "remote_runtime_capacity",
                 true,
                 format!(
-                    "Remote Brain runtime owner capacity {} is fully occupied",
-                    MAX_RETAINED_REMOTE_NODE_OWNERS
+                    "Remote Brain runtime owner capacity {MAX_RETAINED_REMOTE_NODE_OWNERS} is fully occupied"
                 ),
             ));
         }
@@ -2247,9 +2246,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                     "Project runtime is retiring",
                 ));
             }
-            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
-            | Some(ProjectRuntimeOwnerStateV1::Recovering)
-            | Some(ProjectRuntimeOwnerStateV1::RecoveryRequired(_)) => {
+            Some(
+                ProjectRuntimeOwnerStateV1::ReplacingSessions
+                | ProjectRuntimeOwnerStateV1::Recovering
+                | ProjectRuntimeOwnerStateV1::RecoveryRequired(_),
+            ) => {
                 return Err(TraceDecayError::project_route(
                     "project_runtime_recovery",
                     true,
@@ -2270,20 +2271,19 @@ impl DaemonSessionRuntimeRegistryV1 {
                 "project_runtime_capacity",
                 true,
                 format!(
-                    "Project runtime owner capacity {} is fully occupied",
-                    MAX_RETAINED_PROJECT_RUNTIME_OWNERS
+                    "Project runtime owner capacity {MAX_RETAINED_PROJECT_RUNTIME_OWNERS} is fully occupied"
                 ),
             ));
         }
         entries.insert(project_id.clone(), ProjectRuntimeOwnerStateV1::Opening);
-        Ok(ProjectRuntimeOwnerAdmissionV1::Opening(
+        Ok(ProjectRuntimeOwnerAdmissionV1::Opening(Box::new(
             ProjectRuntimeOwnerOpeningReservationV1 {
                 owners: self.project_owners.clone(),
                 project_id: project_id.clone(),
                 previous: None,
                 armed: true,
             },
-        ))
+        )))
     }
 
     fn extend_project_runtime_owner(
@@ -2302,20 +2302,19 @@ impl DaemonSessionRuntimeRegistryV1 {
                     "project_runtime_capacity",
                     true,
                     format!(
-                        "Project runtime owner capacity {} is fully occupied",
-                        MAX_RETAINED_PROJECT_RUNTIME_OWNERS
+                        "Project runtime owner capacity {MAX_RETAINED_PROJECT_RUNTIME_OWNERS} is fully occupied"
                     ),
                 ));
             }
             entries.insert(project_id.clone(), ProjectRuntimeOwnerStateV1::Opening);
-            return Ok(ProjectRuntimeOwnerAdmissionV1::Opening(
+            return Ok(ProjectRuntimeOwnerAdmissionV1::Opening(Box::new(
                 ProjectRuntimeOwnerOpeningReservationV1 {
                     owners: self.project_owners.clone(),
                     project_id: project_id.clone(),
                     previous: None,
                     armed: true,
                 },
-            ));
+            )));
         };
         let ProjectRuntimeOwnerStateV1::Ready(previous) = state else {
             entries.insert(project_id.clone(), state);
@@ -2326,14 +2325,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             ));
         };
         entries.insert(project_id.clone(), ProjectRuntimeOwnerStateV1::Opening);
-        Ok(ProjectRuntimeOwnerAdmissionV1::Opening(
+        Ok(ProjectRuntimeOwnerAdmissionV1::Opening(Box::new(
             ProjectRuntimeOwnerOpeningReservationV1 {
                 owners: self.project_owners.clone(),
                 project_id: project_id.clone(),
                 previous: Some(previous),
                 armed: true,
             },
-        ))
+        )))
     }
 
     fn reserve_project_runtime_retirement(

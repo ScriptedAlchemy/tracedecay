@@ -520,21 +520,22 @@ impl TraceDecay {
                     let bound = exact_target.get(&(start, end));
                     let other = exact_other.get(&(start, end));
                     if bound.is_some() && other.is_some() {
-                        reason = "target and same-name graph evidence conflict at this occurrence"
-                            .to_owned();
+                        "target and same-name graph evidence conflict at this occurrence"
+                            .clone_into(&mut reason);
                     } else if let Some(bound) = bound {
                         kind = bound.kind;
                         source_node_id = Some(bound.source_node_id.clone());
                         if is_generated_path(&relative_path) {
-                            reason = "required site is generated or vendored".to_owned();
+                            "required site is generated or vendored".clone_into(&mut reason);
                         } else if !bound.apply_grade {
-                            reason = "graph edge authority is not safe for an apply-grade rename"
-                                .to_owned();
+                            "graph edge authority is not safe for an apply-grade rename"
+                                .clone_into(&mut reason);
                         } else if macro_syntax_at(line, line_start) {
-                            reason = "required site is inside unsupported macro syntax".to_owned();
+                            "required site is inside unsupported macro syntax"
+                                .clone_into(&mut reason);
                         } else {
                             disposition = RenameSiteDispositionV1::Changed;
-                            reason = "exact graph-bound occurrence".to_owned();
+                            "exact graph-bound occurrence".clone_into(&mut reason);
                             changed_ranges.push((start, end));
                         }
                     } else if let Some(other) = other {
@@ -542,25 +543,26 @@ impl TraceDecay {
                         source_node_id = Some(other.source_node_id.clone());
                         if other.apply_grade {
                             disposition = RenameSiteDispositionV1::Unchanged;
-                            reason =
-                                "same spelling belongs to a different canonical symbol".to_owned();
+                            "same spelling belongs to a different canonical symbol"
+                                .clone_into(&mut reason);
                         } else {
-                            reason = "same-name graph edge authority cannot safely exempt this occurrence"
-                                .to_owned();
+                            "same-name graph edge authority cannot safely exempt this occurrence"
+                                .clone_into(&mut reason);
                         }
                     } else if string_literal_at(line, line_start, &relative_path) {
                         disposition = RenameSiteDispositionV1::Skipped;
                         kind = RenameSiteKindV1::ProtectedValue;
-                        reason = "byte-exact string or wire value is protected".to_owned();
+                        "byte-exact string or wire value is protected".clone_into(&mut reason);
                     } else if comment_at(line, line_start) {
                         disposition = RenameSiteDispositionV1::Skipped;
                         kind = RenameSiteKindV1::Documentation;
-                        reason = "text-only prose is never guessed as a reference".to_owned();
+                        "text-only prose is never guessed as a reference".clone_into(&mut reason);
                     } else if is_generated_path(&relative_path) {
                         disposition = RenameSiteDispositionV1::Skipped;
-                        reason = "unbound occurrence is generated or vendored".to_owned();
+                        "unbound occurrence is generated or vendored".clone_into(&mut reason);
                     } else if macro_syntax_at(line, line_start) {
-                        reason = "unbound occurrence is inside unsupported macro syntax".to_owned();
+                        "unbound occurrence is inside unsupported macro syntax"
+                            .clone_into(&mut reason);
                     }
                     let id = site_id(&relative_path, start, end, kind)?;
                     if kind == RenameSiteKindV1::ProtectedValue {
@@ -612,7 +614,7 @@ impl TraceDecay {
                     });
                 }
             }
-            changed_ranges.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+            changed_ranges.sort_unstable_by_key(|range| std::cmp::Reverse(range.0));
             for pair in changed_ranges.windows(2) {
                 if pair[0].0 < pair[1].1 {
                     hazards.push(RenameHazardV1 {
