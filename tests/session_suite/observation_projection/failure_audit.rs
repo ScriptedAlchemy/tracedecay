@@ -434,18 +434,26 @@ async fn deterministic_sanitization_refusal_records_disposition_and_drains_rest(
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    // Text that opens a JSON container but can never parse: the LCM payload
-    // sanitizer refuses it deterministically on every attempt, so classifying
-    // it as an environmental storage failure would poison the queue forever.
+    // Plain-string content that opens a JSON container but can never parse:
+    // the projected text is stored verbatim and the LCM payload sanitizer
+    // refuses it deterministically on every attempt, so classifying it as an
+    // environmental storage failure would poison the queue forever.
+    let poisoned_payload = json!({
+        "type": "user",
+        "uuid": "record-message-sanitization-poisoned",
+        "timestamp": "2025-06-15T15:06:40Z",
+        "message": {
+            "id": "message-sanitization-poisoned",
+            "role": "user",
+            "content": "{ deterministically unsanitizable"
+        }
+    });
     let poisoned = observation(
         "session-sanitization-refusal",
         0,
         100,
         "receipt.sanitization-refusal-poisoned",
-        conversational_payload(
-            "message-sanitization-poisoned",
-            "{ deterministically unsanitizable",
-        ),
+        poisoned_payload,
     );
     let survivor = observation(
         "session-sanitization-refusal",
