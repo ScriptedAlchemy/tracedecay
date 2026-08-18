@@ -1,12 +1,12 @@
-mod backfill;
 mod codec;
 mod persist;
+mod reset;
 pub mod retention;
 mod schema;
 
-pub use backfill::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION;
-pub use schema::OBSERVATION_ANCHOR_SCHEMA_MIGRATION;
-pub(super) use schema::ensure_observation_schema;
+pub use reset::{ObservationAuthorityResetV1, reset_refused_observation_authority};
+pub use schema::OBSERVATION_AUTHORITY;
+pub(super) use schema::{ensure_observation_schema, require_admitted_observation_shape};
 
 use tracedecay_domain::{
     AnchorSourceGenerationV2, CanonicalObservationIdV1, ObservationScopeV1,

@@ -1,8 +1,7 @@
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
     ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SessionMessageProjection, SessionMessageRecord,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, SessionMessageRecord,
     SessionRecord,
 };
 
@@ -490,28 +489,6 @@ pub(super) async fn ensure_projection_output_state_cache(
     )
     .await
     .map_err(|error| storage("initialize projection output state cache", error))?;
-    conn.execute(
-        "UPDATE temp.observation_projection_output_state
-         SET projector_owned = 1,
-             canonical_observation_id = latest_observation_id
-         WHERE projector_version = ?1
-           AND EXISTS (
-                SELECT 1 FROM observation_projection_provenance AS predecessor
-                WHERE predecessor.projector_version IN (?2, ?3)
-                  AND predecessor.output_provider =
-                      observation_projection_output_state.output_provider
-                  AND predecessor.output_message_id =
-                      observation_projection_output_state.output_message_id
-                  AND predecessor.message_created = 1
-           )",
-        params![
-            SESSION_MESSAGE_PROJECTOR_VERSION,
-            SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-            SESSION_MESSAGE_PROJECTOR_VERSION_V1
-        ],
-    )
-    .await
-    .map_err(|error| storage("inherit predecessor projection ownership", error))?;
     conn.execute(
         "INSERT INTO temp.observation_projection_output_state_meta(initialized, data_version)
          VALUES (1, ?1)",

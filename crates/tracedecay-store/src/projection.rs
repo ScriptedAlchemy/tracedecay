@@ -14,9 +14,6 @@ use crate::{SessionMessageRecord, SessionRecord};
 #[cfg(test)]
 mod tests;
 
-pub const SESSION_MESSAGE_PROJECTOR_VERSION_V1: &str = "claude-session-message-v1";
-pub const SESSION_MESSAGE_PROJECTOR_VERSION_V2: &str = "claude-session-message-v2";
-pub const SESSION_MESSAGE_PROJECTOR_VERSION_V3: &str = "claude-session-message-v3";
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V4: &str = "claude-session-message-v4";
 pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V4;
 pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION;

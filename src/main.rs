@@ -729,7 +729,7 @@ async fn dispatch_project_command(
             dispatch_memory_command(action).await?;
         }
         Commands::Storage { action } => {
-            commands::handle_profile_storage_action(action).await?;
+            commands::handle_profile_storage_action(action, assume_yes).await?;
         }
         Commands::Wipe { all } => {
             commands::handle_wipe(all, assume_yes).await?;

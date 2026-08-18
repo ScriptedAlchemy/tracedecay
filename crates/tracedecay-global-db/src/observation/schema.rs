@@ -2,13 +2,44 @@ use std::collections::BTreeSet;
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
-use super::super::{global_db_operation_error, global_db_operation_message};
+use super::super::global_db_operation_error;
 
-const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrement";
+/// Typed reset authority for the observation store. No observation shape has
+/// ever shipped in a published release (`observations` is absent from both the
+/// v0.0.66 package and `origin/master`), so any schema drift here is a
+/// branch-local development artifact and refuses admission with
+/// [`ResetRequired`](tracedecay_runtime_core::errors::TraceDecayError::ResetRequired)
+/// instead of migrating.
+pub const OBSERVATION_AUTHORITY: &str = "observations";
 
-pub const OBSERVATION_ANCHOR_SCHEMA_MIGRATION: &str = "observation-retrieval-anchors-v2";
+/// Marker proving `observations` was created with the canonical AUTOINCREMENT
+/// DDL below; the authority schema contract's AUTOINCREMENT invariant consumes
+/// it. It is recorded at creation, never by rewriting an existing table.
+pub(super) const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrement";
 
-pub(super) const OBSERVATION_SCHEMA_OPERATION: &str = "migrate observation authority schema";
+/// Canonical `observations` column set. Shared by the admission refusal below
+/// and the scoped operator reset in [`super::reset`] so the two can never
+/// disagree about what counts as a refused shape.
+pub(super) const OBSERVATION_CANONICAL_COLUMNS: &[&str] = &[
+    "sequence",
+    "observation_id",
+    "payload_digest",
+    "receipt_id",
+    "observation_json",
+    "committed_cursor_json",
+];
+
+/// Canonical provider-neutral `source_cursor_advances` column set, shared with
+/// [`super::reset`] like [`OBSERVATION_CANONICAL_COLUMNS`].
+pub(super) const SOURCE_CURSOR_ADVANCES_CANONICAL_COLUMNS: &[&str] = &[
+    "source_json",
+    "scope_json",
+    "coverage_json",
+    "reason",
+    "receipt_id",
+];
+
+pub(super) const OBSERVATION_SCHEMA_OPERATION: &str = "ensure observation authority schema";
 
 async fn observation_table_exists(
     conn: &impl QueryExecutor,
@@ -24,27 +55,6 @@ async fn observation_table_exists(
         .await
         .map(|row| row.is_some())
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
-}
-
-async fn observation_columns(
-    conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<BTreeSet<String>> {
-    let mut rows = conn
-        .query("SELECT name FROM pragma_table_xinfo('observations')", ())
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    let mut columns = BTreeSet::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
-    {
-        columns.insert(
-            row.get::<String>(0)
-                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?,
-        );
-    }
-    Ok(columns)
 }
 
 pub(super) async fn migration_recorded(
@@ -64,103 +74,12 @@ pub(super) async fn migration_recorded(
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
-async fn migrate_observation_schema(
-    conn: &impl Executor,
-    table_preexisted: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    let columns = observation_columns(conn).await?;
-    let required = [
-        "sequence",
-        "observation_id",
-        "payload_digest",
-        "receipt_id",
-        "observation_json",
-        "committed_cursor_json",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect::<BTreeSet<_>>();
-    let mut allowed = required.clone();
-    allowed.insert("idempotency_key".to_string());
-    if !required.is_subset(&columns) || !columns.is_subset(&allowed) {
-        return Err(global_db_operation_message(
-            OBSERVATION_SCHEMA_OPERATION,
-            "observations has unsupported columns for canonical migration",
-        ));
-    }
-    super::super::schema_contract::validate_observation_migration_source(
-        conn,
-        columns.contains("idempotency_key"),
-    )
-    .await?;
-    let recorded = migration_recorded(conn, OBSERVATION_SCHEMA_MIGRATION).await?;
-    if !table_preexisted || (recorded && columns == required) {
-        conn.execute(
-            "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
-            params![OBSERVATION_SCHEMA_MIGRATION],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-        return Ok(());
-    }
-
-    // This full-table rewrite previously interrupted a 15GB `sessions.db`
-    // during an update.
-    // `observations` must stay classified `Recoverable` -- re-derivable by
-    // re-running sanitization/projection over recoverable transcript
-    // sources -- for that failure to stay non-blocking; assert it here so a
-    // future reclassification cannot silently drift from the code it
-    // documents.
-    debug_assert!(
-        matches!(
-            tracedecay_runtime_core::durability::session_authority_table_class("observations"),
-            tracedecay_runtime_core::durability::StoreDurabilityClass::Recoverable
-        ),
-        "the observations full-table rewrite must only ever run against a table \
-         proven Recoverable by the upgrade durability model"
-    );
-    conn.execute_batch(
-        "PRAGMA defer_foreign_keys = ON;
-             DROP TRIGGER IF EXISTS observations_immutable_update;
-             DROP TRIGGER IF EXISTS observations_immutable_delete;
-             DROP TABLE IF EXISTS observations_canonical_v2;
-             CREATE TABLE observations_canonical_v2 (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                observation_id TEXT NOT NULL UNIQUE,
-                payload_digest TEXT NOT NULL,
-                receipt_id TEXT NOT NULL,
-                observation_json TEXT NOT NULL,
-                committed_cursor_json TEXT NOT NULL,
-                FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
-             );
-             INSERT INTO observations_canonical_v2
-                (sequence, observation_id, payload_digest, receipt_id,
-                 observation_json, committed_cursor_json)
-             SELECT sequence, observation_id, payload_digest, receipt_id,
-                    observation_json, committed_cursor_json
-             FROM observations;
-             DROP TABLE observations;
-             ALTER TABLE observations_canonical_v2 RENAME TO observations;",
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    conn.execute(
-        "INSERT OR REPLACE INTO global_schema_migrations(migration) VALUES (?1)",
-        params![OBSERVATION_SCHEMA_MIGRATION],
-    )
-    .await
-    .map(|_| ())
-    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
-}
-
-async fn migrate_source_cursor_advances_schema(
-    conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
+async fn table_columns(
+    conn: &impl QueryExecutor,
+    table: &str,
+) -> tracedecay_runtime_core::errors::Result<BTreeSet<String>> {
     let mut rows = conn
-        .query(
-            "SELECT name FROM pragma_table_xinfo('source_cursor_advances')",
-            (),
-        )
+        .query("SELECT name FROM pragma_table_xinfo(?1)", params![table])
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     let mut columns = BTreeSet::new();
@@ -174,78 +93,63 @@ async fn migrate_source_cursor_advances_schema(
                 .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?,
         );
     }
-    let provider_neutral = [
-        "source_json",
-        "scope_json",
-        "coverage_json",
-        "reason",
-        "receipt_id",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect::<BTreeSet<_>>();
-    if columns == provider_neutral {
-        return Ok(());
-    }
-    let legacy = [
-        "source_json",
-        "scope_json",
-        "file_generation",
-        "start_offset",
-        "end_offset",
-        "reason",
-        "receipt_id",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect::<BTreeSet<_>>();
-    if columns != legacy {
-        return Err(global_db_operation_message(
-            OBSERVATION_SCHEMA_OPERATION,
-            "source_cursor_advances has unsupported columns",
-        ));
-    }
-    conn.execute_batch(
-        "CREATE TABLE source_cursor_advances_v2 (
-            source_json TEXT NOT NULL,
-            scope_json TEXT NOT NULL,
-            coverage_json TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            receipt_id TEXT,
-            PRIMARY KEY(source_json, scope_json, coverage_json),
-            FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
-         );
-         INSERT INTO source_cursor_advances_v2
-            (source_json, scope_json, coverage_json, reason, receipt_id)
-         SELECT source_json, scope_json,
-                json_object(
-                    'generation', CAST(file_generation AS INTEGER),
-                    'ordering_domain', 'file_bytes',
-                    'range', json_object(
-                        'start', CAST(start_offset AS INTEGER),
-                        'end', CAST(end_offset AS INTEGER)
-                    )
-                ),
-                reason, receipt_id
-         FROM source_cursor_advances;
-         DROP TABLE source_cursor_advances;
-         ALTER TABLE source_cursor_advances_v2 RENAME TO source_cursor_advances;",
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+    Ok(columns)
 }
 
-pub async fn ensure_observation_schema(
-    conn: &(impl Executor + Sync),
+fn canonical_column_set(columns: &[&str]) -> BTreeSet<String> {
+    columns.iter().map(|column| (*column).to_string()).collect()
+}
+
+/// Refuses a store whose `observations` or `source_cursor_advances` table
+/// carries anything but the canonical shape (plus, for `observations`, its
+/// creation marker). The alternative shapes — the `idempotency_key` column
+/// era, unmarked non-AUTOINCREMENT tables, and the byte-offset
+/// `source_cursor_advances` predecessor — were branch-local and never shipped
+/// in a published release, so there is no sanctioned migration: the store
+/// surfaces a typed `ResetRequired` naming this authority instead of
+/// rewriting data in place. Runs at schema installation for fresh stores and
+/// at the attach boundary for existing ones.
+pub(crate) async fn require_admitted_observation_shape(
+    conn: &impl QueryExecutor,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    let table_preexisted = observation_table_exists(conn).await?;
-    tracedecay_runtime_core::db::retrieval_anchor_schema::install_retrieval_anchor_schema(
-        conn,
-        OBSERVATION_SCHEMA_OPERATION,
-    )
-    .await?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS global_schema_migrations (
+    if observation_table_exists(conn).await? {
+        let columns = table_columns(conn, "observations").await?;
+        let recorded = migration_recorded(conn, OBSERVATION_SCHEMA_MIGRATION).await?;
+        if columns != canonical_column_set(OBSERVATION_CANONICAL_COLUMNS) || !recorded {
+            return Err(
+                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                    OBSERVATION_AUTHORITY,
+                    "observations carries a pre-release branch-local shape that no \
+                     published binary ever wrote; there is no sanctioned migration, \
+                     reset the observation authority to recreate it at the canonical \
+                     schema",
+                ),
+            );
+        }
+    }
+    let advances = table_columns(conn, "source_cursor_advances").await?;
+    if !advances.is_empty()
+        && advances != canonical_column_set(SOURCE_CURSOR_ADVANCES_CANONICAL_COLUMNS)
+    {
+        return Err(
+            tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                OBSERVATION_AUTHORITY,
+                "source_cursor_advances carries a pre-release branch-local shape \
+                 that no published binary ever wrote; there is no sanctioned \
+                 migration, reset the observation authority to recreate it at the \
+                 canonical schema",
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Canonical observation-authority DDL. Shared with the scoped operator reset
+/// in [`super::reset`], which recreates these tables after dropping a refused
+/// authority, so the installer and the reset can never produce different
+/// shapes.
+pub(super) const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS global_schema_migrations (
             migration TEXT PRIMARY KEY
         );
         CREATE TABLE IF NOT EXISTS sanitization_receipts (
@@ -334,10 +238,6 @@ pub async fn ensure_observation_schema(
             PRIMARY KEY(source_json, scope_json, coverage_json),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
-        CREATE TABLE IF NOT EXISTS observation_backfill_watermarks (
-            migration TEXT NOT NULL PRIMARY KEY,
-            backfilled_through INTEGER NOT NULL CHECK(backfilled_through >= 0)
-        );
         CREATE TABLE IF NOT EXISTS projection_queue (
             observation_id TEXT PRIMARY KEY,
             observation_sequence INTEGER NOT NULL UNIQUE,
@@ -345,28 +245,28 @@ pub async fn ensure_observation_schema(
             next_retry_at_micros INTEGER NOT NULL DEFAULT 0 CHECK(next_retry_at_micros >= 0),
             last_error TEXT,
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
-        );",
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    super::super::ensure_table_columns(
+        );";
+
+pub async fn ensure_observation_schema(
+    conn: &(impl Executor + Sync),
+) -> tracedecay_runtime_core::errors::Result<()> {
+    let table_preexisted = observation_table_exists(conn).await?;
+    tracedecay_runtime_core::db::retrieval_anchor_schema::install_retrieval_anchor_schema(
         conn,
-        "source_cursor_advances",
-        &[(
-            "receipt_id",
-            "ALTER TABLE source_cursor_advances
-             ADD COLUMN receipt_id TEXT REFERENCES sanitization_receipts(receipt_id)",
-        )],
+        OBSERVATION_SCHEMA_OPERATION,
     )
-    .await
-    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    migrate_source_cursor_advances_schema(conn).await?;
-    migrate_observation_schema(conn, table_preexisted).await?;
-    // The retrieval-anchor and repository-provenance backfills deliberately do
-    // NOT run here: this function executes inside the schema-upgrade
-    // mega-transaction, where a cancelled open (the warmup deadline interrupts
-    // in-flight statements) would roll every row of a large-store backfill back
-    // and re-arm the same full scan on the next open. `super::backfill` runs
-    // both after that transaction commits and pages their progress durably.
+    .await?;
+    conn.execute_batch(OBSERVATION_AUTHORITY_SCHEMA_SQL)
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    if !table_preexisted {
+        conn.execute(
+            "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
+            params![OBSERVATION_SCHEMA_MIGRATION],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    }
+    require_admitted_observation_shape(conn).await?;
     Ok(())
 }

@@ -6,6 +6,7 @@ use tracedecay::display::format_bytes;
 
 pub(crate) async fn handle_profile_storage_action(
     action: ProfileStorageAction,
+    assume_yes: bool,
 ) -> tracedecay::errors::Result<()> {
     match action {
         ProfileStorageAction::StorageReport {
@@ -20,7 +21,266 @@ pub(crate) async fn handle_profile_storage_action(
         ProfileStorageAction::RehearseProfileBackup { backup, restore } => {
             handle_rehearse_profile_backup(backup, restore)
         }
+        ProfileStorageAction::ResetAuthority { authority, db } => {
+            handle_reset_authority(authority, db, assume_yes)
+        }
+        ProfileStorageAction::ResetProjectStore {
+            project_root,
+            project_id,
+        } => handle_reset_project_store(project_root, project_id, assume_yes),
     }
+}
+
+/// Scoped operator recovery for a project graph store whose open failed with
+/// the typed `ResetRequired` state (an incompatible `user_version`). Only the
+/// refused graph database and its WAL/SHM sidecars are deleted; the store
+/// directory, session archive, and provider transcripts are preserved, so the
+/// next daemon open recreates the graph at the canonical schema and re-ingests
+/// from those durable inputs. A store already at the canonical schema is
+/// refused untouched — this command cannot be used to wipe a healthy store.
+fn handle_reset_project_store(
+    project_root: Option<String>,
+    project_id: Option<String>,
+    assume_yes: bool,
+) -> tracedecay::errors::Result<()> {
+    let profile_root = tracedecay::storage::default_profile_root()?;
+    let project_id = match (project_root, project_id) {
+        (Some(root), None) => {
+            let root = PathBuf::from(root);
+            let layout = tracedecay::storage::resolve_layout_for_current_profile(&root)?;
+            layout.identity.project_id.ok_or_else(|| {
+                tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "project root '{}' resolves no authoritative project identity",
+                        root.display()
+                    ),
+                }
+            })?
+        }
+        (None, Some(project_id)) => {
+            tracedecay::storage::validate_project_id(&project_id).map_err(|message| {
+                tracedecay::errors::TraceDecayError::Config {
+                    message: format!("invalid --project-id: {message}"),
+                }
+            })?;
+            project_id
+        }
+        _ => {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "exactly one of --project-root or --project-id is required".to_owned(),
+            });
+        }
+    };
+    if !assume_yes {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "resetting the refused project graph store for '{project_id}' deletes its \
+                 code graph and project memory facts; sessions re-ingest from the preserved \
+                 transcripts at the next open. Re-run with --yes to confirm"
+            ),
+        });
+    }
+    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "reset-project-store",
+    )?;
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle_lease,
+        &profile_root,
+        "reset-project-store",
+    )?;
+    let outcome = reset_refused_project_graph_store(&profile_root, &project_id)?;
+    println!(
+        "reset the refused project graph store for '{project_id}' \
+         (schema v{} -> fresh v{} at the next open)",
+        outcome.previous_schema_version, outcome.canonical_schema_version
+    );
+    println!("  removed {}", outcome.graph_db_path.display());
+    println!(
+        "  preserved the store directory, session archive, and provider transcripts \
+         under {}",
+        outcome.data_root.display()
+    );
+    println!(
+        "run `tracedecay init <project root>` (or any daemon-brokered open) to recreate \
+         the graph at the canonical schema; sessions re-ingest from the preserved \
+         transcripts"
+    );
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ResetProjectGraphStoreOutcome {
+    data_root: PathBuf,
+    graph_db_path: PathBuf,
+    previous_schema_version: i64,
+    canonical_schema_version: u32,
+}
+
+/// Verifies the project graph store under `profile_root` is genuinely refused
+/// — a real SQLite database stamped with a schema version this binary does
+/// not create — and deletes exactly that database and its WAL/SHM sidecars.
+/// A store already at the canonical schema (or a file that is not a SQLite
+/// database) is refused untouched, so this cannot wipe a healthy store.
+fn reset_refused_project_graph_store(
+    profile_root: &Path,
+    project_id: &str,
+) -> tracedecay::errors::Result<ResetProjectGraphStoreOutcome> {
+    let data_root = tracedecay::storage::profile_sharded_data_root(profile_root, project_id);
+    let graph_db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+    if !graph_db_path.is_file() {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "no project graph store exists at {}; nothing to reset",
+                graph_db_path.display()
+            ),
+        });
+    }
+    let has_header = tracedecay::storage::has_sqlite_database_header(&graph_db_path).map_err(
+        |error| tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "could not verify the store header at {}: {error}",
+                graph_db_path.display()
+            ),
+        },
+    )?;
+    if !has_header {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "{} is not a SQLite database; the scoped reset covers only stores refused \
+                 for an incompatible schema version",
+                graph_db_path.display()
+            ),
+        });
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        &graph_db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|error| tracedecay::errors::TraceDecayError::Database {
+        operation: "open project graph store for reset verification".to_string(),
+        message: error.to_string(),
+    })?;
+    let previous_schema_version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|error| tracedecay::errors::TraceDecayError::Database {
+            operation: "read project graph store schema version".to_string(),
+            message: error.to_string(),
+        })?;
+    drop(connection);
+    let canonical_schema_version = tracedecay::db::migrations::SCHEMA_VERSION;
+    if previous_schema_version == i64::from(canonical_schema_version) {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "the project graph store at {} is already at the canonical schema \
+                 v{canonical_schema_version}; it is not refused and nothing was reset",
+                graph_db_path.display()
+            ),
+        });
+    }
+    for sidecar_suffix in ["", "-wal", "-shm"] {
+        let path = if sidecar_suffix.is_empty() {
+            graph_db_path.clone()
+        } else {
+            let mut file_name = graph_db_path
+                .file_name()
+                .unwrap_or_default()
+                .to_os_string();
+            file_name.push(sidecar_suffix);
+            graph_db_path.with_file_name(file_name)
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!("failed to remove {}: {error}", path.display()),
+                });
+            }
+        }
+    }
+    Ok(ResetProjectGraphStoreOutcome {
+        data_root,
+        graph_db_path,
+        previous_schema_version,
+        canonical_schema_version,
+    })
+}
+
+/// Scoped operator recovery for a store whose open failed with the typed
+/// `ResetRequired` state. The daemon cannot open a refused store, so the
+/// reset runs offline under the profile's exclusive maintenance lease; the
+/// next daemon open recreates the authority at the canonical schema and its
+/// content re-derives from the preserved transcripts.
+fn handle_reset_authority(
+    authority: String,
+    db: Option<String>,
+    assume_yes: bool,
+) -> tracedecay::errors::Result<()> {
+    if authority != tracedecay_global_db::observation::OBSERVATION_AUTHORITY {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "no scoped reset exists for authority '{authority}'; the only \
+                 scoped-resettable authority is '{}'",
+                tracedecay_global_db::observation::OBSERVATION_AUTHORITY
+            ),
+        });
+    }
+    if !assume_yes {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "resetting the '{authority}' authority drops its refused tables and \
+                 clears their recoverable derivations; re-run with --yes to confirm"
+            ),
+        });
+    }
+    let profile_root = tracedecay::storage::default_profile_root()?;
+    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "reset-authority",
+    )?;
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle_lease,
+        &profile_root,
+        "reset-authority",
+    )?;
+    let db_path = match db {
+        Some(path) => PathBuf::from(path),
+        None => tracedecay_sessions::runtime::user_sessions_db_path(&profile_root),
+    };
+    if !db_path.is_file() {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "no sessions store exists at {}; nothing to reset",
+                db_path.display()
+            ),
+        });
+    }
+    let mut connection = rusqlite::Connection::open(&db_path).map_err(|error| {
+        tracedecay::errors::TraceDecayError::Database {
+            operation: "open sessions store for authority reset".to_string(),
+            message: error.to_string(),
+        }
+    })?;
+    let report = tracedecay_global_db::observation::reset_refused_observation_authority(
+        &mut connection,
+    )?;
+    println!(
+        "reset the refused '{authority}' authority in {}",
+        db_path.display()
+    );
+    for table in &report.reset_tables {
+        println!("  recreated {table} empty at the canonical schema");
+    }
+    println!(
+        "  cleared {} recoverable session_messages row(s)",
+        report.cleared_session_message_rows
+    );
+    println!(
+        "the authority content re-derives from the preserved transcripts at the \
+         next daemon open"
+    );
+    Ok(())
 }
 
 async fn brokered_storage_report(
@@ -294,4 +554,105 @@ fn handle_rehearse_profile_backup(
         restore
     );
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod reset_project_store_tests {
+    use super::*;
+
+    fn write_store_with_user_version(profile_root: &Path, project_id: &str, version: u32) -> PathBuf {
+        let data_root = tracedecay::storage::profile_sharded_data_root(profile_root, project_id);
+        std::fs::create_dir_all(&data_root).expect("store dir");
+        let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+        let connection = rusqlite::Connection::open(&db_path).expect("create store");
+        connection
+            .execute_batch(&format!(
+                "PRAGMA user_version = {version}; CREATE TABLE anchor (id INTEGER);"
+            ))
+            .expect("stamp store");
+        drop(connection);
+        db_path
+    }
+
+    #[test]
+    fn refused_old_schema_store_is_reset_and_transcript_inputs_survive() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        let db_path = write_store_with_user_version(&profile_root, "proj_refused_v18", 18);
+        // WAL/SHM sidecars and durable transcript inputs share the store dir.
+        let wal_path = db_path.with_file_name("tracedecay.db-wal");
+        std::fs::write(&wal_path, b"wal").unwrap();
+        let data_root = db_path.parent().unwrap().to_path_buf();
+        let sessions_path = data_root.join("sessions.db");
+        std::fs::write(&sessions_path, b"session archive").unwrap();
+
+        let outcome =
+            reset_refused_project_graph_store(&profile_root, "proj_refused_v18").unwrap();
+
+        assert_eq!(outcome.previous_schema_version, 18);
+        assert!(!db_path.exists(), "refused graph database must be removed");
+        assert!(!wal_path.exists(), "WAL sidecar must be removed");
+        assert!(
+            sessions_path.exists(),
+            "the session archive is a durable re-ingest input and must survive"
+        );
+        assert!(data_root.exists(), "the store directory itself must survive");
+    }
+
+    #[test]
+    fn canonical_schema_store_is_refused_untouched() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        let db_path = write_store_with_user_version(
+            &profile_root,
+            "proj_canonical",
+            tracedecay::db::migrations::SCHEMA_VERSION,
+        );
+
+        let error =
+            reset_refused_project_graph_store(&profile_root, "proj_canonical").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("already at the canonical schema"),
+            "unexpected refusal: {error}"
+        );
+        assert!(db_path.exists(), "a healthy store must never be deleted");
+    }
+
+    #[test]
+    fn non_sqlite_file_is_refused_untouched() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        let data_root =
+            tracedecay::storage::profile_sharded_data_root(&profile_root, "proj_not_sqlite");
+        std::fs::create_dir_all(&data_root).unwrap();
+        let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+        std::fs::write(&db_path, b"not a database").unwrap();
+
+        let error =
+            reset_refused_project_graph_store(&profile_root, "proj_not_sqlite").unwrap_err();
+
+        assert!(
+            error.to_string().contains("is not a SQLite database"),
+            "unexpected refusal: {error}"
+        );
+        assert!(db_path.exists(), "an unrecognized file must never be deleted");
+    }
+
+    #[test]
+    fn missing_store_is_a_typed_nothing_to_reset() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+
+        let error =
+            reset_refused_project_graph_store(&profile_root, "proj_absent").unwrap_err();
+
+        assert!(
+            error.to_string().contains("nothing to reset"),
+            "unexpected refusal: {error}"
+        );
+    }
 }

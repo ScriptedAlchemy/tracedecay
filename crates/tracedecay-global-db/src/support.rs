@@ -378,6 +378,66 @@ pub(crate) async fn ensure_table_columns(
     Ok(())
 }
 
+const CODE_PROJECT_PRIMARY_ROOT_COLUMNS: &[(&str, &str)] = &[
+    (
+        "primary_root_platform",
+        "ALTER TABLE code_projects ADD COLUMN primary_root_platform TEXT",
+    ),
+    (
+        "primary_root_bytes",
+        "ALTER TABLE code_projects ADD COLUMN primary_root_bytes BLOB",
+    ),
+    (
+        "primary_root_last_seen_at",
+        "ALTER TABLE code_projects ADD COLUMN primary_root_last_seen_at INTEGER",
+    ),
+];
+
+pub(crate) async fn table_exists(
+    conn: &(impl tracedecay_runtime_core::db::engine::QueryExecutor + ?Sized),
+    table: &str,
+) -> tracedecay_runtime_core::db::engine::Result<bool> {
+    let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
+        conn,
+        "SELECT 1 FROM pragma_table_info(?1) LIMIT 1",
+        tracedecay_runtime_core::db::engine::params![table],
+    )
+    .await?;
+    Ok(rows.next().await?.is_some())
+}
+
+/// True when `code_projects` exists but still carries the released
+/// pre-`primary_root` column shape (the 8-column registry shipped through
+/// 0.0.66). A missing table is an unknown shape, not a released one.
+pub(crate) async fn code_projects_missing_primary_root_columns(
+    conn: &(impl tracedecay_runtime_core::db::engine::QueryExecutor + ?Sized),
+) -> tracedecay_runtime_core::db::engine::Result<bool> {
+    if !table_exists(conn, "code_projects").await? {
+        return Ok(false);
+    }
+    for &(column, _) in CODE_PROJECT_PRIMARY_ROOT_COLUMNS {
+        if !table_column_exists(conn, "code_projects", column).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Adds the nullable `primary_root_*` columns the final `code_projects`
+/// contract requires to a registry created by a released pre-`primary_root`
+/// binary. Purely additive: existing rows are preserved with NULL values
+/// until the next project registration backfills them. A registry without
+/// the table at all is left for contract validation to refuse with its typed
+/// reset state rather than fabricated here.
+pub(crate) async fn ensure_code_project_primary_root_columns(
+    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
+) -> tracedecay_runtime_core::db::engine::Result<()> {
+    if !table_exists(conn, "code_projects").await? {
+        return Ok(());
+    }
+    ensure_table_columns(conn, "code_projects", CODE_PROJECT_PRIMARY_ROOT_COLUMNS).await
+}
+
 pub(crate) async fn ensure_session_parent_columns(
     conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
 ) -> tracedecay_runtime_core::db::engine::Result<()> {

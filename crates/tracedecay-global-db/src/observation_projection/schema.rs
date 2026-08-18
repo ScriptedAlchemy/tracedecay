@@ -3,17 +3,12 @@ use tracedecay_runtime_core::{
     ports::registered_schema::RegisteredSchemaInstallationV1,
 };
 
-/// Creates the observation projection schema at its final V4 shape, or
-/// verifies that an existing store already carries that shape.
-///
-/// There is no ladder here. Every store is born at the shape below; a store at
-/// any other shape is a typed refusal from [`verify_final_projection_shape`],
-/// naming the wipe-and-recreate remedy rather than a migrate command.
-pub(in super::super) async fn ensure_observation_projection_schema(
-    conn: &impl Executor,
-) -> Result<(), Error> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS observation_projection_provenance (
+/// Final V4 observation-projection DDL. Shared with the scoped observation
+/// reset in `crate::observation::reset`, which recreates these tables after
+/// dropping a refused authority, so the installer and the reset can never
+/// produce different shapes.
+pub(crate) const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS observation_projection_provenance (
             projector_version TEXT NOT NULL,
             observation_id TEXT NOT NULL,
             output_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(output_ordinal >= 0),
@@ -297,9 +292,57 @@ pub(in super::super) async fn ensure_observation_projection_schema(
                 ON DELETE CASCADE,
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
-        );",
-    )
-    .await?;
+        );";
+
+/// V4 anchor-binding triggers, shared with the scoped observation reset like
+/// [`OBSERVATION_PROJECTION_SCHEMA_SQL`].
+pub(crate) const OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL: &str =
+    include_str!("projection_v4_binding_triggers.sql");
+
+/// Historical-data indexes the schema contract requires on the projection
+/// authority, shared with the scoped observation reset.
+pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
+     ON observation_projection_provenance
+        (projector_version, output_provider, output_message_id);",
+    "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_global_output
+     ON observation_projection_provenance
+        (output_provider, output_message_id, projector_version);",
+    "CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_query
+     ON observation_workflow_facts
+        (provider, session_id, semantic_kind, status, observation_sequence);",
+    "CREATE INDEX IF NOT EXISTS idx_observation_provider_usage_scope
+     ON observation_provider_usage
+        (projector_version, scope_kind, project_id, provider, session_id,
+         observation_sequence, usage_ordinal);",
+    "CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_item
+     ON observation_workflow_facts
+        (provider, session_id, semantic_kind, item_id, provider_reference,
+         event_sequence, source_sequence, observation_sequence);",
+    "CREATE INDEX IF NOT EXISTS idx_projection_rebuild_provenance_output
+     ON observation_projection_rebuild_provenance
+        (projector_version, generation, output_provider, output_message_id);",
+    "CREATE INDEX IF NOT EXISTS idx_projection_rebuild_workflow_goal
+     ON observation_projection_rebuild_workflow_facts
+        (projector_version, generation, provider, session_id, semantic_kind,
+         provider_reference, observation_sequence);",
+    "CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
+     ON observations (observation_id, receipt_id);",
+    "CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
+     ON observation_projection_dispositions (observation_id, receipt_id);",
+];
+
+/// Creates the observation projection schema at its final V4 shape, or
+/// verifies that an existing store already carries that shape.
+///
+/// There is no ladder here. Every store is born at the shape in
+/// [`OBSERVATION_PROJECTION_SCHEMA_SQL`]; a store at any other shape is a
+/// typed refusal from [`verify_final_projection_shape`], naming the
+/// wipe-and-recreate remedy rather than a migrate command.
+pub(in super::super) async fn ensure_observation_projection_schema(
+    conn: &impl Executor,
+) -> Result<(), Error> {
+    conn.execute_batch(OBSERVATION_PROJECTION_SCHEMA_SQL).await?;
     verify_final_projection_shape(conn).await?;
     ensure_v4_projection_binding_triggers(conn).await
 }
@@ -313,36 +356,7 @@ pub(in super::super) async fn ensure_observation_projection_performance_indexes(
     // explicit revalidated-batch API keeps shutdown cancellation while allowing one
     // real-scale SQLite index build to use the schema transaction's fixed
     // 120-second lease instead of the ordinary 30-second statement deadline.
-    for sql in [
-        "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
-         ON observation_projection_provenance
-            (projector_version, output_provider, output_message_id);",
-        "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_global_output
-         ON observation_projection_provenance
-            (output_provider, output_message_id, projector_version);",
-        "CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_query
-         ON observation_workflow_facts
-            (provider, session_id, semantic_kind, status, observation_sequence);",
-        "CREATE INDEX IF NOT EXISTS idx_observation_provider_usage_scope
-         ON observation_provider_usage
-            (projector_version, scope_kind, project_id, provider, session_id,
-             observation_sequence, usage_ordinal);",
-        "CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_item
-         ON observation_workflow_facts
-            (provider, session_id, semantic_kind, item_id, provider_reference,
-             event_sequence, source_sequence, observation_sequence);",
-        "CREATE INDEX IF NOT EXISTS idx_projection_rebuild_provenance_output
-         ON observation_projection_rebuild_provenance
-            (projector_version, generation, output_provider, output_message_id);",
-        "CREATE INDEX IF NOT EXISTS idx_projection_rebuild_workflow_goal
-         ON observation_projection_rebuild_workflow_facts
-            (projector_version, generation, provider, session_id, semantic_kind,
-             provider_reference, observation_sequence);",
-        "CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
-         ON observations (observation_id, receipt_id);",
-        "CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
-         ON observation_projection_dispositions (observation_id, receipt_id);",
-    ] {
+    for sql in OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL {
         installation
             .execute_authority_revalidated_batch(sql)
             .await?;
@@ -365,7 +379,7 @@ async fn projection_table_column_exists(
 }
 
 async fn ensure_v4_projection_binding_triggers(conn: &impl Executor) -> Result<(), Error> {
-    conn.execute_batch(include_str!("projection_v4_binding_triggers.sql"))
+    conn.execute_batch(OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL)
         .await
 }
 

@@ -1,10 +1,9 @@
 mod retrieval_anchors;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
@@ -714,8 +713,11 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
     assert_eq!(deltas.get("observation_repository_provenance"), Some(&1));
 }
 
+/// The `idempotency_key` observation shape never shipped in a published
+/// release, so admission must refuse it with the typed `ResetRequired` state
+/// naming the observation authority — never migrate it in place.
 #[tokio::test]
-async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
+async fn pre_release_idempotency_observation_shape_refuses_admission_with_reset_required() {
     let tmp = TempDir::new().unwrap();
     let bootstrap = profile_runtime(&tmp).await;
     let db_path = bootstrap
@@ -723,34 +725,14 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
         .unwrap()
         .to_path_buf();
     drop(bootstrap);
-    std::fs::remove_file(&db_path).unwrap();
-    for suffix in ["-wal", "-shm"] {
-        let mut sidecar = db_path.as_os_str().to_os_string();
-        sidecar.push(suffix);
-        let _ = std::fs::remove_file(PathBuf::from(sidecar));
-    }
-    let original = observation(0, 100, "receipt.legacy.original", "legacy payload");
-    let original_cursor = cursor(100);
-    let legacy_idempotency_key = {
-        let mut hasher = Sha256::new();
-        hasher.update(b"tracedecay.claude.idempotency.v1\0");
-        hasher.update(
-            tracedecay_domain::research::canonical_json_bytes(original.identity()).unwrap(),
-        );
-        format!("sha256:{}", hex::encode(hasher.finalize()))
-    };
-    let mut legacy_wire = serde_json::to_value(&original).unwrap();
-    legacy_wire["idempotency_key"] = legacy_idempotency_key.clone().into();
 
     let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
     raw_conn
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    raw_conn
         .execute_batch(
-            "CREATE TABLE sanitization_receipts (
-                receipt_id TEXT PRIMARY KEY,
-                sanitizer_version TEXT NOT NULL,
-                payload_digest TEXT NOT NULL,
-                receipt_json TEXT NOT NULL
-            );
+            "DROP TABLE observations;
             CREATE TABLE observations (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 observation_id TEXT NOT NULL UNIQUE,
@@ -760,167 +742,48 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
                 observation_json TEXT NOT NULL,
                 committed_cursor_json TEXT NOT NULL,
                 FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
-            );",
-        )
-        .unwrap();
-    raw_conn
-        .execute(
-            "INSERT INTO sanitization_receipts
-                (receipt_id, sanitizer_version, payload_digest, receipt_json)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![
-                original.receipt().receipt().receipt_id().as_str(),
-                original.receipt().receipt().sanitizer_version().as_str(),
-                original.payload_reference().digest().as_str(),
-                serde_json::to_string(original.receipt()).unwrap()
-            ],
-        )
-        .unwrap();
-    raw_conn
-        .execute(
-            "INSERT INTO observations
+            );
+            INSERT INTO observations
                 (observation_id, idempotency_key, payload_digest, receipt_id,
                  observation_json, committed_cursor_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                original.observation_id().as_str(),
-                legacy_idempotency_key,
-                original.payload_reference().digest().as_str(),
-                original.receipt().receipt().receipt_id().as_str(),
-                serde_json::to_string(&legacy_wire).unwrap(),
-                serde_json::to_string(&original_cursor).unwrap()
-            ],
+            VALUES ('observation.legacy', 'idempotency.legacy', 'digest.legacy',
+                    'receipt.legacy', '{}', '{}');",
         )
         .unwrap();
     drop(raw_conn);
 
-    let runtime = profile_runtime(&tmp).await;
-    assert_eq!(
-        runtime.database_path(HostAdmissionScope::Profile),
-        Some(db_path.as_path())
-    );
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let stored = store
-        .get_observation(original.observation_id())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.observation(), &original);
-    assert_eq!(stored.committed_cursor(), &original_cursor);
-    assert_eq!(
-        stored.projection_generation().as_str(),
-        "projection.legacy-observation-import.v1"
-    );
-    assert_eq!(stored.retrieval_anchor().ingested_at(), UtcMicros(0));
-    assert!(matches!(
-        stored.repository_provenance_attachment().availability(),
-        EvidenceAvailabilityV1::Unknown
-    ));
-    assert_eq!(
-        stored.projection_status(),
-        ObservationProjectionStatus::Queued
-    );
-
-    let duplicate = store
-        .persist_observation(write(original.clone(), None))
-        .await
-        .unwrap();
-    assert!(matches!(
-        duplicate,
-        ObservationPersistOutcome::ExactDuplicate(receipt)
-            if receipt == *stored.commit_receipt()
-    ));
-
-    let next = observation(100, 200, "receipt.legacy.next", "next payload");
-    store
-        .persist_observation(write(next.clone(), Some(original_cursor)))
-        .await
-        .unwrap();
-    let verify_conn = rusqlite::Connection::open(&db_path).unwrap();
-    let mut statement = verify_conn
-        .prepare("SELECT name FROM pragma_table_xinfo('observations')")
-        .unwrap();
-    let columns = statement
-        .query_map((), |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert!(!columns.iter().any(|name| name == "idempotency_key"));
-    drop(statement);
-    let mut statement = verify_conn
-        .prepare(
-            "SELECT migration FROM global_schema_migrations
-             WHERE migration IN (?1, ?2)
-             ORDER BY migration",
-        )
-        .unwrap();
-    let migration_markers = statement
-        .query_map(
-            rusqlite::params![
-                "observation-repository-provenance-v1",
-                "observation-retrieval-anchors-v2"
-            ],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(
-        migration_markers,
-        vec![
-            "observation-repository-provenance-v1".to_owned(),
-            "observation-retrieval-anchors-v2".to_owned(),
-        ],
-        "an existing global database must record both resumable anchor upgrades"
-    );
-    drop(statement);
-    let mut statement = verify_conn
-        .prepare(
-            "SELECT name FROM sqlite_master
-             WHERE type IN ('table', 'trigger')
-               AND name IN (
-                   'observation_repository_provenance',
-                   'observation_repository_provenance_immutable_update',
-                   'observation_repository_provenance_immutable_delete'
-               )
-             ORDER BY name",
-        )
-        .unwrap();
-    let provenance_schema = statement
-        .query_map((), |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(
-        provenance_schema,
-        vec![
-            "observation_repository_provenance".to_owned(),
-            "observation_repository_provenance_immutable_delete".to_owned(),
-            "observation_repository_provenance_immutable_update".to_owned(),
-        ]
-    );
-    drop(statement);
+    let error = match HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay")).await {
+        Ok(_) => panic!("a pre-release observation shape must refuse admission"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("expected the typed ResetRequired state, got: {error}"));
+    assert_eq!(authority, "observations");
     assert!(
-        verify_conn
-            .execute(
-                "UPDATE observation_repository_provenance
-                 SET availability_json = availability_json
-                 WHERE observation_id = ?1",
-                rusqlite::params![original.observation_id().as_str()],
-            )
-            .is_err(),
-        "an upgraded provenance attachment must be immutable"
+        reason.contains("no sanctioned migration"),
+        "the refusal must explain that the shape never shipped: {reason}"
     );
-    let exists = verify_conn
+
+    let verify_conn = rusqlite::Connection::open(&db_path).unwrap();
+    let legacy_columns_intact = verify_conn
         .query_row(
-            "SELECT sequence FROM observations WHERE observation_id = ?1",
-            rusqlite::params![next.observation_id().as_str()],
-            |_| Ok(()),
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_xinfo('observations')
+                WHERE name = 'idempotency_key'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
         )
-        .is_ok();
-    assert!(exists);
+        .unwrap();
+    assert!(
+        legacy_columns_intact,
+        "a refused shape must not be silently migrated"
+    );
+    let legacy_rows: i64 = verify_conn
+        .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(legacy_rows, 1, "refused data must be preserved for recovery");
 }
 
 #[tokio::test]

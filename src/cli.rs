@@ -1156,6 +1156,43 @@ pub enum ProfileStorageAction {
         #[arg(long)]
         restore: String,
     },
+    /// Reset exactly one refused authority so the next open recreates it at
+    /// the canonical schema. Applies only to a store whose open failed with
+    /// the typed ResetRequired state naming that authority; healthy
+    /// authorities are refused and nothing else in the store is touched.
+    /// Requires the global `--yes` confirmation and an exclusive maintenance
+    /// lease (the daemon cannot open a refused store, so recovery runs
+    /// offline).
+    #[command(name = "reset-authority")]
+    ResetAuthority {
+        /// Authority named by the ResetRequired state ("observations").
+        authority: String,
+        /// Sessions store carrying the refused authority (defaults to the
+        /// profile-scope user sessions store).
+        #[arg(long = "db")]
+        db: Option<String>,
+    },
+    /// Reset a project graph store whose open failed with the typed
+    /// ResetRequired state (an incompatible schema this binary cannot upgrade
+    /// in place). Only the refused graph database is deleted; the store
+    /// directory, session archive, and transcripts are preserved, and the
+    /// next open recreates the graph at the canonical schema and re-ingests
+    /// from those transcripts. A store already at the canonical schema is
+    /// refused untouched. Requires the global `--yes` confirmation and an
+    /// exclusive maintenance lease (the daemon cannot open a refused store,
+    /// so recovery runs offline).
+    #[command(name = "reset-project-store")]
+    ResetProjectStore {
+        /// Project root whose refused store should be reset; identity
+        /// resolves through the same durable enrollment and repository
+        /// markers the daemon consults.
+        #[arg(long = "project-root", conflicts_with = "project_id")]
+        project_root: Option<String>,
+        /// Exact registered project id (proj_...) whose refused store should
+        /// be reset, for a root that is no longer reachable.
+        #[arg(long = "project-id")]
+        project_id: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

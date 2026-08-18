@@ -1588,6 +1588,24 @@ fn storage_subcommands_use_contextual_nouns_without_legacy_aliases() {
         }) if backup == "/tmp/backups/backup_2026_08_11" && restore == "/tmp/restore"
     ));
 
+    let reset = Cli::try_parse_from([
+        "tracedecay",
+        "storage",
+        "reset-authority",
+        "observations",
+        "--db",
+        "/tmp/profile/user-sessions.db",
+    ])
+    .expect("storage reset-authority should parse");
+
+    assert!(matches!(
+        reset.command,
+        Some(Commands::Storage {
+            action: ProfileStorageAction::ResetAuthority { authority, db }
+        }) if authority == "observations"
+            && db.as_deref() == Some("/tmp/profile/user-sessions.db")
+    ));
+
     for args in [
         vec![
             "tracedecay",

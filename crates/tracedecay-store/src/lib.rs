@@ -159,9 +159,8 @@ pub use projection::{
     PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation, ProjectionCheckpoint,
     ProjectionPersistOutcome, ProjectionProvenance, ProjectionRebuildOutcome, ProjectionSkipReason,
     ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V1, SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V3, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, WorkflowFactProjection,
+    WorkflowFactRecord,
 };
 pub use provider_descriptor::{
     ToolMetadataNormalizer, synthesizes_native_record_id, tool_metadata_normalizer,
