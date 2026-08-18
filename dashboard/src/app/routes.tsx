@@ -1,18 +1,9 @@
-import { Suspense, lazy } from 'react';
 import { createBrowserRouter } from 'react-router';
+import { RouteChunkBoundary, type RouteChunkLoader } from './RouteChunkBoundary';
 import { Shell } from './shell/Shell';
 
-/** Chunk-load fallback: same geometry as page headers (zero CLS). */
-function ChunkFallback() {
-  return (
-    <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
-      <span className="text-sm font-semibold tracking-tight text-text-muted">Loading…</span>
-    </div>
-  );
-}
-
-function page<T extends string>(path: T, label: string, load: () => Promise<{ default: () => React.JSX.Element }>) {
-  return { path, label, Page: lazy(load) } as const;
+function page<T extends string>(path: T, label: string, load: RouteChunkLoader) {
+  return { path, label, load } as const;
 }
 
 // The thirteen workspaces, each its own lazy code-split chunk: the shell stays
@@ -50,9 +41,6 @@ export const WORKSPACES = [
     import('../workspaces/work/WorkPage.tsx').then((m) => ({ default: m.WorkPage }))),
 ] as const;
 
-/** Brain is the index surface: the all-projects aggregate. */
-const BrainIndex = WORKSPACES[0].Page;
-
 export const router = createBrowserRouter([
   {
     path: '/',
@@ -60,19 +48,11 @@ export const router = createBrowserRouter([
     children: [
       {
         index: true,
-        element: (
-          <Suspense fallback={<ChunkFallback />}>
-            <BrainIndex />
-          </Suspense>
-        ),
+        element: <RouteChunkBoundary load={WORKSPACES[0].load} />,
       },
-      ...WORKSPACES.map(({ path, Page }) => ({
+      ...WORKSPACES.map(({ path, load }) => ({
         path,
-        element: (
-          <Suspense fallback={<ChunkFallback />}>
-            <Page />
-          </Suspense>
-        ),
+        element: <RouteChunkBoundary load={load} />,
       })),
     ],
   },
