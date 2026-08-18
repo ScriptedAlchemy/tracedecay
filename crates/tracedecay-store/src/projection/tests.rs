@@ -260,6 +260,41 @@ fn cloning_a_projection_preserves_the_derived_digest() {
     );
 }
 
+/// A storage failure names its cause everywhere the error is rendered:
+/// `Display` (used by `%error` log fields and `RetryDeferred::last_error`)
+/// carries the immediate source, and `durable_detail()` walks the full
+/// chain without duplicating the level Display already printed.
+#[test]
+fn storage_error_display_and_durable_detail_carry_the_source_chain() {
+    let leaf = std::io::Error::other("database is locked");
+    let middle = std::io::Error::other(leaf);
+    let error = ProjectionStoreError::Storage {
+        operation: "upsert projected LCM raw message",
+        source: Box::new(middle),
+    };
+
+    let display = error.to_string();
+    assert!(
+        display.contains("upsert projected LCM raw message"),
+        "display must name the operation: {display}"
+    );
+    assert!(
+        display.contains("database is locked"),
+        "display must carry the source cause: {display}"
+    );
+
+    let detail = error.durable_detail();
+    assert!(
+        detail.contains("database is locked"),
+        "durable detail must include the deepest cause: {detail}"
+    );
+    assert_eq!(
+        detail.matches("database is locked").count(),
+        1,
+        "the cause must not be duplicated across chain levels: {detail}"
+    );
+}
+
 #[test]
 fn provenance_is_shared_across_every_output_of_one_observation() {
     let observation = observation("zeta");

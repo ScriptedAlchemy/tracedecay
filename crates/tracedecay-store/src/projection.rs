@@ -558,7 +558,11 @@ pub enum ProjectionStoreError {
     Contract(#[source] ObservationContractError),
     #[error("projection anchor contract validation failed")]
     Anchor(#[from] DomainError),
-    #[error("projection storage operation {operation} failed")]
+    // Display carries the immediate cause: this variant surfaces through
+    // `%error` log fields and `last_error` strings, where an operation name
+    // alone ("… failed") made a stalled projection drain undiagnosable.
+    // `durable_detail()` still appends the deeper chain without repeating it.
+    #[error("projection storage operation {operation} failed: {source}")]
     Storage {
         operation: &'static str,
         #[source]

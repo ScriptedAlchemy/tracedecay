@@ -26,7 +26,7 @@
     "tool_invocation",
     "tool_result",
     "reasoning",
-    "uncorrelated_usage",
+    "provider_usage",
     "git",
     "workflow"
   ],

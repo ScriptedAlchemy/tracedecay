@@ -66,7 +66,7 @@ pub fn normalize(
             &mut facts,
             message,
             stable_record_id.as_str(),
-            record_kind == "assistant",
+            record_kind == "assistant" && !is_api_error_placeholder(native, message),
             authored_message,
         );
         append_assistant_attribution_fact(&mut facts, native, record_kind);
@@ -128,6 +128,18 @@ pub fn normalize(
         evidence,
     )
     .map_err(|_| invalid())
+}
+
+/// Claude writes API-error placeholders as assistant records carrying
+/// `isApiErrorMessage: true`, model `"<synthetic>"`, and all-zero
+/// `message.usage`. No provider request was billed for them, so their zero
+/// counters must never become provider-usage rows — recording them attributes
+/// zero-token usage to the non-model `"<synthetic>"` and pollutes billing.
+/// Either native signal alone marks the placeholder (older records may carry
+/// one without the other).
+fn is_api_error_placeholder(native: &Value, message: &Value) -> bool {
+    native.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true)
+        || message.get("model").and_then(Value::as_str) == Some("<synthetic>")
 }
 
 /// Provider-authored visible message content only: plain strings, or `text`

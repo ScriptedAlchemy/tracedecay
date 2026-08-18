@@ -1,13 +1,11 @@
-use std::collections::BTreeSet;
-
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    ObservationId, ObservationOrderingDomainV1, ProviderId, ProviderUsageContractDimensionV1,
-    SessionId,
+    ObservationId, ObservationOrderingDomainV1, ProviderId, ProviderUsageCounterSemanticsV1,
+    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, SessionId,
 };
 use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatch_tool};
 
@@ -345,24 +343,35 @@ fn append_cursor_usage_fact(
         || reasoning_tokens.is_some()
         || total_tokens.is_some()
     {
-        facts.push(CanonicalObservationFactV1::UncorrelatedUsage {
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_write_tokens,
-            reasoning_tokens,
-            total_tokens,
+        // The counters ride the message record itself, so they are correlated
+        // to this exact session/message (the envelope relations) and count that
+        // one message's tokens: message scope, delta semantics. The model comes
+        // only from the record's own spellings — never from tracedecay-injected
+        // session enrichment, which is neighboring-session evidence.
+        facts.push(CanonicalObservationFactV1::ProviderUsage {
+            model: cursor_record_message_model(native, message.unwrap_or(native)).map_or(
+                ProviderUsageModelV1::Unknown {
+                    reason: CanonicalUnknownStateV1::Absent,
+                },
+                |model| ProviderUsageModelV1::Known { model },
+            ),
+            native_scope: ProviderUsageScopeV1::Message,
+            counter_semantics: ProviderUsageCounterSemanticsV1::Delta,
+            counters: ProviderUsageCountersV1::Known {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                reasoning_tokens,
+                total_tokens,
+            },
+            request_id: None,
             native_kind: native
                 .get("type")
                 .and_then(Value::as_str)
                 .unwrap_or("message")
                 .to_string(),
             native_field: native_field.to_string(),
-            missing_dimensions: BTreeSet::from([
-                ProviderUsageContractDimensionV1::Model,
-                ProviderUsageContractDimensionV1::Scope,
-                ProviderUsageContractDimensionV1::CounterSemantics,
-            ]),
         });
     }
 }

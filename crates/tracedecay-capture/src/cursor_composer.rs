@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
@@ -7,8 +5,10 @@ use tracedecay_domain::{
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
     CanonicalWorkflowSemanticKindV1, ObservationId, ObservationOrderingDomainV1,
-    ObservationSourceIdentityV1, ProviderId, ProviderUsageContractDimensionV1, SessionId,
+    ObservationSourceIdentityV1, ProviderId, ProviderUsageCounterSemanticsV1,
+    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, SessionId,
 };
+use tracedecay_store::cursor_dispatch::cursor_model_string;
 
 use crate::ObservationRecordParseErrorV1;
 
@@ -172,20 +172,32 @@ pub fn normalize_cursor_composer_observation_with_message_id(
                 .or_else(|| token_count.get("total_tokens")),
         );
         if input_tokens.is_some() || output_tokens.is_some() || total_tokens.is_some() {
-            facts.push(CanonicalObservationFactV1::UncorrelatedUsage {
-                input_tokens,
-                output_tokens,
-                cache_read_tokens: None,
-                cache_write_tokens: None,
-                reasoning_tokens: None,
-                total_tokens,
+            // A bubble's tokenCount is that bubble's own token spend, and the
+            // envelope relations already carry the composer session and bubble
+            // message identity: message scope, delta semantics. Only the
+            // bubble's own model spellings name the model — the session-level
+            // `modelConfig` (`tracedecaySessionModel`) is not per-message
+            // evidence and mid-session model switches would misattribute it.
+            facts.push(CanonicalObservationFactV1::ProviderUsage {
+                model: cursor_model_string(native).map_or(
+                    ProviderUsageModelV1::Unknown {
+                        reason: CanonicalUnknownStateV1::Absent,
+                    },
+                    |model| ProviderUsageModelV1::Known { model },
+                ),
+                native_scope: ProviderUsageScopeV1::Message,
+                counter_semantics: ProviderUsageCounterSemanticsV1::Delta,
+                counters: ProviderUsageCountersV1::Known {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    reasoning_tokens: None,
+                    total_tokens,
+                },
+                request_id: None,
                 native_kind: "bubble".to_string(),
                 native_field: "tokenCount".to_string(),
-                missing_dimensions: BTreeSet::from([
-                    ProviderUsageContractDimensionV1::Model,
-                    ProviderUsageContractDimensionV1::Scope,
-                    ProviderUsageContractDimensionV1::CounterSemantics,
-                ]),
             });
         }
     }
