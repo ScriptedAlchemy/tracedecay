@@ -230,6 +230,7 @@ impl ProductionProjectCompositionHarnessV1 {
                 allow_initialize_root_routing: false,
                 tool_list_changed_capable: false,
                 catalog_version: String::new(),
+                moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
             };
             let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
             let composition = store_administration
@@ -738,6 +739,9 @@ mod code_index_activation_test {
 
 #[cfg(test)]
 mod journey_test_support;
+
+#[cfg(test)]
+mod delivery_read_gate_journey_test;
 
 #[cfg(test)]
 mod generation_retention_test;
