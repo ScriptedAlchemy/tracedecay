@@ -342,6 +342,10 @@ pub fn attach_feedback_system_quality(
             unavailable_reason: unavailable,
         }));
     }
+    if read_model.rejected_arguments.rejected_total.is_none() {
+        read_model.rejected_arguments =
+            read_model::project_rejected_arguments_from_feedback(feedback, &watermark);
+    }
     read_model.current &= feedback.coverage == FeedbackCoverageV1::Known;
     read_model.watermark = format!("{};{watermark}", read_model.watermark);
 }

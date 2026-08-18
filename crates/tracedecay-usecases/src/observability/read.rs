@@ -6,7 +6,10 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::{AnalyticsEventQuery, RegisteredGlobalDb};
 
-use super::read_model::{project_plan26_read_models, unavailable_plan26_read_models};
+use super::read_model::{
+    project_plan26_read_models, project_rejected_arguments, unavailable_plan26_read_models,
+    unavailable_rejected_arguments,
+};
 use super::{
     ANALYTICS_DESCRIPTOR, EVENT_LIMIT, MeasurementDescriptor, MeasurementProvenance,
     MeasurementSpec, OBSERVABILITY_PROVIDER, coverage, horizon, measurement,
@@ -56,6 +59,7 @@ pub fn observatory_unavailable_read_model(
     ObservatoryReadModelV1 {
         authorized_scope_ref: scope_ref.unwrap_or("all").to_string(),
         horizon: read_horizon,
+        rejected_arguments: unavailable_rejected_arguments(&watermark, reason),
         watermark,
         observed_at_micros,
         current: false,
@@ -230,6 +234,8 @@ pub async fn observatory_read_model(
     let (analytics_mode, comparison, mut plan_metrics) =
         project_plan26_read_models(&event_refs, &read_horizon, &watermark, event_state, unknown);
     metrics.append(&mut plan_metrics);
+    let rejected_arguments =
+        project_rejected_arguments(&event_refs, &watermark, complete, unknown);
     ObservatoryReadModelV1 {
         authorized_scope_ref: scope_ref.unwrap_or("all").to_string(),
         horizon: read_horizon,
@@ -239,5 +245,6 @@ pub async fn observatory_read_model(
         metrics,
         analytics_mode,
         comparison,
+        rejected_arguments,
     }
 }

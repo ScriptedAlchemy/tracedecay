@@ -4,7 +4,8 @@ use tracedecay_domain::{
     AnalyticsModeV1, ContextOutcomeObservedV1, CoverageStateV1, LatencyObservedV1, LatencyStageV1,
     ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
     ObservabilityTerminalResultV1, OperationAvailabilityV1, OperationResourceObservedV1,
-    RetrievalAblationObservedV1, RetrieverObservedV1,
+    RejectedArgumentErrorClassV1, RejectedArgumentNameV1, RejectedArgumentObservedV1,
+    RejectedArgumentSurfaceV1, RetrievalAblationObservedV1, RetrieverObservedV1,
 };
 
 use super::{RegisteredObservabilityPortV1, observatory_read_model};
@@ -265,5 +266,128 @@ async fn canonical_read_selects_latest_consent_and_keeps_unrecorded_evidence_unk
             since_micros: now_seconds.saturating_sub(60).saturating_mul(1_000_000),
             until_micros: model.observed_at_micros,
         }
+    );
+}
+
+#[tokio::test]
+async fn rejected_argument_read_model_counts_seeded_observations_exactly() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "observatory-rejected-argument-projection",
+    )
+    .await;
+    let port = RegisteredObservabilityPortV1::new(&harness.registered);
+    let payloads = [
+        RejectedArgumentObservedV1 {
+            surface: RejectedArgumentSurfaceV1::Cli,
+            operation: "feedback_diagnostics".to_owned(),
+            argument: RejectedArgumentNameV1::RequestBody,
+            error_class: RejectedArgumentErrorClassV1::InvalidShape,
+            schema_revision: 1,
+        },
+        RejectedArgumentObservedV1 {
+            surface: RejectedArgumentSurfaceV1::Cli,
+            operation: "feedback_diagnostics".to_owned(),
+            argument: RejectedArgumentNameV1::RequestBody,
+            error_class: RejectedArgumentErrorClassV1::InvalidShape,
+            schema_revision: 1,
+        },
+        RejectedArgumentObservedV1 {
+            surface: RejectedArgumentSurfaceV1::Mcp,
+            operation: "feedback_list".to_owned(),
+            argument: RejectedArgumentNameV1::Operation,
+            error_class: RejectedArgumentErrorClassV1::Unauthorized,
+            schema_revision: 1,
+        },
+        RejectedArgumentObservedV1 {
+            surface: RejectedArgumentSurfaceV1::Http,
+            operation: "feedback_get".to_owned(),
+            argument: RejectedArgumentNameV1::RequestHandle,
+            error_class: RejectedArgumentErrorClassV1::InvalidShape,
+            schema_revision: 1,
+        },
+    ];
+    for (index, value) in payloads.into_iter().enumerate() {
+        port.record(envelope(
+            (index + 1) as u64,
+            ObservabilityPayloadV1::RejectedArgument(value),
+        ))
+        .await
+        .expect("record rejected-argument observation");
+    }
+
+    let now_seconds = now_micros().0.div_euclid(1_000_000);
+    let model = observatory_read_model(
+        &harness.registered,
+        Some("scope:observatory-projection"),
+        now_seconds.saturating_sub(60),
+    )
+    .await;
+
+    let rejected = &model.rejected_arguments;
+    assert_eq!(rejected.coverage.state, CoverageStateV1::Known);
+    assert_eq!(rejected.rejected_total, Some(4));
+    assert_eq!(rejected.eligible_attempts, None);
+    assert_eq!(
+        rejected.rejection_rate, None,
+        "rate stays unavailable when the attempt denominator is unknown"
+    );
+    assert_eq!(rejected.redacted_name_count, 0);
+    assert_eq!(rejected.groups.len(), 3);
+    assert_eq!(
+        rejected
+            .groups
+            .iter()
+            .find(|group| {
+                group.surface == RejectedArgumentSurfaceV1::Cli
+                    && group.operation == "feedback_diagnostics"
+                    && group.argument == RejectedArgumentNameV1::RequestBody
+                    && group.error_class == RejectedArgumentErrorClassV1::InvalidShape
+            })
+            .map(|group| group.count),
+        Some(2)
+    );
+    assert_eq!(
+        rejected
+            .groups
+            .iter()
+            .find(|group| group.surface == RejectedArgumentSurfaceV1::Mcp)
+            .map(|group| group.count),
+        Some(1)
+    );
+    assert_eq!(
+        rejected
+            .groups
+            .iter()
+            .find(|group| group.surface == RejectedArgumentSurfaceV1::Http)
+            .map(|group| group.count),
+        Some(1)
+    );
+    assert!(
+        rejected.groups.iter().all(|group| group.rate.is_none()),
+        "per-cell rates stay absent without an eligible-attempt denominator"
+    );
+}
+
+#[tokio::test]
+async fn rejected_argument_read_model_does_not_fabricate_empty_zero_without_family() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "observatory-rejected-argument-empty",
+    )
+    .await;
+    let now_seconds = now_micros().0.div_euclid(1_000_000);
+    let model = observatory_read_model(
+        &harness.registered,
+        Some("scope:observatory-projection"),
+        now_seconds.saturating_sub(60),
+    )
+    .await;
+    let rejected = &model.rejected_arguments;
+    assert_eq!(rejected.rejected_total, None);
+    assert_eq!(rejected.rejection_rate, None);
+    assert!(rejected.groups.is_empty());
+    assert_eq!(rejected.coverage.state, CoverageStateV1::Unknown);
+    assert_eq!(
+        rejected.unavailable_reason.as_deref(),
+        Some("rejected_argument_observations_not_recorded")
     );
 }

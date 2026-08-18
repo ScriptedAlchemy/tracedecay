@@ -7,7 +7,10 @@ use std::pin::Pin;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{AnalyticsModeV1, CoverageStateV1, ObservabilityEnvelopeV1};
+use tracedecay_domain::{
+    AnalyticsModeV1, CoverageStateV1, ObservabilityEnvelopeV1, RejectedArgumentErrorClassV1,
+    RejectedArgumentNameV1, RejectedArgumentSurfaceV1,
+};
 
 use crate::ApplicationContractError;
 
@@ -203,6 +206,36 @@ pub struct PerformanceComparisonReadModelV1 {
     pub unavailable_reason: Option<String>,
 }
 
+/// One surface × operation × argument × error-class cell in the rejected-argument view.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct RejectedArgumentGroupV1 {
+    pub surface: RejectedArgumentSurfaceV1,
+    pub operation: String,
+    pub argument: RejectedArgumentNameV1,
+    pub error_class: RejectedArgumentErrorClassV1,
+    pub count: u64,
+    /// Eligible-attempt rate for this cell. Absent when the attempt
+    /// denominator or coverage is insufficient.
+    pub rate: Option<f64>,
+}
+
+/// Frequency and rate projection for dispatcher rejected-argument observations.
+///
+/// Counts may be known while `rejection_rate` stays absent: Plan 26 forbids
+/// fabricating a rate when the eligible-attempt denominator is unknown.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct RejectedArgumentAnalyticsV1 {
+    pub coverage: MetricCoverageV1,
+    pub projector_revision: String,
+    pub watermark: String,
+    pub eligible_attempts: Option<u64>,
+    pub rejected_total: Option<u64>,
+    pub rejection_rate: Option<f64>,
+    pub redacted_name_count: u64,
+    pub groups: Vec<RejectedArgumentGroupV1>,
+    pub unavailable_reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct ObservatoryReadModelV1 {
     pub authorized_scope_ref: String,
@@ -213,6 +246,7 @@ pub struct ObservatoryReadModelV1 {
     pub metrics: Vec<MetricValueV1>,
     pub analytics_mode: AnalyticsModeReadModelV1,
     pub comparison: PerformanceComparisonReadModelV1,
+    pub rejected_arguments: RejectedArgumentAnalyticsV1,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -355,6 +389,25 @@ mod tests {
                     state: CoverageStateV1::Unknown,
                 },
                 unavailable_reason: Some("comparison_evidence_not_recorded".into()),
+            },
+            rejected_arguments: RejectedArgumentAnalyticsV1 {
+                coverage: MetricCoverageV1 {
+                    eligible: None,
+                    observed: 0,
+                    completed: 0,
+                    censored: 0,
+                    unknown: 1,
+                    excluded: 0,
+                    state: CoverageStateV1::Unknown,
+                },
+                projector_revision: "observatory-rejected-argument-projector.v1".into(),
+                watermark: "watermark:7".into(),
+                eligible_attempts: None,
+                rejected_total: None,
+                rejection_rate: None,
+                redacted_name_count: 0,
+                groups: Vec::new(),
+                unavailable_reason: Some("rejected_argument_observations_not_recorded".into()),
             },
         }
     }

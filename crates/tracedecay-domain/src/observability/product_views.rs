@@ -4,6 +4,7 @@
 //! Projectors may count only the facts carried here; they may not infer a
 //! correctness, cost, or effect outcome from temporal proximity.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::CoverageStateV1;
@@ -280,6 +281,64 @@ impl RemoteCoverageObservedV1 {
         }
         if self.coverage != CoverageStateV1::Known && self.unavailable_reason.is_none() {
             return Err("coverage_reason");
+        }
+        Ok(())
+    }
+}
+
+/// Transport that rejected a surface argument. Unknown preserves missing
+/// attribution instead of inventing cli/mcp/http.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectedArgumentSurfaceV1 {
+    Cli,
+    Mcp,
+    Http,
+    Unknown,
+}
+
+/// Normalized rejected-argument name. Raw flags, values, and tokens never
+/// enter this vocabulary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectedArgumentNameV1 {
+    RequestBody,
+    Pagination,
+    RequestHandle,
+    Operation,
+    Lifecycle,
+    Unknown,
+}
+
+/// Closed error class for a rejected surface argument.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectedArgumentErrorClassV1 {
+    Missing,
+    InvalidShape,
+    OutOfBounds,
+    Unsupported,
+    Unauthorized,
+    Stale,
+    Unknown,
+}
+
+/// Canonical dispatcher rejection observation. Counts only; no raw argument
+/// values, error text, or reversible tokens.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct RejectedArgumentObservedV1 {
+    pub surface: RejectedArgumentSurfaceV1,
+    pub operation: String,
+    pub argument: RejectedArgumentNameV1,
+    pub error_class: RejectedArgumentErrorClassV1,
+    pub schema_revision: u16,
+}
+
+impl RejectedArgumentObservedV1 {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        validate_ref(&self.operation)?;
+        if self.schema_revision == 0 {
+            return Err("schema_revision");
         }
         Ok(())
     }

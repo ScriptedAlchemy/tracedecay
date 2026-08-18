@@ -13,7 +13,10 @@ use tracedecay_domain::feedback::{
     CiFailureSourceDegradationV1, FeedbackCycleObservationV1, FeedbackEvaluationInputV1,
     FeedbackObservationKindV1, FeedbackSavedEvaluationV1, ProviderEvaluationStateV1,
 };
-use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    ManifestDigest, RejectedArgumentErrorClassV1, RejectedArgumentNameV1, RejectedArgumentSurfaceV1,
+    UtcMicros, canonical_sha256,
+};
 
 use crate::request_identity::{
     derive_feedback_observation_idempotency, derive_feedback_source_event_idempotency,
@@ -529,6 +532,78 @@ impl FeedbackSourceEventV1 {
     }
 }
 
+fn rejected_argument_cell(
+    event: &FeedbackSourceEventV1,
+) -> Option<(
+    RejectedArgumentSurfaceV1,
+    String,
+    RejectedArgumentNameV1,
+    RejectedArgumentErrorClassV1,
+)> {
+    match event {
+        FeedbackSourceEventV1::SurfaceArgumentRejected {
+            operation,
+            route,
+            argument,
+            rejection,
+            ..
+        } => Some((
+            match route {
+                Some(FeedbackDeliveryRouteV1::Cli) => RejectedArgumentSurfaceV1::Cli,
+                Some(FeedbackDeliveryRouteV1::Mcp) => RejectedArgumentSurfaceV1::Mcp,
+                Some(FeedbackDeliveryRouteV1::Http) => RejectedArgumentSurfaceV1::Http,
+                Some(
+                    FeedbackDeliveryRouteV1::Lsp
+                    | FeedbackDeliveryRouteV1::HookV2
+                    | FeedbackDeliveryRouteV1::HookLegacy
+                    | FeedbackDeliveryRouteV1::Scout,
+                )
+                | None => RejectedArgumentSurfaceV1::Unknown,
+            },
+            serde_variant_name(operation),
+            match argument {
+                FeedbackRejectedArgumentV1::RequestBody => RejectedArgumentNameV1::RequestBody,
+                FeedbackRejectedArgumentV1::Pagination => RejectedArgumentNameV1::Pagination,
+                FeedbackRejectedArgumentV1::RequestHandle => RejectedArgumentNameV1::RequestHandle,
+                FeedbackRejectedArgumentV1::Operation => RejectedArgumentNameV1::Operation,
+                FeedbackRejectedArgumentV1::Lifecycle => RejectedArgumentNameV1::Lifecycle,
+                FeedbackRejectedArgumentV1::Unknown => RejectedArgumentNameV1::Unknown,
+            },
+            match rejection {
+                FeedbackArgumentRejectionClassV1::Missing => RejectedArgumentErrorClassV1::Missing,
+                FeedbackArgumentRejectionClassV1::InvalidShape => {
+                    RejectedArgumentErrorClassV1::InvalidShape
+                }
+                FeedbackArgumentRejectionClassV1::OutOfBounds => {
+                    RejectedArgumentErrorClassV1::OutOfBounds
+                }
+                FeedbackArgumentRejectionClassV1::Unsupported => {
+                    RejectedArgumentErrorClassV1::Unsupported
+                }
+                FeedbackArgumentRejectionClassV1::Unauthorized => {
+                    RejectedArgumentErrorClassV1::Unauthorized
+                }
+                FeedbackArgumentRejectionClassV1::Stale => RejectedArgumentErrorClassV1::Stale,
+                FeedbackArgumentRejectionClassV1::Unknown => RejectedArgumentErrorClassV1::Unknown,
+            },
+        )),
+        FeedbackSourceEventV1::ArgumentRejected { operation, .. } => Some((
+            RejectedArgumentSurfaceV1::Unknown,
+            serde_variant_name(operation),
+            RejectedArgumentNameV1::Unknown,
+            RejectedArgumentErrorClassV1::Unknown,
+        )),
+        _ => None,
+    }
+}
+
+fn serde_variant_name<T: Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(name)) => name,
+        _ => "unknown".to_owned(),
+    }
+}
+
 /// Privacy-safe Plan-26 source event. It contains no source, path, diagnostic
 /// message, overlay content, or transport-local delivery identity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -649,10 +724,24 @@ pub struct FeedbackObservationReadModelV1 {
     pub first_observed_at: Option<UtcMicros>,
     pub last_observed_at: Option<UtcMicros>,
     pub event_counts: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub rejected_argument_groups: Vec<FeedbackRejectedArgumentGroupV1>,
     pub coverage: FeedbackCoverageV1,
     pub watermark: FeedbackObservationWatermarkV1,
     pub denominators: FeedbackObservationDenominatorsV1,
     pub system_quality: FeedbackSystemQualityReadModelV1,
+}
+
+/// One surface × operation × argument × error-class cell projected from
+/// dispatcher rejection source events.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackRejectedArgumentGroupV1 {
+    pub surface: RejectedArgumentSurfaceV1,
+    pub operation: String,
+    pub argument: RejectedArgumentNameV1,
+    pub error_class: RejectedArgumentErrorClassV1,
+    pub count: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -753,6 +842,7 @@ impl FeedbackObservationReadModelV1 {
             first_observed_at: None,
             last_observed_at: None,
             event_counts: BTreeMap::new(),
+            rejected_argument_groups: Vec::new(),
             coverage: FeedbackCoverageV1::Unknown,
             watermark: FeedbackObservationWatermarkV1 {
                 producer_boot_id: None,
@@ -787,6 +877,15 @@ impl FeedbackObservationReadModelV1 {
         incomplete_boots: u64,
     ) -> Option<Self> {
         let mut event_counts = BTreeMap::<String, u64>::new();
+        let mut rejected_argument_counts = BTreeMap::<
+            (
+                RejectedArgumentSurfaceV1,
+                String,
+                RejectedArgumentNameV1,
+                RejectedArgumentErrorClassV1,
+            ),
+            u64,
+        >::new();
         let mut first_observed_at = None;
         let mut last_observed_at = None;
         let mut emitted = 0u64;
@@ -801,6 +900,12 @@ impl FeedbackObservationReadModelV1 {
             let kind = observation.event_kind()?;
             let count = event_counts.entry(kind.to_owned()).or_default();
             *count = count.saturating_add(1);
+            if let Some(source_event) = observation.source_event.as_ref()
+                && let Some(cell) = rejected_argument_cell(source_event)
+            {
+                let count = rejected_argument_counts.entry(cell).or_default();
+                *count = count.saturating_add(1);
+            }
             first_observed_at = Some(
                 first_observed_at.map_or(observation.observed_at, |first: UtcMicros| {
                     first.min(observation.observed_at)
@@ -853,6 +958,20 @@ impl FeedbackObservationReadModelV1 {
             first_observed_at,
             last_observed_at,
             event_counts,
+            rejected_argument_groups: rejected_argument_counts
+                .into_iter()
+                .map(
+                    |((surface, operation, argument, error_class), count)| {
+                        FeedbackRejectedArgumentGroupV1 {
+                            surface,
+                            operation,
+                            argument,
+                            error_class,
+                            count,
+                        }
+                    },
+                )
+                .collect(),
             coverage,
             watermark,
             denominators: FeedbackObservationDenominatorsV1 {
@@ -1405,6 +1524,7 @@ mod tests {
     };
     use tracedecay_domain::{
         CodeGenerationId, CommitId, FileOccurrenceId, HostInstanceId, ManifestDigest, ProjectId,
+        RejectedArgumentErrorClassV1, RejectedArgumentNameV1, RejectedArgumentSurfaceV1,
         RepositoryId, SessionId, SourceSpan, SymbolOccurrenceId, UtcMicros, WorktreeId,
     };
 
@@ -1753,6 +1873,22 @@ mod tests {
         assert!(encoded.contains("\"schema_revision\":1"));
         assert!(!encoded.contains("\"value\""));
         assert!(!encoded.contains("\"raw\""));
+
+        let model = FeedbackObservationReadModelV1::project(&[envelope]).unwrap();
+        assert_eq!(model.rejected_argument_groups.len(), 1);
+        assert_eq!(
+            model.rejected_argument_groups[0].surface,
+            RejectedArgumentSurfaceV1::Http
+        );
+        assert_eq!(
+            model.rejected_argument_groups[0].argument,
+            RejectedArgumentNameV1::RequestBody
+        );
+        assert_eq!(
+            model.rejected_argument_groups[0].error_class,
+            RejectedArgumentErrorClassV1::InvalidShape
+        );
+        assert_eq!(model.rejected_argument_groups[0].count, 1);
     }
 
     #[test]

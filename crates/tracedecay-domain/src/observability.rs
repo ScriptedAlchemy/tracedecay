@@ -23,8 +23,10 @@ pub use payload::ObservabilityPayloadV1;
 pub use product_views::{
     AppropriateRelianceObservedV1, AutomationFunnelObservedV1, AutomationTerminalV1,
     ObservedTernaryV1, ProviderAttemptTerminalV1, ProviderReliabilityObservedV1,
-    RelianceDecisionV1, RelianceVerificationV1, RemoteCoverageObservedV1, RemoteOperationV1,
-    TaskCalibrationEvidenceV1, TaskDecisionDispositionV1, TaskIntelligenceDecisionObservedV1,
+    RejectedArgumentErrorClassV1, RejectedArgumentNameV1, RejectedArgumentObservedV1,
+    RejectedArgumentSurfaceV1, RelianceDecisionV1, RelianceVerificationV1,
+    RemoteCoverageObservedV1, RemoteOperationV1, TaskCalibrationEvidenceV1,
+    TaskDecisionDispositionV1, TaskIntelligenceDecisionObservedV1,
     TaskIntelligenceOutcomeObservedV1, TaskOutcomeV1,
 };
 pub use retrieval::*;

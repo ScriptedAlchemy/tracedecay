@@ -6,6 +6,7 @@
 //! evidence from an unmounted contract.
 
 mod product_views;
+mod rejected_arguments;
 mod workflow_views;
 
 use tracedecay_application::{
@@ -18,6 +19,10 @@ use tracedecay_domain::{
 
 use super::{MeasurementDescriptor, MeasurementProvenance, MeasurementSpec, measurement};
 use product_views::product_view_metrics;
+pub(crate) use rejected_arguments::{
+    project_rejected_arguments, project_rejected_arguments_from_feedback,
+    unavailable_rejected_arguments,
+};
 use workflow_views::workflow_metrics;
 
 const ADOPTION_DESCRIPTOR: &str = "adoption-outcomes.v1";

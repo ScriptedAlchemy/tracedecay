@@ -8,9 +8,10 @@ use super::{
     ContextOutcomeObservedV1, DeadlineObservedV1, ExecutionTopologySampledV1,
     GitHubStackCapabilityObservedV1, HealthSnapshotObservedV1, IndexObservedV1, LatencyObservedV1,
     McpDispatchObservedV1, NoProgressObservedV1, OperationResourceObservedV1,
-    ProviderReliabilityObservedV1, RemoteCoverageObservedV1, RetrievalAblationObservedV1,
-    RetrievalPlannerObservedV1, RetrievalQueryObservedV1, RetrievalSourceObservedV1,
-    RetrievalSynthesisObservedV1, RetrieverObservedV1, StorageObservedV1,
+    ProviderReliabilityObservedV1, RejectedArgumentObservedV1, RemoteCoverageObservedV1,
+    RetrievalAblationObservedV1, RetrievalPlannerObservedV1, RetrievalQueryObservedV1,
+    RetrievalSourceObservedV1, RetrievalSynthesisObservedV1, RetrieverObservedV1,
+    StorageObservedV1,
     TaskIntelligenceDecisionObservedV1, TaskIntelligenceOutcomeObservedV1, TelemetryDropObservedV1,
     WorkBlockedIntervalObservedV1, WorkConflictOutcomeLinkedV1, WorkConflictPredictionObservedV1,
     WorkDeliveryFanoutObservedV1, WorkDuplicateEffortObservedV1, WorkExecutionLeakObservedV1,
@@ -61,6 +62,7 @@ pub enum ObservabilityPayloadV1 {
     WorkflowLifecycle(WorkflowLifecycleObservedV1),
     WorkflowOutcome(WorkflowOutcomeObservedV1),
     WorkflowResource(WorkflowResourceObservedV1),
+    RejectedArgument(RejectedArgumentObservedV1),
 }
 impl ObservabilityPayloadV1 {
     pub const fn event_kind(&self) -> &'static str {
@@ -105,6 +107,7 @@ impl ObservabilityPayloadV1 {
             Self::WorkflowLifecycle(_) => "workflow.lifecycle.observed.v1",
             Self::WorkflowOutcome(_) => "workflow.outcome.observed.v1",
             Self::WorkflowResource(_) => "workflow.resource.observed.v1",
+            Self::RejectedArgument(_) => "feedback.argument.rejected.v1",
         }
     }
 
@@ -150,6 +153,7 @@ impl ObservabilityPayloadV1 {
             Self::WorkflowLifecycle(value) => value.validate(),
             Self::WorkflowOutcome(value) => value.validate(),
             Self::WorkflowResource(value) => value.validate(),
+            Self::RejectedArgument(value) => value.validate(),
         }
     }
 }
