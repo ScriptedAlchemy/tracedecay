@@ -271,12 +271,14 @@ struct Eviction {
     close_reservation: OwnerCloseReservation,
 }
 
+type EvictionFailure = Box<(Eviction, GraphDbError)>;
+
 enum OwnerCloseReservation {
     Unleased {
         reservation_id: GraphDbRetirementReservationId,
     },
     OwnerAttachment {
-        target: GraphDbRetirementTarget,
+        target: Box<GraphDbRetirementTarget>,
         reservation_id: GraphDbRetirementReservationId,
     },
 }
@@ -394,7 +396,7 @@ impl GraphDbRetirementReservation {
         let mut closing = Vec::new();
         while let Some(eviction) = pending.next() {
             let target = match &eviction.close_reservation {
-                OwnerCloseReservation::OwnerAttachment { target, .. } => target.clone(),
+                OwnerCloseReservation::OwnerAttachment { target, .. } => target.as_ref().clone(),
                 OwnerCloseReservation::Unleased { .. } => {
                     self.pending = closing.into_iter().map(|(eviction, _)| eviction).collect();
                     self.pending.push(eviction);
@@ -423,10 +425,11 @@ impl GraphDbRetirementReservation {
                     .err(),
                 Err(error) => {
                     eviction.force_terminal_after_close(&close_result);
-                    Some((eviction, error))
+                    Some(Box::new((eviction, error)))
                 }
             };
-            if let Some((eviction, error)) = terminalization_failure {
+            if let Some(failure) = terminalization_failure {
+                let (eviction, error) = *failure;
                 let terminal_error = self.registry.retain_post_close_retirement_fault(
                     eviction,
                     &close_result,
@@ -464,7 +467,9 @@ impl GraphDbRetirementReservation {
         self.pending
             .iter()
             .filter_map(|eviction| match &eviction.close_reservation {
-                OwnerCloseReservation::OwnerAttachment { target, .. } => Some(target.clone()),
+                OwnerCloseReservation::OwnerAttachment { target, .. } => {
+                    Some(target.as_ref().clone())
+                }
                 OwnerCloseReservation::Unleased { .. } => None,
             })
             .collect()
@@ -480,7 +485,8 @@ impl GraphDbRetirementReservation {
 
     fn restore_pending(&mut self) -> Result<(), GraphDbError> {
         while let Some(eviction) = self.pending.pop() {
-            if let Err((eviction, error)) = self.registry.restore_retiring(eviction) {
+            if let Err(failure) = self.registry.restore_retiring(eviction) {
+                let (eviction, error) = *failure;
                 self.pending.push(eviction);
                 return Err(error);
             }
@@ -496,7 +502,8 @@ impl Drop for GraphDbRetirementReservation {
             return;
         }
         for eviction in self.pending.drain(..) {
-            if let Err((eviction, error)) = self.registry.restore_retiring(eviction) {
+            if let Err(failure) = self.registry.restore_retiring(eviction) {
+                let (eviction, error) = *failure;
                 self.registry
                     .retain_retirement_restore_fault(eviction, error);
             }
@@ -769,7 +776,7 @@ impl GraphDbRegistry {
         let verified_locator = operation.verified_locator().clone();
         let shard_id = binding.shard_id.clone();
 
-        loop {
+        {
             let mut state = self.state_lock()?;
             reject_path_alias(&state, &binding, &verified_locator, &path, expected_format)?;
             match state.entries.get(&shard_id) {
@@ -802,7 +809,6 @@ impl GraphDbRegistry {
                         )?;
                         return Err(error);
                     }
-                    break;
                 }
                 Some(RegistryEntry::Ready {
                     binding: registered_binding,
@@ -1361,7 +1367,7 @@ impl GraphDbRegistry {
                     owner,
                     last_used,
                     close_reservation: OwnerCloseReservation::OwnerAttachment {
-                        target,
+                        target: Box::new(target),
                         reservation_id,
                     },
                 };
@@ -1486,10 +1492,11 @@ impl GraphDbRegistry {
             Ok(()) => self.complete_close(eviction, close_result.clone()).err(),
             Err(error) => {
                 eviction.force_terminal_after_close(&close_result);
-                Some((eviction, error))
+                Some(Box::new((eviction, error)))
             }
         };
-        if let Some((eviction, error)) = terminalization_failure {
+        if let Some(failure) = terminalization_failure {
+            let (eviction, error) = *failure;
             self.retain_post_close_closing_fault(eviction, &close_result, error);
         }
         close_result
@@ -1522,19 +1529,19 @@ impl GraphDbRegistry {
         &self,
         reservation: Eviction,
         result: Result<(), GraphDbError>,
-    ) -> Result<(), (Eviction, GraphDbError)> {
+    ) -> Result<(), EvictionFailure> {
         let (mut state, lock_poison) = self.post_physical_close_state_lock();
         if let Some(error) = lock_poison {
-            return Err((reservation, error));
+            return Err(Box::new((reservation, error)));
         }
         let Some(entry) = state.entries.get(&reservation.binding.shard_id) else {
-            return Err((
+            return Err(Box::new((
                 reservation,
                 GraphDbError::unavailable("graph close reservation disappeared"),
-            ));
+            )));
         };
         if let Err(error) = require_closing(entry, &reservation) {
-            return Err((reservation, error));
+            return Err(Box::new((reservation, error)));
         }
         #[cfg(test)]
         if let Some(error) = self
@@ -1544,7 +1551,7 @@ impl GraphDbRegistry {
             .expect("close completion test fault lock must not be poisoned")
             .take()
         {
-            return Err((reservation, error));
+            return Err(Box::new((reservation, error)));
         }
         match result {
             Ok(()) => {
@@ -1593,22 +1600,22 @@ impl GraphDbRegistry {
         self.inner.changed.notify_all();
     }
 
-    fn restore_retiring(&self, eviction: Eviction) -> Result<(), (Eviction, GraphDbError)> {
+    fn restore_retiring(&self, eviction: Eviction) -> Result<(), EvictionFailure> {
         let mut state = match self.state_lock() {
             Ok(state) => state,
-            Err(error) => return Err((eviction, error)),
+            Err(error) => return Err(Box::new((eviction, error))),
         };
         let Some(entry) = state.entries.get(&eviction.binding.shard_id) else {
-            return Err((
+            return Err(Box::new((
                 eviction,
                 GraphDbError::unavailable("graph retirement reservation disappeared"),
-            ));
+            )));
         };
         if let Err(error) = require_retiring(entry, &eviction) {
-            return Err((eviction, error));
+            return Err(Box::new((eviction, error)));
         }
         if let Err(error) = eviction.restore_before_native_close() {
-            return Err((eviction, error));
+            return Err(Box::new((eviction, error)));
         }
         state.entries.insert(
             eviction.binding.shard_id.clone(),
@@ -1654,19 +1661,19 @@ impl GraphDbRegistry {
         &self,
         reservation: Eviction,
         result: Result<(), GraphDbError>,
-    ) -> Result<(), (Eviction, GraphDbError)> {
+    ) -> Result<(), EvictionFailure> {
         let (mut state, lock_poison) = self.post_physical_close_state_lock();
         if let Some(error) = lock_poison {
-            return Err((reservation, error));
+            return Err(Box::new((reservation, error)));
         }
         let Some(entry) = state.entries.get(&reservation.binding.shard_id) else {
-            return Err((
+            return Err(Box::new((
                 reservation,
                 GraphDbError::unavailable("graph retirement reservation disappeared"),
-            ));
+            )));
         };
         if let Err(error) = require_retiring(entry, &reservation) {
-            return Err((reservation, error));
+            return Err(Box::new((reservation, error)));
         }
         #[cfg(test)]
         if let Some(error) = self
@@ -1676,7 +1683,7 @@ impl GraphDbRegistry {
             .expect("retirement completion test fault lock must not be poisoned")
             .take()
         {
-            return Err((reservation, error));
+            return Err(Box::new((reservation, error)));
         }
         match result {
             Ok(()) => {

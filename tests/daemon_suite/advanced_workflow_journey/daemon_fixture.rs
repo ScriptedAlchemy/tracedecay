@@ -114,10 +114,10 @@ pub(super) fn spawn_project_daemon(home: &Path, project: &Path) -> common::Daemo
 pub(super) fn workflow_tempdir() -> TempDir {
     #[cfg(unix)]
     {
-        return tempfile::Builder::new()
+        tempfile::Builder::new()
             .prefix("tracedecay-advanced-workflow-")
             .tempdir_in("/tmp")
-            .expect("advanced workflow isolation");
+            .expect("advanced workflow isolation")
     }
     #[cfg(not(unix))]
     TempDir::new().expect("advanced workflow isolation")

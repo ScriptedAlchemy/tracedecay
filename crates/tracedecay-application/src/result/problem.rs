@@ -168,7 +168,7 @@ pub enum ApplicationProblem {
     /// The canonical receipt prevents callers from blindly replaying it.
     PartialEffect {
         diagnostic: SafeDiagnostic,
-        committed_receipt: EffectReceipt,
+        committed_receipt: Box<EffectReceipt>,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
     },
@@ -235,7 +235,7 @@ enum ApplicationProblemWire {
     },
     PartialEffect {
         diagnostic: SafeDiagnostic,
-        committed_receipt: EffectReceipt,
+        committed_receipt: Box<EffectReceipt>,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
     },

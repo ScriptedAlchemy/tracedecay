@@ -166,12 +166,12 @@ fn envelope(
     event_time_micros: i64,
     trace_id: &str,
     payload: ObservabilityPayloadV1,
-    valid_from_micros: Option<i64>,
-    valid_until_micros: Option<i64>,
+    validity: (Option<i64>, Option<i64>),
     coverage: CoverageStateV1,
-    dropped_count: u64,
-    process_boot_id: &str,
+    emission: (u64, &str),
 ) -> ObservabilityEnvelopeV1 {
+    let (valid_from_micros, valid_until_micros) = validity;
+    let (dropped_count, process_boot_id) = emission;
     let envelope = ObservabilityEnvelopeV1 {
         event_id: format!("event.rollup.{sequence}"),
         event_kind: payload.event_kind().to_owned(),
@@ -245,11 +245,12 @@ fn topology_event_with(
             shared_authority_serialized_count: 0,
             local_anchor_refs: Vec::new(),
         }),
-        Some(event_time_micros),
-        Some(event_time_micros.saturating_add(1_000)),
+        (
+            Some(event_time_micros),
+            Some(event_time_micros.saturating_add(1_000)),
+        ),
         coverage,
-        dropped_count,
-        process_boot_id,
+        (dropped_count, process_boot_id),
     )
 }
 fn duplicate_event(
@@ -278,11 +279,9 @@ fn duplicate_event(
             coverage: CoverageStateV1::Known,
             local_anchor_refs: vec![anchor.to_owned()],
         }),
-        None,
-        None,
+        (None, None),
         CoverageStateV1::Known,
-        0,
-        "boot.duplicate-rollup",
+        (0, "boot.duplicate-rollup"),
     )
 }
 fn integration_event(
@@ -317,11 +316,9 @@ fn integration_event(
             coverage: CoverageStateV1::Known,
             local_anchor_refs: Vec::new(),
         }),
-        valid_from_micros,
-        None,
+        (valid_from_micros, None),
         CoverageStateV1::Known,
-        0,
-        "boot.integration-rollup",
+        (0, "boot.integration-rollup"),
     )
 }
 fn conflict_prediction(
@@ -358,11 +355,9 @@ fn conflict_prediction_with(
             coverage: CoverageStateV1::Known,
             local_anchor_refs: Vec::new(),
         }),
-        None,
-        None,
+        (None, None),
         CoverageStateV1::Known,
-        0,
-        "boot.correction-rollup",
+        (0, "boot.correction-rollup"),
     )
 }
 fn conflict_outcome(
@@ -385,11 +380,9 @@ fn conflict_outcome(
             coverage: CoverageStateV1::Known,
             correction_revision,
         }),
-        None,
-        None,
+        (None, None),
         CoverageStateV1::Known,
-        0,
-        "boot.correction-rollup",
+        (0, "boot.correction-rollup"),
     )
 }
 fn leak_event(
@@ -409,11 +402,9 @@ fn leak_event(
             owner_class: LeakOwnerClassV1::Work,
             coverage: CoverageStateV1::Known,
         }),
-        None,
-        None,
+        (None, None),
         CoverageStateV1::Known,
-        0,
-        "boot.correction-rollup",
+        (0, "boot.correction-rollup"),
     )
 }
 fn blocked_event(
@@ -435,11 +426,9 @@ fn blocked_event(
             valid_until_micros: Some(until_micros),
             coverage: CoverageStateV1::Known,
         }),
-        None,
-        None,
+        (None, None),
         CoverageStateV1::Known,
-        0,
-        "boot.correction-rollup",
+        (0, "boot.correction-rollup"),
     )
 }
 fn drop_receipt(sequence: u64, event_time_micros: i64) -> ObservabilityEnvelopeV1 {
@@ -453,11 +442,9 @@ fn drop_receipt(sequence: u64, event_time_micros: i64) -> ObservabilityEnvelopeV
             proved_drop_lower_bound: 5,
             clean_shutdown_observed: false,
         }),
-        None,
-        None,
+        (None, None),
         CoverageStateV1::Known,
-        0,
-        "boot.drop-cross-boundary",
+        (0, "boot.drop-cross-boundary"),
     )
 }
 fn assert_equivalent(raw: &ExecutionTopologyMetricsV1, rollup: &ExecutionTopologyMetricsV1) {

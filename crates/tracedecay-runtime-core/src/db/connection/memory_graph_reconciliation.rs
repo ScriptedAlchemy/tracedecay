@@ -134,7 +134,7 @@ impl ProjectMemoryReconciliationTelemetryObserverV1 {
                         database
                             .memory_graph_runtime
                             .get()
-                            .and_then(|runtime| runtime.upgrade())
+                            .and_then(std::sync::Weak::upgrade)
                             .is_some(),
                     ),
                 )

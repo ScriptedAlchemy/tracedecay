@@ -85,7 +85,7 @@ pub enum SourceEditSurfaceOutcomeV1 {
     Insert(InsertResult),
     AstGrep(AstGrepResult),
     Move(MoveResult),
-    Rename(RenameResult),
+    Rename(Box<RenameResult>),
     Failed(SourceEditFailedResultV1),
     Cancelled(SourceEditCancelledResultV1),
     TimedOut(SourceEditTimedOutResultV1),
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn durable_rename_metadata_counts_current_hazards_and_changes() {
-        let outcome = SourceEditSurfaceOutcomeV1::Rename(RenameResult {
+        let outcome = SourceEditSurfaceOutcomeV1::Rename(Box::new(RenameResult {
             success: true,
             files: vec![
                 RenameFileEditV1 {
@@ -319,7 +319,7 @@ mod tests {
             ],
             message: "rename planned".to_owned(),
             ..RenameResult::default()
-        });
+        }));
         let operation = UseCaseId::new("use-case.application.rename-symbol")
             .expect("rename operation identity");
 

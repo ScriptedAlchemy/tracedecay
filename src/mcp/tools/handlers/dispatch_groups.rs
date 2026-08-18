@@ -349,6 +349,7 @@ pub(super) async fn dispatch_info_tools(
                 scope_prefix,
                 active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                 options.code_index_freshness_reader.as_ref(),
+                options.generation_census_reader.as_ref(),
             )
             .await
         }

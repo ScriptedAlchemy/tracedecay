@@ -340,7 +340,7 @@ fn retained_external_authority(
         "automation-run admission identity and retained-effect receipt identity are distinct domains"
     );
     let mut admission = admission;
-    admission.effect_receipt_template = committed_receipt;
+    admission.effect_receipt_template = *committed_receipt;
     let admission = seal_effect_authority(admission);
     let journal_path = canonical_journal_path(dashboard_root, &admission.request.run_id);
     let claim = match reserve_or_replay_blocking(&journal_path, admission.clone())
@@ -784,7 +784,7 @@ fn partial_terminal(admission: &DurableAutomationAdmission) -> AutomationSettled
     let problem =
         retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::PartialEffect {
             reason_code: "application.automation-run.partial-effect".to_owned(),
-            committed_receipt: effect_receipt,
+            committed_receipt: Box::new(effect_receipt),
             detail: "canonical memory effect committed before delivery".to_owned(),
         });
     let problem = ApplicationProblemEnvelope::new(

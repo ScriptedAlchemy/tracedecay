@@ -42,7 +42,7 @@ pub struct ProjectMemoryFactAddRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectMemoryFactAddRequestOutcome {
     RejectedSecretLike,
-    Applied(ProjectMemoryFactAddOutcomeV1),
+    Applied(Box<ProjectMemoryFactAddOutcomeV1>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -96,7 +96,7 @@ pub enum ProjectMemoryFactAddPreflight {
     #[non_exhaustive]
     Ready {
         effect_material: ProjectMemoryFactAddEffectMaterialV1,
-        command: ProjectMemoryFactAddCommandV1,
+        command: Box<ProjectMemoryFactAddCommandV1>,
     },
 }
 
@@ -129,7 +129,7 @@ impl ProjectMemoryFactAddPreflight {
     pub fn into_command(self) -> Option<ProjectMemoryFactAddCommandV1> {
         match self {
             Self::RejectedSecretLike { .. } => None,
-            Self::Ready { command, .. } => Some(command),
+            Self::Ready { command, .. } => Some(*command),
         }
     }
 }
@@ -246,7 +246,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .map_err(MemoryApplicationError::Store)?;
         Ok(ProjectMemoryFactAddPreflight::Ready {
             effect_material,
-            command,
+            command: Box::new(command),
         })
     }
 
@@ -283,9 +283,11 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         };
         self.add_project_memory_fact(command, write_control)
             .await
-            .map(ProjectMemoryFactAddRequestOutcome::Applied)
+            .map(|outcome| ProjectMemoryFactAddRequestOutcome::Applied(Box::new(outcome)))
             .map_err(|error| {
-                error.map_authority_result(ProjectMemoryFactAddRequestOutcome::Applied)
+                error.map_authority_result(|outcome| {
+                    ProjectMemoryFactAddRequestOutcome::Applied(Box::new(outcome))
+                })
             })
     }
 }

@@ -477,6 +477,21 @@ pub(super) async fn portable_project_server_for_request(
                             }
                         }
                         ProjectOpenTaskState::Ready => {
+                            // The open task publishes the server before it
+                            // flips to Ready, but this waiter read the cache
+                            // before it read the state, so a publication that
+                            // raced this iteration must be honored with one
+                            // final cache check instead of a spurious failure.
+                            if let Some(server) = portable_cached_project_server(
+                                &store_administration,
+                                &canonical_project_path,
+                                handshake,
+                                requirement,
+                            )
+                            .await?
+                            {
+                                return Ok(server);
+                            }
                             return Err(TraceDecayError::Config {
                                 message: "project open completed without publishing a server"
                                     .to_string(),

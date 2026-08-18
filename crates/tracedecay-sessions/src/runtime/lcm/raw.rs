@@ -326,8 +326,14 @@ pub async fn upsert_projection_raw_message(
     conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
 ) -> Result<(), LcmError> {
-    let sanitization = sanitize_lcm_payload_text(&message.text)
-        .map_err(|error| LcmError::Db(format!("LCM privacy sanitization failed: {error}")))?;
+    // `sanitize_lcm_payload_text` is a pure function of the text: a failure
+    // here is a deterministic content refusal, not a storage fault, and must
+    // never be retried as one.
+    let sanitization = sanitize_lcm_payload_text(&message.text).map_err(|error| {
+        LcmError::SanitizationRefused {
+            reason: format!("LCM privacy sanitization failed: {error}"),
+        }
+    })?;
     let mut prepared = PreparedMessage {
         text: sanitization.sanitized_text().to_owned(),
         metadata_json: None,
@@ -515,11 +521,9 @@ fn prepare_message(
     externalizer: &mut PayloadExternalizer<'_>,
 ) -> Result<PreparedMessage, LcmError> {
     let initial = sanitize_lcm_payload_text(&message.text).map_err(|error| {
-        eprintln!(
-            "TRACEDEBUG prepare_message sanitize failed: {error}; text={:?}",
-            message.text
-        );
-        LcmError::Db(format!("LCM privacy sanitization failed: {error}"))
+        LcmError::SanitizationRefused {
+            reason: format!("LCM privacy sanitization failed: {error}"),
+        }
     })?;
     let mut text = initial.sanitized_text().to_owned();
     let quarantine_reason =
@@ -798,23 +802,26 @@ fn safe_placeholder_metadata(value: &str) -> String {
 
 const MAX_PROVIDER_METADATA_BYTES: u64 = 1_048_576;
 
+/// Pure function of the provider metadata bytes: every failure is a
+/// deterministic content refusal, never an environmental fault.
 fn protected_metadata_json(
     original: Option<&str>,
     prepared: &PreparedMessage,
 ) -> Result<Option<String>, LcmError> {
+    let refused = |reason: String| LcmError::SanitizationRefused { reason };
     let mut metadata =
         sanitize_provider_metadata_json(original.unwrap_or("{}"), MAX_PROVIDER_METADATA_BYTES)
-            .ok_or_else(|| LcmError::Db("LCM metadata sanitization failed".to_owned()))?;
+            .ok_or_else(|| refused("LCM metadata sanitization failed".to_owned()))?;
     if !metadata.is_object() {
-        return Err(LcmError::Db(
+        return Err(refused(
             "LCM metadata sanitization failed: metadata must be a JSON object".to_owned(),
         ));
     }
     let sanitized_metadata = serde_json::to_string(&metadata)
-        .map_err(|error| LcmError::Db(format!("LCM metadata encoding failed: {error}")))?;
+        .map_err(|error| refused(format!("LCM metadata encoding failed: {error}")))?;
     let metadata_sanitization =
         bind_sanitized_lcm_payload_text(original.unwrap_or("{}"), &sanitized_metadata)
-            .map_err(|error| LcmError::Db(format!("LCM metadata receipt failed: {error}")))?;
+            .map_err(|error| refused(format!("LCM metadata receipt failed: {error}")))?;
     add_sanitization_metadata(
         &mut metadata,
         prepared,

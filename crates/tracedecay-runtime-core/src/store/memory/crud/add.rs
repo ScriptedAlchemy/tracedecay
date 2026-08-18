@@ -22,7 +22,7 @@ use tracedecay_store::{
 const ADD_CANDIDATE_LIMIT: usize = 8;
 
 pub(super) enum ProjectMemoryAddClassification {
-    NormalizedDuplicate(ProjectMemoryFactV1),
+    NormalizedDuplicate(Box<ProjectMemoryFactV1>),
     SemanticNearDuplicate {
         closest_fact_id: FactId,
         similarity_millionths: u32,
@@ -128,9 +128,9 @@ async fn candidates_tx(
         match load_project_memory_projection_tx(transaction, owner, &fact_id).await? {
             Some(ProjectMemoryFactProjectionV1::Available(fact)) => candidates.push(*fact),
             Some(ProjectMemoryFactProjectionV1::Unavailable(_)) => {
-                return Err(FactStoreError::FactUnavailable { fact_id }.into());
+                return Err(FactStoreError::FactUnavailable { fact_id });
             }
-            None => return Err(FactStoreError::FactNotFound { fact_id }.into()),
+            None => return Err(FactStoreError::FactNotFound { fact_id }),
         }
     }
     Ok(candidates)
@@ -149,7 +149,7 @@ pub(super) async fn classify_project_memory_add_tx(
         .find(|candidate| normalized_equivalent(content, candidate.content()))
     {
         return Ok(Some(ProjectMemoryAddClassification::NormalizedDuplicate(
-            candidate.clone(),
+            Box::new(candidate.clone()),
         )));
     }
     let encoder = HolographicEncoder::new();

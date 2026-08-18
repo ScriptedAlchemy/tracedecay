@@ -432,12 +432,10 @@ async fn active_assertion_at_event_tx(
             FactLineageEventKindV1::AssertionRecorded { assertion_id } => {
                 active = Some(assertion_id.clone());
             }
-            FactLineageEventKindV1::PayloadAccessChanged { current, .. }
-                if matches!(
-                    current,
-                    PayloadAccessState::Quarantined | PayloadAccessState::Deleted
-                ) =>
-            {
+            FactLineageEventKindV1::PayloadAccessChanged {
+                current: PayloadAccessState::Quarantined | PayloadAccessState::Deleted,
+                ..
+            } => {
                 active = None;
             }
             _ => {}

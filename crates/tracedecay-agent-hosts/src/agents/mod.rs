@@ -309,6 +309,16 @@ pub trait AgentIntegration {
         false
     }
 
+    /// Evidence that the host application itself is present on this machine
+    /// (its own config/profile surface exists), independent of whether
+    /// tracedecay is integrated into it. Doctor uses this to warn uniformly
+    /// about detected-but-unintegrated hosts instead of printing nothing for
+    /// them. The default is `None`: a host without a cheap, reliable presence
+    /// probe stays quiet rather than guessing at foreign config layouts.
+    fn detected_host_surface(&self, _home: &Path) -> Option<PathBuf> {
+        None
+    }
+
     /// Verify installation health using the daemon-owned snapshot already
     /// collected by Doctor. Integrations with daemon-backed diagnostics can
     /// override this without issuing another daemon call.

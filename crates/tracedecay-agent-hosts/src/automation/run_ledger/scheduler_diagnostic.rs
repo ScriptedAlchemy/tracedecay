@@ -60,8 +60,7 @@ fn append_or_reuse_blocking(
         let mut file = super::exact_lookup::open_stabilized_run_ledger(path, true)?
             .ok_or_else(|| config_error("automation run ledger disappeared during durable open"))?;
         super::ensure_run_ledger_eof_guard(&mut file).map_err(TraceDecayError::from)?;
-        if let Some(existing) =
-            find_before_anchor(&mut file, path, candidate, effectful_anchor_run_id)?
+        if let Some(existing) = find_before_anchor(&file, path, candidate, effectful_anchor_run_id)?
         {
             return Ok(existing);
         }

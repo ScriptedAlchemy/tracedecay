@@ -727,9 +727,7 @@ async fn pre_release_idempotency_observation_shape_refuses_admission_with_reset_
     drop(bootstrap);
 
     let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
-    raw_conn
-        .pragma_update(None, "foreign_keys", false)
-        .unwrap();
+    raw_conn.pragma_update(None, "foreign_keys", false).unwrap();
     raw_conn
         .execute_batch(
             "DROP TABLE observations;
@@ -783,7 +781,10 @@ async fn pre_release_idempotency_observation_shape_refuses_admission_with_reset_
     let legacy_rows: i64 = verify_conn
         .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(legacy_rows, 1, "refused data must be preserved for recovery");
+    assert_eq!(
+        legacy_rows, 1,
+        "refused data must be preserved for recovery"
+    );
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-//! Bounded canonical SQLite candidate discovery for project-memory retrieval.
+//! Bounded canonical `SQLite` candidate discovery for project-memory retrieval.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -537,7 +537,7 @@ pub(super) async fn project_memory_related_candidates_tx(
     let normalized_source = normalize_entity(&entity).to_ascii_lowercase();
     let co_entities = source_facts
         .iter()
-        .flat_map(|fact| fact.entities())
+        .flat_map(tracedecay_store::ProjectMemoryFactV1::entities)
         .map(|candidate| normalize_entity(candidate).to_ascii_lowercase())
         .filter(|candidate| !candidate.is_empty() && candidate != &normalized_source)
         .collect::<BTreeSet<_>>();

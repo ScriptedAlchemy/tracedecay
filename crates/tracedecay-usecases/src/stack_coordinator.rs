@@ -92,6 +92,12 @@ pub struct GitHubStackProviderSourceBindingV1 {
     pub snapshot_source_anchor_id: Option<RetrievalAnchorId>,
 }
 
+struct GitHubStackObservationMaterial<'a> {
+    response_digest: &'a ManifestDigest,
+    provider_snapshot: Option<&'a GitHubStackProviderSnapshotV1>,
+    source_binding: &'a GitHubStackProviderSourceBindingV1,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitHubStackProviderOutcomeV1 {
     Unavailable,
@@ -266,9 +272,11 @@ impl DaemonGitHubStackCoordinatorV1 {
             scope,
             provider,
             state,
-            &digest,
-            None,
-            &source_binding,
+            GitHubStackObservationMaterial {
+                response_digest: &digest,
+                provider_snapshot: None,
+                source_binding: &source_binding,
+            },
             observed_at,
         )
     }
@@ -302,9 +310,11 @@ impl DaemonGitHubStackCoordinatorV1 {
             scope,
             provider,
             state,
-            &response_digest,
-            snapshot.as_ref(),
-            &source_binding,
+            GitHubStackObservationMaterial {
+                response_digest: &response_digest,
+                provider_snapshot: snapshot.as_ref(),
+                source_binding: &source_binding,
+            },
             observed_at,
         )
     }
@@ -716,9 +726,7 @@ impl DaemonGitHubStackCoordinatorV1 {
         scope: ResolvedScope,
         provider: ProviderId,
         state: GitHubStackCapabilityStateV1,
-        response_digest: &ManifestDigest,
-        provider_snapshot: Option<&GitHubStackProviderSnapshotV1>,
-        source_binding: &GitHubStackProviderSourceBindingV1,
+        material: GitHubStackObservationMaterial<'_>,
         observed_at: UtcMicros,
     ) -> Result<GitHubStackObservationV1, GitHubStackCoordinatorErrorV1> {
         scope
@@ -727,29 +735,35 @@ impl DaemonGitHubStackCoordinatorV1 {
         provider
             .validate()
             .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
-        response_digest
+        material
+            .response_digest
             .validate()
             .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
-        source_binding
+        material
+            .source_binding
             .owner
             .validate()
             .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
-        if source_binding.owner.project_id() != Some(&scope.project_id) {
+        if material.source_binding.owner.project_id() != Some(&scope.project_id) {
             return Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation);
         }
-        source_binding
+        material
+            .source_binding
             .capability_source_anchor_id
             .validate()
             .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
-        source_binding
+        material
+            .source_binding
             .snapshot_source_anchor_id
             .as_ref()
             .map_or(Ok(()), RetrievalAnchorId::validate)
             .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
-        if provider_snapshot.is_some() != source_binding.snapshot_source_anchor_id.is_some() {
+        if material.provider_snapshot.is_some()
+            != material.source_binding.snapshot_source_anchor_id.is_some()
+        {
             return Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation);
         }
-        let generation_id = generation_id(response_digest)?;
+        let generation_id = generation_id(material.response_digest)?;
         let capability = GitHubStackCapabilitySnapshotV1::new(
             provider.clone(),
             scope.project_id.clone(),
@@ -757,7 +771,7 @@ impl DaemonGitHubStackCoordinatorV1 {
             scope.worktree_id.clone(),
             state,
             generation_id.clone(),
-            source_binding.capability_source_anchor_id.clone(),
+            material.source_binding.capability_source_anchor_id.clone(),
         )
         .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
         let anchor_owner = ObservationScopeV1::Project {
@@ -768,7 +782,8 @@ impl DaemonGitHubStackCoordinatorV1 {
             &GitTopologyAnchorTargetV1::GitHubStackCapability(capability.clone()),
         )
         .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
-        let snapshot = provider_snapshot
+        let snapshot = material
+            .provider_snapshot
             .map(|snapshot| {
                 build_snapshot(
                     &scope,
@@ -776,7 +791,8 @@ impl DaemonGitHubStackCoordinatorV1 {
                     &capability,
                     &generation_id,
                     snapshot,
-                    source_binding
+                    material
+                        .source_binding
                         .snapshot_source_anchor_id
                         .as_ref()
                         .ok_or(GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?,

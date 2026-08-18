@@ -329,9 +329,13 @@ fn candidate_session_id(
     }
 }
 
+/// Frozen participant manifest lookup: `(session_id, source_id)` to that
+/// participant's `(generation, graph_watermark)`.
+type ParticipantGenerations<'a> = HashMap<(&'a str, &'a str), (u64, u64)>;
+
 fn candidate_generation(
     snapshot: &TemporalExecutionSnapshot,
-    participants: Option<&HashMap<(&str, &str), (u64, u64)>>,
+    participants: Option<&ParticipantGenerations<'_>>,
     candidate: &RankingCandidate,
     session_id: &SessionId,
 ) -> Result<u64, TemporalPortError> {

@@ -46,21 +46,50 @@ export async function fetchEnvelope<T>(
     return { outcome: 'transport', state: 'error', detail: 'HTTP 405' };
   }
   if (!response.ok) {
-    return { outcome: 'transport', state: 'error', detail: `HTTP ${response.status}` };
+    // Some routes answer an unready read with a non-2xx status AND a complete
+    // typed envelope body (the graph-structure routes return 503 while the
+    // verified graph is warming). The body is the daemon's typed truth —
+    // reason included — so it must not be flattened into a raw `HTTP 503`.
+    // Only a non-2xx without a decodable envelope stays a bare transport
+    // error.
+    const decoded = decodeEnvelopeBody<T>(payloadSchema, await bodyJson(response));
+    return decoded ?? { outcome: 'transport', state: 'error', detail: `HTTP ${response.status}` };
   }
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
+  const body = await bodyJson(response);
+  if (body === undefined) {
     return { outcome: 'transport', state: 'unsupported_schema' };
   }
-  // Envelope routes use `null` only when the domain state says no safe payload
-  // exists (for example, a graph read that failed before it could produce a
-  // projection). Decode the envelope first so the reader receives the daemon's
-  // state rather than mislabelling that honest absence as a schema mismatch.
+  return (
+    decodeEnvelopeBody<T>(payloadSchema, body) ?? {
+      outcome: 'transport',
+      state: 'unsupported_schema',
+    }
+  );
+}
+
+async function bodyJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Decodes one envelope body, or `null` when it is not an envelope.
+ *
+ * Envelope routes use a `null` payload only when the domain state says no safe
+ * payload exists (for example, a graph read that failed before it could
+ * produce a projection). The envelope is decoded first so the reader receives
+ * the daemon's state rather than mislabelling that honest absence as a schema
+ * mismatch. */
+function decodeEnvelopeBody<T>(
+  payloadSchema: WireSchema<T>,
+  body: unknown,
+): EnvelopeResult<T> | null {
+  if (body === undefined) return null;
   const parsed = DashboardEnvelopeV1Schema(payloadSchema.nullable()).safeParse(body);
   if (!parsed.success) {
-    return { outcome: 'transport', state: 'unsupported_schema' };
+    return null;
   }
   const envelope = parsed.data;
   if (envelope.payload === null) {

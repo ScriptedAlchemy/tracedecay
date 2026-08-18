@@ -28,8 +28,8 @@ use tracedecay_usecases::delivery::{
     ProjectDeliveryGitHubOperationSnapshotV1, ProjectDeliveryGitHubSourceV1,
     ProjectDeliveryGitHubTimelineV1, ProjectDeliveryProviderMountGateV1,
     ProjectDeliveryPullRequestIdentityV1, ProjectDeliveryPullRequestOperationV1,
-    ProjectDeliveryPullRequestStateV1, ProjectDeliveryPullRequestV1,
-    ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1, ProjectDeliveryReleaseSourceV1,
+    ProjectDeliveryPullRequestStateV1, ProjectDeliveryPullRequestV1, ProjectDeliveryReadOutcomeV1,
+    ProjectDeliveryReadRequestV1, ProjectDeliveryReleaseSourceV1,
     ProjectDeliveryReviewBodyPreviewV1, ProjectDeliveryReviewItemV1,
     ProjectDeliveryReviewObservationKindV1, ProjectDeliveryReviewObservationV1,
     ProjectDeliverySnapshotV1,
@@ -1090,7 +1090,9 @@ fn map_review_observation(
     }
 }
 
-fn map_review_body_preview(preview: ProjectDeliveryReviewBodyPreviewV1) -> DeliveryReviewBodyPreviewV1 {
+fn map_review_body_preview(
+    preview: ProjectDeliveryReviewBodyPreviewV1,
+) -> DeliveryReviewBodyPreviewV1 {
     DeliveryReviewBodyPreviewV1 {
         text: preview.text,
         truncated: preview.truncated,
@@ -1177,7 +1179,11 @@ fn map_ci_check(check: ProjectDeliveryCiCheckV1) -> DeliveryCiCheckV1 {
         check_status: map_ci_status(check.check_status),
         check_conclusion: check.check_conclusion.map(map_ci_conclusion),
         failed_step: check.failed_step,
-        annotations: check.annotations.into_iter().map(map_ci_annotation).collect(),
+        annotations: check
+            .annotations
+            .into_iter()
+            .map(map_ci_annotation)
+            .collect(),
         annotation_count: check.annotation_count,
         provider_head_commit: check.provider_head_sha,
         failure_kind: map_ci_failure_kind(check.failure_kind),

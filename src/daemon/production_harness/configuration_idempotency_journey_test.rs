@@ -301,7 +301,7 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
                 profile_id: profile_id.clone(),
             },
             key: SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("user setting key"),
-            value: ConfigurationValueV1::Boolean(true),
+            value: Box::new(ConfigurationValueV1::Boolean(true)),
         }],
         expected_revision: expected_revision.clone(),
         idempotency_key: ConfigurationIdempotencyKey::new(
@@ -352,7 +352,7 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
         mutations: vec![ConfigurationDirectMutationRequestV1::Set {
             layer: ConfigurationLayerIdV1::UserProfile { profile_id },
             key: SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("user setting key"),
-            value: ConfigurationValueV1::Boolean(false),
+            value: Box::new(ConfigurationValueV1::Boolean(false)),
         }],
         ..request
     };

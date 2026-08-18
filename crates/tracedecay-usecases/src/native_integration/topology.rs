@@ -198,7 +198,7 @@ impl ExactPairNativeIntegrationTopology {
                 Err(outcome) => return Ok(outcome),
             };
         let selection = FrozenBranchStackSnapshotV1::new(
-            declared_revision.clone(),
+            declared_revision.as_ref().clone(),
             source_node_id.clone(),
             destination_node_id.clone(),
             *direction,

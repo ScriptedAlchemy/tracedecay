@@ -234,7 +234,7 @@ async fn credential_references_are_opaque_and_activation_failure_preserves_last_
             &DirectConfigurationMutation::Set {
                 layer: direct_project_layer(),
                 key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-                value: ConfigurationValueV1::Boolean(true),
+                value: Box::new(ConfigurationValueV1::Boolean(true)),
             },
             &root.revision_id,
         )

@@ -103,7 +103,7 @@ pub struct FactStatusV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FactProjectionV1 {
-    Available { fact: FactV1 },
+    Available { fact: Box<FactV1> },
     Unavailable { status: FactStatusV1 },
 }
 

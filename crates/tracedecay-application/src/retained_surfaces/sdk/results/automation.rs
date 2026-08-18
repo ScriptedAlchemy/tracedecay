@@ -381,7 +381,7 @@ impl AutomationExternalEffectReceiptV1 {
 )]
 pub enum AutomationCommittedReceiptV1 {
     Curation(MemoryAutomationCurationReceiptV1),
-    AutomaticFact(MemoryAutomationFactReceiptV1),
+    AutomaticFact(Box<MemoryAutomationFactReceiptV1>),
     SkillWriting(AutomationExternalEffectReceiptV1),
     UserJobDelivery(AutomationExternalEffectReceiptV1),
 }

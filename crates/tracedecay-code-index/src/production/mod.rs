@@ -1299,7 +1299,8 @@ where
                 },
             ));
         }
-        let (parse_artifacts, parsed_len) = parse_for_indexing(
+        let cancellation = ExtractionControlBridge { control };
+        let extraction = match parse_for_indexing(
             retained_parses,
             config,
             snapshot,
@@ -1307,23 +1308,37 @@ where
             file,
             captured,
             parser,
-        )?;
-        Self::checkpoint(control)?;
-        let cancellation = ExtractionControlBridge { control };
-        let extraction = extractor
-            .extract_preparsed(
-                &receipt_bound,
-                descriptor,
-                parse_artifacts,
-                parsed_len,
-                &cancellation,
-            )
-            .map_err(|error| match error {
-                ExtractionFailureV1::Cancelled | ExtractionFailureV1::TimedOut => {
-                    Self::interruption_error(control)
-                }
-                error => CodeIndexProductionErrorV1::Extraction(error),
-            })?;
+        ) {
+            Ok((parse_artifacts, parsed_len)) => {
+                Self::checkpoint(control)?;
+                extractor
+                    .extract_preparsed(
+                        &receipt_bound,
+                        descriptor,
+                        parse_artifacts,
+                        parsed_len,
+                        &cancellation,
+                    )
+                    .map_err(|error| match error {
+                        ExtractionFailureV1::Cancelled | ExtractionFailureV1::TimedOut => {
+                            Self::interruption_error(control)
+                        }
+                        error => CodeIndexProductionErrorV1::Extraction(error),
+                    })?
+            }
+            // One file exceeding the bounded parse budget is evidence about
+            // that file, never about the generation: record it as a typed
+            // unsupported document with a reason and keep building, instead
+            // of failing the whole reconcile cycle and leaving the served
+            // generation permanently stale.
+            Err(CodeIndexProductionErrorV1::RetainedParse(ParseError::TimedOut { .. })) => {
+                Self::checkpoint(control)?;
+                extractor
+                    .extract_parse_timed_out(&receipt_bound, descriptor)
+                    .map_err(CodeIndexProductionErrorV1::Extraction)?
+            }
+            Err(error) => return Err(error),
+        };
         Self::checkpoint(control)?;
         let (artifacts, exact_authority) = chunker
             .index_file_with_authority_from_extraction(

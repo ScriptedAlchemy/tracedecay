@@ -240,7 +240,7 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
             (ApplicationProblemKind::PartialEffect, Some(diagnostic), Some(committed_receipt)) => {
                 ApplicationProblem::PartialEffect {
                     diagnostic,
-                    committed_receipt,
+                    committed_receipt: Box::new(committed_receipt),
                     retry: wire.retry,
                     legal_actions: wire.legal_actions.clone(),
                 }
@@ -689,6 +689,8 @@ impl ApplicationProblemEnvelope {
     }
 }
 
+pub type ApplicationResult<T> = Result<ApplicationEnvelope<T>, ApplicationProblemEnvelope>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,7 +748,7 @@ mod tests {
                     "The effect committed but delivery did not complete.",
                 )
                 .expect("diagnostic"),
-                committed_receipt: receipt(),
+                committed_receipt: Box::new(receipt()),
                 retry: RetryDirective::Never,
                 legal_actions: vec![LegalAction::Reconcile],
             },
@@ -988,5 +990,3 @@ mod tests {
         );
     }
 }
-
-pub type ApplicationResult<T> = Result<ApplicationEnvelope<T>, ApplicationProblemEnvelope>;

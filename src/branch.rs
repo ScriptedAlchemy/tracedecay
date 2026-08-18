@@ -526,6 +526,7 @@ pub fn rollback_prepared_branch_tracking(
     Ok(PreparedBranchRollbackOutcome::RolledBack)
 }
 
+#[cfg(test)]
 fn rollback_branch_tracking(
     tracedecay_dir: &Path,
     branch_name: &str,

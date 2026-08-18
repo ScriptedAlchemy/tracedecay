@@ -158,7 +158,7 @@ pub(super) fn project_committed_receipts(
                     ));
                 }
                 project_automatic_fact_receipt(result)
-                    .map(AutomationCommittedReceiptV1::AutomaticFact)
+                    .map(|receipt| AutomationCommittedReceiptV1::AutomaticFact(Box::new(receipt)))
             })
             .collect(),
         AutomationCommittedReceipt::UserJobDelivery(receipt) => {
@@ -216,7 +216,7 @@ pub(super) fn project_recovered_committed_receipts(
                 .ok_or_else(|| contract_error("recovered automatic-fact receipt set is empty"))?;
             project_committed_receipts(
                 request,
-                &AutomationCommittedReceipt::AutomaticFacts(receipts),
+                &AutomationCommittedReceipt::AutomaticFacts(Box::new(receipts)),
             )
         }
         (None, true) => Ok(Vec::new()),

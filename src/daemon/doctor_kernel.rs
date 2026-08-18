@@ -37,10 +37,10 @@ use tracedecay_application::doctor::{
     DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageFindingV1,
     DoctorStorageIncompleteReasonV1, HostConformanceV1, HostIntegrationDoctorPort,
     HostIntegrationReadV1, IngestRefusalCensusReadV1, IngestRefusalCountV1,
-    LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1,
-    ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort,
-    OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteOperationalReadV1,
-    RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort,
+    LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort,
+    ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
+    ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
+    RuntimeLivenessV1, StorageDoctorPort,
 };
 use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,

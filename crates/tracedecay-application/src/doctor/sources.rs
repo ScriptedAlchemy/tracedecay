@@ -1720,8 +1720,7 @@ mod tests {
 
     #[test]
     fn unknown_ingest_refusal_census_cannot_claim_health() {
-        let finding =
-            ingest_refusal_finding(&IngestRefusalCensusReadV1::Unknown).expect("finding");
+        let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Unknown).expect("finding");
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Unknown);
         assert!(!finding.state().is_healthy_complete());
     }

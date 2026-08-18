@@ -58,9 +58,10 @@ async fn reads_use_finite_owner_bound_authority_methods() {
         search_page.graph_coverage(),
         ProjectMemoryFactSearchGraphCoverageV1::NotMounted
     );
-    let forwarded = application.authority.search_read_controls.lock().unwrap();
-    assert_eq!(forwarded.as_slice(), &[read_control_address]);
-    drop(forwarded);
+    {
+        let forwarded = application.authority.search_read_controls.lock().unwrap();
+        assert_eq!(forwarded.as_slice(), &[read_control_address]);
+    }
     assert!(
         application
             .get_project_memory_fact(target.clone(), &read_control)

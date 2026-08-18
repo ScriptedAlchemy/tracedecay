@@ -258,7 +258,7 @@ fn preflight_request(index: usize) -> NativeIntegrationPreflightRequestV1 {
                 stack_id: declared_revision.stack_id.clone(),
                 revision_id: declared_revision.revision_id.clone(),
                 revision_digest: declared_revision.digest.clone(),
-                declared_revision,
+                declared_revision: Box::new(declared_revision),
                 source_node_id,
                 destination_node_id,
                 direction: NativeIntegrationDirectionV1::PropagateDependencyToDependent,

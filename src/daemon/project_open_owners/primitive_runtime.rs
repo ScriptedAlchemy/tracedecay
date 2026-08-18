@@ -4,7 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay_usecases::primitives::{
-    ProductionPrimitiveOpenRequestV1, open_production_primitive_runtime,
+    ProductionPrimitiveCodeAuthoritiesV1, ProductionPrimitiveOpenRequestV1,
+    open_production_primitive_runtime,
 };
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
@@ -41,12 +42,14 @@ pub(super) async fn open_and_register_project_primitive_runtime(
     let primitive_runtime =
         open_production_primitive_runtime(ProductionPrimitiveOpenRequestV1::new(
             graph,
-            code_graph,
-            Some(ignored_dependency_admission),
+            ProductionPrimitiveCodeAuthoritiesV1 {
+                code_graph,
+                ignored_dependency_admission: Some(ignored_dependency_admission),
+                code_index: Arc::new(invocation.code_index_schedulers.clone()),
+                diagnostic_identity: Arc::new(invocation.code_index_schedulers.clone()),
+            },
             session_db,
             temporal,
-            Arc::new(invocation.code_index_schedulers.clone()),
-            Arc::new(invocation.code_index_schedulers.clone()),
             access,
             admitted_root_uri.to_owned(),
             daemon_operation_event_authority(),

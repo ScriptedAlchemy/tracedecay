@@ -191,9 +191,8 @@ impl RetainedSurfaceOperation {
 
     /// Parse an exact catalog/HTTP operation segment without a tool prefix.
     pub fn from_operation_name(name: &str) -> Option<Self> {
-        match name {
-            "session_refresh" => return Some(Self::SessionRefresh),
-            _ => {}
+        if name == "session_refresh" {
+            return Some(Self::SessionRefresh);
         }
         surface_specs()
             .into_iter()

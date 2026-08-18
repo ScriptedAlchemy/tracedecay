@@ -274,8 +274,8 @@ pub struct ContextScoutClaimHandleV1 {
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub enum ContextScoutClaimResultV1 {
     Claimed {
-        claim: ContextScoutClaimHandleV1,
-        suggestion: ContextScoutSuggestionProjectionV1,
+        claim: Box<ContextScoutClaimHandleV1>,
+        suggestion: Box<ContextScoutSuggestionProjectionV1>,
     },
     Empty,
 }

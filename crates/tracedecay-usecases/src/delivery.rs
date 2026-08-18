@@ -889,10 +889,8 @@ impl ProjectDeliveryReadAuthorityV1 {
             });
         }
         checks.sort_by(|left, right| {
-            (delivery_ci_check_rank(left), ci_run_sort_key(&left.run)).cmp(&(
-                delivery_ci_check_rank(right),
-                ci_run_sort_key(&right.run),
-            ))
+            (delivery_ci_check_rank(left), ci_run_sort_key(&left.run))
+                .cmp(&(delivery_ci_check_rank(right), ci_run_sort_key(&right.run)))
         });
         let timeline = ProjectDeliveryCiTimelineV1 {
             checks,
@@ -1491,7 +1489,11 @@ mod tests {
         assert_eq!(identity.state, ProjectDeliveryPullRequestStateV1::Open);
         assert!(identity.draft);
         assert_eq!(
-            (identity.additions, identity.deletions, identity.changed_files),
+            (
+                identity.additions,
+                identity.deletions,
+                identity.changed_files
+            ),
             (10, 2, 3)
         );
     }

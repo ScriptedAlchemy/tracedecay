@@ -187,11 +187,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         _read_control: &FactReadControl,
     ) -> FactStoreResult<ProjectMemoryFactPageV1> {
         self.authority_calls.lock().unwrap().push("list");
-        Ok(ProjectMemoryFactPageV1::new(
-            query.owner().clone(),
-            vec![],
-            None,
-        )?)
+        ProjectMemoryFactPageV1::new(query.owner().clone(), vec![], None)
     }
 
     async fn search_project_memory_facts(
@@ -204,12 +200,12 @@ impl ProjectMemoryFactStore for FakeAuthority {
             .unwrap()
             .push(std::ptr::from_ref(read_control).addr());
         self.authority_calls.lock().unwrap().push("search");
-        Ok(ProjectMemoryFactSearchPageV1::new(
+        ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
             None,
             ProjectMemoryFactSearchGraphCoverageV1::NotMounted,
-        )?)
+        )
     }
 
     async fn probe_project_memory_facts(
@@ -218,12 +214,12 @@ impl ProjectMemoryFactStore for FakeAuthority {
         _read_control: &FactReadControl,
     ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
         self.authority_calls.lock().unwrap().push("probe");
-        Ok(ProjectMemoryFactSearchPageV1::new(
+        ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
             None,
             ProjectMemoryFactSearchGraphCoverageV1::NotApplicable,
-        )?)
+        )
     }
 
     async fn related_project_memory_facts(
@@ -232,12 +228,12 @@ impl ProjectMemoryFactStore for FakeAuthority {
         _read_control: &FactReadControl,
     ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
         self.authority_calls.lock().unwrap().push("related");
-        Ok(ProjectMemoryFactSearchPageV1::new(
+        ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
             None,
             ProjectMemoryFactSearchGraphCoverageV1::NotMounted,
-        )?)
+        )
     }
 
     async fn reason_project_memory_facts(
@@ -246,12 +242,12 @@ impl ProjectMemoryFactStore for FakeAuthority {
         _read_control: &FactReadControl,
     ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
         self.authority_calls.lock().unwrap().push("reason");
-        Ok(ProjectMemoryFactSearchPageV1::new(
+        ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
             None,
             ProjectMemoryFactSearchGraphCoverageV1::NotApplicable,
-        )?)
+        )
     }
 
     async fn find_project_memory_contradictions(
@@ -260,10 +256,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         _read_control: &FactReadControl,
     ) -> FactStoreResult<ProjectMemoryFactContradictionPageV1> {
         self.authority_calls.lock().unwrap().push("contradictions");
-        Ok(ProjectMemoryFactContradictionPageV1::new(
-            query.owner().clone(),
-            vec![],
-        )?)
+        ProjectMemoryFactContradictionPageV1::new(query.owner().clone(), vec![])
     }
 
     async fn get_project_memory_fact(
@@ -281,12 +274,12 @@ impl ProjectMemoryFactStore for FakeAuthority {
         _read_control: &FactReadControl,
     ) -> FactStoreResult<ProjectMemoryFactHistoryV1> {
         self.authority_calls.lock().unwrap().push("history");
-        Ok(ProjectMemoryFactHistoryV1::new(
+        ProjectMemoryFactHistoryV1::new(
             query.target().owner().clone(),
             query.target().fact_id().clone(),
             vec![],
             None,
-        )?)
+        )
     }
 
     async fn project_memory_status(
@@ -507,7 +500,7 @@ fn authority_fixture_error() -> FactStoreError {
 }
 
 fn project_memory_status(owner: FactOwnerV1) -> FactStoreResult<ProjectMemoryMemoryStatusV1> {
-    Ok(ProjectMemoryMemoryStatusV1::new(
+    ProjectMemoryMemoryStatusV1::new(
         owner,
         0,
         0,
@@ -520,7 +513,7 @@ fn project_memory_status(owner: FactOwnerV1) -> FactStoreResult<ProjectMemoryMem
         0,
         0,
         tracedecay_store::ProjectMemoryMemoryFeedbackFunnelV1::new(0, 0, 0, 0, 0),
-    )?)
+    )
 }
 
 fn owner() -> FactOwnerV1 {

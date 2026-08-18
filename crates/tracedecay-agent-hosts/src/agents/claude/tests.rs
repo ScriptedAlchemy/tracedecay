@@ -657,3 +657,35 @@ fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
         "a refused lifecycle must not have touched host-owned registration state"
     );
 }
+
+/// The single documented wildcard rule must satisfy the permission check on
+/// its own, exactly like a full per-tool grant, while partial grants keep the
+/// prompt warning truthful. An empty expected list (no registered tool
+/// catalog) must not read as vacuously satisfied.
+#[test]
+fn plugin_permission_coverage_accepts_wildcard_or_full_per_tool_grants() {
+    let wildcard = plugin_wildcard_perm();
+    assert_eq!(wildcard, "mcp__plugin_tracedecay_graph__*");
+
+    let per_tool = vec![
+        format!("{PLUGIN_TOOL_PERM_PREFIX}tracedecay_search"),
+        format!("{PLUGIN_TOOL_PERM_PREFIX}tracedecay_grep"),
+    ];
+    let all: Vec<&str> = per_tool.iter().map(String::as_str).collect();
+
+    assert!(plugin_perms_covered(&[wildcard.as_str()], &per_tool));
+    assert!(plugin_perms_covered(&all, &per_tool));
+    assert!(
+        !plugin_perms_covered(&all[..1], &per_tool),
+        "one missing per-tool grant without the wildcard still prompts"
+    );
+    assert!(!plugin_perms_covered(&[], &per_tool));
+    assert!(
+        !plugin_perms_covered(&all, &[]),
+        "an empty expected-tool list must not read as vacuously satisfied"
+    );
+    assert!(
+        plugin_perms_covered(&[wildcard.as_str()], &[]),
+        "the wildcard rule covers the namespace even without a registered catalog"
+    );
+}

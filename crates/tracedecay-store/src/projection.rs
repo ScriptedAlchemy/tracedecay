@@ -74,6 +74,11 @@ pub enum ProjectionSkipReason {
     /// auditable skip instead of wedging the projection queue.
     OutputCollision,
     InvalidContract,
+    /// The projected content deterministically failed privacy sanitization or
+    /// receipt binding (a pure function of the bytes). Retrying can never
+    /// succeed, so the observation converges as a durable, auditable skip
+    /// instead of wedging the projection queue behind an endless retry.
+    SanitizationRefused,
 }
 
 impl ProjectionSkipReason {
@@ -82,6 +87,7 @@ impl ProjectionSkipReason {
             Self::NonConversationalRecord => "non_conversational_record",
             Self::OutputCollision => "output_collision",
             Self::InvalidContract => "invalid_contract",
+            Self::SanitizationRefused => "sanitization_refused",
         }
     }
 
@@ -90,6 +96,7 @@ impl ProjectionSkipReason {
             "non_conversational_record" => Some(Self::NonConversationalRecord),
             "output_collision" => Some(Self::OutputCollision),
             "invalid_contract" => Some(Self::InvalidContract),
+            "sanitization_refused" => Some(Self::SanitizationRefused),
             _ => None,
         }
     }
@@ -568,6 +575,12 @@ pub enum ProjectionStoreError {
         #[source]
         source: Box<dyn Error + Send + Sync>,
     },
+    // Deterministic, content-dependent refusal (the projected output failed
+    // pure sanitization/receipt binding). Like `Contract`, it can never
+    // succeed on retry: callers record a durable skip disposition and keep
+    // draining instead of scheduling an environmental retry.
+    #[error("projected content failed deterministic sanitization: {reason}")]
+    SanitizationRefused { reason: String },
     #[error(
         "projection retry is deferred after attempt {attempt_count} until {next_retry_at_micros}"
     )]

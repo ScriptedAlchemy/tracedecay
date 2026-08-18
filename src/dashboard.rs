@@ -68,31 +68,79 @@ pub fn register_test_schema_installer() {
 /// integration-test graph. The returned writer is the same serialization
 /// authority captured by managed-skill mutation/materialization and must be
 /// mounted into dashboard state with the authority. Runs use canonical runner
-/// locking directly, so a model turn never holds this broad writer.
+/// locking directly, so a model turn never holds this broad writer. The
+/// retained invocation service is mounted with the graph's exact project
+/// observability identity before that authority can admit backend execution.
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
-pub fn dashboard_automation_authority_for_test(
+pub async fn dashboard_automation_authority_for_test(
     cg: std::sync::Arc<crate::tracedecay::TraceDecay>,
     profile_root: impl AsRef<std::path::Path>,
 ) -> crate::errors::Result<(DashboardAutomationAuthorityV1, DashboardAutomationWriter)> {
     let profile_root = profile_root.as_ref().canonicalize()?;
+    let project_root = cg.project_root().canonicalize()?;
+    let configuration = cg
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .map_err(|error| crate::errors::TraceDecayError::Config {
+            message: format!("dashboard automation fixture configuration is unavailable: {error}"),
+        })?;
+    let configured_project_root = configuration.target.project_root.canonicalize()?;
+    if configured_project_root != project_root {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: "dashboard automation fixture configuration resolved a different project root"
+                .to_owned(),
+        });
+    }
+    let project_id = configuration.target.project_id.clone();
+    let scope =
+        crate::daemon::project_open_owners::resolved_scope_for_project(&project_root, &project_id)
+            .map_err(|error| crate::errors::TraceDecayError::Config {
+                message: format!("dashboard automation fixture scope is invalid: {error}"),
+            })?;
+    let project_database = cg
+        .store_runtime_registry()
+        .project_sessions(project_id.clone(), [project_root.clone()])
+        .await?;
+    let configuration_policy_digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.daemon.configuration-policy.v1",
+        &scope.scope_digest,
+        &configuration.snapshot.effective_behavior_digest,
+        &configuration.snapshot.resolution_provenance_digest,
+    ))
+    .map_err(|error| crate::errors::TraceDecayError::Config {
+        message: format!("dashboard automation fixture policy digest failed: {error}"),
+    })?;
     let writer = standalone_dashboard_automation_writer();
     let resident_memory = std::sync::Arc::new(
         tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
         ),
     );
-    let authority = crate::daemon::dashboard_automation::compose_dashboard_automation_authority_for_test(
-        profile_root,
-        cg,
-        std::sync::Arc::clone(&writer),
-        crate::daemon::DaemonInvocationService::with_code_index_schedulers(
-            crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory(
-                1,
-                resident_memory,
-            ),
+    let invocation_service = crate::daemon::DaemonInvocationService::with_code_index_schedulers(
+        crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory(
+            1,
+            resident_memory,
         ),
-    )?;
+    );
+    invocation_service
+        .mount_observability_producer(
+            project_root,
+            project_database,
+            project_id,
+            configuration.snapshot.effective_behavior_digest,
+            configuration_policy_digest,
+        )
+        .await?;
+    let authority =
+        crate::daemon::dashboard_automation::compose_dashboard_automation_authority_for_test(
+            profile_root,
+            cg,
+            std::sync::Arc::clone(&writer),
+            invocation_service,
+        )?;
     Ok((authority, writer))
 }
 

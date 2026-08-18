@@ -293,9 +293,7 @@ fn adoption_metrics(
             };
             let reason = (!complete).then_some(if !source_complete {
                 "incomplete_observability_coverage"
-            } else if index < 3 {
-                "adoption_eligibility_not_recorded"
-            } else if eligibility_records == 0 {
+            } else if index < 3 || eligibility_records == 0 {
                 "adoption_eligibility_not_recorded"
             } else {
                 "adoption_outcomes_not_recorded"

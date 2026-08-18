@@ -8,8 +8,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1, WorkOwnerObservationResultV1,
-    execution_owner_fact_envelope,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityEmissionOutcomeV1,
+    WorkOwnerObservationResultV1, execution_owner_fact_envelope,
 };
 
 /// Records one immutable Workflow journal/census settlement. Lifecycle facts
@@ -217,18 +217,20 @@ pub fn record_workflow_settlement(
             execution_owner_fact_envelope(
                 producer.identity(),
                 projection.definition().project_id().as_str(),
-                &format!(
-                    "workflow-settlement:{}:{}:{kind}",
-                    projection.run_id().as_str(),
-                    projection.sequence()
-                ),
-                "workflow_settlement",
-                census.observed_at,
-                Some(started_at),
-                Some(census.observed_at),
-                terminal,
-                coverage,
-                payload,
+                ExecutionOwnerFactInputV1 {
+                    owner_transition_ref: &format!(
+                        "workflow-settlement:{}:{}:{kind}",
+                        projection.run_id().as_str(),
+                        projection.sequence()
+                    ),
+                    operation: "workflow_settlement",
+                    event_time: census.observed_at,
+                    valid_from: Some(started_at),
+                    valid_until: Some(census.observed_at),
+                    terminal_result: terminal,
+                    coverage,
+                    payload,
+                },
             )
         })
         .collect::<Result<Vec<_>, _>>();

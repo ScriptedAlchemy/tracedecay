@@ -277,9 +277,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut config = AutomationConfig::default();
-        config.enabled = true;
-        config.backend = AutomationBackend::CodexAppServer;
+        let mut config = AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            ..AutomationConfig::default()
+        };
         config.tasks.memory_curator = AutomationTaskConfig {
             enabled: true,
             schedule: Some("daily".to_string()),

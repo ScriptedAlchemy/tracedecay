@@ -284,13 +284,13 @@ mutation_request!(RecordWorkHandoffRequestV1 {
 #[serde(tag = "change", rename_all = "snake_case")]
 pub enum WorkProductChangeDraftV1 {
     AddTask {
-        item: WorkItemV1,
+        item: Box<WorkItemV1>,
     },
     CreateTask {
         initiative: WorkInitiativeV1,
         plan: WorkPlanV1,
         milestone: WorkMilestoneV1,
-        item: WorkItemV1,
+        item: Box<WorkItemV1>,
     },
     DecideProposal {
         proposal: WorkProposalV1,
@@ -336,8 +336,8 @@ pub struct PrepareWorkProductMutationRequestV1 {
 #[schemars(extend("type" = "object"))]
 pub enum WorkProductMutationRequestV1 {
     Create(CreateWorkProductRequestV1),
-    AddTask(AddWorkTaskRequestV1),
-    CreateTask(CreateWorkTaskRequestV1),
+    AddTask(Box<AddWorkTaskRequestV1>),
+    CreateTask(Box<CreateWorkTaskRequestV1>),
     DecideProposal(DecideWorkProposalRequestV1),
     DecideRelationReplan(DecideWorkRelationReplanRequestV1),
     ApplyRelationReplan(ApplyWorkRelationReplanRequestV1),

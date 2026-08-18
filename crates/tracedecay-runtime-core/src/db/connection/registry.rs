@@ -188,8 +188,8 @@ pub struct DatabaseOwnerRetirementReservationV1 {
 /// minting a new database owner identity.
 pub struct DatabaseGraphOwnerRetirementCompositionRefusalV1 {
     error: DatabaseOwnerErrorV1,
-    database_owner_reservation: DatabaseOwnerRetirementReservationV1,
-    graph_owner_target: CanonicalGraphStoreOwnerRetirementTargetV1,
+    database_owner_reservation: Box<DatabaseOwnerRetirementReservationV1>,
+    graph_owner_target: Box<CanonicalGraphStoreOwnerRetirementTargetV1>,
 }
 
 impl DatabaseGraphOwnerRetirementCompositionRefusalV1 {
@@ -209,8 +209,8 @@ impl DatabaseGraphOwnerRetirementCompositionRefusalV1 {
     ) {
         (
             self.error,
-            self.database_owner_reservation,
-            self.graph_owner_target,
+            *self.database_owner_reservation,
+            *self.graph_owner_target,
         )
     }
 }
@@ -634,8 +634,8 @@ impl DatabaseOwnerRetirementReservationV1 {
             None => {
                 return Err(DatabaseGraphOwnerRetirementCompositionRefusalV1 {
                     error: DatabaseOwnerErrorV1::MissingWriteAuthority,
-                    database_owner_reservation: self,
-                    graph_owner_target: graph_owner_attachment,
+                    database_owner_reservation: Box::new(self),
+                    graph_owner_target: Box::new(graph_owner_attachment),
                 });
             }
         };

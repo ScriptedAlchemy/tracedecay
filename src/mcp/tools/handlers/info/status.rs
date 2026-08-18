@@ -94,6 +94,25 @@ fn attach_full_branch_status(cg: &TraceDecay, output: &mut Value) {
     }
 }
 
+/// Serialize the generation census exactly as the CLI decoder reads it back.
+///
+/// [`crate::runtime_telemetry::GenerationCensusSnapshot`] is the single wire
+/// authority for the `graph_statistics` field: this route serializes it and
+/// `tracedecay status` deserializes the same Rust type, so the two sides
+/// cannot drift.
+pub(crate) async fn graph_statistics_value(
+    generation_census_reader: Option<&crate::runtime_telemetry::GenerationCensusReader>,
+) -> Result<Value> {
+    let census = match generation_census_reader {
+        Some(reader) => reader().await,
+        None => crate::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+            reason:
+                crate::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+        },
+    };
+    Ok(serde_json::to_value(&census)?)
+}
+
 /// Handles `tracedecay_status` tool calls.
 pub(crate) async fn handle_status(
     cg: &TraceDecay,
@@ -104,6 +123,7 @@ pub(crate) async fn handle_status(
     code_index_freshness_reader: Option<
         &crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
     >,
+    generation_census_reader: Option<&crate::runtime_telemetry::GenerationCensusReader>,
 ) -> Result<ToolResult> {
     if status_arg_flag(&args, "admission_only", false) {
         let mut output = json!({
@@ -131,10 +151,7 @@ pub(crate) async fn handle_status(
 
     let mut output = json!({
         "project_root": cg.project_root(),
-        "graph_statistics": {
-            "status": "unavailable",
-            "reason": "sealed_generation_statistics_not_published",
-        },
+        "graph_statistics": graph_statistics_value(generation_census_reader).await?,
     });
     let code_index_freshness = match code_index_freshness_reader {
         Some(reader) => match reader(cg.project_root().to_path_buf()).await {
@@ -456,11 +473,54 @@ pub(crate) fn handle_active_project(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::global_db::{
         SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     };
+    use crate::runtime_telemetry::{
+        GenerationCensusReader, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
+    };
 
-    use super::historical_session_catch_up_state;
+    use super::{graph_statistics_value, historical_session_catch_up_state};
+
+    /// The daemon serializes `graph_statistics` and `tracedecay status`
+    /// deserializes it as the same Rust type. This round-trip is the wire
+    /// contract: if either side drifts, this test fails before a user sees a
+    /// `missing field` decode error.
+    #[tokio::test]
+    async fn graph_statistics_round_trips_the_cli_status_decode() {
+        let absent = graph_statistics_value(None)
+            .await
+            .expect("typed absence serializes");
+        let decoded: GenerationCensusSnapshot =
+            serde_json::from_value(absent).expect("CLI decodes typed absence");
+        assert_eq!(
+            decoded,
+            GenerationCensusSnapshot::Unavailable {
+                reason: GenerationCensusUnavailableReason::AuthorityUnavailable,
+            }
+        );
+
+        let observed = GenerationCensusSnapshot::Observed {
+            statistics: crate::code_index::production::CodeIndexGenerationStatisticsV1 {
+                source_total_bytes: 1_024,
+                symbol_count: 12,
+                edge_count: 7,
+            },
+        };
+        let reader_census = observed.clone();
+        let reader: GenerationCensusReader = Arc::new(move || {
+            let census = reader_census.clone();
+            Box::pin(async move { census })
+        });
+        let value = graph_statistics_value(Some(&reader))
+            .await
+            .expect("observed census serializes");
+        let decoded: GenerationCensusSnapshot =
+            serde_json::from_value(value).expect("CLI decodes observed census");
+        assert_eq!(decoded, observed);
+    }
 
     #[test]
     fn historical_backlog_is_typed_daemon_owned_warming() {

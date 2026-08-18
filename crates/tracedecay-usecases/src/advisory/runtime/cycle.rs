@@ -173,7 +173,8 @@ where
                     == GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
                     && matches!(
                         outcome,
-                        GitHubReviewRefreshOutcomeV1::Stored(_) | GitHubReviewRefreshOutcomeV1::Stale
+                        GitHubReviewRefreshOutcomeV1::Stored(_)
+                            | GitHubReviewRefreshOutcomeV1::Stale
                     )
                 {
                     let identity_request = GitHubReviewReadRequestV1 {

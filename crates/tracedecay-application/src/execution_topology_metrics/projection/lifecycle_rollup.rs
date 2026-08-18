@@ -161,11 +161,11 @@ fn merge_segments(
     target.sort_unstable();
     let mut merged = Vec::with_capacity(target.len());
     for (start, end) in target.drain(..) {
-        if let Some((_, previous_end)) = merged.last_mut() {
-            if start <= *previous_end {
-                *previous_end = (*previous_end).max(end);
-                continue;
-            }
+        if let Some((_, previous_end)) = merged.last_mut()
+            && start <= *previous_end
+        {
+            *previous_end = (*previous_end).max(end);
+            continue;
         }
         merged.push((start, end));
     }

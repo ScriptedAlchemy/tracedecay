@@ -21,7 +21,7 @@ mod fixture;
 #[path = "support/mod.rs"]
 mod graph_support;
 
-use fixture::{ContractFixture, NativeMismatch, settle_publication, with_context};
+use fixture::{ContractFixture, NativeMismatch, PageBatchSpec, settle_publication, with_context};
 use graph_support::TestCancellation;
 
 #[derive(Default)]
@@ -178,13 +178,15 @@ fn paged_synthetic_corpus_publishes_after_eval_sized_admission() {
         let next = unique_page_checkpoint(ordinal);
         let (batch, receipt) = fixture.page_batch_and_receipt(
             &plan,
-            "paged-corpus",
-            ordinal,
-            start,
-            page,
-            expected.clone(),
-            next.clone(),
-            ordinal as f32,
+            PageBatchSpec {
+                name: "paged-corpus",
+                ordinal,
+                start,
+                count: page,
+                expected_checkpoint: expected.clone(),
+                next_checkpoint: next.clone(),
+                marker: ordinal as f32,
+            },
         );
         if ordinal == 0 {
             fixture.begin_and_append(&mut authority, &plan, &receipt, "paged-corpus");
@@ -248,13 +250,15 @@ fn recovered_generation_digest_cost_scaling_probe() {
             let next = unique_page_checkpoint(ordinal);
             let (batch, receipt) = fixture.page_batch_and_receipt(
                 &plan,
-                "digest",
-                ordinal,
-                start,
-                page,
-                expected.clone(),
-                next.clone(),
-                ordinal as f32,
+                PageBatchSpec {
+                    name: "digest",
+                    ordinal,
+                    start,
+                    count: page,
+                    expected_checkpoint: expected.clone(),
+                    next_checkpoint: next.clone(),
+                    marker: ordinal as f32,
+                },
             );
             if ordinal == 0 {
                 fixture.begin_and_append(&mut authority, &plan, &receipt, "digest");
@@ -325,13 +329,15 @@ fn paged_corpus_settle_cost_scaling_probe() {
             let next = unique_page_checkpoint(ordinal);
             let (batch, receipt) = fixture.page_batch_and_receipt(
                 &plan,
-                "probe",
-                ordinal,
-                start,
-                page,
-                expected.clone(),
-                next.clone(),
-                ordinal as f32,
+                PageBatchSpec {
+                    name: "probe",
+                    ordinal,
+                    start,
+                    count: page,
+                    expected_checkpoint: expected.clone(),
+                    next_checkpoint: next.clone(),
+                    marker: ordinal as f32,
+                },
             );
             if ordinal == 0 {
                 fixture.begin_and_append(&mut authority, &plan, &receipt, "probe");
@@ -371,13 +377,15 @@ fn production_width_page_applies_and_publishes_through_named_budgets() {
     let next = unique_page_checkpoint(0);
     let (batch, receipt) = fixture.page_batch_and_receipt(
         &plan,
-        "prod-width",
-        0,
-        0,
-        page,
-        plan.initial_checkpoint_digest.clone(),
-        next,
-        0.125,
+        PageBatchSpec {
+            name: "prod-width",
+            ordinal: 0,
+            start: 0,
+            count: page,
+            expected_checkpoint: plan.initial_checkpoint_digest.clone(),
+            next_checkpoint: next,
+            marker: 0.125,
+        },
     );
     fixture.begin_and_append(&mut authority, &plan, &receipt, "prod-width");
     fixture

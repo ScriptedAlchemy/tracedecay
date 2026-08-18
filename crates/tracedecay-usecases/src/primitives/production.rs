@@ -2488,6 +2488,13 @@ fn affected_tests_evidence(
 
 /// Owned authorities and admitted project state required to open the complete
 /// application primitive runtime.
+pub struct ProductionPrimitiveCodeAuthoritiesV1 {
+    pub code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+    pub ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
+    pub code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    pub diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+}
+
 pub struct ProductionPrimitiveOpenRequestV1 {
     source_runtime: Arc<SourceReadRuntime>,
     code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
@@ -2504,24 +2511,21 @@ pub struct ProductionPrimitiveOpenRequestV1 {
 impl ProductionPrimitiveOpenRequestV1 {
     pub fn new(
         source_runtime: Arc<SourceReadRuntime>,
-        code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
-        ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
+        code: ProductionPrimitiveCodeAuthoritiesV1,
         session_db: RegisteredGlobalDbLeaseV1,
         temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
-        code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
-        diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
         access: ProjectSourceAccessSnapshot,
         admitted_root_uri: String,
         operation_events: OperationEventAuthority,
     ) -> Self {
         Self {
             source_runtime,
-            code_graph,
-            ignored_dependency_admission,
+            code_graph: code.code_graph,
+            ignored_dependency_admission: code.ignored_dependency_admission,
             session_db,
             temporal,
-            code_index,
-            diagnostic_identity,
+            code_index: code.code_index,
+            diagnostic_identity: code.diagnostic_identity,
             access,
             admitted_root_uri,
             operation_events,

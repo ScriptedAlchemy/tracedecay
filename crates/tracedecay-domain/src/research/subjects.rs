@@ -99,6 +99,13 @@ mod tests {
                 field: "source position byte range",
             })
         );
-        assert!(SourcePosition::ByteOffset { start: 10, end: 100 }.validate().is_ok());
+        assert!(
+            SourcePosition::ByteOffset {
+                start: 10,
+                end: 100
+            }
+            .validate()
+            .is_ok()
+        );
     }
 }

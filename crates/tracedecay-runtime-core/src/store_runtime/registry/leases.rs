@@ -154,6 +154,7 @@ impl StoreRuntimeOpenRequest {
         &self.key
     }
 
+    #[must_use]
     pub fn require_opened_file_identity(mut self, expected: u64) -> Self {
         self.expected_opened_file_identity = Some(expected);
         self

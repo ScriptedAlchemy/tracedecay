@@ -40,8 +40,9 @@ pub use emit::{
     record_operation_resource, record_retrieval_query, record_storage,
 };
 pub use execution_emit::{
-    ExecutionTopologyObservationUnavailableV1, NativeIntegrationObservationResultV1,
-    execution_owner_fact_envelope, record_native_integration_transition,
+    ExecutionOwnerFactInputV1, ExecutionTopologyObservationUnavailableV1,
+    NativeIntegrationObservationResultV1, execution_owner_fact_envelope,
+    record_native_integration_transition,
 };
 pub use export::RegisteredAggregateShareExporterV1;
 pub use github_stack_emit::{

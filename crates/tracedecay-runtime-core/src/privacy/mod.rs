@@ -57,9 +57,10 @@ pub use structural_id::{
 };
 pub use structured::{StructuredTextFormatV1, sanitize_provider_metadata_json};
 pub use structured_text::{
-    CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, LCM_PAYLOAD_SANITIZER_VERSION_V1,
-    LcmPayloadSanitizationV1, bind_sanitized_lcm_payload_text, quarantine_lcm_payload_text,
-    sanitize_code_source_bytes, sanitize_lcm_payload_text, sanitize_provider_metadata_text,
+    CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, CodeSourceShapeV1,
+    LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, bind_sanitized_lcm_payload_text,
+    quarantine_lcm_payload_text, sanitize_code_source_bytes, sanitize_lcm_payload_text,
+    sanitize_provider_metadata_text,
 };
 pub use tracedecay_capture::{
     ClaudeRecordParseErrorV1, MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,

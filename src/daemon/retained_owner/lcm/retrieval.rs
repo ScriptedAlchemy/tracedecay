@@ -414,7 +414,7 @@ pub(super) async fn execute_expand(
     evidence_outcome(
         context,
         RetainedSurfaceOperation::LcmExpand,
-        RetainedSurfaceResultV1::LcmExpand(result),
+        RetainedSurfaceResultV1::LcmExpand(Box::new(result)),
     )
 }
 

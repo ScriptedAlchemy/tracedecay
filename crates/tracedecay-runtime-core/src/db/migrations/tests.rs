@@ -367,7 +367,7 @@ async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
 
 /// The creation DDL installs the retained relational shape in one transaction:
 /// canonical memory, evidence assembly, external sources, and graph publication
-/// manifests, without recreating either superseded SQLite projection.
+/// manifests, without recreating either superseded `SQLite` projection.
 #[tokio::test]
 async fn fresh_creation_installs_every_stage_of_the_final_shape() {
     let (conn, _dir) = create_schema_db().await;

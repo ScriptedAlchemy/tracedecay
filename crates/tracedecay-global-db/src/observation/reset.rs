@@ -75,8 +75,10 @@ const OBSERVATION_PROJECTION_TABLES: &[&str] = &[
 /// durability model classifies them `Durable` by default, so a scoped
 /// observation reset must not delete their rows; populated rows here make the
 /// scoped reset refuse rather than orphan them.
-const DURABLE_DEPENDENT_TABLES: &[&str] =
-    &["session_temporal_observation_effects", "session_occurrences"];
+const DURABLE_DEPENDENT_TABLES: &[&str] = &[
+    "session_temporal_observation_effects",
+    "session_occurrences",
+];
 
 /// Outcome of one completed scoped reset.
 #[derive(Debug)]
@@ -251,10 +253,7 @@ pub fn reset_refused_observation_authority(
     for sql in OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL {
         transaction.execute_batch(sql).map_err(reset_storage)?;
     }
-    let reset_table_names = reset_tables
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
+    let reset_table_names = reset_tables.iter().map(String::as_str).collect::<Vec<_>>();
     for sql in invariant_trigger_sql_for_tables(&reset_table_names) {
         transaction.execute_batch(sql).map_err(reset_storage)?;
     }

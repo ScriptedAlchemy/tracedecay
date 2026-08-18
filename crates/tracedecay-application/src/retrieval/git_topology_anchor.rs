@@ -101,7 +101,7 @@ pub enum GitTopologyAnchorPublicationOutcomeV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitTopologyAnchorResolutionOutcomeV2 {
-    Resolved(RetrievalAnchorRecordV2),
+    Resolved(Box<RetrievalAnchorRecordV2>),
     Unavailable,
 }
 

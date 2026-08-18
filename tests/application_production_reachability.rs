@@ -116,7 +116,7 @@ async fn production_fixture() -> ProductionFixture {
         assert!(
             ready["items"]
                 .as_array()
-                .is_some_and(|items| items.iter().any(|item| item["name"] == Value::from(name))),
+                .is_some_and(|items| items.iter().any(|item| item["name"] == name)),
             "pagination probe must index {name} before a managed run can be seeded: {ready:#}"
         );
     }
@@ -274,7 +274,7 @@ fn probe_trait_source() -> String {
 /// Rust that gives a single node more outgoing hierarchy edges than a page.
 fn probe_hierarchy_source() -> String {
     let mut source =
-        format!("pub fn application_pagination_probe_leaf_canary() -> u32 {{\n    0\n}}\n\n");
+        "pub fn application_pagination_probe_leaf_canary() -> u32 {\n    0\n}\n\n".to_string();
     for index in 0..PROBE_SYMBOL_COUNT {
         source.push_str(&format!("pub trait ProbeBaseCanary{index:02} {{}}\n\n"));
     }
@@ -1023,7 +1023,7 @@ async fn resolve_probe_node_id(fixture: &ProductionFixture, name: &str) -> Strin
         .as_array()
         .unwrap_or_else(|| panic!("anchor page items for {name}: {payload:#}"))
         .iter()
-        .find(|item| item["name"] == Value::from(name))
+        .find(|item| item["name"] == name)
         .and_then(|item| item["node_id"].as_str())
         .unwrap_or_else(|| {
             panic!("fixture must index a symbol named {name}, saw: {payload:#}");

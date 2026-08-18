@@ -58,7 +58,7 @@ async fn list_project_memory_facts_inner_tx(
     let key = OwnerKey::new(query.owner())?;
     let category = query.category().map(project_memory_category_label);
     let min_trust = query.min_trust().map(Confidence::as_f64);
-    let has_min_trust = if min_trust.is_some() { 1_i64 } else { 0_i64 };
+    let has_min_trust = i64::from(min_trust.is_some());
     let fetch_limit = i64::try_from(query.limit().saturating_add(1)).map_err(|_| {
         FactStoreError::InvalidQueryLimit {
             limit: query.limit(),
@@ -219,7 +219,7 @@ async fn list_project_memory_facts_inner_tx(
     let next = has_more
         .then(|| facts.last().map(|fact| fact.fact_id().clone()))
         .flatten();
-    ProjectMemoryFactPageV1::new(query.owner().clone(), facts, next).map_err(Into::into)
+    ProjectMemoryFactPageV1::new(query.owner().clone(), facts, next)
 }
 
 pub(in crate::store::memory) async fn get_project_memory_fact_controlled_tx(

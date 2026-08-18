@@ -13,6 +13,7 @@ use tracedecay_store::{
 };
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_sessions::lcm::contracts::LcmError;
 use tracedecay_sessions::runtime::claude::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
 };
@@ -188,7 +189,9 @@ async fn derive_projection_with_alias_from_generation(
         durable_projection_disposition(conn, observation.observation_id().as_str()).await?
         && matches!(
             reason,
-            ProjectionSkipReason::OutputCollision | ProjectionSkipReason::InvalidContract
+            ProjectionSkipReason::OutputCollision
+                | ProjectionSkipReason::InvalidContract
+                | ProjectionSkipReason::SanitizationRefused
         )
     {
         return Ok(ObservationProjection::Skipped(reason));
@@ -514,13 +517,22 @@ pub(super) async fn apply_session(
 /// Writes the projection-derived raw row through the canonical LCM raw
 /// authority so it carries the content-bound sanitization receipt that
 /// hydration requires; a receipt-less raw row is unreadable, not raw storage.
+///
+/// A deterministic sanitization refusal keeps its typed class: mapping it to
+/// `Storage` would schedule an endless environmental retry for content that
+/// can never succeed, permanently poisoning the sequential projection queue.
 async fn upsert_projected_raw_message(
     conn: &impl Executor,
     message: &SessionMessageRecord,
 ) -> ProjectionStoreResult<()> {
     tracedecay_sessions::runtime::lcm::raw::upsert_projection_raw_message(conn, message)
         .await
-        .map_err(|error| storage("upsert projected LCM raw message", error))
+        .map_err(|error| match error {
+            LcmError::SanitizationRefused { reason } => {
+                ProjectionStoreError::SanitizationRefused { reason }
+            }
+            environmental => storage("upsert projected LCM raw message", environmental),
+        })
 }
 
 async fn apply_rows(

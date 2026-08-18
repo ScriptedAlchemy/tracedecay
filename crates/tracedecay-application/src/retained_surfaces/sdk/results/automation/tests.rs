@@ -879,7 +879,7 @@ fn partial_problem_result(
     let problem =
         retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::PartialEffect {
             reason_code: "application.automation-run.partial-effect".to_owned(),
-            committed_receipt: receipt,
+            committed_receipt: Box::new(receipt),
             detail: "A canonical memory effect committed before the run stopped".to_owned(),
         });
     let problem = ApplicationProblemEnvelope::new(

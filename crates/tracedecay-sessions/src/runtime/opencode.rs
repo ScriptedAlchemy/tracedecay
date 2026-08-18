@@ -963,16 +963,11 @@ fn outcome_for_scan_evidence(evidence: HostScanEvidence) -> OpenCodeCaptureOutco
 }
 
 fn opencode_data_dir(home: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        return home.join("Library/Application Support/opencode");
-    }
-    #[cfg(target_os = "windows")]
-    {
-        return home.join("AppData/Local/opencode");
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/opencode")
+    } else if cfg!(target_os = "windows") {
+        home.join("AppData/Local/opencode")
+    } else {
         home.join(".local/share/opencode")
     }
 }

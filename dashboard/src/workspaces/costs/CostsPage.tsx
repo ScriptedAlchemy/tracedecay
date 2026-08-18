@@ -1,6 +1,6 @@
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
-import { ReadFailure } from '../../ui/LegacyStates.tsx';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
+import { StateChip } from '../../ui/StateChip.tsx';
 import { Meter, MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { formatCount, splitCount } from '../../ui/format.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
@@ -53,6 +53,42 @@ export function CostsPage() {
       <SavingsLedger />
       <CanonicalCosts />
       <TopologyMetricsCosts />
+    </div>
+  );
+}
+
+/**
+ * One savings source that did not answer, in the shared typed-state
+ * vocabulary.
+ *
+ * A carried `error` (or an explicit `read_failed` status) is a real failure
+ * and renders as `error` with the daemon's own sentence. `available: false`
+ * without an error is a different fact — the source is not mounted or has no
+ * scope — and rendering it as a red "read failed" invented a failure the wire
+ * never reported.
+ */
+function SourceReadState({
+  source,
+  status,
+  error,
+  band = false,
+}: {
+  source: string;
+  status?: string | null | undefined;
+  error?: string | null | undefined;
+  band?: boolean;
+}) {
+  const failed = error != null || status === 'read_failed';
+  return (
+    <div role="status" className={band ? 'border-b border-edge-subtle px-4 py-2' : undefined}>
+      <StateChip
+        kind={failed ? 'error' : 'unavailable'}
+        detail={
+          failed
+            ? `${source} read failed${error ? `: ${error}` : ''}`
+            : `${source} — the daemon reported this source unavailable without an error`
+        }
+      />
     </div>
   );
 }
@@ -154,10 +190,11 @@ function SavingsLedger() {
               ]}
             />
             {!data.provider_usage.available ? (
-              <ReadFailure
+              <SourceReadState
                 band
-                label="Priced provider usage read failed"
-                detail={data.provider_usage.error}
+                source="priced provider usage"
+                status={data.provider_usage.status}
+                error={data.provider_usage.error}
               />
             ) : null}
 
@@ -199,15 +236,16 @@ function SavingsLedger() {
               ]}
             />
             {!data.savings.available ? (
-              <ReadFailure band label="Savings ledger read failed" detail={data.savings.error} />
+              <SourceReadState band source="savings ledger" error={data.savings.error} />
             ) : null}
 
             <OverviewGrid>
               <OverviewCard title="Where the tokens go">
                 {!data.sessions.available ? (
-                  <ReadFailure
-                    label="Session ledger read failed"
-                    detail={data.sessions.error}
+                  <SourceReadState
+                    source="session ledger"
+                    status={data.sessions.status}
+                    error={data.sessions.error}
                   />
                 ) : mix ? (
                   <TokenMixPlate mix={mix} />
@@ -220,7 +258,7 @@ function SavingsLedger() {
 
               <OverviewCard title={projectTitle}>
                 {!data.savings.available ? (
-                  <ReadFailure label="Savings ledger read failed" detail={data.savings.error} />
+                  <SourceReadState source="savings ledger" error={data.savings.error} />
                 ) : spread ? (
                   <ProjectSpreadPlate spread={spread} />
                 ) : (
@@ -230,9 +268,10 @@ function SavingsLedger() {
 
               <OverviewCard title="How content tokens were counted">
                 {!data.sessions.available ? (
-                  <ReadFailure
-                    label="Session ledger read failed"
-                    detail={data.sessions.error}
+                  <SourceReadState
+                    source="session ledger"
+                    status={data.sessions.status}
+                    error={data.sessions.error}
                   />
                 ) : coverage ? (
                   <figure className="flex flex-col gap-2">

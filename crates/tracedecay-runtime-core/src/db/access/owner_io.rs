@@ -298,7 +298,7 @@ fn platform_replace_with_rollback(
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    const RENAME_SWAP: u32 = 0x00000002;
+    const RENAME_SWAP: u32 = 0x0000_0002;
     unsafe extern "C" {
         fn renamex_np(
             from: *const libc::c_char,

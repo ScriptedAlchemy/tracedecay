@@ -131,6 +131,16 @@ pub enum NativeMismatch {
     MissingEffect,
 }
 
+pub struct PageBatchSpec<'a> {
+    pub name: &'a str,
+    pub ordinal: u64,
+    pub start: u64,
+    pub count: u64,
+    pub expected_checkpoint: SemanticVectorCheckpointDigest,
+    pub next_checkpoint: SemanticVectorCheckpointDigest,
+    pub marker: f32,
+}
+
 impl ContractFixture {
     pub fn new() -> Self {
         Self::new_with_embedding_dimensions(3)
@@ -543,14 +553,17 @@ impl ContractFixture {
     pub fn page_batch_and_receipt(
         &self,
         plan: &SemanticVectorStagePlan,
-        name: &str,
-        ordinal: u64,
-        start: u64,
-        count: u64,
-        expected_checkpoint: SemanticVectorCheckpointDigest,
-        next_checkpoint: SemanticVectorCheckpointDigest,
-        marker: f32,
+        page: PageBatchSpec<'_>,
     ) -> (GraphWriteBatch, SemanticVectorStageBatchReceipt) {
+        let PageBatchSpec {
+            name,
+            ordinal,
+            start,
+            count,
+            expected_checkpoint,
+            next_checkpoint,
+            marker,
+        } = page;
         let mut chunks = Vec::with_capacity(usize::try_from(count).unwrap());
         let mut page_chunks = Vec::with_capacity(chunks.capacity());
         for index in start..start.saturating_add(count) {

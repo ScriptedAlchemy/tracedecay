@@ -122,7 +122,7 @@ pub enum SourceEditOutcome {
     Insert(InsertResult),
     AstGrep(AstGrepResult),
     Move(MoveResult),
-    Rename(RenameResult),
+    Rename(Box<RenameResult>),
     Failed { message: String },
     Cancelled { message: String },
     TimedOut { message: String },

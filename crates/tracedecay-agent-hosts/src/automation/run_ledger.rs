@@ -1041,7 +1041,7 @@ fn read_run_records_tail_page_with_filter(
             });
         }
     };
-    drop(exact_lookup::ReverseJsonlScanner::new(&file, path)?);
+    exact_lookup::ReverseJsonlScanner::new(&file, path)?;
     if limit == 0 {
         return Ok(AutomationRunLedgerPageV1 {
             records: Vec::new(),

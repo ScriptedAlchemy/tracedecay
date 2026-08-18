@@ -80,6 +80,27 @@ fn concrete_work_evidence_mount_accepts_only_its_exact_project_scope() {
     );
 }
 
+/// The mounted identity carries the branch the graph scope was *registered*
+/// under, while a live request carries whatever branch HEAD is on now. The
+/// branch label is not checkout identity: a checkout that switched branches
+/// must keep its work-evidence authority, or project open degrades and every
+/// automation task behind the retained runtime registration stops running.
+#[test]
+fn concrete_work_evidence_mount_accepts_a_moved_branch_reference() {
+    let (mounted, exact_scope) = mounted_scope("project.work-evidence-mount");
+    let moved_branch = ResolvedScope::new(
+        exact_scope.project_id,
+        exact_scope.repository_id,
+        exact_scope.worktree_id,
+        Some(tracedecay_domain::RefId::new("refs/heads/branch.after-switch").unwrap()),
+    )
+    .unwrap();
+
+    mounted
+        .work_evidence_retrieval(&moved_branch, Arc::new(MissingFederatedAuthority))
+        .expect("a moved HEAD branch must not cost the checkout its mounted session authority");
+}
+
 #[test]
 fn concrete_work_evidence_mount_accepts_reference_free_matching_coordinates() {
     let (mounted, exact_scope) = mounted_scope("project.work-evidence-mount");

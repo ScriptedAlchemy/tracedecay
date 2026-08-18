@@ -287,8 +287,10 @@ async fn projectless_reflection_uses_caller_supplied_automation_configuration() 
         &config,
         &test_run_control(),
         &configuration_revision(),
-        &backend,
-        &retrieval,
+        AutomationTaskIo {
+            backend: &backend,
+            retrieval: &retrieval,
+        },
         SessionReflectorAutomationOptions {
             provider: "hermes".to_string(),
             query: "user memory".to_string(),
@@ -378,8 +380,10 @@ async fn terminal_evidence_rejections_do_not_run_user_backends() {
             &config,
             &test_run_control(),
             &configuration_revision(),
-            &reflector_backend,
-            &retrieval,
+            AutomationTaskIo {
+                backend: &reflector_backend,
+                retrieval: &retrieval,
+            },
             SessionReflectorAutomationOptions::default(),
         )
         .await
@@ -415,8 +419,10 @@ async fn terminal_evidence_rejections_do_not_run_user_backends() {
         &config,
         &test_run_control(),
         &configuration_revision(),
-        &reflector_backend,
-        &retrieval,
+        AutomationTaskIo {
+            backend: &reflector_backend,
+            retrieval: &retrieval,
+        },
         SessionReflectorAutomationOptions::default(),
     )
     .await

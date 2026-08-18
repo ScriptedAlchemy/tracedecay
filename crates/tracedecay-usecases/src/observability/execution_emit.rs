@@ -407,15 +407,19 @@ fn transition_envelope(
 ) -> Result<ObservabilityEnvelopeV1, &'static str> {
     let coverage = observation.coverage;
     let payload = ObservabilityPayloadV1::WorkIntegrationTransition(observation);
-    payload_envelope(
+    execution_owner_fact_envelope(
         identity,
         scope_ref,
-        owner_transition_ref,
-        operation,
-        occurred_at,
-        terminal_result,
-        coverage,
-        payload,
+        ExecutionOwnerFactInputV1 {
+            owner_transition_ref,
+            operation,
+            event_time: occurred_at,
+            valid_from: Some(occurred_at),
+            valid_until: Some(occurred_at),
+            terminal_result,
+            coverage,
+            payload,
+        },
     )
 }
 
@@ -429,18 +433,32 @@ fn transition_envelope(
 ///
 /// `event_time` and the valid-time bounds must come from the durable owner
 /// transition. Callers must not substitute the current clock on replay.
+pub struct ExecutionOwnerFactInputV1<'a> {
+    pub owner_transition_ref: &'a str,
+    pub operation: &'a str,
+    pub event_time: UtcMicros,
+    pub valid_from: Option<UtcMicros>,
+    pub valid_until: Option<UtcMicros>,
+    pub terminal_result: Option<ObservabilityTerminalResultV1>,
+    pub coverage: CoverageStateV1,
+    pub payload: ObservabilityPayloadV1,
+}
+
 pub fn execution_owner_fact_envelope(
     identity: &ObservabilityProducerIdentityV1,
     scope_ref: &str,
-    owner_transition_ref: &str,
-    operation: &str,
-    event_time: UtcMicros,
-    valid_from: Option<UtcMicros>,
-    valid_until: Option<UtcMicros>,
-    terminal_result: Option<ObservabilityTerminalResultV1>,
-    coverage: CoverageStateV1,
-    payload: ObservabilityPayloadV1,
+    input: ExecutionOwnerFactInputV1<'_>,
 ) -> Result<ObservabilityEnvelopeV1, &'static str> {
+    let ExecutionOwnerFactInputV1 {
+        owner_transition_ref,
+        operation,
+        event_time,
+        valid_from,
+        valid_until,
+        terminal_result,
+        coverage,
+        payload,
+    } = input;
     if identity.authorized_scope_ref != scope_ref
         || !tracedecay_domain::canonical_text::is_canonical_text_within(owner_transition_ref, 1_024)
     {
@@ -500,30 +518,6 @@ pub fn execution_owner_fact_envelope(
     };
     envelope.validate()?;
     Ok(envelope)
-}
-
-fn payload_envelope(
-    identity: &ObservabilityProducerIdentityV1,
-    scope_ref: &str,
-    owner_transition_ref: &str,
-    operation: &str,
-    occurred_at: UtcMicros,
-    terminal_result: Option<ObservabilityTerminalResultV1>,
-    coverage: CoverageStateV1,
-    payload: ObservabilityPayloadV1,
-) -> Result<ObservabilityEnvelopeV1, &'static str> {
-    execution_owner_fact_envelope(
-        identity,
-        scope_ref,
-        owner_transition_ref,
-        operation,
-        occurred_at,
-        Some(occurred_at),
-        Some(occurred_at),
-        terminal_result,
-        coverage,
-        payload,
-    )
 }
 
 #[cfg(test)]
@@ -732,40 +726,46 @@ mod tests {
         let open = execution_owner_fact_envelope(
             &identity("project.scope"),
             "project.scope",
-            "blocked-interval:fixture",
-            "pause_work_run",
-            UtcMicros(10),
-            Some(UtcMicros(10)),
-            None,
-            None,
-            CoverageStateV1::Known,
-            open,
+            ExecutionOwnerFactInputV1 {
+                owner_transition_ref: "blocked-interval:fixture",
+                operation: "pause_work_run",
+                event_time: UtcMicros(10),
+                valid_from: Some(UtcMicros(10)),
+                valid_until: None,
+                terminal_result: None,
+                coverage: CoverageStateV1::Known,
+                payload: open,
+            },
         )
         .expect("open interval");
         let replay = execution_owner_fact_envelope(
             &identity("project.scope"),
             "project.scope",
-            "blocked-interval:fixture",
-            "pause_work_run",
-            UtcMicros(10),
-            Some(UtcMicros(10)),
-            None,
-            None,
-            CoverageStateV1::Known,
-            open.payload.clone(),
+            ExecutionOwnerFactInputV1 {
+                owner_transition_ref: "blocked-interval:fixture",
+                operation: "pause_work_run",
+                event_time: UtcMicros(10),
+                valid_from: Some(UtcMicros(10)),
+                valid_until: None,
+                terminal_result: None,
+                coverage: CoverageStateV1::Known,
+                payload: open.payload.clone(),
+            },
         )
         .expect("open replay");
         let closed = execution_owner_fact_envelope(
             &identity("project.scope"),
             "project.scope",
-            "blocked-interval:fixture",
-            "pause_work_run",
-            UtcMicros(20),
-            Some(UtcMicros(10)),
-            Some(UtcMicros(20)),
-            None,
-            CoverageStateV1::Known,
-            closed,
+            ExecutionOwnerFactInputV1 {
+                owner_transition_ref: "blocked-interval:fixture",
+                operation: "pause_work_run",
+                event_time: UtcMicros(20),
+                valid_from: Some(UtcMicros(10)),
+                valid_until: Some(UtcMicros(20)),
+                terminal_result: None,
+                coverage: CoverageStateV1::Known,
+                payload: closed,
+            },
         )
         .expect("closed interval");
 

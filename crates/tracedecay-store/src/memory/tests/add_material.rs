@@ -28,7 +28,7 @@ fn one_authority_binds_regular_and_automatic_input_digests() {
             receipt_for(&payload),
             automation_run_id,
             Confidence::new(trust).unwrap(),
-            actor.map(|value| id::<ActorId>(value)),
+            actor.map(id::<ActorId>),
         )
         .unwrap()
     };

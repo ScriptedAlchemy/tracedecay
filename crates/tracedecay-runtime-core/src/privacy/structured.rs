@@ -294,7 +294,7 @@ fn has_yaml_preamble(text: &str) -> bool {
 fn looks_like_yaml_mapping(line: &str) -> bool {
     let line = line.trim_start();
     let line = line.strip_prefix("- ").unwrap_or(line);
-    let line = line.strip_prefix('{').map(str::trim_start).unwrap_or(line);
+    let line = line.strip_prefix('{').map_or(line, str::trim_start);
     let Some((key, rest)) = split_yaml_mapping_entry(line) else {
         return false;
     };
@@ -434,7 +434,7 @@ pub(crate) fn parse_json_value(
         depth: 1,
     }
     .deserialize(&mut deserializer)
-    .and_then(|_| deserializer.end());
+    .and_then(|()| deserializer.end());
     if preflight.is_err() {
         return Err(failure.unwrap_or(JsonPreflightFailureV1::Malformed));
     }
@@ -983,7 +983,7 @@ fn decoded_component(raw: &str) -> Option<String> {
 fn decode_url_key(raw: &str) -> Result<String, StructuredTextParseFailureV1> {
     percent_decode_str(raw)
         .decode_utf8()
-        .map(|decoded| decoded.into_owned())
+        .map(std::borrow::Cow::into_owned)
         .map_err(|_| StructuredTextParseFailureV1::Malformed)
 }
 

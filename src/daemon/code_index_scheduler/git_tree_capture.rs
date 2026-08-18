@@ -179,7 +179,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(None);
         };
         let (sanitized_bytes, sensitivity_level, receipt_id) =
-            privacy::sanitize_code_file(raw_bytes)?;
+            privacy::sanitize_code_file(&descriptor.language, raw_bytes)?;
         let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
         let occurrence = file_occurrence_id(
             &self.repository_id,

@@ -7,7 +7,7 @@ use tracedecay_domain::{
 };
 
 use super::{
-    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityEmissionOutcomeV1,
     ObservabilityProducerIdentityV1, WorkOwnerObservationResultV1, execution_owner_fact_envelope,
 };
 
@@ -68,14 +68,16 @@ fn work_operation_resource_observation_envelope(
     execution_owner_fact_envelope(
         identity,
         canonical_project_scope,
-        &owner_transition_ref,
-        "execute_work_attempt",
-        observed_at,
-        Some(observed_at),
-        Some(observed_at),
-        Some(terminal_result),
-        CoverageStateV1::Known,
-        ObservabilityPayloadV1::OperationResource(Box::new(observation)),
+        ExecutionOwnerFactInputV1 {
+            owner_transition_ref: &owner_transition_ref,
+            operation: "execute_work_attempt",
+            event_time: observed_at,
+            valid_from: Some(observed_at),
+            valid_until: Some(observed_at),
+            terminal_result: Some(terminal_result),
+            coverage: CoverageStateV1::Known,
+            payload: ObservabilityPayloadV1::OperationResource(Box::new(observation)),
+        },
     )
 }
 

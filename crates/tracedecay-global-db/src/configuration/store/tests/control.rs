@@ -39,7 +39,7 @@ fn direct_unset_restores_the_registry_default_and_its_provenance() {
         &DirectConfigurationMutation::Set {
             layer: direct_project_layer(),
             key: key.clone(),
-            value: ConfigurationValueV1::Boolean(true),
+            value: Box::new(ConfigurationValueV1::Boolean(true)),
         },
         &set_revision,
         &registry,
@@ -131,14 +131,14 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
     let mutation = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
         key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: ConfigurationValueV1::Boolean(true),
+        value: Box::new(ConfigurationValueV1::Boolean(true)),
     };
     let foreign_target = DirectConfigurationMutation::Set {
         layer: ConfigurationLayerIdV1::Project {
             project_id: id("project.foreign.fixture"),
         },
         key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: ConfigurationValueV1::Boolean(true),
+        value: Box::new(ConfigurationValueV1::Boolean(true)),
     };
     assert_eq!(
         store
@@ -162,7 +162,7 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
     let conflicting = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
         key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: ConfigurationValueV1::Boolean(false),
+        value: Box::new(ConfigurationValueV1::Boolean(false)),
     };
     assert_eq!(
         store
@@ -177,7 +177,7 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
                 &DirectConfigurationMutation::Set {
                     layer: direct_project_layer(),
                     key: SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).unwrap(),
-                    value: ConfigurationValueV1::SourceBindings(Vec::new()),
+                    value: Box::new(ConfigurationValueV1::SourceBindings(Vec::new())),
                 },
                 &root.revision_id,
             )
@@ -206,7 +206,9 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
                 &DirectConfigurationMutation::Set {
                     layer: direct_project_layer(),
                     key: SettingKey::new("diagnostics.credential_reference.v1").unwrap(),
-                    value: ConfigurationValueV1::CredentialReference(credential_reference),
+                    value: Box::new(ConfigurationValueV1::CredentialReference(
+                        credential_reference
+                    )),
                 },
                 &root.revision_id,
             )
@@ -244,7 +246,7 @@ async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active
     let mutation = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
         key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: ConfigurationValueV1::Boolean(true),
+        value: Box::new(ConfigurationValueV1::Boolean(true)),
     };
     let receipt = store
         .commit_direct(&authority, &mutation, &root.revision_id)
@@ -266,7 +268,7 @@ async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active
                 &DirectConfigurationMutation::Set {
                     layer: direct_project_layer(),
                     key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-                    value: ConfigurationValueV1::Boolean(false),
+                    value: Box::new(ConfigurationValueV1::Boolean(false)),
                 },
                 &root.revision_id,
             )
@@ -290,7 +292,7 @@ async fn owned_global_control_adapter_rejects_writes_after_daemon_scope_ends() {
     let mutation = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
         key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: ConfigurationValueV1::Boolean(true),
+        value: Box::new(ConfigurationValueV1::Boolean(true)),
     };
 
     assert_eq!(
@@ -319,7 +321,9 @@ async fn direct_audit_target_never_persists_sensitive_setting_values() {
             &DirectConfigurationMutation::Set {
                 layer: direct_project_layer(),
                 key: SettingKey::new("index.exclude.v1").unwrap(),
-                value: ConfigurationValueV1::StringList(vec![secret_path.to_owned()]),
+                value: Box::new(ConfigurationValueV1::StringList(vec![
+                    secret_path.to_owned(),
+                ])),
             },
             &root.revision_id,
         )

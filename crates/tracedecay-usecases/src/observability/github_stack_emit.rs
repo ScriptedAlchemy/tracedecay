@@ -27,7 +27,7 @@ use crate::stack_coordinator::{
 };
 
 use super::{
-    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityEmissionOutcomeV1,
     ObservabilityProducerIdentityV1, execution_owner_fact_envelope,
 };
 
@@ -338,14 +338,16 @@ pub fn record_github_stack_capability(
     let envelope = match execution_owner_fact_envelope(
         producer.identity(),
         scope_ref,
-        &owner_transition_ref,
-        OPERATION,
-        coordinator.observed_at,
-        Some(coordinator.observed_at),
-        Some(coordinator.observed_at),
-        Some(ObservabilityTerminalResultV1::Succeeded),
-        observation.coverage,
-        ObservabilityPayloadV1::GitHubStackCapability(observation),
+        ExecutionOwnerFactInputV1 {
+            owner_transition_ref: &owner_transition_ref,
+            operation: OPERATION,
+            event_time: coordinator.observed_at,
+            valid_from: Some(coordinator.observed_at),
+            valid_until: Some(coordinator.observed_at),
+            terminal_result: Some(ObservabilityTerminalResultV1::Succeeded),
+            coverage: observation.coverage,
+            payload: ObservabilityPayloadV1::GitHubStackCapability(observation),
+        },
     ) {
         Ok(envelope) => envelope,
         Err(_) => {
@@ -555,14 +557,16 @@ fn stack_drift_envelope(
     execution_owner_fact_envelope(
         identity,
         scope_ref,
-        &owner_transition_ref,
-        DRIFT_OPERATION,
-        observation.observed_at,
-        Some(UtcMicros(observation.drift.first_observed_micros)),
-        observation.drift.terminal_micros.map(UtcMicros),
-        None,
-        observation.drift.coverage,
-        ObservabilityPayloadV1::WorkStackDrift(observation.drift.clone()),
+        ExecutionOwnerFactInputV1 {
+            owner_transition_ref: &owner_transition_ref,
+            operation: DRIFT_OPERATION,
+            event_time: observation.observed_at,
+            valid_from: Some(UtcMicros(observation.drift.first_observed_micros)),
+            valid_until: observation.drift.terminal_micros.map(UtcMicros),
+            terminal_result: None,
+            coverage: observation.drift.coverage,
+            payload: ObservabilityPayloadV1::WorkStackDrift(observation.drift.clone()),
+        },
     )
 }
 

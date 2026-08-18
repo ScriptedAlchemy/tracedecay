@@ -232,7 +232,7 @@ fn push(
     mutations.push(DirectConfigurationMutation::Set {
         layer: layer.clone(),
         key,
-        value,
+        value: Box::new(value),
     });
     Ok(())
 }

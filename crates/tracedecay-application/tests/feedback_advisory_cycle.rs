@@ -192,6 +192,9 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
             thread_id: Some(GitHubReviewThreadIdV1::new("thread.1").unwrap()),
             comment_id: GitHubReviewCommentIdV1::new("comment.1").unwrap(),
             reply_to_comment_id: None,
+            path: "src/lib.rs".to_owned(),
+            line: Some(3),
+            original_line: Some(3),
             version_digest: digest(SHA_A),
             author_anchor: anchor("anchor.feedback-cycle.github-author"),
             author_class: GitHubReviewAuthorClassV1::Maintainer,
@@ -212,6 +215,7 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
             },
             observed_at: UtcMicros(1),
         }],
+        pull_request: None,
         fetched_at: UtcMicros(2),
     };
     github.validate().unwrap();

@@ -13,7 +13,7 @@ use tracedecay_global_db::{
 
 use super::delivery_spool::recorder_spool_root;
 use super::{
-    BoundedObservabilityProducerV1, ObservabilityOwnerEmissionOutcomeV1,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityOwnerEmissionOutcomeV1,
     ObservabilityProducerIdentityV1, execution_owner_fact_envelope,
 };
 
@@ -148,14 +148,16 @@ impl DeliverySettlementAuthorityV1 {
         let envelope = execution_owner_fact_envelope(
             &self.identity,
             &self.identity.authorized_scope_ref,
-            &owner_transition_ref,
-            "settle-delivery",
-            census.settled_at,
-            Some(census.valid_at),
-            Some(census.settled_at),
-            Some(terminal_result),
-            census.coverage,
-            ObservabilityPayloadV1::WorkDeliveryFanout(census.as_fanout_observation()),
+            ExecutionOwnerFactInputV1 {
+                owner_transition_ref: &owner_transition_ref,
+                operation: "settle-delivery",
+                event_time: census.settled_at,
+                valid_from: Some(census.valid_at),
+                valid_until: Some(census.settled_at),
+                terminal_result: Some(terminal_result),
+                coverage: census.coverage,
+                payload: ObservabilityPayloadV1::WorkDeliveryFanout(census.as_fanout_observation()),
+            },
         )
         .map_err(|error| ApplicationContractError::Domain(error.to_owned()))?;
         let observability = self.producer.emit_owner_fact(envelope).await?;

@@ -128,6 +128,24 @@ describe('fetchStructure', () => {
     expect(result).toEqual({ outcome: 'transport', state: 'error', detail: 'HTTP 503' });
   });
 
+  it('keeps the typed reading when a non-2xx still carries a full envelope', async () => {
+    // The strata route answers 503 while the verified graph is warming, but
+    // its body is a complete typed envelope with the producer's own reason.
+    // That reason must reach the surface instead of a raw `error — HTTP 503`.
+    respond(
+      envelope({
+        status: 'unmeasured',
+        reason: 'graph_authority_unavailable',
+        detail: 'the verified code graph is not ready for this worktree',
+      }),
+      { ok: false, status: 503 },
+    );
+    const result = await fetchStructure<Measurement>('/x', ReadSchema);
+    expect(result.outcome).toBe('unmeasured');
+    expect(absenceReason(result)).toContain('graph_authority_unavailable');
+    expect(absenceReason(result)).not.toContain('HTTP 503');
+  });
+
   it('refuses a body that does not match the contract instead of inventing one', async () => {
     respond(envelope({ status: 'measured', measurement: { hop_count: 'three' } }));
     const result = await fetchStructure<Measurement>('/x', ReadSchema);

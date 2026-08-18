@@ -582,7 +582,7 @@ fn settled_blocked_intervals_are_revisioned_isolated_and_replayed_after_restart(
     let opened = blocked_interval("attempt.blocked", UtcMicros(400));
     store
         .storage()
-        .publish_run_control(&mine, None, &paused_control, &[opened.clone()])
+        .publish_run_control(&mine, None, &paused_control, std::slice::from_ref(&opened))
         .unwrap();
     assert_eq!(
         store
@@ -610,7 +610,7 @@ fn settled_blocked_intervals_are_revisioned_isolated_and_replayed_after_restart(
             &mine,
             Some(paused_control.authority()),
             &resumed,
-            &[settled.clone()],
+            std::slice::from_ref(&settled),
         )
         .unwrap();
     assert_eq!(settled.interval_revision(), 2);
@@ -677,7 +677,12 @@ fn terminal_attempt_closes_its_open_blocked_interval_in_the_same_fenced_cas() {
     let opened = blocked_interval("attempt.blocked.terminal", UtcMicros(400));
     store
         .storage()
-        .publish_run_control(&authority, None, &paused_control, &[opened.clone()])
+        .publish_run_control(
+            &authority,
+            None,
+            &paused_control,
+            std::slice::from_ref(&opened),
+        )
         .unwrap();
 
     let terminal = succeeded(&attempt);

@@ -26,6 +26,7 @@ use rows::{
     validate_receipt_authority_rows, validate_source_cursor_authority_chunk,
     validate_source_cursor_authority_rows,
 };
+pub(crate) use triggers::invariant_trigger_sql_for_tables;
 use triggers::{FOREIGN_KEY_AUDIT_QUERY, replace_trigger, trigger_contracts_intact};
 pub(super) use triggers::{INVARIANTS, Trigger};
 pub use triggers::{

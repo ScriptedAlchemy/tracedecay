@@ -26,10 +26,10 @@ use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::fusion::{CompositionOutputV1, digest_candidate_set};
 use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
 use tracedecay_query::retrieval::semantic::{
-    SemanticAbstentionDispositionV1, SemanticAbstentionV1,
-    SemanticCompositionExecutionAuthorityV1, SemanticCompositionExecutionOutcomeV1,
-    SemanticExecutionControl, SemanticQueryModeV1, SemanticQueryServiceError,
-    SemanticRerankExecutionPortV1, SemanticRerankReadinessV1, SemanticRetrievalRequestV1,
+    SemanticAbstentionDispositionV1, SemanticAbstentionV1, SemanticCompositionExecutionAuthorityV1,
+    SemanticCompositionExecutionOutcomeV1, SemanticExecutionControl, SemanticQueryModeV1,
+    SemanticQueryServiceError, SemanticRerankExecutionPortV1, SemanticRerankReadinessV1,
+    SemanticRetrievalRequestV1,
 };
 use tracedecay_usecases::semantic_runtime::{
     AuthorizedProjectSemanticSearchParametersV1, CommittedRetrievalProfileStateV1,

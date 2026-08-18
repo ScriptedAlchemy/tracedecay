@@ -78,7 +78,6 @@ impl ProjectVectorRetentionFailure {
             Self::Denied(message) => ProjectSemanticVectorCodeScopeLiveness::Denied(message),
         }
     }
-
 }
 
 impl From<crate::store::vector_generations::VectorGenerationStoreErrorV1>

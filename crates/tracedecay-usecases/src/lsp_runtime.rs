@@ -135,6 +135,11 @@ struct CurrentFeedbackCycle {
     expires_at: UtcMicros,
 }
 
+struct FindingContextTarget<'a> {
+    root: &'a AdmittedRoot,
+    document_uri: Option<&'a str>,
+}
+
 /// Coverage and producer state for a diagnostics read that terminated without
 /// a cycle, using the same termination vocabulary the projection path already
 /// applies to operation snapshots. A read that did not complete is evidence
@@ -1602,8 +1607,7 @@ impl ConcreteFeedbackLspSource {
 
     fn current_finding_items<'a>(
         &self,
-        root: &AdmittedRoot,
-        document_uri: Option<&str>,
+        target: FindingContextTarget<'_>,
         scope: &LspFeedbackProjectionScope,
         impact_target_file: Option<&tracedecay_domain::FileOccurrenceId>,
         kind: ContextProjectionKind,
@@ -1664,8 +1668,8 @@ impl ConcreteFeedbackLspSource {
                     (FeedbackReadOperationV1::Get, handle)
                 };
                 self.attach_context_handle(
-                    root,
-                    document_uri,
+                    target.root,
+                    target.document_uri,
                     kind.clone(),
                     scope,
                     observed_at,
@@ -1870,8 +1874,10 @@ impl ManagedDiagnosticSnapshotPort for ConcreteFeedbackLspSource {
             let cycle = result.cycle;
             let expansion_handles = source
                 .current_finding_items(
-                    &request.root,
-                    Some(&request.document_uri),
+                    FindingContextTarget {
+                        root: &request.root,
+                        document_uri: Some(&request.document_uri),
+                    },
                     &scope,
                     cycle.impact.as_ref().map(|impact| &impact.target.file),
                     ContextProjectionKind::diagnostics(),
@@ -1988,8 +1994,10 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
             let (coverage, mut items, omitted_count) =
                 if request.kind == ContextProjectionKind::diagnostics() {
                     let items = match source.current_finding_items(
-                        &root,
-                        request.document_uri.as_deref(),
+                        FindingContextTarget {
+                            root: &root,
+                            document_uri: request.document_uri.as_deref(),
+                        },
                         &scope,
                         cycle.impact.as_ref().map(|impact| &impact.target.file),
                         ContextProjectionKind::diagnostics(),
@@ -2042,8 +2050,10 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                         .filter_map(finding_item)
                         .count();
                     let items = match source.current_finding_items(
-                        &root,
-                        request.document_uri.as_deref(),
+                        FindingContextTarget {
+                            root: &root,
+                            document_uri: request.document_uri.as_deref(),
+                        },
                         &scope,
                         cycle.impact.as_ref().map(|impact| &impact.target.file),
                         kind.clone(),

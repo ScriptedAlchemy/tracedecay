@@ -66,7 +66,7 @@ use tracedecay_domain::{
 };
 use tracedecay_sessions::runtime::codex_app_server::{
     CodexAppServerCancellation, CodexAppServerLaunchReceipt, CodexAppServerSummaryConfig,
-    run_work_with_codex_app_server,
+    CodexAppServerWorkExecution, run_work_with_codex_app_server,
 };
 use tracedecay_usecases::observability::{
     BoundedObservabilityProducerV1, record_terminal_attempt_product_views,
@@ -835,11 +835,13 @@ async fn execute_app_server<S>(
             &prompt,
             &config,
             "tracedecay_work_attempt",
-            &session_cancellation,
-            &cwd,
-            wall,
-            &admitted_environment,
-            &blocking_launch_receipt,
+            CodexAppServerWorkExecution {
+                cancellation: &session_cancellation,
+                cwd: &cwd,
+                timeout: wall,
+                admitted_environment: &admitted_environment,
+                launch_receipt: &blocking_launch_receipt,
+            },
         )
         .and_then(|summary| {
             let source = tracedecay_domain::ObservationSourceIdentityV1::for_provider(

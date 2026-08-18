@@ -538,15 +538,14 @@ fn validate_admitted_source(
     else {
         return Err(CodeIndexIgnoredDependencyRefusalV1::UnsupportedLanguage.into());
     };
-    if StaticLanguageRegistry::new()
-        .descriptor_for_extension(&extension.to_lowercase())
-        .is_none()
-    {
+    let registry = StaticLanguageRegistry::new();
+    let Some(descriptor) = registry.descriptor_for_extension(&extension.to_lowercase()) else {
         return Err(CodeIndexIgnoredDependencyRefusalV1::UnsupportedLanguage.into());
-    }
+    };
+    let language = descriptor.language.clone();
     let bytes = read_bounded_source(&canonical_entrypoint, control)?;
     checkpoint_if_present(control)?;
-    super::privacy::sanitize_code_file(&bytes)
+    super::privacy::sanitize_code_file(&language, &bytes)
         .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::PrivacyRefused)?;
     checkpoint_if_present(control)?;
     Ok(bytes)

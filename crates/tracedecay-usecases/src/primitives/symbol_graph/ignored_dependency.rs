@@ -70,26 +70,30 @@ pub(super) fn validate_claim_generation(
     Ok(())
 }
 
+pub(super) struct IgnoredDependencyRequest<'a> {
+    pub(super) lane: &'a str,
+    pub(super) claim: &'a SymbolGraphPageClaim,
+    pub(super) normal_results_empty: bool,
+    pub(super) requested: bool,
+    pub(super) query: &'a str,
+    pub(super) scope: &'a SymbolGraphScope,
+}
+
 pub(super) async fn admit_ignored_dependency(
     admission: Option<&Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     context: SymbolGraphPortContext<'_>,
     graph: &OpenSymbolGraph,
     cursors: &dyn SymbolGraphCursorPort,
-    lane: &str,
-    claim: &SymbolGraphPageClaim,
-    normal_results_empty: bool,
-    requested: bool,
-    query: &str,
-    scope: &SymbolGraphScope,
+    request: IgnoredDependencyRequest<'_>,
 ) -> Result<(), PrimitiveFailure> {
-    if !normal_results_empty || !requested {
+    if !request.normal_results_empty || !request.requested {
         return Ok(());
     }
     let imports = graph
         .reader
         .external_type_import_candidates(
-            query,
-            scope.path_prefix.as_deref(),
+            request.query,
+            request.scope.path_prefix.as_deref(),
             MAX_COMPATIBILITY_RESULTS,
             Arc::clone(&graph.cancellation),
         )
@@ -107,9 +111,9 @@ pub(super) async fn admit_ignored_dependency(
     cursors
         .finish_page(
             context.request,
-            lane,
-            claim,
-            claim.offset(),
+            request.lane,
+            request.claim,
+            request.claim.offset(),
             0,
             false,
             context.observed_at,

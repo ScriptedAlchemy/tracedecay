@@ -255,8 +255,9 @@ impl StoreAdministration {
         }
     }
 
-    // pub(crate): project_server_lifecycle registers retirements from outside
-    // branch_admin when a project server shuts down.
+    // pub(crate): daemon bootstrap tests register retirements from outside
+    // branch_admin to exercise the shutdown join path.
+    #[cfg(test)]
     pub(crate) async fn track_project_server_retirement(
         &self,
         owner: StoreOwnerKey,

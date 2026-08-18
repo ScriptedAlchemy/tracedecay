@@ -6,8 +6,8 @@ use serde_json::Value;
 use crate::automation::backend::{AgentTaskKind, AgentTaskResponse};
 use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::{
-    AgentTaskRunContext, AutomationRunLedgerPublication, AutomationRunSettlementGuard,
-    RetainedAutomationRun,
+    AgentTaskRunContext, AutomationRunLedgerPublication, AutomationRunPublication,
+    AutomationRunSettlementGuard, RetainedAutomationRun,
 };
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::errors::{Result, TraceDecayError};
@@ -99,8 +99,10 @@ pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement
         backend,
         retrieval,
         options,
-        AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
-        Some(&settlement_guard),
+        AutomationRunPublication {
+            ledger: AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
+            settlement_guard: Some(&settlement_guard),
+        },
     )
     .await;
     RetainedAutomationRun::new(result, settlement_guard)
@@ -121,8 +123,10 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
         backend,
         retrieval,
         options,
-        AutomationRunLedgerPublication::Immediate,
-        None,
+        AutomationRunPublication {
+            ledger: AutomationRunLedgerPublication::Immediate,
+            settlement_guard: None,
+        },
     )
     .await
 }
@@ -134,8 +138,7 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     options: SkillWriterAutomationOptions,
-    ledger_publication: AutomationRunLedgerPublication,
-    settlement_guard: Option<&AutomationRunSettlementGuard>,
+    publication: AutomationRunPublication<'_>,
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
     let authority =
         project_curation_authority(cg, "automation:skill-writer", configuration_revision_id)?;
@@ -153,8 +156,7 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
         backend,
         options,
         None,
-        ledger_publication,
-        settlement_guard,
+        publication,
     )
     .await
 }
@@ -240,8 +242,10 @@ pub(super) async fn run_skill_writer_for_store(
         backend,
         options,
         prebuilt_evidence,
-        AutomationRunLedgerPublication::Immediate,
-        None,
+        AutomationRunPublication {
+            ledger: AutomationRunLedgerPublication::Immediate,
+            settlement_guard: None,
+        },
     )
     .await
 }
@@ -253,9 +257,12 @@ async fn run_skill_writer_for_store_with_publication(
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
     prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
-    ledger_publication: AutomationRunLedgerPublication,
-    settlement_guard: Option<&AutomationRunSettlementGuard>,
+    publication: AutomationRunPublication<'_>,
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
+    let AutomationRunPublication {
+        ledger: ledger_publication,
+        settlement_guard,
+    } = publication;
     let SkillWriterStoreRuntime {
         dashboard_root,
         sessions_db,
@@ -393,7 +400,7 @@ async fn run_skill_writer_for_store_with_publication(
                 .await?;
             return Err(AutomationRunError::RecordedFailure {
                 error,
-                ledger_record,
+                ledger_record: Box::new(ledger_record),
             });
         }
         let repair_request = AgentTaskRequest::new(
@@ -435,7 +442,7 @@ async fn run_skill_writer_for_store_with_publication(
                     .await?;
                 return Err(AutomationRunError::RecordedFailure {
                     error,
-                    ledger_record,
+                    ledger_record: Box::new(ledger_record),
                 });
             }
         };
@@ -464,8 +471,8 @@ async fn run_skill_writer_for_store_with_publication(
             evidence_hash: evidence_hash.clone(),
             proposed_ops: &proposed_ops,
             proposals: &proposals,
+            validation_repairs: &validation_repairs,
         },
-        &validation_repairs,
     )
     .await
     {
@@ -473,11 +480,11 @@ async fn run_skill_writer_for_store_with_publication(
             report,
             record,
             committed_receipt,
-        }) => (report, record, committed_receipt),
+        }) => (report, record, committed_receipt.map(|receipt| *receipt)),
         Ok(SkillWriterFinalization::FailedRecorded { error, record }) => {
             return Err(AutomationRunError::RecordedFailure {
                 error,
-                ledger_record: record,
+                ledger_record: Box::new(record),
             });
         }
         Err(AutomationRunError::Runtime(err)) => {
@@ -492,7 +499,7 @@ async fn run_skill_writer_for_store_with_publication(
                 .await?;
             return Err(AutomationRunError::RecordedFailure {
                 error: err,
-                ledger_record,
+                ledger_record: Box::new(ledger_record),
             });
         }
         Err(error @ AutomationRunError::RecordedFailure { .. }) => return Err(error),
@@ -504,7 +511,7 @@ async fn run_skill_writer_for_store_with_publication(
         .map_err(|error| match committed_receipt.clone() {
             Some(committed_receipt) => AutomationRunError::PartialEffect {
                 run_id: run.run_id.clone(),
-                committed_receipt,
+                committed_receipt: Box::new(committed_receipt),
                 ledger_record: None,
                 detail: "Skill lifecycle changes committed, but their automation terminal could not be published; reconcile the skill receipt before another run.",
             },
@@ -529,6 +536,7 @@ pub(super) struct ProposedSkillOutput<'a> {
     pub(super) evidence_hash: Option<String>,
     pub(super) proposed_ops: &'a Value,
     pub(super) proposals: &'a [Value],
+    pub(super) validation_repairs: &'a [Value],
 }
 
 fn skill_validation_repairs_summary(validation_repairs: &[Value]) -> Value {
@@ -546,7 +554,6 @@ pub(super) async fn finalize_skill_writer_success(
     authority: &CurationApplyAuthorityV1,
     activation_policy: &'static str,
     output: ProposedSkillOutput<'_>,
-    validation_repairs: &[Value],
 ) -> AutomationRunResult<SkillWriterFinalization> {
     let ProposedSkillOutput {
         response,
@@ -555,6 +562,7 @@ pub(super) async fn finalize_skill_writer_success(
         evidence_hash,
         proposed_ops,
         proposals,
+        validation_repairs,
     } = output;
     let run_id = finalizer.run_id();
     let curation_decision =
@@ -607,7 +615,7 @@ pub(super) async fn finalize_skill_writer_success(
         .map_err(|error| match committed_receipt.clone() {
             Some(committed_receipt) => AutomationRunError::PartialEffect {
                 run_id: run_id.to_owned(),
-                committed_receipt,
+                committed_receipt: Box::new(committed_receipt),
                 ledger_record: None,
                 detail: "Skill lifecycle changes committed, but their exact completion time could not be recorded; reconcile the skill receipt before another run.",
             },
@@ -697,7 +705,7 @@ pub(super) async fn finalize_skill_writer_success(
             .map_err(|error| match committed_receipt.clone() {
                 Some(committed_receipt) => AutomationRunError::PartialEffect {
                     run_id: run_id.to_owned(),
-                    committed_receipt,
+                    committed_receipt: Box::new(committed_receipt),
                     ledger_record: None,
                     detail: "Skill lifecycle changes committed, but their failed automation terminal could not be published; reconcile the skill receipt before another run.",
                 },
@@ -706,8 +714,8 @@ pub(super) async fn finalize_skill_writer_success(
         if let Some(committed_receipt) = committed_receipt {
             return Err(AutomationRunError::PartialEffect {
                 run_id: run_id.to_owned(),
-                committed_receipt,
-                ledger_record: Some(record),
+                committed_receipt: Box::new(committed_receipt),
+                ledger_record: Some(Box::new(record)),
                 detail: "Skill lifecycle changes committed, but the batch did not reach complete success; reconcile the skill receipt before another run.",
             });
         }
@@ -752,7 +760,7 @@ pub(super) async fn finalize_skill_writer_success(
     Ok(SkillWriterFinalization::Completed {
         report,
         record,
-        committed_receipt,
+        committed_receipt: committed_receipt.map(Box::new),
     })
 }
 
@@ -786,7 +794,7 @@ pub(super) enum SkillWriterFinalization {
     Completed {
         report: Value,
         record: AutomationRunLedgerRecord,
-        committed_receipt: Option<AutomationCommittedReceipt>,
+        committed_receipt: Option<Box<AutomationCommittedReceipt>>,
     },
     FailedRecorded {
         error: TraceDecayError,

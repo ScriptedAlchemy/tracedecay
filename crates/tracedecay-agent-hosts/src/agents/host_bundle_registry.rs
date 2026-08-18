@@ -526,11 +526,26 @@ fn component_assets(
             .collect());
     }
 
+    // The Cursor native extension deploys under a VS Code-style versioned
+    // directory (`publisher.name-version`), so both the prefix and the
+    // manifest's `version` carry the real release version instead of a
+    // frozen `0.0.0` literal.
+    if (host, component) == (HostKindV1::CursorDesktop, HostBundleComponentV1::Agent) {
+        let prefix = super::cursor::cursor_native_extension_relative_dir();
+        let mut rendered = Vec::new();
+        for (path, body) in super::plugin_bundle::cursor_native_extension_files() {
+            let contents = if path == "package.json" {
+                super::plugin_bundle::stamp_manifest_version(body)
+                    .map_err(|_| HostBundleRegistryError::Incompatible)?
+            } else {
+                render_compiled_asset(body, tracedecay_bin)
+            };
+            rendered.push((format!("{prefix}/{path}"), contents.into_bytes()));
+        }
+        return Ok(rendered);
+    }
+
     let (prefix, files) = match (host, component) {
-        (HostKindV1::CursorDesktop, HostBundleComponentV1::Agent) => (
-            ".cursor/extensions/tracedecay.cursor-native-0.0.0",
-            super::plugin_bundle::cursor_native_extension_files(),
-        ),
         // Kiro's `settings/mcp.json` is a shared user document: the native
         // registration authority merges the TraceDecay server into it (preserving
         // third-party entries) and re-reads it for this component's confirmed
@@ -640,11 +655,15 @@ mod tests {
 
     #[test]
     fn advertised_native_components_have_real_assets() {
+        let cursor_native_extension_js = format!(
+            "{}/dist/extension.js",
+            crate::agents::cursor::cursor_native_extension_relative_dir()
+        );
         for (host, component, expected) in [
             (
                 HostKindV1::CursorDesktop,
                 HostBundleComponentV1::Agent,
-                ".cursor/extensions/tracedecay.cursor-native-0.0.0/dist/extension.js",
+                cursor_native_extension_js.as_str(),
             ),
             (
                 HostKindV1::KimiCode,

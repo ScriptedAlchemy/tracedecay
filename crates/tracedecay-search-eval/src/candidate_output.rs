@@ -11,6 +11,7 @@
 //! activation authority.
 
 use std::borrow::Cow;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1147,9 +1148,9 @@ impl PublishedCorpusCache {
         copies: usize,
         admitted_scope: AdmittedCorpusScopeFn,
     ) -> Result<(), CandidateOutputError> {
-        if !self.by_scale.contains_key(&copies) {
+        if let Entry::Vacant(entry) = self.by_scale.entry(copies) {
             let published = publish_corpus_with_scale(repo_root, workload, copies, admitted_scope)?;
-            self.by_scale.insert(copies, published);
+            entry.insert(published);
         }
         Ok(())
     }

@@ -727,7 +727,7 @@ impl AutomationEffectAuthority {
                         self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(
                             settlement_guard,
                         ))?;
-                        let record = reused.prior_record;
+                        let record = *reused.prior_record;
                         observe_automation_ledger(observer, &record);
                         Ok(RetainedAutomationSettlementOutcome::Reused { record })
                     }
@@ -912,7 +912,7 @@ impl AutomationEffectAuthority {
         Ok(RetainedSettlementWaiter {
             task: tokio::task::spawn_blocking(move || {
                 self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(guard))?;
-                let prior_record = reused.prior_record;
+                let prior_record = *reused.prior_record;
                 observe_automation_ledger(observer, &prior_record);
                 Ok(prior_record)
             }),
@@ -1022,13 +1022,13 @@ impl AutomationEffectAuthority {
                 detail,
             } => self
                 .settle_partial(&run_id, &committed_receipt, detail)
-                .map(|problem| (problem, ledger_record)),
+                .map(|problem| (problem, ledger_record.map(|record| *record))),
             AutomationRunError::RecordedFailure {
                 error,
                 ledger_record,
             } => runtime_problem(&self.context, &self.cancellation, &error)
                 .and_then(|problem| self.problem_envelope(problem, Vec::new()))
-                .map(|problem| (problem, Some(ledger_record))),
+                .map(|problem| (problem, Some(*ledger_record))),
             AutomationRunError::Runtime(error) => {
                 runtime_problem(&self.context, &self.cancellation, &error)
                     .and_then(|problem| self.problem_envelope(problem, Vec::new()))
@@ -1294,7 +1294,7 @@ impl AutomationEffectAuthority {
             grant_revision: context.grant().revision,
             grant_digest: context.grant().digest.clone(),
             disclosure: context.grant().disclosure,
-            effect_receipt_template: committed_receipt,
+            effect_receipt_template: *committed_receipt,
             actor: context.actor().clone(),
             scope: context.scope().clone(),
             request_id: context.request_id().clone(),
@@ -1735,7 +1735,7 @@ impl AutomationEffectAuthority {
     fn outer_result_partial_problem(
         &self,
         reason_code: String,
-        committed_receipt: tracedecay_application::EffectReceipt,
+        committed_receipt: Box<tracedecay_application::EffectReceipt>,
         detail: String,
         committed_outer_result: AutomationRunResultV1,
     ) -> Result<AutomationSettledProblem> {

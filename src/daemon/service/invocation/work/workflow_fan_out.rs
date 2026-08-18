@@ -645,7 +645,7 @@ pub(in crate::daemon::service::invocation) fn admit_workflow_child(
                     initiative: child.initiative.clone(),
                     plan: child.plan.clone(),
                     milestone: child.milestone.clone(),
-                    item: child.item.clone(),
+                    item: Box::new(child.item.clone()),
                 },
                 child.create_command_id.clone(),
                 occurred_at,

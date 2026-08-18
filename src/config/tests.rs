@@ -1264,7 +1264,7 @@ mod runtime_configuration_cutover {
                 project_id: project_id.clone(),
             },
             key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
-            value: ConfigurationValueV1::Boolean(true),
+            value: Box::new(ConfigurationValueV1::Boolean(true)),
         };
         let authority = ConfigurationMutationAuthority {
             receipt: ConfigurationMutationGrantReceiptV1::issue(

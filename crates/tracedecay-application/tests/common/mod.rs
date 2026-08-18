@@ -820,10 +820,9 @@ impl WorkAttemptStoragePort for WorkProductAttemptStore {
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         task_ids
             .iter()
-            .cloned()
             .map(|task_id| {
-                attempt_capacity(&rows, authority, &task_id, concurrency)
-                    .map(|capacity| (task_id, capacity))
+                attempt_capacity(&rows, authority, task_id, concurrency)
+                    .map(|capacity| (task_id.clone(), capacity))
             })
             .collect()
     }

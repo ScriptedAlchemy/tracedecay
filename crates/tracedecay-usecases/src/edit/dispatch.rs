@@ -153,7 +153,7 @@ pub(super) async fn run_source_edit(
             new_name,
             dry_run,
             ..
-        } => SourceEditOutcome::Rename(
+        } => SourceEditOutcome::Rename(Box::new(
             graph
                 .rename_symbol(
                     admitted_graph(&graph_read).await?,
@@ -162,6 +162,6 @@ pub(super) async fn run_source_edit(
                     dry_run,
                 )
                 .await?,
-        ),
+        )),
     })
 }

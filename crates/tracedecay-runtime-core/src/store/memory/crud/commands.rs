@@ -337,13 +337,11 @@ async fn project_memory_replay_add_tx(
             fact,
             project_memory_commit_receipt_from_operation_tx(transaction, owner, receipt).await?,
             true,
-        )
-        .map_err(Into::into),
+        ),
         "normalized_duplicate" => ProjectMemoryFactAddOutcomeV1::normalized_duplicate(
             fact,
             ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
-        )
-        .map_err(Into::into),
+        ),
         "semantic_near_duplicate" | "possible_conflict" => {
             let closest_id = receipt
                 .receipt
@@ -366,8 +364,7 @@ async fn project_memory_replay_add_tx(
                     similarity,
                     commit_receipt,
                     true,
-                )
-                .map_err(Into::into);
+                );
             }
             ProjectMemoryFactAddOutcomeV1::possible_conflict(
                 fact,
@@ -376,9 +373,8 @@ async fn project_memory_replay_add_tx(
                 commit_receipt,
                 true,
             )
-            .map_err(Into::into)
         }
-        _ => Err(FactStoreError::InvalidCommitReceipt.into()),
+        _ => Err(FactStoreError::InvalidCommitReceipt),
     }
 }
 
@@ -432,8 +428,7 @@ pub(in crate::store::memory) async fn add_project_memory_fact_tx(
             now,
         )
         .await?;
-        return ProjectMemoryFactAddOutcomeV1::normalized_duplicate(fact, closest)
-            .map_err(Into::into);
+        return ProjectMemoryFactAddOutcomeV1::normalized_duplicate(fact, closest);
     }
 
     let proposed_content = sanitized.payload.content().to_owned();
@@ -473,10 +468,9 @@ pub(in crate::store::memory) async fn add_project_memory_fact_tx(
         )
         .await?;
         return ProjectMemoryFactAddOutcomeV1::normalized_duplicate(
-            ProjectMemoryFactProjectionV1::Available(Box::new(closest.clone())),
+            ProjectMemoryFactProjectionV1::Available(closest.clone()),
             closest_id,
-        )
-        .map_err(Into::into);
+        );
     }
     let comparison = match classification {
         Some(ProjectMemoryAddClassification::SemanticNearDuplicate {
@@ -529,8 +523,7 @@ pub(in crate::store::memory) async fn add_project_memory_fact_tx(
                 similarity_millionths,
                 canonical_receipt,
                 replayed,
-            )
-            .map_err(Into::into);
+            );
         }
         return ProjectMemoryFactAddOutcomeV1::semantic_near_duplicate(
             fact,
@@ -538,10 +531,9 @@ pub(in crate::store::memory) async fn add_project_memory_fact_tx(
             similarity_millionths,
             canonical_receipt,
             replayed,
-        )
-        .map_err(Into::into);
+        );
     }
-    ProjectMemoryFactAddOutcomeV1::added(fact, canonical_receipt, replayed).map_err(Into::into)
+    ProjectMemoryFactAddOutcomeV1::added(fact, canonical_receipt, replayed)
 }
 
 async fn project_memory_replay_update_tx(
@@ -580,7 +572,6 @@ async fn project_memory_replay_update_tx(
         project_memory_commit_receipt_from_operation_tx(transaction, owner, receipt).await?,
         true,
     )
-    .map_err(Into::into)
 }
 
 pub(in crate::store::memory) async fn update_project_memory_fact_tx(
@@ -649,8 +640,7 @@ pub(in crate::store::memory) async fn update_project_memory_fact_tx(
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
             "update payload was rejected by the privacy sanitizer",
-        )
-        .into());
+        ));
     };
     let new_trust = request.patch().trust().unwrap_or(current.trust());
     let now = project_memory_now()?;
@@ -694,7 +684,6 @@ pub(in crate::store::memory) async fn update_project_memory_fact_tx(
         canonical_receipt,
         replayed,
     )
-    .map_err(Into::into)
 }
 
 async fn project_memory_replay_remove_tx(
@@ -734,9 +723,8 @@ async fn project_memory_replay_remove_tx(
                     .await?,
                 true,
             )
-            .map_err(Into::into)
         }
-        _ => Err(FactStoreError::InvalidCommitReceipt.into()),
+        _ => Err(FactStoreError::InvalidCommitReceipt),
     }
 }
 
@@ -867,5 +855,4 @@ pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
         canonical_receipt,
         replayed,
     )
-    .map_err(Into::into)
 }

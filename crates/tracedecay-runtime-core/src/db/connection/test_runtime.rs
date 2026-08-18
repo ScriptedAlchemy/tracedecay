@@ -96,7 +96,7 @@ impl RegisteredTestRuntimeRetirementControlV1 {
         };
         let request = StoreRuntimeOpenRequest::new_authorized(
             target_shard,
-            self.binding.incarnation.clone(),
+            self.binding.incarnation,
             profile_pin,
             self.authority.clone(),
         );

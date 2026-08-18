@@ -153,13 +153,13 @@ impl CatalogScan {
             record.logical_path.clone(),
             record.file_occurrence_id.clone(),
         );
-        if let Some(existing) = previous {
-            if existing != record.file_occurrence_id {
-                return Err(CodeGraphProjectionError::Corrupt(format!(
-                    "code graph logical path `{}` is claimed by more than one file occurrence",
-                    record.logical_path
-                )));
-            }
+        if let Some(existing) = previous
+            && existing != record.file_occurrence_id
+        {
+            return Err(CodeGraphProjectionError::Corrupt(format!(
+                "code graph logical path `{}` is claimed by more than one file occurrence",
+                record.logical_path
+            )));
         }
         if self
             .catalog

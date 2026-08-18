@@ -30,7 +30,7 @@ pub enum DashboardAutomationAuthorityErrorV1 {
     Conflict { detail: String },
     Failed { detail: String },
     ApplicationProblem(ApplicationProblemEnvelope),
-    AutomationProblem(AutomationRunProblemV1),
+    AutomationProblem(Box<AutomationRunProblemV1>),
 }
 
 impl DashboardAutomationAuthorityErrorV1 {

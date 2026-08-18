@@ -20,8 +20,9 @@ pub use grep_analysis::{
     TraceDecayDependencyDepthAuthorityV1,
 };
 pub use production::{
-    ProductionPrimitiveOpenRequestV1, TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project,
-    locator_digest_for_project, open_production_primitive_runtime,
+    ProductionPrimitiveCodeAuthoritiesV1, ProductionPrimitiveOpenRequestV1,
+    TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project, locator_digest_for_project,
+    open_production_primitive_runtime,
 };
 pub use runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,

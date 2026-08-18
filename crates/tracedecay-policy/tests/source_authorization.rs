@@ -1,10 +1,9 @@
 use serde_json::json;
 use tracedecay_policy::authorization::{
-    AuthorizationCoverageV1, DisclosureClassV1,
-    ExternalContentStatusV1, PolicyIdentifierV1, PolicyReasonCodeV1, PublicSourceResultShapeV1,
-    SinkKindV1, SourceAccessDecisionV1, SourceAuthorizationEvaluator,
-    SourceAuthorizationEvaluatorV1, SourceAuthorizationTruthTableV1, TypedOperationV1,
-    issue_source_authorization_proof, public_source_result_shape,
+    AuthorizationCoverageV1, DisclosureClassV1, ExternalContentStatusV1, PolicyIdentifierV1,
+    PolicyReasonCodeV1, PublicSourceResultShapeV1, SinkKindV1, SourceAccessDecisionV1,
+    SourceAuthorizationEvaluator, SourceAuthorizationEvaluatorV1, SourceAuthorizationTruthTableV1,
+    TypedOperationV1, issue_source_authorization_proof, public_source_result_shape,
 };
 const SOURCE_AUTHORIZATION_TRUTH_TABLES: &str =
     include_str!("fixtures/source_authorization/core.json");

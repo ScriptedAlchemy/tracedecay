@@ -4,7 +4,7 @@ use crate::db::engine::params;
 use super::connection::{Database, DatabaseWriteTransaction};
 use crate::errors::{Result, TraceDecayError};
 
-/// Result of one metadata point read whose payload is projected by SQLite only
+/// Result of one metadata point read whose payload is projected by `SQLite` only
 /// when its encoded byte length is within the caller's bound.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BoundedMetadataValue {
@@ -42,7 +42,7 @@ impl Database {
 
     /// Reads a metadata value without materializing an over-limit payload.
     ///
-    /// SQLite measures the stored value as bytes and conditionally projects
+    /// `SQLite` measures the stored value as bytes and conditionally projects
     /// the value in the same query. The runtime therefore receives only the
     /// measured length and `NULL` when the value exceeds the caller's limit.
     pub async fn get_metadata_bounded(
@@ -53,10 +53,7 @@ impl Database {
         // SQLite lengths are signed 64-bit integers. A larger Rust bound is
         // equivalent to SQLite's maximum representable value, not a smaller
         // policy limit.
-        let sql_limit = match i64::try_from(max_encoded_bytes) {
-            Ok(limit) => limit,
-            Err(_) => i64::MAX,
-        };
+        let sql_limit = i64::try_from(max_encoded_bytes).unwrap_or(i64::MAX);
         let mut rows = self
             .read_connection()
             .query(

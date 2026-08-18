@@ -281,14 +281,14 @@ impl ExecutionTopologyEvidenceV1 {
                 match self.outcomes.get(&outcome.prediction_ref) {
                     Some(existing) if existing.correction_revision > row.correction_revision => {}
                     Some(existing) if existing.correction_revision == row.correction_revision => {
-                        if existing != &row {
-                            if self.invalid_correction_keys.insert((
+                        if existing != &row
+                            && self.invalid_correction_keys.insert((
                                 1,
                                 outcome.prediction_ref.clone(),
                                 u64::from(row.correction_revision),
-                            )) {
-                                self.invalid_events = self.invalid_events.saturating_add(1);
-                            }
+                            ))
+                        {
+                            self.invalid_events = self.invalid_events.saturating_add(1);
                         }
                     }
                     _ => {

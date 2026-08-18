@@ -154,10 +154,10 @@ pub struct AutomaticFactApplyBatch {
 #[derive(Debug, Clone)]
 pub(crate) enum SettledAutomaticFactReceipt {
     Projected {
-        receipt: AutomaticFactReceipt,
-        authority_result: ProjectMemoryAutomaticFactApplyResultV1,
+        receipt: Box<AutomaticFactReceipt>,
+        authority_result: Box<ProjectMemoryAutomaticFactApplyResultV1>,
     },
-    InvalidAuthority(ProjectMemoryAutomaticFactApplyResultV1),
+    InvalidAuthority(Box<ProjectMemoryAutomaticFactApplyResultV1>),
 }
 
 enum AutomaticFactApplySettlement {
@@ -576,11 +576,11 @@ fn automatic_fact_apply_settlement(
     };
     let receipt = match automatic_fact_receipt(authority_result.receipt()) {
         Ok(receipt) => SettledAutomaticFactReceipt::Projected {
-            receipt,
-            authority_result,
+            receipt: Box::new(receipt),
+            authority_result: Box::new(authority_result),
         },
         Err(_) if invalid_authority => {
-            SettledAutomaticFactReceipt::InvalidAuthority(authority_result)
+            SettledAutomaticFactReceipt::InvalidAuthority(Box::new(authority_result))
         }
         Err(error) => return Err(error),
     };
@@ -596,7 +596,7 @@ impl SettledAutomaticFactReceipt {
             Self::Projected {
                 authority_result, ..
             }
-            | Self::InvalidAuthority(authority_result) => authority_result,
+            | Self::InvalidAuthority(authority_result) => *authority_result,
         }
     }
 

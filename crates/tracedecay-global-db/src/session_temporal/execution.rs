@@ -417,7 +417,7 @@ pub struct TaskSessionTemporalExecutionReportV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskSessionTemporalExecutionOutcomeV1 {
-    Complete(TaskSessionTemporalExecutionReportV1),
+    Complete(Box<TaskSessionTemporalExecutionReportV1>),
     Omitted(TaskSessionExecutionOmissionV1),
 }
 

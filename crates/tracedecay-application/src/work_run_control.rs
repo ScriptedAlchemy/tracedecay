@@ -411,7 +411,6 @@ where
         let blocked_intervals = frontier
             .open_blocked_intervals
             .iter()
-            .cloned()
             .map(|receipt| {
                 receipt.close(
                     command.occurred_at,

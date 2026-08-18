@@ -398,7 +398,10 @@ async fn orphaned_store_with_repository_identity_is_readopted_without_aliasing()
     )
     .await
     .expect("re-adoption must restore the enrollment root");
-    assert!(!roots.is_empty(), "re-adoption must produce enrollment roots");
+    assert!(
+        !roots.is_empty(),
+        "re-adoption must produce enrollment roots"
+    );
     let restored = crate::storage::read_enrollment_marker(&project)
         .expect("read restored enrollment marker")
         .expect("enrollment marker must be restored");
@@ -406,7 +409,10 @@ async fn orphaned_store_with_repository_identity_is_readopted_without_aliasing()
         restored.project_id, project_id,
         "restored enrollment must name the durable identity"
     );
-    assert_eq!(restored.storage_mode, crate::storage::StorageMode::ProfileSharded);
+    assert_eq!(
+        restored.storage_mode,
+        crate::storage::StorageMode::ProfileSharded
+    );
 
     // Re-adoption restores identity only; the store's data is never replaced.
     let graph_bytes_after = std::fs::read(&layout.graph_db_path).expect("graph bytes after");

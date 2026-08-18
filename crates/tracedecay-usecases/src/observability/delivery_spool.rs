@@ -171,7 +171,7 @@ impl DeliveryRecorderSpoolV1 {
             .iter()
             .take(limit.min(MAX_PENDING_RECEIPTS))
         {
-            let bytes = read_bounded(&path, MAX_RECEIPT_BYTES)
+            let bytes = read_bounded(path, MAX_RECEIPT_BYTES)
                 .map_err(map_read_error)?
                 .ok_or(DeliveryRecorderSpoolError::Corrupt)?;
             let receipt = decode_receipt(&bytes)?;

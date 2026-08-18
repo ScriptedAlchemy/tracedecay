@@ -232,7 +232,7 @@ impl<'a> SessionPageReconstructionRequest<'a> {
 pub enum SessionPageReconstruction {
     Occurrence {
         session: SessionRecord,
-        message: SessionMessageRecord,
+        message: Box<SessionMessageRecord>,
     },
     Summary {
         session: SessionRecord,
@@ -349,7 +349,10 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
                     {
                         return Err(SessionTemporalExecutionError::Unavailable);
                     }
-                    Ok(SessionPageReconstruction::Occurrence { session, message })
+                    Ok(SessionPageReconstruction::Occurrence {
+                        session,
+                        message: Box::new(message),
+                    })
                 }),
             };
             match result {
@@ -976,7 +979,7 @@ impl TaskSessionTemporalExecutionPortV1 for RegisteredGlobalDbSessionTemporalExe
                 .snapshot
                 .source_coverage()
                 .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            Ok(TaskSessionTemporalExecutionOutcomeV1::Complete(
+            Ok(TaskSessionTemporalExecutionOutcomeV1::Complete(Box::new(
                 TaskSessionTemporalExecutionReportV1 {
                     binding: request.binding().clone(),
                     selection,
@@ -985,7 +988,7 @@ impl TaskSessionTemporalExecutionPortV1 for RegisteredGlobalDbSessionTemporalExe
                         source_coverage,
                     ),
                 },
-            ))
+            )))
         })
     }
 }

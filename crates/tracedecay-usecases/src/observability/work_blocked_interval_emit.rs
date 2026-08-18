@@ -5,8 +5,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1, WorkOwnerObservationResultV1,
-    execution_owner_fact_envelope,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityEmissionOutcomeV1,
+    WorkOwnerObservationResultV1, execution_owner_fact_envelope,
 };
 
 /// Offers one exact open or settled interval receipt without awaiting telemetry.
@@ -74,13 +74,15 @@ pub fn work_blocked_interval_observation_envelope(
     execution_owner_fact_envelope(
         producer.identity(),
         canonical_project_scope,
-        &owner_transition_ref,
-        "work_blocked_interval",
-        event_time,
-        Some(receipt.started_at()),
-        valid_until,
-        None,
-        CoverageStateV1::Known,
-        ObservabilityPayloadV1::WorkBlockedInterval(payload),
+        ExecutionOwnerFactInputV1 {
+            owner_transition_ref: &owner_transition_ref,
+            operation: "work_blocked_interval",
+            event_time,
+            valid_from: Some(receipt.started_at()),
+            valid_until,
+            terminal_result: None,
+            coverage: CoverageStateV1::Known,
+            payload: ObservabilityPayloadV1::WorkBlockedInterval(payload),
+        },
     )
 }

@@ -348,6 +348,7 @@ pub fn prepare_branch_admin_mutation(
 /// Metadata is the only mutation: the branch never owned a database of its
 /// own, and any legacy private store is left for canonical orphan collection.
 /// Takes the branch-add lock for its own load-verify-save window.
+#[cfg(test)]
 pub(super) fn rollback_published_branch_tracking(
     tracedecay_dir: &Path,
     branch_name: &str,

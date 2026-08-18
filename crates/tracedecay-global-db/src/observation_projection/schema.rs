@@ -342,7 +342,8 @@ pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
 pub(in super::super) async fn ensure_observation_projection_schema(
     conn: &impl Executor,
 ) -> Result<(), Error> {
-    conn.execute_batch(OBSERVATION_PROJECTION_SCHEMA_SQL).await?;
+    conn.execute_batch(OBSERVATION_PROJECTION_SCHEMA_SQL)
+        .await?;
     verify_final_projection_shape(conn).await?;
     ensure_v4_projection_binding_triggers(conn).await
 }

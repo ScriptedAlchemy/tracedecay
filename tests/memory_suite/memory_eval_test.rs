@@ -454,7 +454,7 @@ fn run_search(fixture: &Fixture, query: &str, limit: usize) -> Vec<FactSearchHit
 
 fn available_fact(projection: FactProjectionV1) -> FactV1 {
     match projection {
-        FactProjectionV1::Available { fact } => fact,
+        FactProjectionV1::Available { fact } => *fact,
         FactProjectionV1::Unavailable { status } => {
             panic!("expected available fact projection, got {status:?}")
         }

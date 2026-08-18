@@ -479,11 +479,11 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
                 .map(SettledAutomaticFactReceipt::into_authority_result)
                 .collect(),
         )
-        .map(AutomationCommittedReceipt::AutomaticFacts)
+        .map(|receipts| AutomationCommittedReceipt::AutomaticFacts(Box::new(receipts)))
         .ok_or_else(|| TraceDecayError::Config {
             message: "automatic fact settlement lost its committed authority receipt".to_owned(),
         })?;
-        let record = match finalizer
+        let record = finalizer
             .append_failed_record_with_effects(
                 response.model.clone(),
                 evidence_hash,
@@ -504,10 +504,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
                 terminal_rejected_count,
             )
             .await
-        {
-            Ok(record) => Some(record),
-            Err(_) => None,
-        };
+            .ok();
         return Ok(SessionReflectorFinalization::FailedRecorded {
             run_id: run_id.to_owned(),
             committed_receipt,
@@ -551,7 +548,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
             .map(SettledAutomaticFactReceipt::into_authority_result)
             .collect(),
     )
-    .map(AutomationCommittedReceipt::AutomaticFacts);
+    .map(|receipts| AutomationCommittedReceipt::AutomaticFacts(Box::new(receipts)));
     let mut record = match finalizer.success_record(
         response,
         report
@@ -826,7 +823,7 @@ async fn run_session_reflector_for_store_with_publication<A: ProjectMemoryFactSt
                     .await?;
                 return Err(AutomationRunError::RecordedFailure {
                     error,
-                    ledger_record,
+                    ledger_record: Box::new(ledger_record),
                 });
             }
         };
@@ -871,8 +868,8 @@ async fn run_session_reflector_for_store_with_publication<A: ProjectMemoryFactSt
         }) => {
             return Err(AutomationRunError::PartialEffect {
                 run_id,
-                committed_receipt,
-                ledger_record: record,
+                committed_receipt: Box::new(committed_receipt),
+                ledger_record: record.map(Box::new),
                 detail,
             });
         }
@@ -888,7 +885,7 @@ async fn run_session_reflector_for_store_with_publication<A: ProjectMemoryFactSt
                 .await?;
             return Err(AutomationRunError::RecordedFailure {
                 error: err,
-                ledger_record,
+                ledger_record: Box::new(ledger_record),
             });
         }
     };
@@ -901,7 +898,7 @@ async fn run_session_reflector_for_store_with_publication<A: ProjectMemoryFactSt
             if let Some(committed_receipt) = committed_receipt {
                 return Err(AutomationRunError::PartialEffect {
                     run_id: run.run_id.clone(),
-                    committed_receipt,
+                    committed_receipt: Box::new(committed_receipt),
                     ledger_record: None,
                     detail: "Automatic facts committed, but the automation terminal could not be published; reconcile the committed receipt before another run.",
                 });

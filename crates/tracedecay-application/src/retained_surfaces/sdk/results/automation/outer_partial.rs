@@ -33,7 +33,7 @@ fn outer_delivery_partial(result: AutomationRunResultV1) -> Value {
     let problem =
         retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::PartialEffect {
             reason_code: "application.retained.effect-delivery-failed".to_owned(),
-            committed_receipt: EffectReceipt {
+            committed_receipt: Box::new(EffectReceipt {
                 operation: operation.use_case_id().clone(),
                 request_id: request_id.clone(),
                 actor: ActorId::new("actor.automation").expect("actor"),
@@ -49,7 +49,7 @@ fn outer_delivery_partial(result: AutomationRunResultV1) -> Value {
                 outcome: EffectTermination::Partial,
                 committed_state: Some(committed_state),
                 external_proof: None,
-            },
+            }),
             detail: "The outer result committed before delivery expired".to_owned(),
         });
     let envelope = ApplicationProblemEnvelope::new(

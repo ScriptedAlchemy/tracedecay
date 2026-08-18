@@ -1446,8 +1446,8 @@ async fn run_execute_pair(
                 DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
                     error: tracedecay_agent_hosts::automation::AutomationRunError::PartialEffect {
                         run_id,
-                        committed_receipt,
-                        ledger_record,
+                        committed_receipt: Box::new(committed_receipt),
+                        ledger_record: ledger_record.map(Box::new),
                         detail,
                     },
                 }));
@@ -1503,8 +1503,8 @@ async fn run_execute_pair(
             let skill_terminal = DeferredLegTerminal::Problem(Box::new(DeferredProblemTerminal {
                 error: tracedecay_agent_hosts::automation::AutomationRunError::PartialEffect {
                     run_id,
-                    committed_receipt,
-                    ledger_record,
+                    committed_receipt: Box::new(committed_receipt),
+                    ledger_record: ledger_record.map(Box::new),
                     detail,
                 },
             }));

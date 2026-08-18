@@ -1329,7 +1329,8 @@ enum CodeGraphServingAuthorityV1 {
     Persistent {
         /// Retained solely to keep the canonical graph store lease alive for
         /// the lifetime of the serving owners; never read.
-        _lease: Arc<tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1>,
+        _lease:
+            Arc<tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1>,
     },
     #[cfg(test)]
     Memory,

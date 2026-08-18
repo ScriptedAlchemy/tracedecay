@@ -227,10 +227,12 @@ async fn activate_and_track_manual_branch_owned(
 
 /// Seals the current, exact Git snapshot for one mounted branch worktree.
 ///
-/// This is the canonical production authority shared by daemon branch-add and
-/// the in-process production composition harness. It intentionally captures
-/// one Git snapshot, requests a scheduler refresh, then requires exact
-/// repository/worktree/ref/OID equality before publishing metadata.
+/// This wrapper is the in-process production composition harness's entry to
+/// the shared `track_exact_worktree_branch_with_lifecycle` authority. It
+/// intentionally captures one Git snapshot, requests a scheduler refresh,
+/// then requires exact repository/worktree/ref/OID equality before
+/// publishing metadata.
+#[cfg(any(test, feature = "test-transport"))]
 pub(crate) async fn track_exact_worktree_branch(
     graph: &Arc<crate::tracedecay::TraceDecay>,
     schedulers: &CodeIndexSchedulerRegistryV1,

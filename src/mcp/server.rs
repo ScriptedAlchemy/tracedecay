@@ -464,12 +464,18 @@ impl MountedProjectApplicationRetrievalV1 {
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("mounted project session identity is invalid: {error}"),
                 })?;
+        // Project, repository, and worktree are checkout identity. The branch
+        // reference is deliberately not: it is the label HEAD happens to
+        // carry, the mounted identity records the label the graph scope was
+        // *registered* under, and the two diverge on every ordinary branch
+        // switch. Demanding they match made project open degrade its full
+        // upgrade on any checkout serving a branch other than the registered
+        // one, which silently disabled work evidence and every automation
+        // task behind the retained runtime registration.
         let same_coordinates = mounted_scope.project_id == expected_scope.project_id
             && mounted_scope.repository_id == expected_scope.repository_id
             && mounted_scope.worktree_id == expected_scope.worktree_id;
-        let reference_matches = expected_scope.reference.is_none()
-            || mounted_scope.reference == expected_scope.reference;
-        if !same_coordinates || !reference_matches {
+        if !same_coordinates {
             return Err(TraceDecayError::Config {
                 message: "Work evidence retrieval scope does not match the mounted project session authority"
                     .to_owned(),

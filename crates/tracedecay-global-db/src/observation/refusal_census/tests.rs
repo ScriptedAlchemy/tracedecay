@@ -11,9 +11,8 @@ async fn insert_advance(
     offset: u64,
     reason: &str,
 ) {
-    let source_json = format!(
-        "{{\"provider\":\"{provider}\",\"native_session_id\":\"census-session\"}}"
-    );
+    let source_json =
+        format!("{{\"provider\":\"{provider}\",\"native_session_id\":\"census-session\"}}");
     let coverage_json = format!("{{\"start\":{offset},\"end\":{}}}", offset + 1);
     runtime
         .profile_database()

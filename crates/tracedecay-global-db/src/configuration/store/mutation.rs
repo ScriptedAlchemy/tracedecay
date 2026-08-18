@@ -466,7 +466,7 @@ pub(super) fn apply_direct_mutation_to_snapshot(
                     effective_values,
                     provenance,
                     key.clone(),
-                    value.clone(),
+                    value.as_ref().clone(),
                     layer,
                     revision_id,
                 );
@@ -529,7 +529,7 @@ pub(super) fn validate_direct_control_mutation(
             {
                 return Err(ConfigurationError::PolicyWideningForbidden);
             }
-            if matches!(value, ConfigurationValueV1::CredentialReference(_)) {
+            if matches!(value.as_ref(), ConfigurationValueV1::CredentialReference(_)) {
                 return Err(ConfigurationError::validation_message(
                     "credential references require the write-only credential operation",
                 ));

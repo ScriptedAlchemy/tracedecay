@@ -53,7 +53,6 @@ const KIRO_AGENT_ALL_TOOLS: &str = "*";
 const KIRO_ALLOWED_BUILTIN_TOOLS: &str = "@builtin";
 const KIRO_ALLOWED_TRACEDECAY_TOOLS: &str = "@tracedecay";
 const KIRO_PROMPT_HOOK: &str = "hook-kiro-prompt-submit";
-const KIRO_SHORT_HOOK_TIMEOUT_MS: u64 = 5_000;
 
 /// Name of Kiro's own MCP registry binary.
 const KIRO_CLI: &str = "kiro-cli";
@@ -74,12 +73,13 @@ const KIRO_MCP_SERVER_NAME: &str = "tracedecay";
 /// same server cannot drift apart.
 const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
-/// A hook the managed Kiro agent registers.
+/// A hook the managed Kiro agent registers. Kiro's documented hook entry
+/// schema is `command` plus an optional `matcher` — nothing else, so no
+/// timeout or other tuning field exists to carry here.
 struct KiroManagedHook {
     event: &'static str,
     matcher: Option<&'static str>,
     subcommand: &'static str,
-    timeout_ms: u64,
 }
 
 /// Every managed-agent hook, in registration order. The single source of
@@ -101,17 +101,17 @@ const KIRO_MANAGED_HOOKS: &[KiroManagedHook] = &[KiroManagedHook {
     event: "userPromptSubmit",
     matcher: None,
     subcommand: KIRO_PROMPT_HOOK,
-    timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
 }];
 
 /// Builds the managed agent's `hooks` object from [`KIRO_MANAGED_HOOKS`],
-/// grouping entries per event in table order.
+/// grouping entries per event in table order. Entries carry exactly Kiro's
+/// documented fields (`command`, optional `matcher`); an undocumented field
+/// would ship schema noise Kiro never reads.
 fn managed_agent_hooks(tracedecay_bin: &str) -> serde_json::Value {
     let mut grouped: Vec<(&str, Vec<serde_json::Value>)> = Vec::new();
     for hook in KIRO_MANAGED_HOOKS {
         let mut entry = json!({
             "command": super::hook_command(tracedecay_bin, hook.subcommand),
-            "timeout_ms": hook.timeout_ms,
         });
         if let Some(matcher) = hook.matcher {
             entry["matcher"] = json!(matcher);
@@ -628,9 +628,11 @@ fn run_kiro_mcp_step(kiro_cli: &Path, args: &[&str], home: &Path) -> Result<()> 
     })
 }
 
-fn read_mcp_config_observation(
-    path: &Path,
-) -> Result<(Option<Vec<u8>>, serde_json::Map<String, serde_json::Value>)> {
+/// Exact registry-document bytes (absent when nothing is registered yet) and
+/// the operator-owned peer MCP server entries read from that document.
+type McpConfigObservation = (Option<Vec<u8>>, serde_json::Map<String, serde_json::Value>);
+
+fn read_mcp_config_observation(path: &Path) -> Result<McpConfigObservation> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -643,7 +645,7 @@ fn read_mcp_config_observation(
     let Some(bytes) = bytes.as_deref() else {
         return Ok((None, serde_json::Map::new()));
     };
-    let config = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
+    let config = serde_json::from_slice::<serde_json::Value>(bytes).map_err(|error| {
         TraceDecayError::Config {
             message: format!("failed to parse {} as JSON: {error}", path.display()),
         }
@@ -1293,14 +1295,7 @@ fn doctor_check_managed_agent(dc: &mut DoctorCounters, home: &Path) {
     }
 
     for hook in KIRO_MANAGED_HOOKS {
-        doctor_check_agent_hook(
-            dc,
-            &config,
-            hook.event,
-            hook.matcher,
-            hook.subcommand,
-            hook.timeout_ms,
-        );
+        doctor_check_agent_hook(dc, &config, hook.event, hook.matcher, hook.subcommand);
     }
 }
 
@@ -1347,7 +1342,6 @@ fn doctor_check_agent_hook(
     event: &str,
     matcher: Option<&str>,
     subcommand: &str,
-    timeout_ms: u64,
 ) {
     let hook = find_agent_hook(config, event, matcher, subcommand);
     let Some(hook) = hook else {
@@ -1358,15 +1352,18 @@ fn doctor_check_agent_hook(
         return;
     };
 
-    let timeout_ok = hook.get("timeout_ms").and_then(serde_json::Value::as_u64) == Some(timeout_ms);
-    if timeout_ok {
-        let matcher_label = matcher.map_or(String::new(), |m| format!(" ({m})"));
-        dc.pass(&format!("Kiro {event}{matcher_label} hook installed"));
-    } else {
+    // Kiro's hook schema is `command` + optional `matcher` only. A stray
+    // `timeout_ms` is residue from an older tracedecay version that wrote an
+    // undocumented field; a reinstall rewrites the entry to the exact schema.
+    if hook.get("timeout_ms").is_some() {
         dc.warn(&format!(
-            "Kiro {event} hook timeout differs from tracedecay default -- run `tracedecay install --agent kiro` to update"
+            "Kiro {event} hook carries an undocumented timeout_ms field from an older \
+             tracedecay version -- run `tracedecay install --agent kiro` to rewrite it"
         ));
+        return;
     }
+    let matcher_label = matcher.map_or(String::new(), |m| format!(" ({m})"));
+    dc.pass(&format!("Kiro {event}{matcher_label} hook installed"));
 }
 
 fn find_agent_hook<'a>(

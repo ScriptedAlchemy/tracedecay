@@ -44,7 +44,7 @@ pub enum RetainedSurfaceExecutionErrorV1 {
     Conflict,
     PartialEffect {
         reason_code: String,
-        committed_receipt: EffectReceipt,
+        committed_receipt: Box<EffectReceipt>,
         detail: String,
     },
     Stale,
@@ -900,7 +900,7 @@ mod tests {
         let receipt = partial_receipt(&operation, &context);
         let service = service_for(RetainedSurfaceExecutionErrorV1::PartialEffect {
             reason_code: "application.retained.partial-effect".to_owned(),
-            committed_receipt: receipt.clone(),
+            committed_receipt: Box::new(receipt.clone()),
             detail: "The lower authority committed before delivery failed.".to_owned(),
         });
 

@@ -31,7 +31,9 @@ use tracedecay_application::remote::protocol::{
     remote_enrollment_result_contract_v1, remote_protocol_problem,
     remote_replay_result_contract_v1,
 };
-use tracedecay_application::remote::protocol_owner::RemoteProtocolOwnerV1;
+use tracedecay_application::remote::protocol_owner::{
+    RemoteOperationProtocolPortsV1, RemoteProtocolOwnerV1,
+};
 use tracedecay_application::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
     RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1, RemoteRecoveryProtocolOwnerV1,
@@ -1039,24 +1041,26 @@ pub(crate) fn build_daemon_remote_protocol_router(
         Arc::new(DaemonRemoteEnrollmentProtocolPortV1 {
             credentials: Arc::clone(&credentials),
         }),
-        Arc::new(DaemonRemoteCaptureProtocolPortV1 {
-            credentials: Arc::clone(&credentials),
-        }),
-        Arc::new(DaemonRemoteReplayProtocolPortV1 {
-            credentials: Arc::clone(&credentials),
-            transaction: Arc::clone(&transaction),
-        }),
-        Arc::new(DaemonRemoteFrameTransferProtocolPortV1 {
-            credentials: Arc::clone(&credentials),
-        }),
-        Arc::new(observability::DaemonRemoteQueryProtocolPortV1::new(
-            Arc::clone(&credentials),
-            transaction,
-            invocation,
-        )),
-        recovery.clone(),
-        recovery.clone(),
-        recovery,
+        RemoteOperationProtocolPortsV1 {
+            capture: Arc::new(DaemonRemoteCaptureProtocolPortV1 {
+                credentials: Arc::clone(&credentials),
+            }),
+            replay: Arc::new(DaemonRemoteReplayProtocolPortV1 {
+                credentials: Arc::clone(&credentials),
+                transaction: Arc::clone(&transaction),
+            }),
+            frame_transfer: Arc::new(DaemonRemoteFrameTransferProtocolPortV1 {
+                credentials: Arc::clone(&credentials),
+            }),
+            query: Arc::new(observability::DaemonRemoteQueryProtocolPortV1::new(
+                Arc::clone(&credentials),
+                transaction,
+                invocation,
+            )),
+            backup: recovery.clone(),
+            restore: recovery.clone(),
+            promotion: recovery,
+        },
     );
     let admission = Arc::new(RemoteCredentialAdmissionServiceV1::new(
         DaemonRemoteCredentialLookupV1::new(credentials),

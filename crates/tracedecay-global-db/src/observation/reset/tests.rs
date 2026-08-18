@@ -7,9 +7,10 @@ use tracedecay_runtime_core::errors::TraceDecayError;
 use super::reset_refused_observation_authority;
 
 async fn install_registered_store(path: &std::path::Path) {
-    let admitted = open_registered_test_database_fixture(path, TestDatabaseRuntimeScope::ProfileSessions)
-        .await
-        .expect("install the registered sessions schema");
+    let admitted =
+        open_registered_test_database_fixture(path, TestDatabaseRuntimeScope::ProfileSessions)
+            .await
+            .expect("install the registered sessions schema");
     drop(admitted);
 }
 
@@ -96,7 +97,8 @@ async fn refused_observation_shape_resets_scoped_and_readmits() {
 
     let report = {
         let mut raw = rusqlite::Connection::open(&database_path).unwrap();
-        reset_refused_observation_authority(&mut raw).expect("scoped reset of the refused authority")
+        reset_refused_observation_authority(&mut raw)
+            .expect("scoped reset of the refused authority")
     };
     assert!(
         report

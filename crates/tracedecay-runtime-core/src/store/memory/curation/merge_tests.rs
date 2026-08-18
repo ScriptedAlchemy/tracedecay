@@ -285,7 +285,7 @@ async fn initial_merge_returns_exact_canonical_commit_receipts() {
     assert_eq!(outcome.input_digest(), durable.request_digest);
     assert_eq!(outcome.winner(), &winner);
     assert!(outcome.content_updated());
-    assert_eq!(outcome.deleted_losers(), &[loser.clone()]);
+    assert_eq!(outcome.deleted_losers(), std::slice::from_ref(&loser));
     assert_eq!(outcome.commit_receipts().len(), 2);
     assert_eq!(outcome.commit_receipts()[0].fact_id(), winner.fact_id());
     assert_eq!(outcome.commit_receipts()[0].committed_event_ids().len(), 2);

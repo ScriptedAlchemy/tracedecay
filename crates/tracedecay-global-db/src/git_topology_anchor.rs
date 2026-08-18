@@ -100,7 +100,9 @@ impl RegisteredGitTopologyAnchorAuthorityV2 {
         ) {
             return Ok(GitTopologyAnchorResolutionOutcomeV2::Unavailable);
         }
-        Ok(GitTopologyAnchorResolutionOutcomeV2::Resolved(record))
+        Ok(GitTopologyAnchorResolutionOutcomeV2::Resolved(Box::new(
+            record,
+        )))
     }
 }
 

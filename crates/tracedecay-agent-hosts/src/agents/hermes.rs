@@ -110,6 +110,11 @@ impl AgentIntegration for HermesIntegration {
             .any(|dir| dir.is_dir())
     }
 
+    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+        let root = hermes_home(home);
+        root.is_dir().then_some(root)
+    }
+
     fn export_managed_skills(
         &self,
         home: &Path,

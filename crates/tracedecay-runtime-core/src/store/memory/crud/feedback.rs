@@ -263,7 +263,6 @@ async fn project_memory_replay_feedback_tx(
         project_memory_commit_receipt_from_operation_tx(transaction, owner, receipt).await?,
         true,
     )
-    .map_err(Into::into)
 }
 
 pub(in crate::store::memory) async fn record_project_memory_fact_feedback_tx(
@@ -384,7 +383,6 @@ pub(in crate::store::memory) async fn record_project_memory_fact_feedback_tx(
         canonical_receipt,
         replayed,
     )
-    .map_err(Into::into)
 }
 
 pub(in crate::store::memory) async fn project_memory_fact_feedback_history_tx(
@@ -401,8 +399,7 @@ pub(in crate::store::memory) async fn project_memory_fact_feedback_history_tx(
         return Err(storage_message(
             PROJECT_MEMORY_READ_OPERATION,
             "feedback history target is missing",
-        )
-        .into());
+        ));
     }
     let key = OwnerKey::new(query.target().owner())?;
     let fetch_limit = i64::try_from(query.limit().saturating_add(1)).map_err(|_| {
@@ -477,7 +474,6 @@ pub(in crate::store::memory) async fn project_memory_fact_feedback_history_tx(
         .flatten()
         .transpose()?;
     ProjectMemoryFactFeedbackHistoryV1::new(query.target().owner().clone(), events, next_after)
-        .map_err(Into::into)
 }
 
 pub(in crate::store::memory) async fn inspect_project_memory_fact_controlled_tx(
@@ -582,7 +578,7 @@ async fn inspect_project_memory_fact_inner_tx(
             PROJECT_MEMORY_READ_OPERATION,
         )?;
         if FactOwnerV1::from(anchor.owner().clone()) != *target.owner() {
-            return Err(FactStoreError::OwnerMismatch.into());
+            return Err(FactStoreError::OwnerMismatch);
         }
         anchors.push(anchor);
     }
@@ -600,9 +596,7 @@ async fn inspect_project_memory_fact_inner_tx(
     if let Some(read_control) = read_control {
         ensure_project_memory_read_active(read_control)?;
     }
-    ProjectMemoryFactInspectionV1::new(*fact, history, anchors, status)
-        .map(Some)
-        .map_err(Into::into)
+    ProjectMemoryFactInspectionV1::new(*fact, history, anchors, status).map(Some)
 }
 
 pub(super) struct CommitAttempt {
@@ -748,5 +742,5 @@ fn automatic_fact_apply_result(
     receipt: ProjectMemoryAutomaticFactReceiptV1,
     disposition: ProjectMemoryAutomaticFactApplyDispositionV1,
 ) -> FactStoreResult<ProjectMemoryAutomaticFactApplyResultV1> {
-    ProjectMemoryAutomaticFactApplyResultV1::new(receipt, disposition).map_err(Into::into)
+    ProjectMemoryAutomaticFactApplyResultV1::new(receipt, disposition)
 }

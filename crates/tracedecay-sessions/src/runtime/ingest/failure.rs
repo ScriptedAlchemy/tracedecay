@@ -476,6 +476,9 @@ pub fn classify_claude_observation_failure(
     };
     let projection = |error: &Projection| match error {
         Projection::Storage { .. } => unavailable("observation_projection_storage_failed"),
+        Projection::SanitizationRefused { .. } => {
+            permanent("observation_projection_sanitization_refused")
+        }
         Projection::RetryDeferred { .. } => contended("observation_projection_retry_deferred"),
         Projection::Gap { .. } => permanent("observation_projection_checkpoint_gap"),
         Projection::OutputCollision { .. } => permanent("observation_projection_output_collision"),

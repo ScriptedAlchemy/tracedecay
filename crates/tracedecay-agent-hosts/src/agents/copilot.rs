@@ -360,6 +360,10 @@ fn rendered_invocation(copilot_cli: &Path, args: &[&str]) -> String {
     }
 }
 
+/// Exact registry-document bytes (absent when nothing is registered yet) and
+/// the operator-owned peer MCP server entries read from that document.
+type McpConfigObservation = (Option<Vec<u8>>, serde_json::Map<String, serde_json::Value>);
+
 /// Return the operator-owned MCP servers in Copilot's registry document,
 /// excluding TraceDecay's own entry. The host CLI remains the only writer;
 /// this read-only snapshot lets the lifecycle reject a command that drops or
@@ -369,9 +373,7 @@ fn rendered_invocation(copilot_cli: &Path, args: &[&str]) -> String {
 /// rollback observation) and its peer servers (for the preservation guard).
 /// An absent file is a legitimate state — nothing registered yet — and yields
 /// no bytes and no peers.
-fn read_mcp_config_observation(
-    path: &Path,
-) -> Result<(Option<Vec<u8>>, serde_json::Map<String, serde_json::Value>)> {
+fn read_mcp_config_observation(path: &Path) -> Result<McpConfigObservation> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

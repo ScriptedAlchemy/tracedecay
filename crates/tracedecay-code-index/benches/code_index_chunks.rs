@@ -24,10 +24,10 @@ use tracedecay_code_index::projection::{
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, ExtractionBatchV1, FileOccurrenceId,
     LanguageDescriptorV1, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
-    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, ProjectionReplayReasonV1, RepositoryId, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    UtcMicros, ValidatedCodeFileV1,
 };
 
 const WORKLOAD_PATH: &str = concat!(

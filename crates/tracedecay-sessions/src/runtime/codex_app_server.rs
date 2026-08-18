@@ -219,16 +219,18 @@ pub fn run_prompt_with_codex_app_server(
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
 ) -> Result<CodexAppServerSummary> {
-    run_prompt_with_optional_cancellation(
-        prompt,
-        config,
-        thread_source,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+    run_prompt_with_optional_execution(prompt, config, thread_source, None)
+}
+
+/// Work-attempt execution bindings for one Codex app-server spawn: the
+/// cancellation registration, working tree, wall budget, admitted environment
+/// snapshot, and the launch receipt that records a successful spawn.
+pub struct CodexAppServerWorkExecution<'a> {
+    pub cancellation: &'a CodexAppServerCancellation,
+    pub cwd: &'a Path,
+    pub timeout: Duration,
+    pub admitted_environment: &'a BTreeMap<String, OsString>,
+    pub launch_receipt: &'a CodexAppServerLaunchReceipt,
 }
 
 /// Runs a Work attempt through Codex app-server with only the environment
@@ -239,39 +241,22 @@ pub fn run_work_with_codex_app_server(
     prompt: &str,
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
-    cancellation: &CodexAppServerCancellation,
-    cwd: &Path,
-    timeout: Duration,
-    admitted_environment: &BTreeMap<String, OsString>,
-    launch_receipt: &CodexAppServerLaunchReceipt,
+    execution: CodexAppServerWorkExecution<'_>,
 ) -> Result<CodexAppServerSummary> {
-    run_prompt_with_optional_cancellation(
-        prompt,
-        config,
-        thread_source,
-        Some(cancellation),
-        Some(cwd),
-        Some(timeout),
-        Some(admitted_environment),
-        Some(launch_receipt),
-    )
+    run_prompt_with_optional_execution(prompt, config, thread_source, Some(execution))
 }
 
-fn run_prompt_with_optional_cancellation(
+fn run_prompt_with_optional_execution(
     prompt: &str,
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
-    cancellation: Option<&CodexAppServerCancellation>,
-    cwd: Option<&Path>,
-    timeout: Option<Duration>,
-    admitted_environment: Option<&BTreeMap<String, OsString>>,
-    launch_receipt: Option<&CodexAppServerLaunchReceipt>,
+    execution: Option<CodexAppServerWorkExecution<'_>>,
 ) -> Result<CodexAppServerSummary> {
     let model = configured_model(config);
     let mut command = codex_app_server_command(&config.codex_bin);
-    if let Some(admitted_environment) = admitted_environment {
+    if let Some(execution) = &execution {
         command.env_clear();
-        for (key, value) in admitted_environment {
+        for (key, value) in execution.admitted_environment {
             command.env(key, value);
         }
     }
@@ -284,16 +269,18 @@ fn run_prompt_with_optional_cancellation(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let child = spawn_codex_app_server(&mut command, &config.codex_bin)?;
-    if let Some(launch_receipt) = launch_receipt {
-        launch_receipt.record_started(Instant::now());
+    if let Some(execution) = &execution {
+        execution.launch_receipt.record_started(Instant::now());
     }
     let process_group = child.id();
     let mut child = ChildGuard {
         child,
-        cancellation: cancellation.cloned(),
+        cancellation: execution
+            .as_ref()
+            .map(|execution| execution.cancellation.clone()),
     };
-    if let Some(cancellation) = cancellation {
-        cancellation.register(process_group);
+    if let Some(execution) = &execution {
+        execution.cancellation.register(process_group);
     }
 
     let stdout = child
@@ -332,8 +319,10 @@ fn run_prompt_with_optional_cancellation(
         config,
         thread_source,
         model,
-        cwd,
-        timeout.unwrap_or(config.timeout),
+        execution.as_ref().map(|execution| execution.cwd),
+        execution
+            .as_ref()
+            .map_or(config.timeout, |execution| execution.timeout),
     );
     drop(child);
     let _ = stdout_reader.join();
@@ -930,11 +919,13 @@ mod tests {
             "Return a work result.",
             &config,
             "tracedecay_work_attempt",
-            &CodexAppServerCancellation::default(),
-            temporary.path(),
-            Duration::from_secs(2),
-            &admitted_environment,
-            &launch_receipt,
+            CodexAppServerWorkExecution {
+                cancellation: &CodexAppServerCancellation::default(),
+                cwd: temporary.path(),
+                timeout: Duration::from_secs(2),
+                admitted_environment: &admitted_environment,
+                launch_receipt: &launch_receipt,
+            },
         );
         // SAFETY: return the process environment to the state this test found.
         unsafe {
@@ -978,11 +969,13 @@ mod tests {
             "This process cannot start.",
             &config,
             "tracedecay_work_attempt",
-            &CodexAppServerCancellation::default(),
-            temporary.path(),
-            Duration::from_secs(1),
-            &BTreeMap::new(),
-            &launch_receipt,
+            CodexAppServerWorkExecution {
+                cancellation: &CodexAppServerCancellation::default(),
+                cwd: temporary.path(),
+                timeout: Duration::from_secs(1),
+                admitted_environment: &BTreeMap::new(),
+                launch_receipt: &launch_receipt,
+            },
         );
 
         assert!(result.is_err());

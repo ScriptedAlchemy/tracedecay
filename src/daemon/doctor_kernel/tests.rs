@@ -439,6 +439,71 @@ fn retained_or_unreported_observation_history_is_not_absent() {
     );
 }
 
+#[test]
+fn refusal_censuses_merge_by_provider_and_reason() {
+    use crate::global_db::observation::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
+
+    let merged = ingest_refusal_read_from_censuses(&[
+        ObservationRefusalCensusV1::Observed {
+            refusals: vec![ObservationRefusalCountV1 {
+                provider: "cursor".to_owned(),
+                reason: "admission_refused".to_owned(),
+                count: 100,
+            }],
+        },
+        ObservationRefusalCensusV1::Observed {
+            refusals: vec![
+                ObservationRefusalCountV1 {
+                    provider: "cursor".to_owned(),
+                    reason: "admission_refused".to_owned(),
+                    count: 60,
+                },
+                ObservationRefusalCountV1 {
+                    provider: "codex".to_owned(),
+                    reason: "admission_refused".to_owned(),
+                    count: 27,
+                },
+            ],
+        },
+    ]);
+
+    assert_eq!(
+        merged,
+        IngestRefusalCensusReadV1::Observed {
+            refusals: vec![
+                IngestRefusalCountV1 {
+                    provider: "codex".to_owned(),
+                    reason: "admission_refused".to_owned(),
+                    count: 27,
+                },
+                IngestRefusalCountV1 {
+                    provider: "cursor".to_owned(),
+                    reason: "admission_refused".to_owned(),
+                    count: 160,
+                },
+            ],
+        }
+    );
+}
+
+#[test]
+fn one_unavailable_refusal_census_makes_the_merged_read_unknown() {
+    use crate::global_db::observation::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
+
+    let merged = ingest_refusal_read_from_censuses(&[
+        ObservationRefusalCensusV1::Observed {
+            refusals: vec![ObservationRefusalCountV1 {
+                provider: "cursor".to_owned(),
+                reason: "admission_refused".to_owned(),
+                count: 1,
+            }],
+        },
+        ObservationRefusalCensusV1::Unavailable,
+    ]);
+
+    assert_eq!(merged, IngestRefusalCensusReadV1::Unknown);
+}
+
 // --- Storage mapper ---------------------------------------------------------
 
 #[test]
@@ -541,6 +606,13 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
             total_count: 7,
             last_observed_at_micros: Some(42),
             coverage: DoctorCoverageCompletenessV1::Partial,
+        },
+        ingest_refusals: IngestRefusalCensusReadV1::Observed {
+            refusals: vec![IngestRefusalCountV1 {
+                provider: "cursor".to_owned(),
+                reason: "admission_refused".to_owned(),
+                count: 160,
+            }],
         },
         storage: merge_storage_reads(
             storage_family_read(vec![orphan_storage_finding()]),

@@ -232,11 +232,10 @@ pub(in crate::store::memory) async fn project_memory_automatic_fact_receipt_reco
         return Err(storage_message(
             PROJECT_MEMORY_READ_OPERATION,
             "automatic fact receipt identity mismatch",
-        )
-        .into());
+        ));
     }
     if row_string(&row, 1, PROJECT_MEMORY_READ_OPERATION)? != key.json {
-        return Err(FactStoreError::OwnerMismatch.into());
+        return Err(FactStoreError::OwnerMismatch);
     }
     let request = automatic_fact_request_from_value(
         owner,
@@ -305,7 +304,6 @@ pub(in crate::store::memory) async fn project_memory_automatic_fact_receipt_reco
         UtcMicros(row_i64(&row, 9, PROJECT_MEMORY_READ_OPERATION)?),
     )
     .map(Some)
-    .map_err(Into::into)
 }
 
 pub(in crate::store::memory) async fn get_project_memory_automatic_fact_receipt_tx(
@@ -334,8 +332,7 @@ pub(in crate::store::memory) async fn list_project_memory_automatic_fact_receipt
         return Err(FactStoreError::InvalidQueryLimit {
             limit,
             max: MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
-        }
-        .into());
+        });
     }
     let key = OwnerKey::new(owner)?;
     let fetch_limit =

@@ -618,7 +618,7 @@ fn automation_terminal_run(
 fn automation_problem(
     problem: crate::daemon::automation_effect::AutomationSettledProblem,
 ) -> DashboardAutomationAuthorityErrorV1 {
-    DashboardAutomationAuthorityErrorV1::AutomationProblem(problem)
+    DashboardAutomationAuthorityErrorV1::AutomationProblem(Box::new(problem))
 }
 
 #[cfg(test)]

@@ -1117,7 +1117,7 @@ impl SemanticModelLifecycleOwnerV1 {
         let handle = thread::Builder::new()
             .name("tracedecay-fastembed-acquire".to_owned())
             .spawn(move || {
-                let result = run_acquisition(
+                run_acquisition(
                     &worker_root,
                     &worker_catalog,
                     source.as_ref(),
@@ -1125,8 +1125,7 @@ impl SemanticModelLifecycleOwnerV1 {
                     &epoch,
                     &worker_inner,
                     &verified_ready,
-                );
-                result
+                )
             });
         match handle {
             Ok(join) => {

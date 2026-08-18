@@ -320,8 +320,7 @@ mod tests {
                     "generation.recovery.{ordinal}"
                 )),
                 topology_generation: WorkTopologyGenerationRefV1::new(format!(
-                    "sha256:{}",
-                    format!("{ordinal:064x}")
+                    "sha256:{ordinal:064x}"
                 ))
                 .unwrap(),
             },

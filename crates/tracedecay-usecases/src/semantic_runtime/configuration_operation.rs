@@ -1310,7 +1310,7 @@ mod tests {
             config: crate::config::TraceDecayConfig::default(),
         };
         let (configuration, _) = ProjectConfigurationRuntime::open(
-            crate::config::OpenedRuntimeConfiguration::new(configuration, Arc::clone(&database)),
+            crate::config::OpenedRuntimeConfiguration::new(configuration, database.clone()),
         )
         .expect("configuration runtime");
         ProductionSemanticConfigurationOperationV1::new(

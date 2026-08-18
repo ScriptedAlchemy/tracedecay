@@ -23,12 +23,16 @@ impl GraphCancellation for CancelAfterObservations {
     }
 }
 
+struct ImportNames<'a> {
+    imported: Option<&'a str>,
+    local: Option<&'a str>,
+}
+
 fn import(
     file_occurrence: &str,
     logical_path: &str,
     module_specifier: &str,
-    imported_name: Option<&str>,
-    local_name: Option<&str>,
+    names: ImportNames<'_>,
     namespace: ImportNamespaceV1,
     module_kind: ImportModuleKindV1,
     start_byte: u64,
@@ -37,8 +41,8 @@ fn import(
         logical_path: logical_path.to_owned(),
         file_occurrence_id: id(file_occurrence),
         module_specifier: module_specifier.to_owned(),
-        imported_name: imported_name.map(str::to_owned),
-        local_name: local_name.map(str::to_owned),
+        imported_name: names.imported.map(str::to_owned),
+        local_name: names.local.map(str::to_owned),
         namespace,
         module_kind,
         span: SourceSpan {
@@ -62,8 +66,10 @@ pub(super) fn external_type_import(
         file_occurrence,
         logical_path,
         module_specifier,
-        Some(imported_name),
-        Some(local_name),
+        ImportNames {
+            imported: Some(imported_name),
+            local: Some(local_name),
+        },
         ImportNamespaceV1::Type,
         ImportModuleKindV1::BareModule,
         start_byte,
@@ -137,8 +143,10 @@ fn all_import_rows_project_as_full_file_bound_entities_without_symbols() {
             "file.import.main",
             "src/main.ts",
             "@scope/pkg",
-            Some("FooWidget"),
-            Some("ValueWidget"),
+            ImportNames {
+                imported: Some("FooWidget"),
+                local: Some("ValueWidget"),
+            },
             ImportNamespaceV1::Value,
             ImportModuleKindV1::BareModule,
             2,
@@ -147,8 +155,10 @@ fn all_import_rows_project_as_full_file_bound_entities_without_symbols() {
             "file.import.main",
             "src/main.ts",
             "./local",
-            Some("FooWidget"),
-            Some("RelativeWidget"),
+            ImportNames {
+                imported: Some("FooWidget"),
+                local: Some("RelativeWidget"),
+            },
             ImportNamespaceV1::Type,
             ImportModuleKindV1::ProjectRelative,
             4,
@@ -157,8 +167,10 @@ fn all_import_rows_project_as_full_file_bound_entities_without_symbols() {
             "file.import.main",
             "src/main.ts",
             "@scope/pkg",
-            None,
-            None,
+            ImportNames {
+                imported: None,
+                local: None,
+            },
             ImportNamespaceV1::SideEffect,
             ImportModuleKindV1::BareModule,
             6,

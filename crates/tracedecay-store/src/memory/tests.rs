@@ -837,7 +837,7 @@ fn durable_memory_receipts_expose_infallible_stable_state_digests() {
             "tracedecay.fact-commit-receipt.committed-state.v1",
             &fact_id,
             &owner,
-            &[event_id.clone()],
+            std::slice::from_ref(&event_id),
             &event_id,
             Option::<&FactAssertionId>::None,
         ))

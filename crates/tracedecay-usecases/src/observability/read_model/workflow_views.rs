@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn terminal_outcome_and_resources_project_only_with_complete_denominators() {
-        let events = vec![
+        let events = [
             envelope(
                 "workflow:lifecycle",
                 ObservabilityPayloadV1::WorkflowLifecycle(lifecycle()),

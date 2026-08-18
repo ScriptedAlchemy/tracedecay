@@ -833,7 +833,10 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
         assert_available(&omissions, temporal);
         let first_evidence = first_evidence
             .unwrap_or_else(|| panic!("{temporal:?} first page omitted TaskSession evidence"));
-        assert_eq!(first_evidence.continuation, Some(continuation.clone()));
+        assert_eq!(
+            first_evidence.continuation,
+            Some(continuation.as_ref().clone())
+        );
         assert_eq!(first_evidence.ranked_anchors.len(), 1);
         assert_eq!(first_evidence.hydrated.len(), 1);
         let first_ranked = &first_evidence.ranked_anchors[0];
@@ -1022,7 +1025,7 @@ pub(super) fn assert_available_over_sdk_mcp_and_dashboard(
             attempt: identity.clone(),
         }),
         continuation: Some(WorkEvidenceContinuationV1::TaskSession {
-            continuation: rank_final_continuation,
+            continuation: Box::new(rank_final_continuation),
         }),
         observed_at: now(),
     });

@@ -295,7 +295,7 @@ async fn call_chain(
         .clamp(1, MAX_CALL_CHAIN_DEPTH);
     let control = match graph_control::<CallChainMeasurementV1>(&state, control) {
         Ok(control) => control,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let graph = match admitted_graph::<CallChainMeasurementV1>(
         &state,
@@ -402,7 +402,7 @@ async fn strata(
 ) -> Response {
     let control = match graph_control::<StrataMeasurementV1>(&state, control) {
         Ok(control) => control,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let graph = match admitted_graph::<StrataMeasurementV1>(
         &state,
@@ -530,7 +530,7 @@ async fn node_facts(
 ) -> Response {
     let control = match graph_control::<FactMatchesMeasurementV1>(&state, control) {
         Ok(control) => control,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let graph = match admitted_graph::<FactMatchesMeasurementV1>(
         &state,
@@ -544,7 +544,7 @@ async fn node_facts(
     };
     let occurrence = match parse_occurrence::<FactMatchesMeasurementV1>(&state, &node_id) {
         Ok(occurrence) => occurrence,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let symbol = match symbol_summary(&graph, &occurrence) {
         Ok(Some(node)) => node,
@@ -632,7 +632,7 @@ async fn node_tests(
 ) -> Response {
     let control = match graph_control::<TestMapMeasurementV1>(&state, control) {
         Ok(control) => control,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let graph = match admitted_graph::<TestMapMeasurementV1>(
         &state,
@@ -646,7 +646,7 @@ async fn node_tests(
     };
     let occurrence = match parse_occurrence::<TestMapMeasurementV1>(&state, &node_id) {
         Ok(occurrence) => occurrence,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let symbol = match symbol_summary(&graph, &occurrence) {
         Ok(Some(node)) => node,
@@ -795,7 +795,7 @@ async fn node_sessions(
 ) -> Response {
     let control = match graph_control::<NodeSessionsMeasurementV1>(&state, control) {
         Ok(control) => control,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let graph = match admitted_graph::<NodeSessionsMeasurementV1>(
         &state,
@@ -809,7 +809,7 @@ async fn node_sessions(
     };
     let occurrence = match parse_occurrence::<NodeSessionsMeasurementV1>(&state, &node_id) {
         Ok(occurrence) => occurrence,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let symbol = match symbol_summary(&graph, &occurrence) {
         Ok(Some(node)) => node,
@@ -882,14 +882,14 @@ struct AdmittedGraphReadV1 {
 fn graph_control<T: Serialize>(
     state: &DashboardState,
     control: Option<Extension<DashboardHttpRequestControlV1>>,
-) -> std::result::Result<DashboardHttpRequestControlV1, Response> {
+) -> std::result::Result<DashboardHttpRequestControlV1, Box<Response>> {
     control.map(|Extension(control)| control).ok_or_else(|| {
-        unmeasured_response::<T>(
+        Box::new(unmeasured_response::<T>(
             state,
             StatusCode::SERVICE_UNAVAILABLE,
             "graph_request_admission_unavailable",
             "dashboard HTTP request admission is unavailable",
-        )
+        ))
     })
 }
 
@@ -948,14 +948,14 @@ async fn admitted_graph<T: Serialize>(
 fn parse_occurrence<T: Serialize>(
     state: &DashboardState,
     node_id: &str,
-) -> std::result::Result<SymbolOccurrenceId, Response> {
+) -> std::result::Result<SymbolOccurrenceId, Box<Response>> {
     SymbolOccurrenceId::new(node_id.to_owned()).map_err(|error| {
-        unmeasured_response::<T>(
+        Box::new(unmeasured_response::<T>(
             state,
             StatusCode::BAD_REQUEST,
             "invalid_node_identity",
             &error.to_string(),
-        )
+        ))
     })
 }
 

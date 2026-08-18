@@ -15,8 +15,9 @@ use super::backend::{
 use super::config::AutomationConfig;
 use super::lifecycle::{
     AgentTaskRunContext, AutomationCommittedReceipt, AutomationRunControl, AutomationRunError,
-    AutomationRunLedgerPublication, AutomationRunResult, AutomationRunSettlementGuard,
-    RetainedAutomationRun, SchedulerGate, failed_backend_fallback_report,
+    AutomationRunLedgerPublication, AutomationRunPublication, AutomationRunResult,
+    AutomationRunSettlementGuard, RetainedAutomationRun, SchedulerGate,
+    failed_backend_fallback_report,
 };
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::errors::{Result, TraceDecayError};
@@ -95,8 +96,10 @@ pub async fn run_memory_curator_with_backend(
         backend,
         options,
         run_control,
-        AutomationRunLedgerPublication::Immediate,
-        None,
+        AutomationRunPublication {
+            ledger: AutomationRunLedgerPublication::Immediate,
+            settlement_guard: None,
+        },
     )
     .await
 }
@@ -121,8 +124,10 @@ pub async fn run_memory_curator_with_backend_for_retained_settlement(
                 backend,
                 options,
                 run_control,
-                AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
-                Some(&settlement_guard),
+                AutomationRunPublication {
+                    ledger: AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
+                    settlement_guard: Some(&settlement_guard),
+                },
             )
             .await
         }
@@ -153,8 +158,10 @@ pub(crate) async fn run_user_memory_curator_with_backend(
         backend,
         options,
         run_control,
-        AutomationRunLedgerPublication::Immediate,
-        None,
+        AutomationRunPublication {
+            ledger: AutomationRunLedgerPublication::Immediate,
+            settlement_guard: None,
+        },
     )
     .await
 }
@@ -236,9 +243,12 @@ async fn run_memory_curator_for_store_with_publication(
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
     run_control: &AutomationRunControl,
-    ledger_publication: AutomationRunLedgerPublication,
-    settlement_guard: Option<&AutomationRunSettlementGuard>,
+    publication: AutomationRunPublication<'_>,
 ) -> AutomationRunResult<MemoryCuratorAutomationRun> {
+    let AutomationRunPublication {
+        ledger: ledger_publication,
+        settlement_guard,
+    } = publication;
     let curation_authority = store.curation_authority(configuration_revision_id)?;
     let sessions_db = store.sessions_db();
     let mut run = AgentTaskRunContext::new(
@@ -369,7 +379,7 @@ async fn run_memory_curator_for_store_with_publication(
                 .await?;
             return Err(AutomationRunError::RecordedFailure {
                 error,
-                ledger_record,
+                ledger_record: Box::new(ledger_record),
             });
         }
 
@@ -409,7 +419,7 @@ async fn run_memory_curator_for_store_with_publication(
                     .await?;
                 return Err(AutomationRunError::RecordedFailure {
                     error,
-                    ledger_record,
+                    ledger_record: Box::new(ledger_record),
                 });
             }
         };
@@ -455,7 +465,7 @@ async fn run_memory_curator_for_store_with_publication(
                     .await?;
                 return Err(AutomationRunError::RecordedFailure {
                     error,
-                    ledger_record,
+                    ledger_record: Box::new(ledger_record),
                 });
             }
             Err(MemoryCurationApplyFailure::Settled {
@@ -501,8 +511,8 @@ async fn run_memory_curator_for_store_with_publication(
                     settled_count,
                     mutation_count,
                 ));
-                let committed_receipt = AutomationCommittedReceipt::MemoryCuration(receipt);
-                let record = match finalizer
+                let committed_receipt = AutomationCommittedReceipt::MemoryCuration(*receipt);
+                let record = finalizer
                     .append_failed_record_with_effects(
                         response.model.clone(),
                         evidence_hash,
@@ -516,14 +526,11 @@ async fn run_memory_curator_for_store_with_publication(
                         rejected_count,
                     )
                     .await
-                {
-                    Ok(record) => Some(record),
-                    Err(_) => None,
-                };
+                    .ok();
                 return Err(AutomationRunError::PartialEffect {
                     run_id: run.run_id.clone(),
-                    committed_receipt,
-                    ledger_record: record,
+                    committed_receipt: Box::new(committed_receipt),
+                    ledger_record: record.map(Box::new),
                     detail: "Memory curation committed, but its canonical result projection failed; reconcile the committed receipt before another run.",
                 });
             }
@@ -599,9 +606,9 @@ async fn run_memory_curator_for_store_with_publication(
             if let Some(committed_receipt) = committed_receipt {
                 return Err(AutomationRunError::PartialEffect {
                     run_id: run.run_id.clone(),
-                    committed_receipt: AutomationCommittedReceipt::MemoryCuration(
+                    committed_receipt: Box::new(AutomationCommittedReceipt::MemoryCuration(
                         committed_receipt,
-                    ),
+                    )),
                     ledger_record: None,
                     detail: "Memory curation committed, but its exact completion time could not be recorded; reconcile the committed receipt before another run.",
                 });
@@ -621,9 +628,9 @@ async fn run_memory_curator_for_store_with_publication(
             if let Some(committed_receipt) = committed_receipt {
                 return Err(AutomationRunError::PartialEffect {
                     run_id: run.run_id.clone(),
-                    committed_receipt: AutomationCommittedReceipt::MemoryCuration(
+                    committed_receipt: Box::new(AutomationCommittedReceipt::MemoryCuration(
                         committed_receipt,
-                    ),
+                    )),
                     ledger_record: None,
                     detail: "Memory curation committed, but the automation terminal could not be published; reconcile the committed receipt before another run.",
                 });
@@ -786,7 +793,7 @@ enum MemoryCurationApplyFailure {
     Settled {
         error: TraceDecayError,
         operation_count: usize,
-        receipt: ProjectMemoryFactCurationReceiptV1,
+        receipt: Box<ProjectMemoryFactCurationReceiptV1>,
     },
 }
 
@@ -832,7 +839,7 @@ fn settle_memory_curation_result(
         }) => Err(MemoryCurationApplyFailure::Settled {
             error: memory_application_error(error),
             operation_count,
-            receipt: authority_result,
+            receipt: Box::new(authority_result),
         }),
     }
 }

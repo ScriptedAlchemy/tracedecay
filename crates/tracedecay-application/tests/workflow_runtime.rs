@@ -240,7 +240,7 @@ fn durable_plan_releases_only_the_committed_parallel_frontier_after_rebuild() {
     )
     .unwrap();
     let projection =
-        tracedecay_domain::WorkflowRunProjection::rebuild(&[admitted.clone()]).unwrap();
+        tracedecay_domain::WorkflowRunProjection::rebuild(std::slice::from_ref(&admitted)).unwrap();
     let released = durable
         .children
         .iter()

@@ -25,8 +25,6 @@ use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryI
 use tracedecay_lsp::LspRuntimeFailure;
 
 use super::graph_activation::CodeGraphActivationAuthorityV1;
-#[cfg(test)]
-use super::{CodeIndexBytePoolStatsV1, CodeIndexCadenceReadModelV1};
 use super::{
     CodeIndexArrivalV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1,
     CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1,
@@ -35,6 +33,8 @@ use super::{
     LatestCompleteCodeIndexV1, PendingHintsV1, SharedCodeIndexBytePoolV1,
     newly_eligible_percentile, now_micros,
 };
+#[cfg(test)]
+use super::{CodeIndexBytePoolStatsV1, CodeIndexCadenceReadModelV1};
 
 mod ignored_dependencies;
 mod lsp_projection;

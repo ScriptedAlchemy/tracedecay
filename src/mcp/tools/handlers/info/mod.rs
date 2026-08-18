@@ -29,6 +29,7 @@ pub(super) use read::handle_read;
 pub(super) use registry::{handle_project_context, handle_project_list, handle_project_search};
 pub(super) use signature_search::handle_signature_search;
 pub(super) use simplify_scan::handle_simplify_scan;
+pub(crate) use status::graph_statistics_value;
 pub(super) use status::{handle_active_project, handle_admin_sync, handle_status};
 pub(super) use todos::handle_todos;
 pub(super) use type_hierarchy::handle_type_hierarchy;

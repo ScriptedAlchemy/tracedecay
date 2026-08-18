@@ -1579,6 +1579,23 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
     },
 ];
 
+/// CREATE-trigger statements for every authority invariant trigger installed
+/// on one of the given tables. The scoped observation reset restores the
+/// triggers that dropped with their tables through this single authority, so
+/// it can never install a trigger shape the contract validator would refuse.
+pub(crate) fn invariant_trigger_sql_for_tables(tables: &[&str]) -> Vec<&'static str> {
+    INVARIANTS
+        .iter()
+        .flat_map(|invariant| invariant.triggers)
+        .filter(|trigger| {
+            tables
+                .iter()
+                .any(|table| table.eq_ignore_ascii_case(trigger.table))
+        })
+        .map(|trigger| trigger.create_sql)
+        .collect()
+}
+
 pub(super) async fn replace_trigger(
     conn: &impl Executor,
     trigger: &Trigger,

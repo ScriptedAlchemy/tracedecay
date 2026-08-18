@@ -115,7 +115,7 @@ pub(super) async fn execute_configuration(
                 let mutation = DirectConfigurationMutation::Set {
                     layer: request.layer,
                     key: request.key,
-                    value: request.value,
+                    value: Box::new(request.value),
                 };
                 let mutation_authority = issue_direct_configuration_mutation_authority(
                     &registered,
@@ -532,7 +532,9 @@ fn semantic_profile_transition(
         DirectConfigurationMutation::Set { key, value, .. }
             if key.as_str() == crate::config::SEMANTIC_RUNTIME_SETTING_KEY =>
         {
-            let tracedecay_domain::configuration::ConfigurationValueV1::Text(value) = value else {
+            let tracedecay_domain::configuration::ConfigurationValueV1::Text(value) =
+                value.as_ref()
+            else {
                 return Err(ConfigurationError::validation_message(
                     "semantic runtime configuration must be canonical JSON text",
                 ));

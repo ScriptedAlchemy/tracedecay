@@ -514,6 +514,17 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
     }
 }
 
+fn invalid_start_problem() -> ApplicationProblem {
+    ApplicationProblem::InvalidRequest {
+        diagnostic: crate::SafeDiagnostic {
+            code: "application.work-attempt.invalid-product-admission".to_owned(),
+            message: "The Work attempt command is invalid.".to_owned(),
+        },
+        retry: crate::RetryDirective::Never,
+        legal_actions: vec![crate::LegalAction::CorrectRequest],
+    }
+}
+
 #[cfg(test)]
 mod product_problem_tests {
     use crate::{
@@ -538,16 +549,5 @@ mod product_problem_tests {
                 legal_actions: vec![LegalAction::Refresh],
             }
         );
-    }
-}
-
-fn invalid_start_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: crate::SafeDiagnostic {
-            code: "application.work-attempt.invalid-product-admission".to_owned(),
-            message: "The Work attempt command is invalid.".to_owned(),
-        },
-        retry: crate::RetryDirective::Never,
-        legal_actions: vec![crate::LegalAction::CorrectRequest],
     }
 }

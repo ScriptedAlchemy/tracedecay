@@ -80,17 +80,16 @@ pub fn redact_lcm_sensitive_payload(
         return Err(DetectionError::ScanLimitExceeded);
     }
     let mut patterns = Vec::new();
-    let text = match raw.trim_start().starts_with(['{', '[']) {
-        true => {
-            let mut payload = parse_json_value(raw, limits.depth, limits.values)
-                .map_err(|_| DetectionError::Receipt)?;
-            if !(payload.is_object() || payload.is_array()) {
-                return Err(DetectionError::Receipt);
-            }
-            redact_structured(&mut payload, policy, &mut patterns);
-            serde_json::to_string(&payload).map_err(|_| DetectionError::Receipt)?
+    let text = if raw.trim_start().starts_with(['{', '[']) {
+        let mut payload = parse_json_value(raw, limits.depth, limits.values)
+            .map_err(|_| DetectionError::Receipt)?;
+        if !(payload.is_object() || payload.is_array()) {
+            return Err(DetectionError::Receipt);
         }
-        false => redact_text(raw, policy, &mut patterns),
+        redact_structured(&mut payload, policy, &mut patterns);
+        serde_json::to_string(&payload).map_err(|_| DetectionError::Receipt)?
+    } else {
+        redact_text(raw, policy, &mut patterns)
     };
     patterns.sort();
     patterns.dedup();

@@ -82,7 +82,7 @@ pub enum DirectConfigurationMutation {
     Set {
         layer: ConfigurationLayerIdV1,
         key: SettingKey,
-        value: ConfigurationValueV1,
+        value: Box<ConfigurationValueV1>,
     },
     Unset {
         layer: ConfigurationLayerIdV1,

@@ -259,7 +259,7 @@ impl PreparedRetainedEffect {
     ) -> RetainedSurfaceExecutionErrorV1 {
         RetainedSurfaceExecutionErrorV1::PartialEffect {
             reason_code: reason_code.to_owned(),
-            committed_receipt: self.partial_receipt(committed_state),
+            committed_receipt: Box::new(self.partial_receipt(committed_state)),
             detail: detail.to_owned(),
         }
     }
@@ -330,14 +330,14 @@ impl PreparedRetainedEffect {
         if let Some((reason_code, detail)) = partial {
             return Err(RetainedSurfaceExecutionErrorV1::PartialEffect {
                 reason_code: reason_code.to_owned(),
-                committed_receipt: partial_receipt,
+                committed_receipt: Box::new(partial_receipt),
                 detail: detail.to_owned(),
             });
         }
         let post_commit_failure =
             |detail: &'static str| RetainedSurfaceExecutionErrorV1::PartialEffect {
                 reason_code: "application.retained.effect-delivery-failed".to_owned(),
-                committed_receipt: partial_receipt.clone(),
+                committed_receipt: Box::new(partial_receipt.clone()),
                 detail: detail.to_owned(),
             };
         let execution = OperationReceipt::completed(
@@ -384,7 +384,7 @@ impl PreparedRetainedEffect {
             let (reason_code, detail) = self.expiry_partial();
             return Err(RetainedSurfaceExecutionErrorV1::PartialEffect {
                 reason_code: reason_code.to_owned(),
-                committed_receipt: partial_receipt,
+                committed_receipt: Box::new(partial_receipt),
                 detail: detail.to_owned(),
             });
         }

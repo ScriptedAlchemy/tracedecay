@@ -572,7 +572,7 @@ fn validate_direct_mutation(
     match mutation {
         DirectConfigurationMutation::Set { layer, key, value } => {
             reject_protected_key(key)?;
-            if matches!(value, ConfigurationValueV1::CredentialReference(_)) {
+            if matches!(value.as_ref(), ConfigurationValueV1::CredentialReference(_)) {
                 return Err(ConfigurationError::validation_message(
                     "credential references require the write-only credential operation",
                 ));
@@ -914,7 +914,7 @@ mod tests {
                     project_id: id::<ProjectId>("project.fixture"),
                 },
                 key: SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).unwrap(),
-                value: ConfigurationValueV1::SourceBindings(Vec::new()),
+                value: Box::new(ConfigurationValueV1::SourceBindings(Vec::new())),
             },
         );
         assert_eq!(result, Err(ConfigurationError::PolicyWideningForbidden));
@@ -930,7 +930,9 @@ mod tests {
                     project_id: id::<ProjectId>("project.fixture"),
                 },
                 key: SettingKey::new("analyzer.settings.v1").unwrap(),
-                value: ConfigurationValueV1::AnalyzerSettings(AnalyzerSettingsV1::empty()),
+                value: Box::new(ConfigurationValueV1::AnalyzerSettings(
+                    AnalyzerSettingsV1::empty(),
+                )),
             },
         );
         assert!(result.is_ok());

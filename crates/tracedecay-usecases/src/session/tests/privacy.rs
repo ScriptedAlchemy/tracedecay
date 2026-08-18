@@ -238,16 +238,17 @@ async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
     let policy_digest = harness.seed_privacy_fixture().await;
     let (context, binding) = request_context(policy_digest);
 
-    let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
-    let service = SessionRetrievalService::new(
-        AllowAuthorizer,
-        &execution,
-        Words,
-        SessionRetrievalConfiguration::new(3, 5).unwrap(),
-    );
-    let before = service.retrieve(&context, &binding, privacy_query()).await;
-    drop(service);
-    drop(execution);
+    let before = {
+        let execution =
+            RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
+        let service = SessionRetrievalService::new(
+            AllowAuthorizer,
+            &execution,
+            Words,
+            SessionRetrievalConfiguration::new(3, 5).unwrap(),
+        );
+        service.retrieve(&context, &binding, privacy_query()).await
+    };
 
     let harness = harness.remount().await;
     let reopened_execution =

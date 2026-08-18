@@ -168,12 +168,10 @@ fn candidate_read_failures_preserve_stable_typed_semantics() {
             1,
             Arc::new(CancelledNow),
         )
-        .err()
-        .expect("cancelled candidate read");
+        .expect_err("cancelled candidate read");
     let stale = store
         .interactive_reader_with_cancellation(&next_generation(), Arc::new(NeverCancelled))
-        .err()
-        .expect("generation mismatch");
+        .expect_err("generation mismatch");
 
     let corrupt_store = corrupt_store(&generation);
     let corrupt_reader = corrupt_store
@@ -186,8 +184,7 @@ fn candidate_read_failures_preserve_stable_typed_semantics() {
             1,
             Arc::new(NeverCancelled),
         )
-        .err()
-        .expect("corrupt candidate read");
+        .expect_err("corrupt candidate read");
 
     let cases = [
         (

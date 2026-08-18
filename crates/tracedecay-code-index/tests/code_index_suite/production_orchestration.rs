@@ -1,8 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
+use tracedecay_code_extraction::incremental::ParseLimits;
 use tracedecay_code_index::{
     chunks::content_digest,
     graph_projection::{
@@ -22,6 +24,7 @@ use tracedecay_code_index::{
         ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
     },
     provider::GenerationTestAttributionJoinReadPort,
+    retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
 };
 use tracedecay_domain::{
     BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, FileOccurrenceId, LanguageId,
@@ -350,6 +353,123 @@ fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
     assert!(stats.changed_bytes < 60);
     assert!(stats.visited_top_level_nodes <= 3);
     assert!(stats.extracted_bytes < 120);
+}
+
+/// One file exceeding the bounded per-file parse budget must never fail the
+/// whole build: the generation still completes, publishes, and serves, with
+/// the slow file recorded as a typed unsupported document (with a reason) and
+/// truthful coverage accounting.
+#[test]
+fn slow_parse_file_publishes_a_completed_generation_with_a_typed_omission() {
+    // The retained parser's deadline is only observed every ~100 Tree-sitter
+    // parse operations, so the tiny file completes before the first progress
+    // check while the generated file reliably crosses many of them. A 1ns
+    // budget therefore deterministically times out exactly the large file.
+    let pool = SharedRetainedParsePool::new(RetainedParsePoolLimits {
+        document: ParseLimits {
+            max_parse_time: Duration::from_nanos(1),
+            ..ParseLimits::default()
+        },
+        ..RetainedParsePoolLimits::default()
+    })
+    .expect("retained parse pool");
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner")
+        .with_retained_parse_pool(pool);
+
+    let fast_source = "fn fast() -> u32 { 1 }\n";
+    let slow_source = (0..2_000)
+        .map(|index| format!("fn generated_{index}() -> u64 {{ {index} }}\n"))
+        .collect::<String>();
+    let fast = SanitizedCodeFileV1 {
+        file_occurrence_id: id::<FileOccurrenceId>("file.fast"),
+        logical_path: "src/fast.rs".to_owned(),
+        language: Some(id::<LanguageId>("rust")),
+        content_digest: content_digest(fast_source.as_bytes()),
+        disposition: SnapshotFileDispositionV1::Present,
+    };
+    let slow = SanitizedCodeFileV1 {
+        file_occurrence_id: id::<FileOccurrenceId>("file.slow"),
+        logical_path: "src/slow.rs".to_owned(),
+        language: Some(id::<LanguageId>("rust")),
+        content_digest: content_digest(slow_source.as_bytes()),
+        disposition: SnapshotFileDispositionV1::Present,
+    };
+    let request = CodeIndexBuildRequestV1 {
+        snapshot: SanitizedCodeSnapshotV1 {
+            repository: id::<RepositoryId>("repository.production"),
+            worktree: None,
+            reference: None,
+            source_revision: None,
+            sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
+            sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.production")],
+            content_identity: content_digest(format!("{fast_source}{slow_source}").as_bytes()),
+            captured_at: UtcMicros(1_000_000),
+            files: vec![fast.clone(), slow.clone()],
+        },
+        captured_files: vec![
+            CodeIndexCapturedFileV1 {
+                file_occurrence_id: fast.file_occurrence_id.clone(),
+                sanitized_bytes: fast_source.as_bytes().to_vec(),
+                sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+            },
+            CodeIndexCapturedFileV1 {
+                file_occurrence_id: slow.file_occurrence_id.clone(),
+                sanitized_bytes: slow_source.into_bytes(),
+                sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+            },
+        ],
+        changed_files: BTreeSet::new(),
+        invalidations: BTreeSet::new(),
+        ignored_source_admissions: Vec::new(),
+        repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            tree: None,
+            dirty: RepositoryDirtyStateV1::Dirty,
+        },
+        sealed_at: UtcMicros(1_100_000),
+        target_projection_key: projection_key(),
+    };
+
+    let generation = owner
+        .build_and_publish(request, &ActiveControl)
+        .expect("a slow-parse file must not fail the whole generation");
+
+    // Truthful coverage: both files eligible, exactly the slow one omitted.
+    assert_eq!(generation.coverage().files_eligible, 2);
+    assert_eq!(generation.coverage().files_unsupported, 1);
+
+    // The generation serves: the fast file's chunks are admitted, and no
+    // chunk was invented for the timed-out file.
+    let admitted = generation
+        .admitted_chunks()
+        .expect("published generation admits exact chunks");
+    assert!(!admitted.is_empty());
+    assert!(
+        admitted
+            .iter()
+            .all(|chunk| chunk.chunk().anchor.file_occurrence_id.as_str() == "file.fast")
+    );
+
+    // The omission is a typed per-file document state with a reason, durable
+    // through sealing.
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let value: serde_json::Value = serde_json::from_slice(&sealed).expect("sealed JSON");
+    let slow_document = value["generation"]["files"]
+        .as_array()
+        .expect("sealed files")
+        .iter()
+        .map(|file| &file["artifacts"]["chunks"]["document"])
+        .find(|document| document["file_occurrence_id"] == "file.slow")
+        .expect("slow file document is retained in the generation");
+    assert_eq!(slow_document["eligibility"]["eligibility"], "unsupported");
+    let reason = slow_document["eligibility"]["reason"]["reason"]
+        .as_str()
+        .expect("typed omission carries a reason");
+    assert!(
+        reason.contains("parse budget"),
+        "unexpected omission reason: {reason}"
+    );
 }
 
 #[test]

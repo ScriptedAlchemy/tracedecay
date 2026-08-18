@@ -52,7 +52,7 @@ fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
     if let Some(parent) = lock_path.parent() {
         crate::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
-    crate::storage::reject_symlink_components(&lock_path, "automation run ledger lock")?;
+    crate::storage::reject_symlink_components(lock_path, "automation run ledger lock")?;
     let parent = lock_path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -531,7 +531,7 @@ fn repair_corrupt_run_ledger_append_intent_impl(
             repair_corrupt_append_intent(dashboard_root, &ledger_path, &mut ledger, &bytes)
         })();
         let unlock = fs2::FileExt::unlock(&ledger_lock).map_err(TraceDecayError::from);
-        result.and_then(|()| unlock)
+        result.and(unlock)
     })
 }
 
@@ -633,7 +633,7 @@ where
             remove_canonical_spool_durable(&path)
         })();
         let unlock = fs2::FileExt::unlock(&ledger_lock).map_err(TraceDecayError::from);
-        result.and_then(|()| unlock)
+        result.and(unlock)
     })
 }
 
@@ -1378,12 +1378,11 @@ fn repair_corrupt_append_intent(
         spool
             .seek(SeekFrom::Start(0))
             .map_err(TraceDecayError::from)?;
-        if exact_prefix_matches(ledger, &mut spool, suffix_len)? {
-            if matched.replace(path).is_some() {
-                return Err(config_error(
-                    "corrupt append intent has ambiguous exact spool authority",
-                ));
-            }
+        if exact_prefix_matches(ledger, &mut spool, suffix_len)? && matched.replace(path).is_some()
+        {
+            return Err(config_error(
+                "corrupt append intent has ambiguous exact spool authority",
+            ));
         }
     }
     if matched.is_none() {

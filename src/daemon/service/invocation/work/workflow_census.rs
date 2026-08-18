@@ -240,14 +240,16 @@ fn try_persist_workflow_fan_out_census(
     let envelope = tracedecay_usecases::observability::execution_owner_fact_envelope(
         producer.identity(),
         context.scope().project_id.as_str(),
-        &owner_ref,
-        "workflow_fan_out_census",
-        census.observed_at,
-        Some(previous.observed_at),
-        Some(census.observed_at),
-        terminal,
-        tracedecay_domain::CoverageStateV1::Known,
-        tracedecay_domain::ObservabilityPayloadV1::ExecutionTopology(sample),
+        tracedecay_usecases::observability::ExecutionOwnerFactInputV1 {
+            owner_transition_ref: &owner_ref,
+            operation: "workflow_fan_out_census",
+            event_time: census.observed_at,
+            valid_from: Some(previous.observed_at),
+            valid_until: Some(census.observed_at),
+            terminal_result: terminal,
+            coverage: tracedecay_domain::CoverageStateV1::Known,
+            payload: tracedecay_domain::ObservabilityPayloadV1::ExecutionTopology(sample),
+        },
     )
     .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     match producer
@@ -587,14 +589,16 @@ fn pending_census_envelopes(
             tracedecay_usecases::observability::execution_owner_fact_envelope(
                 producer.identity(),
                 project_id.as_str(),
-                &owner_ref,
-                "workflow_fan_out_census",
-                observation.census.observed_at,
-                Some(observation.previous_observed_at),
-                Some(observation.census.observed_at),
-                observation.terminal,
-                tracedecay_domain::CoverageStateV1::Known,
-                tracedecay_domain::ObservabilityPayloadV1::ExecutionTopology(sample),
+                tracedecay_usecases::observability::ExecutionOwnerFactInputV1 {
+                    owner_transition_ref: &owner_ref,
+                    operation: "workflow_fan_out_census",
+                    event_time: observation.census.observed_at,
+                    valid_from: Some(observation.previous_observed_at),
+                    valid_until: Some(observation.census.observed_at),
+                    terminal_result: observation.terminal,
+                    coverage: tracedecay_domain::CoverageStateV1::Known,
+                    payload: tracedecay_domain::ObservabilityPayloadV1::ExecutionTopology(sample),
+                },
             )
         })
         .collect()

@@ -92,7 +92,7 @@ impl BranchGraphSourceV1 {
 /// Result of the locked graph-source compare-and-swap publisher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchGraphSourcePublishOutcomeV1 {
-    Published(BranchGraphSourcePublicationV1),
+    Published(Box<BranchGraphSourcePublicationV1>),
     AlreadyPublished(BranchGraphSourceV1),
     CompareAndSwapMiss {
         observed: Option<BranchGraphSourceV1>,
@@ -497,13 +497,13 @@ pub fn publish_graph_source(
         )
     })?;
     save_branch_meta(tracedecay_dir, &meta)?;
-    Ok(BranchGraphSourcePublishOutcomeV1::Published(
+    Ok(BranchGraphSourcePublishOutcomeV1::Published(Box::new(
         BranchGraphSourcePublicationV1 {
             branch: branch.to_owned(),
             previous_entry,
             installed_entry,
         },
-    ))
+    )))
 }
 
 /// Restores the entry immediately preceding one exact graph-source

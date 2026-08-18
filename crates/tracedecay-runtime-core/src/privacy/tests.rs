@@ -17,7 +17,7 @@ use super::detect::{
 use super::sanitize::{CLAUDE_SANITIZER_VERSION_V1, OBSERVATION_SANITIZER_VERSION_V1};
 use super::{
     CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1,
-    ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, DetectionConfidenceV1,
+    ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, CodeSourceShapeV1, DetectionConfidenceV1,
     LcmSensitiveRedactionPolicyV1, MAX_OBSERVATION_RECORD_BYTES, MEMORY_FACT_SANITIZER_VERSION_V1,
     MemoryFactSanitizationV1, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
     SanitizationFindingV1, SanitizedPayloadVerificationError, parse_claude_record_v1,
@@ -94,12 +94,21 @@ fn code_source_sanitizer_redacts_and_issues_raw_bound_receipts() {
     assert_eq!(first_secret.len(), second_secret.len());
     let source = |secret: &str| format!("pub const TOKEN: &str = \"{secret}\";\n");
 
-    let first = sanitize_code_source_bytes(source(&first_secret).as_bytes())
-        .expect("sanitize first code source");
-    let replay = sanitize_code_source_bytes(source(&first_secret).as_bytes())
-        .expect("replay first code source");
-    let second = sanitize_code_source_bytes(source(&second_secret).as_bytes())
-        .expect("sanitize second code source");
+    let first = sanitize_code_source_bytes(
+        source(&first_secret).as_bytes(),
+        CodeSourceShapeV1::CodeOrProse,
+    )
+    .expect("sanitize first code source");
+    let replay = sanitize_code_source_bytes(
+        source(&first_secret).as_bytes(),
+        CodeSourceShapeV1::CodeOrProse,
+    )
+    .expect("replay first code source");
+    let second = sanitize_code_source_bytes(
+        source(&second_secret).as_bytes(),
+        CodeSourceShapeV1::CodeOrProse,
+    )
+    .expect("sanitize second code source");
 
     assert!(!String::from_utf8_lossy(first.sanitized_bytes()).contains(&first_secret));
     assert_eq!(first.sanitized_bytes(), second.sanitized_bytes());
@@ -142,7 +151,9 @@ fn code_source_sanitizer_redacts_and_issues_raw_bound_receipts() {
 
 #[test]
 fn payload_verifier_rejects_stale_receipts_and_exact_content_mismatch() {
-    let sanitized = sanitize_code_source_bytes(b"let safe = true;\n").expect("sanitize source");
+    let sanitized =
+        sanitize_code_source_bytes(b"let safe = true;\n", CodeSourceShapeV1::CodeOrProse)
+            .expect("sanitize source");
     let (bytes, receipt) = sanitized.into_parts();
     let payload = Value::String(String::from_utf8(bytes).expect("sanitized UTF-8"));
     let revision = ComponentVersion::new(CODE_SOURCE_SANITIZER_VERSION_V1).expect("valid revision");

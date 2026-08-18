@@ -145,6 +145,18 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
         for agent in agents::all_integrations() {
             if should_run_host_healthcheck(agent.as_ref(), home) {
                 agent.healthcheck_with_daemon_status(&mut dc, &hctx, daemon_status.as_ref().ok());
+            } else if let Some(surface) = agent.detected_host_surface(home) {
+                // The host itself is on this machine but carries no tracedecay
+                // integration. Silence here read as "nothing to say", which
+                // hid exactly the hosts an operator most likely wants wired
+                // up — warn uniformly, like the deferred-lifecycle hosts do.
+                eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
+                dc.warn(&format!(
+                    "{} detected ({}) but tracedecay is not integrated — run `tracedecay install --agent {}`",
+                    agent.name(),
+                    surface.display(),
+                    agent.id()
+                ));
             }
         }
     } else {

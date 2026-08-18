@@ -403,7 +403,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
                 initiative,
                 plan,
                 milestone,
-                item,
+                item: Box::new(item),
             },
             causation_event_id: None,
             evidence: Vec::new(),

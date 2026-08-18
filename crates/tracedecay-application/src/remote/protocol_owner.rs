@@ -44,37 +44,29 @@ pub type RemoteRestoreProtocolOwnerPortV1 = dyn RemoteProtocolPortV1<StagedResto
 pub type RemotePromotionProtocolOwnerPortV1 =
     dyn RemoteProtocolPortV1<PromotionConfirmationV1, Output = PromotionCasReceiptV1> + Send + Sync;
 
+pub struct RemoteOperationProtocolPortsV1 {
+    pub capture: Arc<RemoteCaptureProtocolOwnerPortV1>,
+    pub replay: Arc<RemoteReplayProtocolOwnerPortV1>,
+    pub frame_transfer: Arc<RemoteFrameTransferProtocolOwnerPortV1>,
+    pub query: Arc<RemoteQueryProtocolOwnerPortV1>,
+    pub backup: Arc<RemoteBackupProtocolOwnerPortV1>,
+    pub restore: Arc<RemoteRestoreProtocolOwnerPortV1>,
+    pub promotion: Arc<RemotePromotionProtocolOwnerPortV1>,
+}
+
 pub struct RemoteProtocolOwnerV1 {
     enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>,
-    capture: Arc<RemoteCaptureProtocolOwnerPortV1>,
-    replay: Arc<RemoteReplayProtocolOwnerPortV1>,
-    frame_transfer: Arc<RemoteFrameTransferProtocolOwnerPortV1>,
-    query: Arc<RemoteQueryProtocolOwnerPortV1>,
-    backup: Arc<RemoteBackupProtocolOwnerPortV1>,
-    restore: Arc<RemoteRestoreProtocolOwnerPortV1>,
-    promotion: Arc<RemotePromotionProtocolOwnerPortV1>,
+    operations: RemoteOperationProtocolPortsV1,
 }
 
 impl RemoteProtocolOwnerV1 {
     pub fn new(
         enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>,
-        capture: Arc<RemoteCaptureProtocolOwnerPortV1>,
-        replay: Arc<RemoteReplayProtocolOwnerPortV1>,
-        frame_transfer: Arc<RemoteFrameTransferProtocolOwnerPortV1>,
-        query: Arc<RemoteQueryProtocolOwnerPortV1>,
-        backup: Arc<RemoteBackupProtocolOwnerPortV1>,
-        restore: Arc<RemoteRestoreProtocolOwnerPortV1>,
-        promotion: Arc<RemotePromotionProtocolOwnerPortV1>,
+        operations: RemoteOperationProtocolPortsV1,
     ) -> Self {
         Self {
             enrollment,
-            capture,
-            replay,
-            frame_transfer,
-            query,
-            backup,
-            restore,
-            promotion,
+            operations,
         }
     }
 }
@@ -102,7 +94,7 @@ macro_rules! delegate_remote_operation {
                 request: RemoteProtocolRequestV1<$request>,
                 credential: OpaqueRemoteCredential,
             ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-                self.$field.execute(request, credential)
+                self.operations.$field.execute(request, credential)
             }
 
             fn execute_controlled(
@@ -111,7 +103,9 @@ macro_rules! delegate_remote_operation {
                 credential: OpaqueRemoteCredential,
                 control: crate::remote::protocol::RemoteProtocolExecutionControlV1,
             ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-                self.$field.execute_controlled(request, credential, control)
+                self.operations
+                    .$field
+                    .execute_controlled(request, credential, control)
             }
         }
     };

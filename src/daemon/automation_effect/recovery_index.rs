@@ -649,7 +649,7 @@ pub(super) fn recovered_partial_terminal(
     let problem =
         retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::PartialEffect {
             reason_code: "application.automation-run.recovered-partial-effect".to_owned(),
-            committed_receipt: receipt,
+            committed_receipt: Box::new(receipt),
             detail:
                 "Canonical memory effects committed before the outer run terminal was published."
                     .to_owned(),

@@ -1139,7 +1139,15 @@ impl DeterministicCodeChunker {
                     reason.clone(),
                 );
             }
-            other => Some(format!("{other:?}")),
+            ParseOutcomeV1::TimedOut => {
+                Some("Tree-sitter parsing exceeded the bounded per-file parse budget".to_owned())
+            }
+            ParseOutcomeV1::Cancelled => {
+                Some("extraction was cancelled before parsing completed".to_owned())
+            }
+            ParseOutcomeV1::Failed { reason } => {
+                Some(format!("Tree-sitter parsing failed: {reason}"))
+            }
         };
         if let Some(reason) = parse_reason {
             let document = CodeSearchDocumentV1 {

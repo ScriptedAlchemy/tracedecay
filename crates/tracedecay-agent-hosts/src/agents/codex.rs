@@ -1770,6 +1770,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         for plugin_dir in cached_dirs {
             doctor_check_plugin_dir(dc, &plugin_dir, global_policy, home);
         }
+        doctor_check_native_activation(dc, home);
         return;
     }
 
@@ -1791,6 +1792,66 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         CODEX_GLOBAL_PLUGIN_SOURCE_PATH,
         "tracedecay install --agent codex",
     );
+    doctor_check_native_activation(dc, home);
+}
+
+/// Codex's own readback of "installed and enabled": the
+/// `[plugins."tracedecay@…"] enabled = true` activation record in
+/// `config.toml` — the state `codex plugin list` reports. Staged source and a
+/// marketplace entry alone never load the plugin's MCP server, skills, or
+/// hooks, so their presence must not read as an installed integration.
+fn doctor_check_native_activation(dc: &mut DoctorCounters, home: &Path) {
+    let marketplace_name = codex_cached_marketplace_name(home);
+    let config_path = codex_config_path(home);
+    match codex_plugin_enabled(home) {
+        Ok(true) => dc.pass(&format!(
+            "Codex reports plugin tracedecay@{marketplace_name} installed and enabled in {}",
+            config_path.display()
+        )),
+        Ok(false) => dc.fail(&format!(
+            "Codex reports tracedecay@{marketplace_name} not installed — {} has no \
+             `[plugins.\"tracedecay@{marketplace_name}\"] enabled = true`, so the MCP server, \
+             skills, and hooks never load. Run `tracedecay install --agent codex` (drives \
+             `codex plugin add tracedecay@{marketplace_name}`), then `/hooks` inside Codex to \
+             trust the managed hooks",
+            config_path.display()
+        )),
+        Err(()) => dc.fail(&format!(
+            "could not read Codex plugin activation state ({} or {})",
+            config_path.display(),
+            codex_personal_marketplace_path(home).display()
+        )),
+    }
+}
+
+/// The one Codex step TraceDecay cannot perform after a successful install:
+/// hook trust is Codex-owned (`/hooks` inside a session). Returns follow-up
+/// guidance while any managed hook is untrusted or stale, and `None` once
+/// Codex records explicit, current trust for every managed hook.
+pub fn codex_hook_trust_followup(home: &Path) -> Option<String> {
+    let marketplace_name = codex_cached_marketplace_name(home);
+    let hooks_path = [
+        codex_plugin_current_cached_install_dir(home).join("hooks/hooks.json"),
+        codex_plugin_install_dir(home).join("hooks/hooks.json"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())?;
+    let hooks = load_json_file(&hooks_path);
+    let entries = codex_hook_trust_entries_for_marketplace(&hooks, &marketplace_name).ok()?;
+    if entries.is_empty() {
+        return None;
+    }
+    let config_path = codex_config_path(home);
+    let trusted_and_explicit = load_toml_file(&config_path).is_ok_and(|config| {
+        codex_plugin_hook_trust_state(&config, &entries) == CodexHookTrustState::Trusted
+            && std::fs::read_to_string(&config_path)
+                .is_ok_and(|contents| codex_hook_state_table_is_explicit(&contents))
+    });
+    (!trusted_and_explicit).then(|| {
+        "Codex hook trust is host-owned: run `/hooks` inside a Codex session to trust the \
+         tracedecay lifecycle hooks (Codex silently skips untrusted hooks)"
+            .to_string()
+    })
 }
 
 fn doctor_check_marketplace_entry(

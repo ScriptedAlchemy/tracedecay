@@ -21,8 +21,8 @@ use super::detect::{
 };
 use super::structured::StructuredTextFormatV1;
 use super::structured_text::{
-    sanitize_code_source_bytes, sanitize_lcm_payload_text, sanitize_provider_metadata_text,
-    sanitize_structured_text,
+    CodeSourceShapeV1, sanitize_code_source_bytes, sanitize_lcm_payload_text,
+    sanitize_provider_metadata_text, sanitize_structured_text,
 };
 
 mod code_shape;
@@ -405,7 +405,8 @@ fn code_source_sanitizer_parses_environment_files_before_scanning() {
     let raw = format!("# service env\nREGION=us-east\nVAULT_PASSPHRASE={PLACEHOLDER}\n");
     assert!(raw_sweep(&raw).contains(PLACEHOLDER));
 
-    let sanitized = sanitize_code_source_bytes(raw.as_bytes()).expect("sanitize code source");
+    let sanitized = sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData)
+        .expect("sanitize code source");
     let text = String::from_utf8(sanitized.sanitized_bytes().to_vec()).expect("sanitized UTF-8");
 
     assert!(!text.contains(PLACEHOLDER));

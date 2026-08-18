@@ -706,6 +706,33 @@ fn plugin_tool_perms() -> Vec<String> {
         .collect()
 }
 
+/// The single documented allow rule covering every plugin tool: the literal
+/// MCP server prefix plus a trailing tool glob
+/// (`mcp__plugin_tracedecay_graph__*`, see
+/// <https://code.claude.com/docs/en/permissions>). One settings.json entry
+/// instead of one per tool.
+fn plugin_wildcard_perm() -> String {
+    format!("{PLUGIN_TOOL_PERM_PREFIX}*")
+}
+
+/// True when the settings allowlist covers every plugin tool without
+/// prompting: either the single wildcard rule or an explicit per-tool grant
+/// for each managed tool.
+fn plugin_perms_satisfied(installed: &[&str]) -> bool {
+    plugin_perms_covered(installed, &plugin_tool_perms())
+}
+
+/// Coverage check against a concrete expected-tool list. An empty expected
+/// list (the tool catalog was never registered in this process) must not read
+/// as vacuously satisfied — only the wildcard rule can cover it.
+fn plugin_perms_covered(installed: &[&str], per_tool: &[String]) -> bool {
+    installed.contains(&plugin_wildcard_perm().as_str())
+        || (!per_tool.is_empty()
+            && per_tool
+                .iter()
+                .all(|perm| installed.contains(&perm.as_str())))
+}
+
 /// Marker heading of the tracedecay-managed CLAUDE.md rules block.
 const CLAUDE_MD_MARKER: &str = "## MANDATORY: No Explore Agents When Tracedecay Is Available";
 /// The one `## ` sub-heading the managed block owns (see
@@ -1059,27 +1086,29 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
         .unwrap_or_default();
 
     // The plugin-namespace entries are the ones the plugin MCP server actually
-    // matches against; a missing entry means every call to that tool prompts
+    // matches against; without coverage every call to a tool prompts
     // interactively and hard-fails headless/in subagents. Check these first —
-    // this is the real adoption gate.
-    let plugin_expected = plugin_tool_perms();
-    let plugin_missing: Vec<&String> = plugin_expected
-        .iter()
-        .filter(|p| !installed.contains(&p.as_str()))
-        .collect();
-    if plugin_missing.is_empty() {
+    // this is the real adoption gate. Claude settings.json stays host-owned
+    // (TraceDecay never writes it), so the remedy is the one-rule instruction,
+    // not an enumeration of every tool name.
+    let wildcard = plugin_wildcard_perm();
+    if installed.contains(&wildcard.as_str()) {
         dc.pass(&format!(
-            "All {} plugin tool permissions granted",
-            plugin_expected.len()
+            "Plugin tool permissions covered by the single allow rule \"{wildcard}\""
+        ));
+    } else if plugin_perms_satisfied(&installed) {
+        dc.pass(&format!(
+            "All {} plugin tool permissions granted individually — the single allow rule \
+             \"{wildcard}\" would replace them",
+            plugin_tool_perms().len()
         ));
     } else {
         dc.fail(&format!(
-            "{} plugin tool permission(s) missing ({PLUGIN_TOOL_PERM_PREFIX}*) — every call prompts interactively; configure them in Claude Code",
-            plugin_missing.len()
+            "Plugin tool calls will prompt interactively — add the single allow rule \
+             \"{wildcard}\" to `permissions.allow` in {} (or run `/permissions` in Claude Code \
+             and allow that rule); it covers every tracedecay plugin tool",
+            settings_path.display()
         ));
-        for perm in &plugin_missing {
-            dc.info(&format!("missing: {perm}"));
-        }
     }
 
     let expected = expected_tool_perms();
@@ -1161,17 +1190,15 @@ fn warn_missing_permissions(settings: &serde_json::Value) {
 
     // Check the plugin namespace — the entries the plugin MCP server matches.
     // A machine mid-upgrade may carry legacy `mcp__tracedecay__*` entries but
-    // lack the `mcp__plugin_tracedecay_graph__*` twins, which is exactly
-    // what causes per-call prompts, so that is the gap worth warning about.
-    let expected = plugin_tool_perms();
-    let missing_count = expected
-        .iter()
-        .filter(|p| !installed.contains(&p.as_str()))
-        .count();
-
-    if missing_count > 0 {
+    // lack coverage of the `mcp__plugin_tracedecay_graph__*` namespace, which
+    // is exactly what causes per-call prompts, so that is the gap worth
+    // warning about — with the one-rule remedy, not a tool census.
+    if !plugin_perms_satisfied(&installed) {
         eprintln!(
-            "\x1b[33mwarning: {missing_count} tracedecay plugin tool(s) are not yet permitted (calls will prompt). Configure permissions in Claude Code.\x1b[0m"
+            "\x1b[33mwarning: tracedecay plugin tools are not yet permitted in Claude Code \
+             (calls will prompt). Add the single allow rule \"{}\" to `permissions.allow` in \
+             ~/.claude/settings.json, or allow it via `/permissions` in Claude Code.\x1b[0m",
+            plugin_wildcard_perm()
         );
     }
 }

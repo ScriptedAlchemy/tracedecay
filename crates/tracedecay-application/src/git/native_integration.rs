@@ -30,7 +30,7 @@ pub enum NativeIntegrationSelectionBindingV1 {
         stack_id: BranchStackId,
         revision_id: BranchStackRevisionId,
         revision_digest: ManifestDigest,
-        declared_revision: BranchStackRevisionV1,
+        declared_revision: Box<BranchStackRevisionV1>,
         source_node_id: StackNodeId,
         destination_node_id: StackNodeId,
         direction: NativeIntegrationDirectionV1,
@@ -136,20 +136,18 @@ impl NativeIntegrationStackResolutionRequestV1 {
             destination_node_id,
             ..
         } = &self.selection
-        {
-            if declared_revision.inventory_snapshot_id != self.inventory_snapshot_id
+            && (declared_revision.inventory_snapshot_id != self.inventory_snapshot_id
                 || declared_revision.inventory_epoch != self.inventory_epoch
                 || !declared_node_matches_scope(declared_revision, source_node_id, &self.source)
                 || !declared_node_matches_scope(
                     declared_revision,
                     destination_node_id,
                     &self.destination,
-                )
-            {
-                return Err(ApplicationContractError::Inconsistent {
-                    field: "native integration declared stack authority",
-                });
-            }
+                ))
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "native integration declared stack authority",
+            });
         }
         Ok(())
     }

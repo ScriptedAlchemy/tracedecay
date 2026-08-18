@@ -457,7 +457,15 @@ fn plan_artifact_action(
         // deployment, `Install` recording its own byte-identical staged
         // deploy). Everything else with a foreign or absent marker conflicts.
         if !adopts_pre_receipt_artifact(operation, artifact, state) {
-            return Err(HostBundleError::OwnershipConflict);
+            return Err(HostBundleError::OwnershipConflict(format!(
+                "{}: existing file is not owned by this component (observed ownership marker {}, expected {:?})",
+                artifact.relative_path,
+                match state.ownership_marker.as_deref() {
+                    Some(marker) => format!("{marker:?}"),
+                    None => "recorded by no receipt".to_string(),
+                },
+                artifact.ownership_marker,
+            )));
         }
         return Ok(if state.artifact_digest == Some(artifact.artifact_digest) {
             HostArtifactActionV1::Noop
@@ -473,23 +481,29 @@ fn plan_artifact_action(
             if state.artifact_digest == Some(owned_digest) {
                 Ok(HostArtifactActionV1::BackupThenRemove)
             } else {
-                Err(HostBundleError::OwnershipConflict)
+                Err(HostBundleError::OwnershipConflict(format!(
+                    "{}: deployed bytes no longer match the receipt-owned content; refusing to \
+                     delete a file modified outside TraceDecay",
+                    artifact.relative_path
+                )))
             }
         }
-        HostBundleLifecycleOpV1::Install => {
-            if state.artifact_digest == Some(artifact.artifact_digest) {
-                Ok(HostArtifactActionV1::Noop)
-            } else {
-                Err(HostBundleError::OwnershipConflict)
-            }
-        }
-        HostBundleLifecycleOpV1::Update => {
+        // Install over a path this component's own receipt already claims is
+        // the ordinary reinstall/update journey (e.g. a new bundle version
+        // over an unmodified prior deploy), so it converges exactly as
+        // `Update` does. Only a third-party edit — bytes that match neither
+        // the catalog nor the receipt-owned content — is a conflict.
+        HostBundleLifecycleOpV1::Install | HostBundleLifecycleOpV1::Update => {
             if state.artifact_digest == Some(artifact.artifact_digest) {
                 Ok(HostArtifactActionV1::Noop)
             } else if state.artifact_digest == Some(owned_digest) {
                 Ok(HostArtifactActionV1::BackupThenReplace)
             } else {
-                Err(HostBundleError::OwnershipConflict)
+                Err(HostBundleError::OwnershipConflict(format!(
+                    "{}: deployed file was modified outside TraceDecay since its receipt was \
+                     written (marker {:?})",
+                    artifact.relative_path, artifact.ownership_marker
+                )))
             }
         }
         HostBundleLifecycleOpV1::Repair => {
@@ -3124,7 +3138,12 @@ impl HostBundleWriterV1 {
                     }
                     (Some(_), None) => return Err(HostBundleError::ArtifactContentMismatch),
                     (None, None) => {}
-                    (None, Some(_)) => return Err(HostBundleError::OwnershipConflict),
+                    (None, Some(_)) => {
+                        return Err(HostBundleError::OwnershipConflict(format!(
+                            "{}: a file appeared at a path this transaction removed",
+                            entry.relative_path
+                        )));
+                    }
                 }
             }
         }
@@ -3799,7 +3818,10 @@ impl HostBundleWriterV1 {
             let bytes = read_regular_nofollow(&parent, &name)?
                 .ok_or(HostBundleError::InvalidObservedState)?;
             if <[u8; 32]>::from(Sha256::digest(&bytes)) != expected.artifact_digest {
-                return Err(HostBundleError::OwnershipConflict);
+                return Err(HostBundleError::OwnershipConflict(format!(
+                    "{}: deployed bytes no longer match the receipt-owned content (marker {:?})",
+                    expected.relative_path, expected.ownership_marker
+                )));
             }
             let snapshot_name = host_bundle_snapshot_name(index, &expected.relative_path);
             match read_regular_nofollow(&snapshot_dir, &snapshot_name)? {
@@ -4243,7 +4265,9 @@ fn atomic_write_nofollow(
     match parent.symlink_metadata(name) {
         Ok(metadata) if metadata.file_type().is_file() && replace_existing => {}
         Ok(metadata) if metadata.file_type().is_file() => {
-            return Err(HostBundleError::OwnershipConflict);
+            return Err(HostBundleError::OwnershipConflict(format!(
+                "{name}: a file appeared at this deploy path after planning"
+            )));
         }
         Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -4283,7 +4307,9 @@ fn atomic_write_nofollow(
                     .hard_link(&temporary, parent, name)
                     .map_err(|error| {
                         if error.kind() == io::ErrorKind::AlreadyExists {
-                            HostBundleError::OwnershipConflict
+                            HostBundleError::OwnershipConflict(format!(
+                                "{name}: a file appeared at this deploy path mid-write"
+                            ))
                         } else {
                             host_bundle_storage_failure!()
                         }
@@ -6203,7 +6229,7 @@ mod tests {
         // Somebody else owns the bytes on this artifact path. That is a
         // standing refusal, not preview staleness: retrying cannot clear it,
         // so it must be reported as the ownership conflict it is.
-        assert_eq!(
+        assert!(matches!(
             HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
                 &component_set,
                 &request,
@@ -6211,8 +6237,8 @@ mod tests {
                 &verifier,
                 &mut registration,
             ),
-            Err(HostBundleError::OwnershipConflict)
-        );
+            Err(HostBundleError::OwnershipConflict(_))
+        ));
         assert_eq!(
             std::fs::read(root.path().join("plugins/core.json")).unwrap(),
             b"external"
@@ -6407,7 +6433,7 @@ mod tests {
         )
         .unwrap();
         let mut writer = HostBundleWriterV1::open(install_root.path()).unwrap();
-        assert_eq!(
+        assert!(matches!(
             writer.execute(
                 &bundle,
                 &execution(
@@ -6419,8 +6445,8 @@ mod tests {
                 &content(b"expected"),
                 &verifier(&bundle),
             ),
-            Err(HostBundleError::OwnershipConflict)
-        );
+            Err(HostBundleError::OwnershipConflict(_))
+        ));
         assert_eq!(
             std::fs::read(install_root.path().join("plugins/tracedecay.json")).unwrap(),
             b"legacy"
@@ -6519,7 +6545,7 @@ mod tests {
 
         std::fs::write(root.path().join("plugins/tracedecay.json"), b"foreign").unwrap();
         let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
-        assert_eq!(
+        assert!(matches!(
             writer.execute(
                 &second,
                 &execution(
@@ -6531,8 +6557,8 @@ mod tests {
                 &content(b"second"),
                 &verifier(&second),
             ),
-            Err(HostBundleError::OwnershipConflict)
-        );
+            Err(HostBundleError::OwnershipConflict(_))
+        ));
     }
 
     fn pre_v2_artifact(
@@ -6581,13 +6607,15 @@ mod tests {
             HostBundleLifecycleOpV1::Update,
             HostBundleLifecycleOpV1::Uninstall,
         ] {
-            assert_eq!(
-                plan_artifact_action(
-                    operation,
-                    artifact,
-                    Some(&pre_v2_artifact(artifact, b"pre-v2", marker.clone())),
+            assert!(
+                matches!(
+                    plan_artifact_action(
+                        operation,
+                        artifact,
+                        Some(&pre_v2_artifact(artifact, b"pre-v2", marker.clone())),
+                    ),
+                    Err(HostBundleError::OwnershipConflict(_))
                 ),
-                Err(HostBundleError::OwnershipConflict),
                 "{operation:?} must not adopt an artifact no receipt records"
             );
         }
@@ -6600,25 +6628,34 @@ mod tests {
         let foreign = expected_ownership_marker(HostKindV1::Hermes, HostBundleComponentV1::Core);
         assert_ne!(foreign, artifact.ownership_marker);
 
-        // A foreign marker on the same deploy path is still a conflict.
-        assert_eq!(
-            plan_artifact_action(
-                HostBundleLifecycleOpV1::Repair,
-                artifact,
-                Some(&pre_v2_artifact(artifact, b"pre-v2", Some(foreign))),
-            ),
-            Err(HostBundleError::OwnershipConflict)
+        // A foreign marker on the same deploy path is still a conflict, and
+        // the refusal names the conflicting deploy path.
+        let foreign_conflict = plan_artifact_action(
+            HostBundleLifecycleOpV1::Repair,
+            artifact,
+            Some(&pre_v2_artifact(artifact, b"pre-v2", Some(foreign))),
+        )
+        .expect_err("a foreign marker must refuse");
+        assert!(matches!(
+            foreign_conflict,
+            HostBundleError::OwnershipConflict(_)
+        ));
+        assert!(
+            foreign_conflict
+                .to_string()
+                .contains(&artifact.relative_path),
+            "the conflict must name the contested path: {foreign_conflict}"
         );
         // So is an absent marker: receipt- and orphan-derived observations
         // never carry one, so they can never be adopted.
-        assert_eq!(
+        assert!(matches!(
             plan_artifact_action(
                 HostBundleLifecycleOpV1::Repair,
                 artifact,
                 Some(&pre_v2_artifact(artifact, b"pre-v2", None)),
             ),
-            Err(HostBundleError::OwnershipConflict)
-        );
+            Err(HostBundleError::OwnershipConflict(_))
+        ));
         // A receipt claiming the path with a foreign marker keeps the original
         // ownership boundary; adoption never applies to receipt-backed state.
         let mut claimed =
@@ -6628,10 +6665,10 @@ mod tests {
             HostBundleComponentV1::Core,
         ));
         claimed.owned_artifact_digest = Some(Sha256::digest(b"pre-v2").into());
-        assert_eq!(
+        assert!(matches!(
             plan_artifact_action(HostBundleLifecycleOpV1::Repair, artifact, Some(&claimed)),
-            Err(HostBundleError::OwnershipConflict)
-        );
+            Err(HostBundleError::OwnershipConflict(_))
+        ));
     }
 
     /// Discovery and planning must agree on the ownership boundary: whenever
@@ -6736,7 +6773,7 @@ mod tests {
         std::fs::write(root.path().join("plugins/tracedecay.json"), b"pre-v2").unwrap();
 
         let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
-        assert_eq!(
+        assert!(matches!(
             writer.execute(
                 &bundle,
                 &execution(
@@ -6748,8 +6785,8 @@ mod tests {
                 &content(b"current"),
                 &verifier(&bundle),
             ),
-            Err(HostBundleError::OwnershipConflict)
-        );
+            Err(HostBundleError::OwnershipConflict(_))
+        ));
         assert_eq!(
             std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
             b"pre-v2"

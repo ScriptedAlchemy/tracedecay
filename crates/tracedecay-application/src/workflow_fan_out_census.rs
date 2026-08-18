@@ -504,24 +504,23 @@ fn provider_capacities(
             if let Some(attempt) = attempts.get(&child.attempt_identity)
                 && generation.is_some()
                 && attempt_matches_work_snapshot(attempt, work_snapshot)
+                && attempt_active_in_interval(attempt, interval_started_at, observed_at)
             {
-                if attempt_active_in_interval(attempt, interval_started_at, observed_at) {
-                    let active_provider = attempt
-                        .actual_route()
-                        .unwrap_or_else(|| attempt.requested_route())
-                        .provider_id()
-                        .clone();
-                    let active_entry = providers.entry(active_provider).or_insert(limits);
-                    if active_entry.0 != limits.0
-                        || active_entry.1 != limits.1
-                        || active_entry.2 != limits.2
-                    {
-                        return Ok(WorkflowProviderCapacityEvidenceV1::Unavailable {
-                            reason: WorkflowCensusEvidenceReasonV1::InconsistentPinnedTopology,
-                        });
-                    }
-                    active_entry.4 += 1;
+                let active_provider = attempt
+                    .actual_route()
+                    .unwrap_or_else(|| attempt.requested_route())
+                    .provider_id()
+                    .clone();
+                let active_entry = providers.entry(active_provider).or_insert(limits);
+                if active_entry.0 != limits.0
+                    || active_entry.1 != limits.1
+                    || active_entry.2 != limits.2
+                {
+                    return Ok(WorkflowProviderCapacityEvidenceV1::Unavailable {
+                        reason: WorkflowCensusEvidenceReasonV1::InconsistentPinnedTopology,
+                    });
                 }
+                active_entry.4 += 1;
             }
         }
     }

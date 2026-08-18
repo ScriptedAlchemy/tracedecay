@@ -2712,10 +2712,8 @@ mod tests {
             "untitled:///root/a.rs",
         ] {
             assert!(matches!(
-                gateway.semantic_request(
-                    &LspRequestId::Number(7),
-                    &definition_request(document_uri),
-                ),
+                gateway
+                    .semantic_request(&LspRequestId::Number(7), &definition_request(document_uri),),
                 GatewayResponse::Unavailable(MethodUnavailable {
                     reason: MethodUnavailableReason::OutsideAdmittedRoot,
                     ..

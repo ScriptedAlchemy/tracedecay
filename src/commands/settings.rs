@@ -233,7 +233,7 @@ pub(crate) async fn mutate_project_configuration(
             ConfigurationWireRequestV1::Set(ConfigurationSetRequestV1 {
                 layer: layer.clone(),
                 key: key.clone(),
-                value: value.clone(),
+                value: value.as_ref().clone(),
                 expected_revision,
                 idempotency_key: idempotency_key.clone(),
             }),
@@ -317,7 +317,7 @@ pub(crate) fn project_configuration_set(
             project_id: project_id.clone(),
         },
         key: SettingKey::new(key).map_err(|error| configuration_error(error.to_string()))?,
-        value,
+        value: Box::new(value),
     })
 }
 
@@ -340,7 +340,7 @@ pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay::errors::R
             },
             key: SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY)
                 .map_err(|error| configuration_error(error.to_string()))?,
-            value: ConfigurationValueV1::Boolean(enable),
+            value: Box::new(ConfigurationValueV1::Boolean(enable)),
         }]
     } else {
         Vec::new()

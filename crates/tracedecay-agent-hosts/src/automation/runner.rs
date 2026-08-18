@@ -166,6 +166,21 @@ pub struct UserSessionAutomationRun {
     pub skill_writer: SkillWriterAutomationRun,
 }
 
+/// The agent backend and session-retrieval ports one automation run reads.
+#[derive(Clone, Copy)]
+pub(crate) struct AutomationTaskIo<'a> {
+    pub(crate) backend: &'a dyn AgentTaskBackend,
+    pub(crate) retrieval: &'a dyn AutomationSessionRetrieval,
+}
+
+/// Combined-review ledger publication mode plus each leg's optional retained
+/// settlement guard.
+struct CombinedReviewPublication<'a> {
+    ledger: AutomationRunLedgerPublication,
+    reflector_guard: Option<&'a AutomationRunSettlementGuard>,
+    skill_guard: Option<&'a AutomationRunSettlementGuard>,
+}
+
 pub async fn run_user_session_automation_with_backend(
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
@@ -181,8 +196,10 @@ pub async fn run_user_session_automation_with_backend(
         session_registry,
         config,
         configuration_revision_id,
-        backend,
-        retrieval.as_ref(),
+        AutomationTaskIo {
+            backend,
+            retrieval: retrieval.as_ref(),
+        },
         options,
         run_control,
     )
@@ -194,8 +211,7 @@ pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    retrieval: &dyn AutomationSessionRetrieval,
+    io: AutomationTaskIo<'_>,
     options: UserSessionAutomationOptions,
     run_control: &AutomationRunControl,
 ) -> AutomationRunResult<UserSessionAutomationRun> {
@@ -205,8 +221,7 @@ pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
         config,
         run_control,
         configuration_revision_id,
-        backend,
-        retrieval,
+        io,
         options.session_reflector,
     )
     .await?;
@@ -215,7 +230,7 @@ pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
         Arc::clone(&session_registry),
         config,
         configuration_revision_id,
-        backend,
+        io.backend,
         options.memory_curator,
         run_control,
     )
@@ -225,8 +240,8 @@ pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
         session_registry,
         config,
         configuration_revision_id,
-        backend,
-        retrieval,
+        io.backend,
+        io.retrieval,
         options.skill_writer,
     )
     .await?;
@@ -410,13 +425,17 @@ pub async fn run_combined_review_with_backend(
         cg,
         config,
         configuration_revision_id,
-        backend,
-        retrieval.as_ref(),
+        AutomationTaskIo {
+            backend,
+            retrieval: retrieval.as_ref(),
+        },
         options,
         run_control,
-        AutomationRunLedgerPublication::Immediate,
-        None,
-        None,
+        CombinedReviewPublication {
+            ledger: AutomationRunLedgerPublication::Immediate,
+            reflector_guard: None,
+            skill_guard: None,
+        },
     )
     .await
 }
@@ -434,13 +453,14 @@ pub async fn run_combined_review_with_backend_and_retrieval(
         cg,
         config,
         configuration_revision_id,
-        backend,
-        retrieval,
+        AutomationTaskIo { backend, retrieval },
         options,
         run_control,
-        AutomationRunLedgerPublication::Immediate,
-        None,
-        None,
+        CombinedReviewPublication {
+            ledger: AutomationRunLedgerPublication::Immediate,
+            reflector_guard: None,
+            skill_guard: None,
+        },
     )
     .await
 }
@@ -482,13 +502,14 @@ pub async fn run_combined_review_with_backend_and_retrieval_for_retained_settlem
         cg,
         config,
         configuration_revision_id,
-        backend,
-        retrieval,
+        AutomationTaskIo { backend, retrieval },
         options,
         run_control,
-        AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
-        Some(&reflector_guard),
-        Some(&skill_guard),
+        CombinedReviewPublication {
+            ledger: AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
+            reflector_guard: Some(&reflector_guard),
+            skill_guard: Some(&skill_guard),
+        },
     )
     .await;
     RetainedCombinedReviewRun::new(result, reflector_guard, skill_guard)
@@ -534,14 +555,17 @@ async fn run_combined_review_for_retrieval(
     cg: &TraceDecay,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    retrieval: &dyn AutomationSessionRetrieval,
+    io: AutomationTaskIo<'_>,
     options: CombinedReviewAutomationOptions,
     run_control: &AutomationRunControl,
-    ledger_publication: AutomationRunLedgerPublication,
-    reflector_guard: Option<&AutomationRunSettlementGuard>,
-    skill_guard: Option<&AutomationRunSettlementGuard>,
+    publication: CombinedReviewPublication<'_>,
 ) -> Result<CombinedReviewDispatch> {
+    let AutomationTaskIo { backend, retrieval } = io;
+    let CombinedReviewPublication {
+        ledger: ledger_publication,
+        reflector_guard,
+        skill_guard,
+    } = publication;
     let reflector_authority = project_curation_authority(
         cg,
         "automation:session-reflector",
@@ -962,8 +986,8 @@ async fn run_combined_review_for_retrieval(
             evidence_hash: skill_bundle.evidence_hash.clone(),
             proposed_ops: &output,
             proposals: &skills,
+            validation_repairs: &validation_repairs,
         },
-        &validation_repairs,
     )
     .await
     {
@@ -971,7 +995,7 @@ async fn run_combined_review_for_retrieval(
             report,
             record,
             committed_receipt,
-        }) => (report, record, committed_receipt),
+        }) => (report, record, committed_receipt.map(|receipt| *receipt)),
         Ok(SkillWriterFinalization::FailedRecorded {
             error,
             record: skill_record,
@@ -1013,7 +1037,7 @@ async fn run_combined_review_for_retrieval(
             return Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure(
                 Box::new(CombinedMemoryCompletedSkillFailure {
                     session_reflector: Box::new(memory_run),
-                    skill_writer_record: Some(ledger_record),
+                    skill_writer_record: Some(*ledger_record),
                     skill_writer_record_error: None,
                     error,
                 }),
@@ -1029,8 +1053,8 @@ async fn run_combined_review_for_retrieval(
                 CombinedSkillPartial {
                     completed_session_reflector: Box::new(memory_run),
                     run_id,
-                    committed_receipt,
-                    ledger_record,
+                    committed_receipt: *committed_receipt,
+                    ledger_record: ledger_record.map(|record| *record),
                     skill_writer_record_error: None,
                     detail,
                 },

@@ -321,7 +321,7 @@ mod write_control_tests {
         let result: FactStoreResult<()> = DatabaseFactStore::new(&db)
             .project_memory_write(
                 &control,
-                |_| true,
+                |()| true,
                 move |_| {
                     Box::pin(async move {
                         work_ran_in_task.store(true, Ordering::Release);
@@ -351,7 +351,7 @@ mod write_control_tests {
         let result: FactStoreResult<()> = DatabaseFactStore::new(&db)
             .project_memory_write(
                 &control,
-                |_| true,
+                |()| true,
                 |transaction| {
                     Box::pin(async move {
                         transaction

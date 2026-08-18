@@ -546,7 +546,7 @@ async fn successful_project_memory_transaction_schedules_lifecycle_reconciliatio
     store
         .project_memory_write(
             &write_control(),
-            |_| true,
+            |()| true,
             |_transaction| Box::pin(async { Ok::<(), FactStoreError>(()) }),
         )
         .await

@@ -428,6 +428,204 @@ async fn deterministic_contract_rejection_records_disposition_and_checkpoint() {
 }
 
 #[tokio::test]
+async fn deterministic_sanitization_refusal_records_disposition_and_drains_rest() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    // Text that opens a JSON container but can never parse: the LCM payload
+    // sanitizer refuses it deterministically on every attempt, so classifying
+    // it as an environmental storage failure would poison the queue forever.
+    let poisoned = observation(
+        "session-sanitization-refusal",
+        0,
+        100,
+        "receipt.sanitization-refusal-poisoned",
+        conversational_payload(
+            "message-sanitization-poisoned",
+            "{ deterministically unsanitizable",
+        ),
+    );
+    let survivor = observation(
+        "session-sanitization-refusal",
+        100,
+        200,
+        "receipt.sanitization-refusal-survivor",
+        conversational_payload(
+            "message-sanitization-survivor",
+            "sanitization survivor canary",
+        ),
+    );
+    persist(&store, poisoned.clone(), None).await;
+    persist(
+        &store,
+        survivor.clone(),
+        Some(cursor("session-sanitization-refusal", 100)),
+    )
+    .await;
+
+    assert_eq!(
+        store.next_queued_observation().await.unwrap().as_ref(),
+        Some(poisoned.observation_id()),
+        "the poisoned observation must head the sequential queue"
+    );
+    let error = store
+        .project_observation(poisoned.observation_id())
+        .await
+        .expect_err("deterministic sanitization refusal must keep its typed class");
+    match &error {
+        ProjectionStoreError::SanitizationRefused { reason } => assert!(
+            reason.contains("LCM privacy sanitization failed"),
+            "refusal lost its content-failure detail: {reason}"
+        ),
+        other => panic!("sanitization refusal surfaced as {other:?}"),
+    }
+
+    // The refusal commits like a contract rejection: durable disposition with
+    // the observation id and reason, checkpoint advanced, queue item consumed.
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        1
+    );
+    let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let (receipt_id, reason) = conn
+        .query_row(
+            "SELECT receipt_id, reason FROM observation_projection_dispositions
+             WHERE observation_id = ?1",
+            [poisoned.observation_id().as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(reason, ProjectionSkipReason::SanitizationRefused.as_str());
+    assert_eq!(receipt_id, "receipt.sanitization-refusal-poisoned");
+    drop(conn);
+    assert_eq!(
+        table_count(&tmp, "projection_queue").await,
+        1,
+        "the refusal must consume exactly the poisoned queue item"
+    );
+
+    // The rest of the queue drains normally past the recorded refusal.
+    assert_eq!(
+        store.next_queued_observation().await.unwrap().as_ref(),
+        Some(survivor.observation_id())
+    );
+    assert!(matches!(
+        store
+            .project_observation(survivor.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::Projected(_)
+    ));
+    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
+    assert_eq!(
+        search_session_messages(&tmp, "sanitization survivor", 10)
+            .await
+            .len(),
+        1
+    );
+    let texts = projected_message_texts(&tmp).await;
+    assert_eq!(
+        texts.len(),
+        1,
+        "the refused observation must project nothing"
+    );
+    assert!(texts[0].contains("sanitization survivor canary"));
+
+    // A replay converges through the durable disposition instead of
+    // re-deriving (and re-failing) the unsanitizable output.
+    let replay = store
+        .project_observation(poisoned.observation_id())
+        .await
+        .unwrap();
+    assert!(matches!(
+        replay,
+        ProjectionPersistOutcome::ExactDuplicate(_)
+    ));
+}
+
+#[tokio::test]
+async fn environmental_raw_authority_failure_schedules_projection_retry() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let candidate = observation(
+        "session-raw-environmental",
+        0,
+        100,
+        "receipt.raw-environmental",
+        conversational_payload("message-raw-environmental", "environmental raw canary"),
+    );
+    persist(&store, candidate.clone(), None).await;
+
+    // Fail the same raw-authority write the sanitization refusal flows
+    // through, but with an engine fault: this side of the boundary must stay
+    // environmental — retained on the queue with a durable retry, never a
+    // committed skip disposition.
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_projection_raw_upsert
+             BEFORE INSERT ON lcm_raw_messages BEGIN
+                SELECT RAISE(ABORT, 'injected raw authority failure');
+             END;",
+        )
+        .unwrap();
+    let error = store
+        .project_observation(candidate.observation_id())
+        .await
+        .expect_err("environmental raw-authority failure must stay retryable");
+    assert!(
+        matches!(error, ProjectionStoreError::Storage { .. }),
+        "environmental failure surfaced as {error:?}"
+    );
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        0,
+        "an environmental failure must not advance the checkpoint"
+    );
+    assert_eq!(
+        table_count(&tmp, "observation_projection_dispositions").await,
+        0,
+        "an environmental failure must not commit a skip disposition"
+    );
+    let attempts = raw_conn
+        .query_row(
+            "SELECT attempt_count FROM projection_queue WHERE observation_id = ?1",
+            [candidate.observation_id().as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(attempts, 1, "the failure must schedule a durable retry");
+
+    raw_conn
+        .execute_batch(
+            "DROP TRIGGER fail_projection_raw_upsert;
+             UPDATE projection_queue SET next_retry_at_micros = 0;",
+        )
+        .unwrap();
+    drop(raw_conn);
+    store
+        .project_observation(candidate.observation_id())
+        .await
+        .expect("a cleared environmental failure must project on retry");
+    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
+    assert_eq!(
+        search_session_messages(&tmp, "environmental raw", 10)
+            .await
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn divergent_output_collision_converges_as_a_skip_without_overwriting() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;

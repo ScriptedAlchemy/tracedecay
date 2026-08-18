@@ -24,11 +24,9 @@ fn later_closed_drift_replaces_retained_open_state_across_days() {
                 age_bucket: DurationBucketV1::Under1m,
                 coverage: CoverageStateV1::Known,
             }),
-            None,
-            None,
+            (None, None),
             CoverageStateV1::Known,
-            0,
-            "boot.stack-drift",
+            (0, "boot.stack-drift"),
         ));
         closed_events.push(envelope(
             6_000 + index,
@@ -42,11 +40,9 @@ fn later_closed_drift_replaces_retained_open_state_across_days() {
                 age_bucket: DurationBucketV1::From1dTo7d,
                 coverage: CoverageStateV1::Known,
             }),
-            None,
-            None,
+            (None, None),
             CoverageStateV1::Known,
-            0,
-            "boot.stack-drift",
+            (0, "boot.stack-drift"),
         ));
     }
     let open = build_execution_topology_rollup_fragment(
@@ -118,11 +114,9 @@ fn canonical_closed_drift_with_a_false_age_bucket_fails_closed() {
                     age_bucket: DurationBucketV1::From1mTo5m,
                     coverage: CoverageStateV1::Known,
                 }),
-                None,
-                None,
+                (None, None),
                 CoverageStateV1::Known,
-                0,
-                "boot.stack-drift",
+                (0, "boot.stack-drift"),
             )],
             "stack-drift-tamper",
             CoverageStateV1::Known,

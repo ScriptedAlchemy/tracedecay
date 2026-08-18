@@ -359,7 +359,7 @@ pub(super) fn projection(
 ) -> Result<FactProjectionV1, RetainedSurfaceExecutionErrorV1> {
     match projection {
         ProjectMemoryFactProjectionV1::Available(fact) => Ok(FactProjectionV1::Available {
-            fact: available_fact(fact)?,
+            fact: Box::new(available_fact(fact)?),
         }),
         ProjectMemoryFactProjectionV1::Unavailable(fact) => Ok(FactProjectionV1::Unavailable {
             status: unavailable_fact(fact)?,

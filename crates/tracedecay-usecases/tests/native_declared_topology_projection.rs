@@ -391,7 +391,7 @@ fn declared_stack_request_for_scope(
             stack_id: revision.stack_id.clone(),
             revision_id: revision.revision_id.clone(),
             revision_digest: revision.digest.clone(),
-            declared_revision: revision.clone(),
+            declared_revision: Box::new(revision.clone()),
             source_node_id: feature_node,
             destination_node_id: main_node,
             direction: NativeIntegrationDirectionV1::LandDependentIntoDependency,

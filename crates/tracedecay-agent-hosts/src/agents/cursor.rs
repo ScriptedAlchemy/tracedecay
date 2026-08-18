@@ -90,6 +90,7 @@ impl AgentIntegration for CursorIntegration {
         eprintln!("\n\x1b[1mCursor integration\x1b[0m");
         let project_cursor = ctx.project_path.join(".cursor");
         doctor_check_plugin(dc, &ctx.home);
+        doctor_check_native_extension(dc, &ctx.home);
         if legacy_project_cursor_has_tracedecay(&project_cursor) {
             dc.warn(
                 "legacy project Cursor MCP/hooks/rule files are present; rerun \
@@ -204,11 +205,19 @@ fn cursor_plugin_manifest_path(home: &Path) -> PathBuf {
     cursor_plugin_install_dir(home).join(".cursor-plugin/plugin.json")
 }
 
-const CURSOR_NATIVE_EXTENSION_DIR: &str = "tracedecay.cursor-native-0.0.0";
+/// Deploy directory of the native diagnostics extension, versioned exactly
+/// like every VS Code-family extension install (`publisher.name-version`) and
+/// stamped with the real release version — a `0.0.0` directory next to
+/// otherwise-versioned components was an unstampable literal.
+pub(super) fn cursor_native_extension_relative_dir() -> String {
+    format!(
+        ".cursor/extensions/tracedecay.cursor-native-{}",
+        crate::PRODUCT_VERSION
+    )
+}
 
 fn cursor_native_extension_install_dir(home: &Path) -> PathBuf {
-    home.join(".cursor/extensions")
-        .join(CURSOR_NATIVE_EXTENSION_DIR)
+    home.join(cursor_native_extension_relative_dir())
 }
 
 fn cursor_native_extension_registration(home: &Path) -> HostBundleRegistrationStateV1 {
@@ -231,6 +240,68 @@ fn cursor_native_extension_registration(home: &Path) -> HostBundleRegistrationSt
     } else {
         HostBundleRegistrationStateV1::Repairable
     }
+}
+
+/// Doctor coverage for the deployed native diagnostics extension — the one
+/// Cursor component the plugin-dir checks never touched, so a missing or
+/// half-deployed extension was invisible. A wholly absent extension is
+/// informational (the plugin-only install surface never claims it); a
+/// stale-version or half-deployed one warns because an install claimed it
+/// and it no longer loads current diagnostics.
+fn doctor_check_native_extension(dc: &mut DoctorCounters, home: &Path) {
+    let install_dir = cursor_native_extension_install_dir(home);
+    match cursor_native_extension_registration(home) {
+        HostBundleRegistrationStateV1::Current => dc.pass(&format!(
+            "Cursor native diagnostics extension {} deployed at {}",
+            crate::PRODUCT_VERSION,
+            install_dir.display()
+        )),
+        HostBundleRegistrationStateV1::Missing => {
+            let stale = stale_native_extension_dirs(home);
+            if stale.is_empty() {
+                dc.info(&format!(
+                    "Cursor native diagnostics extension {} not deployed ({}) — run \
+                     `tracedecay install --agent cursor`",
+                    crate::PRODUCT_VERSION,
+                    install_dir.display()
+                ));
+            } else {
+                dc.warn(&format!(
+                    "Cursor native diagnostics extension is stale ({}) while {} is current — \
+                     run `tracedecay install --agent cursor` to redeploy",
+                    stale.join(", "),
+                    crate::PRODUCT_VERSION
+                ));
+            }
+        }
+        HostBundleRegistrationStateV1::Repairable => dc.warn(&format!(
+            "Cursor native diagnostics extension at {} is incomplete (dist/extension.js \
+             missing) — run `tracedecay install --agent cursor`",
+            install_dir.display()
+        )),
+        HostBundleRegistrationStateV1::Corrupt => dc.fail(&format!(
+            "package.json at {} is not the tracedecay cursor-native extension — inspect and \
+             remove it, then run `tracedecay install --agent cursor`",
+            install_dir.display()
+        )),
+    }
+}
+
+/// Names of `~/.cursor/extensions/tracedecay.cursor-native-*` directories left
+/// by other product versions (e.g. the unstamped `0.0.0` deploys).
+fn stale_native_extension_dirs(home: &Path) -> Vec<String> {
+    let current = format!("tracedecay.cursor-native-{}", crate::PRODUCT_VERSION);
+    let Ok(entries) = std::fs::read_dir(home.join(".cursor/extensions")) else {
+        return Vec::new();
+    };
+    let mut stale: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .filter(|name| name.starts_with("tracedecay.cursor-native-") && *name != current)
+        .collect();
+    stale.sort();
+    stale
 }
 
 const RETIRED_CURSOR_MEMORY_RULE_MARKER: &str =

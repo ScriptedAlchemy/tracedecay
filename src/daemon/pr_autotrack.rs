@@ -801,6 +801,7 @@ pub fn manual_branch_worktree_path(data_root: &Path, branch: &str) -> PathBuf {
 
 /// Activates an operator-requested branch head through the same worktree
 /// prep + scheduler mount path as [`track_pr`].
+#[cfg(test)]
 pub(crate) async fn activate_manual_branch_head(
     repo_root: &Path,
     graph: &Arc<crate::tracedecay::TraceDecay>,

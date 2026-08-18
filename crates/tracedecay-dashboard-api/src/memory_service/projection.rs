@@ -168,52 +168,6 @@ fn projection_point(meta: &Value, x: f64, y: f64) -> Result<Value, String> {
     Ok(point)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tracedecay_domain::{
-        FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ProvenanceId,
-    };
-
-    #[test]
-    fn projection_point_preserves_canonical_fact_metadata() {
-        let fact_id = FactId::derive(
-            &FactIdentityMaterialV1::new(
-                FactOwnerV1::Profile,
-                FactIdentitySourceV1::Application {
-                    operation_id: ProvenanceId::new("dashboard.projection.fact")
-                        .expect("fixture provenance must be canonical"),
-                },
-            )
-            .expect("fixture identity material must be canonical"),
-        )
-        .expect("fixture fact ID must derive");
-        let point = projection_point(
-            &json!({
-                "fact_id": fact_id.as_str(),
-                "payload_access": "eligible",
-                "content": "canonical fact content",
-                "category": "project",
-                "trust_score": 0.8,
-                "retrieval_count": 3,
-                "created_at": 1,
-                "updated_at": 2,
-                "metadata": {},
-                "entity_count": 2,
-            }),
-            0.25,
-            -0.5,
-        )
-        .expect("complete projection metadata must project");
-
-        assert_eq!(point["fact_id"], fact_id.as_str());
-        assert_eq!(point["payload_access"], "eligible");
-        assert_eq!(point["entity_count"], 2);
-        assert_eq!(point["x"], 0.25);
-        assert_eq!(point["y"], -0.5);
-    }
-}
-
 fn compute_projection(
     key: (String, i64, VectorStateFingerprint),
     rows: Vec<(Value, Vec<f64>)>,
@@ -407,4 +361,50 @@ fn projection_response(computation: &ProjectionComputation, mut obj: Map<String,
     obj.insert("points".into(), json!(computation.points));
     obj.insert("error".into(), json!(computation.error));
     Value::Object(obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_domain::{
+        FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ProvenanceId,
+    };
+
+    #[test]
+    fn projection_point_preserves_canonical_fact_metadata() {
+        let fact_id = FactId::derive(
+            &FactIdentityMaterialV1::new(
+                FactOwnerV1::Profile,
+                FactIdentitySourceV1::Application {
+                    operation_id: ProvenanceId::new("dashboard.projection.fact")
+                        .expect("fixture provenance must be canonical"),
+                },
+            )
+            .expect("fixture identity material must be canonical"),
+        )
+        .expect("fixture fact ID must derive");
+        let point = projection_point(
+            &json!({
+                "fact_id": fact_id.as_str(),
+                "payload_access": "eligible",
+                "content": "canonical fact content",
+                "category": "project",
+                "trust_score": 0.8,
+                "retrieval_count": 3,
+                "created_at": 1,
+                "updated_at": 2,
+                "metadata": {},
+                "entity_count": 2,
+            }),
+            0.25,
+            -0.5,
+        )
+        .expect("complete projection metadata must project");
+
+        assert_eq!(point["fact_id"], fact_id.as_str());
+        assert_eq!(point["payload_access"], "eligible");
+        assert_eq!(point["entity_count"], 2);
+        assert_eq!(point["x"], 0.25);
+        assert_eq!(point["y"], -0.5);
+    }
 }

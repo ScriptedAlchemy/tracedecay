@@ -6,7 +6,7 @@ use tracedecay_domain::{
 };
 
 use super::{
-    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityEmissionOutcomeV1,
     ObservabilityProducerIdentityV1, WorkOwnerObservationResultV1, execution_owner_fact_envelope,
 };
 
@@ -72,14 +72,16 @@ pub(crate) fn work_duplicate_observation_envelope(
     let envelope = match execution_owner_fact_envelope(
         identity,
         canonical_project_scope,
-        &owner_transition_ref,
-        "adjudicate_duplicate",
-        occurred_at,
-        Some(occurred_at),
-        Some(occurred_at),
-        Some(ObservabilityTerminalResultV1::Succeeded),
-        coverage,
-        payload,
+        ExecutionOwnerFactInputV1 {
+            owner_transition_ref: &owner_transition_ref,
+            operation: "adjudicate_duplicate",
+            event_time: occurred_at,
+            valid_from: Some(occurred_at),
+            valid_until: Some(occurred_at),
+            terminal_result: Some(ObservabilityTerminalResultV1::Succeeded),
+            coverage,
+            payload,
+        },
     ) {
         Ok(envelope) => envelope,
         Err(_) => return None,

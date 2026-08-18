@@ -335,7 +335,6 @@ fn rollback_refuses_a_foreign_registry_write_after_cli_apply() {
             &mut registration,
         )
         .unwrap();
-    drop(transaction);
 
     registration
         .confirm_preview(&component_set.component_set, &request, &preview)
@@ -613,5 +612,51 @@ fn the_cli_raw_args_match_the_config_writers_launch_arguments() {
         entry.get("args").unwrap(),
         "the CLI-driven global registration's raw --args values and the workspace-local config \
          writer must launch the same server with the same arguments"
+    );
+}
+
+/// Kiro's documented hook entry schema is `command` plus an optional
+/// `matcher` — an undocumented field (the old `timeout_ms`) is schema noise
+/// Kiro never reads and must not be written.
+#[test]
+fn managed_agent_hook_entries_carry_only_documented_fields() {
+    let hooks = managed_agent_hooks("/bin/tracedecay");
+    let events = hooks.as_object().expect("hooks is an object");
+    assert!(
+        !events.is_empty(),
+        "at least one managed hook is registered"
+    );
+    for (event, entries) in events {
+        for entry in entries.as_array().expect("event entries are an array") {
+            let entry = entry.as_object().expect("hook entry is an object");
+            assert!(
+                entry.contains_key("command"),
+                "hook entry for {event} must carry a command"
+            );
+            for key in entry.keys() {
+                assert!(
+                    matches!(key.as_str(), "command" | "matcher"),
+                    "hook entry for {event} carries undocumented field {key}"
+                );
+            }
+        }
+    }
+}
+
+/// Kiro custom agents do not auto-include steering, so the managed agent's
+/// `resources` must reference the global steering file explicitly.
+#[test]
+fn managed_agent_resources_reference_the_global_steering_file() {
+    let home = tempfile::tempdir().unwrap();
+    let steering = steering_path(home.path());
+    let config = managed_agent_config("/bin/tracedecay", &steering, None);
+    let expected = file_resource_uri(&steering);
+    assert!(
+        config["resources"]
+            .as_array()
+            .expect("agent config has resources")
+            .iter()
+            .any(|value| value.as_str() == Some(expected.as_str())),
+        "managed agent must load global steering as an explicit resource"
     );
 }

@@ -404,12 +404,18 @@ pub struct PreparedSemanticEvaluationProjectionV1 {
     pub prepared: PreparedVectorGenerationV1,
 }
 
+/// Process-local resource ceilings for one evaluator projection runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticEvaluationProjectionResourcesV1 {
+    pub max_sessions: usize,
+    pub memory_ceiling_bytes: u64,
+}
+
 pub fn prepare_semantic_evaluation_projection(
     artifact: LoadedSemanticArtifactV1,
     request: ProjectionBatchRequestV1,
     canonical_chunks: &[CodeSearchChunkV1],
-    max_sessions: usize,
-    memory_ceiling_bytes: u64,
+    resources: SemanticEvaluationProjectionResourcesV1,
     cache: &SemanticEvaluationProjectionBatchCacheV1,
     cache_policy: SemanticEvaluationProjectionBatchCachePolicyV1,
     cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
@@ -424,10 +430,10 @@ pub fn prepare_semantic_evaluation_projection(
         Arc::clone(&authority),
         factory,
         SessionPoolConfigV1 {
-            max_sessions,
+            max_sessions: resources.max_sessions,
             max_queued_waiters: 0,
             idle_timeout: std::time::Duration::from_mins(5),
-            memory_ceiling_bytes,
+            memory_ceiling_bytes: resources.memory_ceiling_bytes,
         },
     )
     .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;

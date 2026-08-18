@@ -57,7 +57,7 @@ pub enum WorkEvidenceContinuationV1 {
         cursor: OpaqueCursor,
     },
     TaskSession {
-        continuation: WorkTaskSessionContinuationV1,
+        continuation: Box<WorkTaskSessionContinuationV1>,
     },
 }
 
@@ -565,7 +565,7 @@ where
                                         if let Some(continuation) = evidence.continuation.clone() {
                                             continuations.push(
                                                 WorkEvidenceContinuationV1::TaskSession {
-                                                    continuation,
+                                                    continuation: Box::new(continuation),
                                                 },
                                             );
                                         }
@@ -750,10 +750,11 @@ where
             expansion: Some(WorkEvidenceExpansionSelectorV1::TaskSession {
                 attempt: request.attempt.clone(),
             }),
-            continuation: request
-                .continuation
-                .clone()
-                .map(|continuation| WorkEvidenceContinuationV1::TaskSession { continuation }),
+            continuation: request.continuation.clone().map(|continuation| {
+                WorkEvidenceContinuationV1::TaskSession {
+                    continuation: Box::new(continuation),
+                }
+            }),
             observed_at: request.observed_at,
         };
         let root = self
@@ -1038,7 +1039,7 @@ fn task_session_continuation(
         Some(WorkEvidenceContinuationV1::TaskSession { continuation })
             if &continuation.attempt == identity =>
         {
-            Some(continuation.clone())
+            Some(continuation.as_ref().clone())
         }
         _ => None,
     }

@@ -1084,6 +1084,9 @@ const fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmission
         ProjectionStoreError::Contract(_) => {
             HostAdmissionOutcome::degraded("projection_contract_rejected")
         }
+        ProjectionStoreError::SanitizationRefused { .. } => {
+            HostAdmissionOutcome::degraded("projection_sanitization_refused")
+        }
     }
 }
 

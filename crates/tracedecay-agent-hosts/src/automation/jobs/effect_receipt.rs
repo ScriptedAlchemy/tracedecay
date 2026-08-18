@@ -396,13 +396,13 @@ fn indeterminate_error(
 ) -> AutomationRunError {
     AutomationRunError::PartialEffect {
         run_id: run_id.to_owned(),
-        committed_receipt: indeterminate_delivery_receipt(
+        committed_receipt: Box::new(indeterminate_delivery_receipt(
             run_id,
             task_key,
             mode,
             target_digest,
             content_digest,
-        ),
+        )),
         ledger_record: None,
         detail: "User job delivery was attempted but could not be proven uncommitted; reconcile the payload-free delivery receipt before retrying.",
     }
@@ -416,7 +416,7 @@ pub(super) fn after_delivery<T>(
 ) -> AutomationRunResult<T> {
     result.map_err(|_| AutomationRunError::PartialEffect {
         run_id: run_id.to_owned(),
-        committed_receipt: receipt,
+        committed_receipt: Box::new(receipt),
         ledger_record: None,
         detail,
     })
@@ -542,12 +542,15 @@ mod tests {
             &sha256_bytes(b"private delivery body"),
         );
         let AutomationRunError::PartialEffect {
-            committed_receipt: AutomationCommittedReceipt::UserJobDelivery(receipt),
+            committed_receipt,
             ledger_record,
             ..
         } = error
         else {
             panic!("attempted delivery must remain a typed partial effect")
+        };
+        let AutomationCommittedReceipt::UserJobDelivery(receipt) = *committed_receipt else {
+            panic!("attempted delivery must carry a delivery receipt")
         };
         assert!(ledger_record.is_none());
         assert_eq!(receipt.run_id(), "run-hostile");
@@ -630,12 +633,15 @@ mod tests {
         .await
         .expect_err("the opened full device must reject the write");
         let AutomationRunError::PartialEffect {
-            committed_receipt: AutomationCommittedReceipt::UserJobDelivery(receipt),
+            committed_receipt,
             ledger_record,
             ..
         } = error
         else {
             panic!("post-open failure must be a partial effect")
+        };
+        let AutomationCommittedReceipt::UserJobDelivery(receipt) = *committed_receipt else {
+            panic!("post-open failure must carry a delivery receipt")
         };
         assert!(ledger_record.is_none());
         assert_eq!(receipt.task_key(), "user_job:private-file");
@@ -664,12 +670,15 @@ mod tests {
         .await
         .expect_err("unknown worker phase must fail closed as indeterminate");
         let AutomationRunError::PartialEffect {
-            committed_receipt: AutomationCommittedReceipt::UserJobDelivery(receipt),
+            committed_receipt,
             ledger_record,
             ..
         } = error
         else {
             panic!("worker panic must preserve an indeterminate receipt")
+        };
+        let AutomationCommittedReceipt::UserJobDelivery(receipt) = *committed_receipt else {
+            panic!("worker panic must carry an indeterminate receipt")
         };
         assert!(ledger_record.is_none());
         assert_eq!(receipt.run_id(), "run-webhook-panic");

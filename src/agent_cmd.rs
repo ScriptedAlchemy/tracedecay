@@ -830,6 +830,15 @@ fn apply_canonical_component_set(
         receipt.component_receipts.len(),
         hex::encode(receipt.operation_id)
     );
+    // Hook trust is the one Codex activation step that stays host-owned, so a
+    // successful (re)install finishes with the exact remaining action.
+    if agent_id == "codex"
+        && request.lifecycle.operation
+            != tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall
+        && let Some(followup) = tracedecay::agents::codex::codex_hook_trust_followup(home)
+    {
+        eprintln!("  {followup}");
+    }
     Ok(())
 }
 
@@ -4236,7 +4245,7 @@ esac
             !matches!(error, HostBundleError::StalePreview(_)),
             "a standing refusal must not be laundered into a retryable staleness report"
         );
-        assert_eq!(error, HostBundleError::OwnershipConflict);
+        assert!(matches!(error, HostBundleError::OwnershipConflict(_)));
     }
 
     /// A foreign edit landing between `stage` and `apply` must still abort the

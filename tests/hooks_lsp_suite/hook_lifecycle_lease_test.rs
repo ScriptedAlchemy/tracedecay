@@ -430,9 +430,11 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         // identity from the payload CWD rather than the process CWD. The
         // recorded host fixture intentionally uses a portable workspace path,
         // so bind this production-shaped payload to this test's enrollment.
-        let payload = (hook == "hook-claude-post-tool-use")
-            .then(|| payload_with_enrolled_cwd(&payload, &project))
-            .unwrap_or(payload);
+        let payload = if hook == "hook-claude-post-tool-use" {
+            payload_with_enrolled_cwd(&payload, &project)
+        } else {
+            payload
+        };
         let output = run_hook_at(&home, &project, hook, Some(&payload));
 
         assert!(output.status.success(), "{hook}: {output:?}");

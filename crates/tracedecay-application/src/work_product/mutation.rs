@@ -55,10 +55,10 @@ where
         match request {
             WorkProductMutationRequestV1::Create(request) => self.create(context, binding, request),
             WorkProductMutationRequestV1::AddTask(request) => {
-                self.add_task(context, binding, request)
+                self.add_task(context, binding, *request)
             }
             WorkProductMutationRequestV1::CreateTask(request) => {
-                self.create_task(context, binding, request)
+                self.create_task(context, binding, *request)
             }
             WorkProductMutationRequestV1::DecideProposal(request) => {
                 self.decide_proposal(context, binding, request)
@@ -185,25 +185,25 @@ where
         let selection = request.selection;
         Ok(match request.change {
             WorkProductChangeDraftV1::AddTask { item } => {
-                WorkProductMutationRequestV1::AddTask(AddWorkTaskRequestV1 {
+                WorkProductMutationRequestV1::AddTask(Box::new(AddWorkTaskRequestV1 {
                     selection,
-                    item,
+                    item: *item,
                     mutation,
-                })
+                }))
             }
             WorkProductChangeDraftV1::CreateTask {
                 initiative,
                 plan,
                 milestone,
                 item,
-            } => WorkProductMutationRequestV1::CreateTask(CreateWorkTaskRequestV1 {
+            } => WorkProductMutationRequestV1::CreateTask(Box::new(CreateWorkTaskRequestV1 {
                 selection,
                 initiative,
                 plan,
                 milestone,
-                item,
+                item: *item,
                 mutation,
-            }),
+            })),
             WorkProductChangeDraftV1::DecideProposal {
                 proposal,
                 disposition,
@@ -775,13 +775,11 @@ fn validate_change_request(
         identity,
         linked_at,
     } = change
-    {
-        if identity.task_id() != task_id
+        && (identity.task_id() != task_id
             || *linked_at != occurred_at
-            || *based_on_version != expected_graph_version
-        {
-            return Err(WorkProductApplicationErrorV1::InvalidRequest);
-        }
+            || *based_on_version != expected_graph_version)
+    {
+        return Err(WorkProductApplicationErrorV1::InvalidRequest);
     }
     Ok(())
 }

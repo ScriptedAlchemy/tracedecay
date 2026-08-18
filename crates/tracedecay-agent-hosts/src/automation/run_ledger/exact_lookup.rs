@@ -1429,7 +1429,7 @@ impl<'a> JsonRangeReader<'a> {
             self.skip_whitespace()?;
             self.expect_byte(b':', "expected ':' after JSON object key")?;
             self.skip_whitespace()?;
-            validate(self, &key)?;
+            validate(self, key)?;
             self.skip_whitespace()?;
             if self.consume_if(b'}')? {
                 return Ok(());

@@ -387,7 +387,16 @@ impl CatalogHostComponentRegistrationAuthority {
                 })
             });
         if aliased {
-            return Err(crate::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
+            let surface = self.registration_path.as_deref().map_or_else(
+                || "the opencode configuration".to_string(),
+                |path| path.display().to_string(),
+            );
+            return Err(
+                crate::agents::host_bundle_v2::HostBundleError::OwnershipConflict(format!(
+                    "{surface}: a non-tracedecay LSP entry runs the tracedecay binary, so \
+                     ownership of the analyzer registration cannot be resolved"
+                )),
+            );
         }
         Ok(())
     }
@@ -1386,21 +1395,44 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         let all_missing = states.iter().all(|state| {
             *state == crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing
         });
-        let any_corrupt = states.iter().any(|state| {
-            *state == crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Corrupt
-        });
-        if any_corrupt {
-            return Err(crate::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
+        let corrupt_components = component_set
+            .components
+            .iter()
+            .zip(&states)
+            .filter(|(_, state)| {
+                **state == crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Corrupt
+            })
+            .map(|(component, _)| format!("{:?}", component.manifest.component))
+            .collect::<Vec<_>>();
+        if !corrupt_components.is_empty() {
+            let surfaces = self
+                .registration_paths(component_set)?
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(
+                crate::agents::host_bundle_v2::HostBundleError::OwnershipConflict(format!(
+                    "host-native registration for {} is unreadable or contradictory; inspect {}",
+                    corrupt_components.join(", "),
+                    surfaces
+                )),
+            );
         }
         let claude_global_install = component_set.host
             == crate::agents::host_bundle_v2::HostKindV1::ClaudeCode
             && self.operation == crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install;
         self.should_apply = match self.operation {
+            // A registration that is partially present or `Repairable` on
+            // install is TraceDecay's own residue — staged sources, a
+            // marketplace entry, or a stale native cache left by a prior
+            // install of this same bundle. Reinstall/update over it must
+            // converge by re-activating, exactly as `Update` does; only a
+            // `Corrupt` (unreadable/contradictory) surface refuses above.
+            // Refusing the mixed states here made every reinstall of a
+            // partially activated host fail as a phantom ownership conflict.
             crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install => {
-                if !all_current && !all_missing && !claude_global_install {
-                    return Err(crate::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
-                }
-                all_missing || claude_global_install
+                !all_current || claude_global_install
             }
             crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => !all_missing,
             crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
@@ -1869,6 +1901,70 @@ mod tests {
             !authority.supports_artifact_only_backup_restore(&component_set.component_set),
             "the Copilot lifecycle drives `copilot mcp add`, so its deployed \
              bytes are not the whole lifecycle"
+        );
+    }
+
+    /// The live reinstall journey: TraceDecay's own staging residue (a
+    /// personal marketplace entry with no native activation yet) makes every
+    /// Codex component registration read `Repairable`. An install over that
+    /// self-owned residue must proceed and re-activate — refusing it as an
+    /// ownership conflict made `tracedecay install --agent codex` fail on
+    /// every reinstall/update of TraceDecay's own prior install.
+    #[test]
+    fn install_preflight_converges_over_own_repairable_registration() {
+        use crate::agents::host_bundle_v2::HostComponentSetRegistrationV1;
+
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle_root = tempfile::tempdir().unwrap();
+        let marketplace = home.path().join(".agents/plugins/marketplace.json");
+        std::fs::create_dir_all(marketplace.parent().unwrap()).unwrap();
+        std::fs::write(
+            &marketplace,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "name": "personal",
+                "plugins": [{
+                    "name": "tracedecay",
+                    "source": {"source": "local", "path": "./.codex/plugins/tracedecay"}
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let component_set =
+            crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
+                HostKindV1::Codex,
+                0,
+            )
+            .expect("Codex has a compiled default set");
+        let mut authority = CatalogHostComponentRegistrationAuthority::new(
+            "codex",
+            home.path(),
+            lifecycle_root.path(),
+            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install,
+        )
+        .expect("catalog registration authority");
+        let request = crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1 {
+            lifecycle: crate::agents::host_bundle_v2::HostComponentSetLifecycleRequestV1 {
+                operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install,
+                expected_host: HostKindV1::Codex,
+                expected_components: component_set
+                    .component_set
+                    .components
+                    .iter()
+                    .map(|component| component.manifest.component)
+                    .collect(),
+                explicit_confirmation: true,
+                hermes_profile_bindings: 0,
+            },
+            operation_id: [7; 16],
+        };
+        authority
+            .preflight(&component_set.component_set, &request)
+            .expect("install over TraceDecay's own repairable registration must proceed");
+        assert!(
+            authority.should_apply,
+            "the converging install must re-activate the host registration"
         );
     }
 

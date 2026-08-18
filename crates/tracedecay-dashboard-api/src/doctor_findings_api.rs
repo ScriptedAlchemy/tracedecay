@@ -167,9 +167,9 @@ mod tests {
         DoctorReportComposerV1, DoctorReportV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
         HostIntegrationDoctorPort, HostIntegrationReadV1, IngestRefusalCensusReadV1,
         LanguageServerDoctorPort, LanguageServerReadV1, ObservabilityDoctorPort,
-        ObservabilityReadV1,
-        OperationalAuditDoctorPort, OperationalAuditReadV1, ProfileAuthorityReadV1,
-        RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
+        ObservabilityReadV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
+        ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort,
+        RuntimeHealthReadV1, StorageDoctorPort,
     };
     use tracedecay_application::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,

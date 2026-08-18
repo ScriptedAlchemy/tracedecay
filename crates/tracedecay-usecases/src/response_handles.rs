@@ -105,7 +105,7 @@ fn store_response_handle_locked(
     now: i64,
 ) -> Result<ResponseHandleRecord> {
     let handle = response_handle_for(content);
-    let path = response_handle_path(&root, &handle)?;
+    let path = response_handle_path(root, &handle)?;
     let stored = StoredResponseHandleRecord {
         created_at: now,
         expires_at: now.saturating_add(RESPONSE_HANDLE_TTL_SECS),
@@ -228,12 +228,12 @@ fn cleanup_expired_response_handles_in_root(
             removed_tombstones,
         };
         cleanup.scanned = visit_stored_files(root, |file| {
-            if file.record.expires_at <= now {
-                if PrivateStoreIo::remove_file_durable(&file.path).map_err(|error| {
+            if file.record.expires_at <= now
+                && PrivateStoreIo::remove_file_durable(&file.path).map_err(|error| {
                     file_error(&file.path, "durably delete expired record", error)
-                })? {
-                    cleanup.removed_expired += 1;
-                }
+                })?
+            {
+                cleanup.removed_expired += 1;
             }
             Ok(())
         })?;
@@ -476,6 +476,7 @@ fn with_exclusive_lock<T>(root: &Path, operation: impl FnOnce() -> Result<T>) ->
     validate_response_handle_path(&path)?;
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)
@@ -660,6 +661,7 @@ mod tests {
             .join(format!(".{leaf}{LOCK_SUFFIX}"));
         let held = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(lock_path)

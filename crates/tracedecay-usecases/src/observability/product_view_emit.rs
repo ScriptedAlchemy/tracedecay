@@ -13,8 +13,8 @@ use tracedecay_domain::{
 use tracedecay_policy::work_loop::WorkProposalDispositionV1;
 
 use super::{
-    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1, WorkOwnerObservationResultV1,
-    execution_owner_fact_envelope,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityEmissionOutcomeV1,
+    WorkOwnerObservationResultV1, execution_owner_fact_envelope,
 };
 
 pub fn record_task_intelligence_decision(
@@ -234,26 +234,30 @@ pub fn record_terminal_attempt_product_views(
     let provider_envelope = execution_owner_fact_envelope(
         producer.identity(),
         scope,
-        &format!("work-provider:{attempt_ref}"),
-        "execute_work_attempt",
-        observed_at,
-        None,
-        Some(observed_at),
-        Some(terminal_result(terminal)),
-        CoverageStateV1::Known,
-        provider,
+        ExecutionOwnerFactInputV1 {
+            owner_transition_ref: &format!("work-provider:{attempt_ref}"),
+            operation: "execute_work_attempt",
+            event_time: observed_at,
+            valid_from: None,
+            valid_until: Some(observed_at),
+            terminal_result: Some(terminal_result(terminal)),
+            coverage: CoverageStateV1::Known,
+            payload: provider,
+        },
     );
     let outcome_envelope = execution_owner_fact_envelope(
         producer.identity(),
         scope,
-        &format!("work-outcome:{attempt_ref}"),
-        "execute_work_attempt",
-        observed_at,
-        None,
-        Some(observed_at),
-        Some(terminal_result(terminal)),
-        CoverageStateV1::Known,
-        outcome,
+        ExecutionOwnerFactInputV1 {
+            owner_transition_ref: &format!("work-outcome:{attempt_ref}"),
+            operation: "execute_work_attempt",
+            event_time: observed_at,
+            valid_from: None,
+            valid_until: Some(observed_at),
+            terminal_result: Some(terminal_result(terminal)),
+            coverage: CoverageStateV1::Known,
+            payload: outcome,
+        },
     );
     let (Ok(provider_envelope), Ok(outcome_envelope)) = (provider_envelope, outcome_envelope)
     else {
@@ -305,14 +309,16 @@ fn emit_with_coverage(
     let envelope = execution_owner_fact_envelope(
         producer.identity(),
         scope,
-        owner_ref,
-        operation,
-        observed_at,
-        None,
-        Some(observed_at),
-        terminal_result,
-        coverage,
-        payload,
+        ExecutionOwnerFactInputV1 {
+            owner_transition_ref: owner_ref,
+            operation,
+            event_time: observed_at,
+            valid_from: None,
+            valid_until: Some(observed_at),
+            terminal_result,
+            coverage,
+            payload,
+        },
     );
     let Ok(envelope) = envelope else {
         return WorkOwnerObservationResultV1::Unavailable;

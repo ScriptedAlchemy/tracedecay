@@ -111,7 +111,6 @@ pub(in crate::store::memory) async fn project_memory_replay_automatic_fact_tx(
                 PROJECT_MEMORY_WRITE_OPERATION,
                 "automatic fact replay target is missing",
             )
-            .into()
         })
 }
 
@@ -184,8 +183,7 @@ pub(in crate::store::memory) async fn project_memory_existing_automatic_fact_rec
             return Err(storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
                 "automatic fact apply identity was reused with a different request",
-            )
-            .into());
+            ));
         }
         return project_memory_automatic_fact_receipt_record_tx(transaction, owner, apply_id).await;
     }

@@ -4,9 +4,7 @@ use std::sync::LazyLock;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
-use super::definitions::{
-    Column, INDEXES, Index, OBSERVATIONS_TABLE_NAME, REGISTRY_TABLE_NAMES, TABLES, Table,
-};
+use super::definitions::{Column, INDEXES, Index, REGISTRY_TABLE_NAMES, TABLES, Table};
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, read_columns, read_foreign_keys, read_indexes,
 };
@@ -262,98 +260,6 @@ fn primary_key_index_matches(actual: &ActualIndex, expected_columns: &[&str]) ->
                     && actual.collation.eq_ignore_ascii_case("BINARY")
                     && actual.name.eq_ignore_ascii_case(expected)
             })
-}
-
-fn index_has_columns(actual: &ActualIndex, expected: &[&str]) -> bool {
-    actual.unique
-        && actual.origin.eq_ignore_ascii_case("u")
-        && !actual.partial
-        && actual.columns.len() == expected.len()
-        && actual
-            .columns
-            .iter()
-            .zip(expected)
-            .all(|(actual, expected)| {
-                actual.cid >= 0
-                    && !actual.descending
-                    && actual.collation.eq_ignore_ascii_case("BINARY")
-                    && actual.name.eq_ignore_ascii_case(expected)
-            })
-}
-
-pub async fn validate_observation_migration_source(
-    conn: &impl QueryExecutor,
-    has_legacy_idempotency: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    let Some(contract) = TABLES
-        .iter()
-        .find(|contract| contract.name == OBSERVATIONS_TABLE_NAME)
-    else {
-        return Err(global_db_operation_message(
-            OPERATION,
-            "canonical observations schema contract is not defined",
-        ));
-    };
-    let columns = read_columns(conn, contract.name).await?;
-    if columns.len() != contract.columns.len() + usize::from(has_legacy_idempotency)
-        || contract.columns.iter().any(|expected| {
-            columns
-                .get(&expected.name.to_ascii_lowercase())
-                .is_none_or(|actual| !column_metadata_matches(actual, expected))
-        })
-    {
-        return Err(global_db_operation_message(
-            OPERATION,
-            "observations has incompatible metadata for canonical migration",
-        ));
-    }
-    if has_legacy_idempotency {
-        let Some(column) = columns.get("idempotency_key") else {
-            return Err(global_db_operation_message(
-                OPERATION,
-                "observations is missing legacy idempotency metadata",
-            ));
-        };
-        if column.hidden != 0
-            || !column.declared_type.eq_ignore_ascii_case("TEXT")
-            || !column.not_null
-            || column.default_value.is_some()
-            || column.primary_key_ordinal != 0
-        {
-            return Err(global_db_operation_message(
-                OPERATION,
-                "observations has incompatible legacy idempotency metadata",
-            ));
-        }
-    }
-    let foreign_keys = read_foreign_keys(conn, contract.name).await?;
-    if !foreign_keys_match(&foreign_keys, contract) {
-        return Err(global_db_operation_message(
-            OPERATION,
-            "observations has incompatible foreign keys for canonical migration",
-        ));
-    }
-    let indexes = read_indexes(conn, contract.name).await?;
-    let unique = indexes
-        .iter()
-        .filter(|index| index.unique && !index.origin.eq_ignore_ascii_case("pk"))
-        .collect::<Vec<_>>();
-    let expected_count = 1 + usize::from(has_legacy_idempotency);
-    if unique.len() != expected_count
-        || !unique
-            .iter()
-            .any(|index| index_has_columns(index, &["observation_id"]))
-        || (has_legacy_idempotency
-            && !unique
-                .iter()
-                .any(|index| index_has_columns(index, &["idempotency_key"])))
-    {
-        return Err(global_db_operation_message(
-            OPERATION,
-            "observations has incompatible unique indexes for canonical migration",
-        ));
-    }
-    Ok(())
 }
 
 async fn validate_indexes_for_table(

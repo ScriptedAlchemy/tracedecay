@@ -53,7 +53,7 @@ pub struct ExecutionTopologyRollupFragmentV1 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ExecutionTopologyRollupFragmentStateV1 {
     Reduced {
-        reduced: ExecutionTopologyReducedRollupStateV1,
+        reduced: Box<ExecutionTopologyReducedRollupStateV1>,
     },
     Capped,
 }
@@ -329,7 +329,9 @@ pub fn build_execution_topology_rollup_fragment(
             return Err(ExecutionTopologyRollupErrorV1::PageUnavailable);
         }
         match reduce_classified_execution_topology_rollup_state(exact_day_horizon, &evidence) {
-            Ok(reduced) => ExecutionTopologyRollupFragmentStateV1::Reduced { reduced },
+            Ok(reduced) => ExecutionTopologyRollupFragmentStateV1::Reduced {
+                reduced: Box::new(reduced),
+            },
             Err(
                 ExecutionTopologyRollupStateErrorV1::CarryBudgetExceeded
                 | ExecutionTopologyRollupStateErrorV1::IntervalBudgetExceeded,

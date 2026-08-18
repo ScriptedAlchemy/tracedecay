@@ -141,7 +141,7 @@ pub enum RetainedSurfaceResultV1 {
     LcmLoadSession(LcmLoadSessionResultV1),
     LcmGrep(LcmGrepResultV1),
     LcmDescribe(LcmDescribeResultV1),
-    LcmExpand(LcmExpandResultV1),
+    LcmExpand(Box<LcmExpandResultV1>),
     LcmExpandQuery(LcmExpandQueryResultV1),
 }
 

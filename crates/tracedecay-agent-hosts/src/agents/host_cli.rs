@@ -379,7 +379,7 @@ fn resolve_launch_command(program: &Path) -> Result<(PathBuf, Vec<OsString>)> {
             })?;
         let mut launch_args = interpreter_tokens[1..]
             .iter()
-            .map(|token| OsString::from(token))
+            .map(OsString::from)
             .collect::<Vec<_>>();
         launch_args.push(program.as_os_str().to_os_string());
         Ok((interpreter_path, launch_args))

@@ -103,6 +103,13 @@ pub async fn project_observation(
                     ProjectionSkipReason::InvalidContract,
                 )
                 .await?;
+            } else if matches!(error, ProjectionStoreError::SanitizationRefused { .. }) {
+                persist_projection_rejection_on_database(
+                    database,
+                    observation_id,
+                    ProjectionSkipReason::SanitizationRefused,
+                )
+                .await?;
             }
             Err(error)
         }
@@ -169,6 +176,13 @@ pub async fn project_observation_with_engine(
                     conn,
                     observation_id,
                     ProjectionSkipReason::InvalidContract,
+                )
+                .await?;
+            } else if matches!(error, ProjectionStoreError::SanitizationRefused { .. }) {
+                persist_projection_rejection_with_engine(
+                    conn,
+                    observation_id,
+                    ProjectionSkipReason::SanitizationRefused,
                 )
                 .await?;
             }

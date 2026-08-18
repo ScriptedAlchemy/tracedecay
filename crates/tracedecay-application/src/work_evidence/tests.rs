@@ -425,10 +425,10 @@ fn provider_session_receipt(identity: WorkAttemptIdentityV1) -> WorkAttemptRecei
     }
 }
 
-fn task_session_service<'a>(
-    sessions: &'a Sessions,
+fn task_session_service(
+    sessions: &Sessions,
 ) -> (
-    WorkEvidenceRetrievalServiceV1<RootPort, Owner, Receipts, &'a Sessions, Anchors>,
+    WorkEvidenceRetrievalServiceV1<RootPort, Owner, Receipts, &Sessions, Anchors>,
     Arc<AtomicUsize>,
 ) {
     let (graph, identity, link) = rooted_graph();
@@ -468,14 +468,14 @@ fn task_session_continuation_request() -> WorkEvidenceRetrieveRequestV1 {
         attempt: attempt.clone(),
     });
     request.continuation = Some(WorkEvidenceContinuationV1::TaskSession {
-        continuation: WorkTaskSessionContinuationV1 {
+        continuation: Box::new(WorkTaskSessionContinuationV1 {
             verified_version: request.verified_version.clone(),
             attempt,
             source: provider_session(),
             participant_epoch: digest('e'),
             temporal_cursor: None,
             ranking_cursor: None,
-        },
+        }),
     });
     request
 }
@@ -597,7 +597,7 @@ async fn continuation_must_match_an_exact_reauthorized_expansion_relation() {
         link_id: id("link.work-evidence.attempt"),
     });
     request.continuation = Some(WorkEvidenceContinuationV1::TaskSession {
-        continuation: WorkTaskSessionContinuationV1 {
+        continuation: Box::new(WorkTaskSessionContinuationV1 {
             verified_version: verified(),
             attempt: attempt(&id("task.work-evidence")),
             source: ObservationSourceIdentityV1::for_provider(
@@ -608,7 +608,7 @@ async fn continuation_must_match_an_exact_reauthorized_expansion_relation() {
             participant_epoch: digest('e'),
             temporal_cursor: Some(OpaqueCursor::new("cursor.not-authority").unwrap()),
             ranking_cursor: None,
-        },
+        }),
     });
     assert_eq!(
         validate_request(&request),

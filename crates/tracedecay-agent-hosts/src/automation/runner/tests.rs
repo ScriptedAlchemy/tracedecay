@@ -949,7 +949,7 @@ async fn automatic_session_curation_records_one_terminal_effect() {
         &run_control,
         "run-automatic-session-curation",
         Some(&format!("sha256:{}", "a".repeat(64))),
-        &[accepted.clone()],
+        std::slice::from_ref(&accepted),
     )
     .await
     .unwrap();

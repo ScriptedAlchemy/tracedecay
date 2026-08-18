@@ -77,9 +77,9 @@ pub use runtime_service::{
 pub use semantic_evaluation::{
     PreparedSemanticEvaluationProjectionV1, SemanticEvaluationCancellationV1,
     SemanticEvaluationProjectionBatchCachePolicyV1, SemanticEvaluationProjectionBatchCacheV1,
-    SemanticEvaluationProjectionCancellationV1, SemanticEvaluationQueryEmbedderV1,
-    SemanticEvaluationQueryFactoryV1, measure_semantic_evaluation_projection_cancellation,
-    prepare_semantic_evaluation_projection,
+    SemanticEvaluationProjectionCancellationV1, SemanticEvaluationProjectionResourcesV1,
+    SemanticEvaluationQueryEmbedderV1, SemanticEvaluationQueryFactoryV1,
+    measure_semantic_evaluation_projection_cancellation, prepare_semantic_evaluation_projection,
 };
 
 /// Default `FastEmbed` catalog model selected on install (offline-safe).

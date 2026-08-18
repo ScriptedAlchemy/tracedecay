@@ -422,11 +422,13 @@ fn read_generation_records_inner(
         &receipts,
         &mut vectors,
         base_generation.as_ref(),
-        &source_generation,
-        &source_manifest_digest,
-        Arc::clone(&cancellation),
-        visiting,
-        recover,
+        ReusedVectorHydrationContext {
+            source_generation: &source_generation,
+            source_manifest_digest: &source_manifest_digest,
+            cancellation: Arc::clone(&cancellation),
+            visiting,
+            recover,
+        },
     )?;
     require_count(owner, ROW_COUNT, vectors.len())?;
     let measured_vector_bytes = vectors.values().try_fold(0_u64, |total, vector| {
@@ -561,16 +563,20 @@ fn read_scope(
     Ok(Some((entities, relations)))
 }
 
+struct ReusedVectorHydrationContext<'a, 'b> {
+    source_generation: &'a CodeGenerationId,
+    source_manifest_digest: &'a ManifestDigest,
+    cancellation: Arc<dyn GraphCancellation>,
+    visiting: &'a mut BTreeSet<VectorGenerationIdV1>,
+    recover: Option<&'a PublishedBaseRecover<'b>>,
+}
+
 fn hydrate_reused_vectors(
     snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
     receipts: &[ProjectionBatchReceiptV1],
     vectors: &mut BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
     base_generation: Option<&VectorGenerationIdV1>,
-    source_generation: &CodeGenerationId,
-    source_manifest_digest: &ManifestDigest,
-    cancellation: Arc<dyn GraphCancellation>,
-    visiting: &mut BTreeSet<VectorGenerationIdV1>,
-    recover: Option<&PublishedBaseRecover<'_>>,
+    context: ReusedVectorHydrationContext<'_, '_>,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
     let missing = receipts
         .iter()
@@ -588,8 +594,13 @@ fn hydrate_reused_vectors(
             missing[0].chunk_id.clone(),
         ));
     };
-    let Some(base) =
-        read_generation_records_inner(snapshot, base_id, cancellation, visiting, recover)?
+    let Some(base) = read_generation_records_inner(
+        snapshot,
+        base_id,
+        context.cancellation,
+        context.visiting,
+        context.recover,
+    )?
     else {
         return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
             BaseGenerationIncompatibilityV1::MissingSnapshot,
@@ -599,8 +610,8 @@ fn hydrate_reused_vectors(
         &missing,
         vectors,
         base.generation.vectors(),
-        source_generation,
-        source_manifest_digest,
+        context.source_generation,
+        context.source_manifest_digest,
     )
 }
 
@@ -645,12 +656,10 @@ fn attach_reused_receipts(
     let mut named = BTreeSet::new();
     let mut reused_batch = None;
     for (index, batch) in receipts.iter().enumerate() {
-        if batch.reused_count > 0 {
-            if reused_batch.replace(index).is_some() {
-                return Err(corrupt(
-                    "published generation names reused receipts on more than one batch",
-                ));
-            }
+        if batch.reused_count > 0 && reused_batch.replace(index).is_some() {
+            return Err(corrupt(
+                "published generation names reused receipts on more than one batch",
+            ));
         }
         for receipt in &batch.receipts {
             if !named.insert(receipt.chunk_id.clone()) {

@@ -827,144 +827,6 @@ pub(in crate::store::memory) async fn relation_kinds_from_canonical_source_for_t
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    use serde_json::json;
-    use tempfile::{TempDir, tempdir};
-    use tracedecay_domain::{
-        Confidence, FactCategoryV1, FactId, FactOwnerV1, ProvenanceId, UtcMicros,
-    };
-    use tracedecay_store::{
-        FactCommitOutcome, FactReadControl, FactStore, FactStoreError, FactWriteControl,
-    };
-
-    use super::*;
-    use crate::db::engine::params;
-    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-    use crate::store::memory::DatabaseFactStore;
-    use crate::store::memory::crud::{initial_batch, sanitize_payload};
-
-    async fn database(label: &str) -> (TempDir, Database) {
-        let directory = tempdir().expect("create graph telemetry fixture directory");
-        let path = directory.path().join(format!("{label}.db"));
-        let authority = DatabaseAuthority::acquire_test(&path, "graph telemetry test authority")
-            .expect("acquire graph telemetry fixture authority");
-        let (database, _) = Database::publish_profile_memory_test_runtime(
-            &path,
-            &authority,
-            TestDatabaseRuntimeMode::Initialize,
-        )
-        .await
-        .expect("publish graph telemetry fixture runtime");
-        (directory, database)
-    }
-
-    fn write_control() -> FactWriteControl {
-        FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
-    }
-
-    async fn seed_source_fact(database: &Database, label: &str) -> FactId {
-        let sanitized = sanitize_payload(
-            &format!("canonical {label} source fact"),
-            FactCategoryV1::General,
-            &[],
-            &[],
-            &json!({"fixture": label}),
-            None,
-        )
-        .expect("sanitize graph telemetry fixture payload")
-        .expect("graph telemetry fixture remains durable");
-        let batch = initial_batch(
-            &FactOwnerV1::Profile,
-            &ProvenanceId::new(format!("graph.telemetry.{label}.seed"))
-                .expect("graph telemetry fixture operation id"),
-            sanitized.payload,
-            sanitized.access,
-            Confidence::new(0.8).expect("graph telemetry fixture confidence"),
-            None,
-            UtcMicros(1_000_000),
-        )
-        .expect("create graph telemetry fixture batch");
-        let fact_id = batch.fact_id().clone();
-        let outcome = DatabaseFactStore::new(database)
-            .commit_fact(batch, &write_control())
-            .await
-            .expect("commit graph telemetry fixture fact");
-        assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
-        fact_id
-    }
-
-    #[tokio::test]
-    async fn cancelled_source_load_records_materialized_source_work() {
-        let (_directory, database) = database("cancelled-source-telemetry").await;
-        seed_source_fact(&database, "cancelled-source-telemetry").await;
-        let observer = database.project_memory_reconciliation_telemetry_observer();
-        let before = observer.snapshot();
-        let checks = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::clone(&checks);
-        let control = FactReadControl::new(Arc::new(move || {
-            observed.fetch_add(1, Ordering::AcqRel) >= 3
-        }));
-
-        let error = load_source(
-            &database,
-            &FactOwnerV1::Profile,
-            Some(&control),
-            Some(&database),
-        )
-        .await
-        .expect_err("source read must stop after materializing its first fact row");
-        assert!(matches!(error, FactStoreError::ReadCancelled));
-        assert_eq!(checks.load(Ordering::Acquire), 4);
-
-        let cancelled = observer.snapshot();
-        assert!(cancelled.source_rows_loaded > before.source_rows_loaded);
-        assert!(cancelled.source_bytes_loaded > before.source_bytes_loaded);
-    }
-
-    #[tokio::test]
-    async fn failed_source_load_records_materialized_source_work() {
-        let (_directory, database) = database("failed-source-telemetry").await;
-        let fact_id = seed_source_fact(&database, "failed-source-telemetry").await;
-        let transaction = database
-            .begin_memory_write_transaction(OPERATION)
-            .await
-            .expect("begin source corruption transaction");
-        assert_eq!(
-            transaction
-                .execute(
-                    "UPDATE memory_v2_current_facts
-                     SET active_assertion_id = NULL
-                     WHERE fact_id = ?1",
-                    params![fact_id.as_str()],
-                )
-                .await
-                .expect("clear canonical assertion reference"),
-            1
-        );
-        transaction
-            .commit()
-            .await
-            .expect("commit source corruption transaction");
-        let observer = database.project_memory_reconciliation_telemetry_observer();
-        let before = observer.snapshot();
-
-        let error = load_source(&database, &FactOwnerV1::Profile, None, Some(&database))
-            .await
-            .expect_err("missing canonical assertion must fail source loading");
-        assert!(matches!(error, FactStoreError::PayloadAccessMismatch));
-
-        let failed = observer.snapshot();
-        assert!(failed.source_rows_loaded > before.source_rows_loaded);
-        assert!(failed.source_bytes_loaded > before.source_bytes_loaded);
-    }
-}
-
 fn push_source_entity(entities: &mut Vec<String>, entity: String) -> FactStoreResult<()> {
     if entities.len() >= MAX_VERIFIED_GENERATION_ENTITIES {
         return Err(storage_message(
@@ -1188,5 +1050,143 @@ pub(super) fn graph_error(
             }
         }
         other => storage_error(OPERATION, other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use serde_json::json;
+    use tempfile::{TempDir, tempdir};
+    use tracedecay_domain::{
+        Confidence, FactCategoryV1, FactId, FactOwnerV1, ProvenanceId, UtcMicros,
+    };
+    use tracedecay_store::{
+        FactCommitOutcome, FactReadControl, FactStore, FactStoreError, FactWriteControl,
+    };
+
+    use super::*;
+    use crate::db::engine::params;
+    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+    use crate::store::memory::DatabaseFactStore;
+    use crate::store::memory::crud::{initial_batch, sanitize_payload};
+
+    async fn database(label: &str) -> (TempDir, Database) {
+        let directory = tempdir().expect("create graph telemetry fixture directory");
+        let path = directory.path().join(format!("{label}.db"));
+        let authority = DatabaseAuthority::acquire_test(&path, "graph telemetry test authority")
+            .expect("acquire graph telemetry fixture authority");
+        let (database, _) = Database::publish_profile_memory_test_runtime(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("publish graph telemetry fixture runtime");
+        (directory, database)
+    }
+
+    fn write_control() -> FactWriteControl {
+        FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
+    }
+
+    async fn seed_source_fact(database: &Database, label: &str) -> FactId {
+        let sanitized = sanitize_payload(
+            &format!("canonical {label} source fact"),
+            FactCategoryV1::General,
+            &[],
+            &[],
+            &json!({"fixture": label}),
+            None,
+        )
+        .expect("sanitize graph telemetry fixture payload")
+        .expect("graph telemetry fixture remains durable");
+        let batch = initial_batch(
+            &FactOwnerV1::Profile,
+            &ProvenanceId::new(format!("graph.telemetry.{label}.seed"))
+                .expect("graph telemetry fixture operation id"),
+            sanitized.payload,
+            sanitized.access,
+            Confidence::new(0.8).expect("graph telemetry fixture confidence"),
+            None,
+            UtcMicros(1_000_000),
+        )
+        .expect("create graph telemetry fixture batch");
+        let fact_id = batch.fact_id().clone();
+        let outcome = DatabaseFactStore::new(database)
+            .commit_fact(batch, &write_control())
+            .await
+            .expect("commit graph telemetry fixture fact");
+        assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+        fact_id
+    }
+
+    #[tokio::test]
+    async fn cancelled_source_load_records_materialized_source_work() {
+        let (_directory, database) = database("cancelled-source-telemetry").await;
+        seed_source_fact(&database, "cancelled-source-telemetry").await;
+        let observer = database.project_memory_reconciliation_telemetry_observer();
+        let before = observer.snapshot();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&checks);
+        let control = FactReadControl::new(Arc::new(move || {
+            observed.fetch_add(1, Ordering::AcqRel) >= 3
+        }));
+
+        let error = load_source(
+            &database,
+            &FactOwnerV1::Profile,
+            Some(&control),
+            Some(&database),
+        )
+        .await
+        .expect_err("source read must stop after materializing its first fact row");
+        assert!(matches!(error, FactStoreError::ReadCancelled));
+        assert_eq!(checks.load(Ordering::Acquire), 4);
+
+        let cancelled = observer.snapshot();
+        assert!(cancelled.source_rows_loaded > before.source_rows_loaded);
+        assert!(cancelled.source_bytes_loaded > before.source_bytes_loaded);
+    }
+
+    #[tokio::test]
+    async fn failed_source_load_records_materialized_source_work() {
+        let (_directory, database) = database("failed-source-telemetry").await;
+        let fact_id = seed_source_fact(&database, "failed-source-telemetry").await;
+        let transaction = database
+            .begin_memory_write_transaction(OPERATION)
+            .await
+            .expect("begin source corruption transaction");
+        assert_eq!(
+            transaction
+                .execute(
+                    "UPDATE memory_v2_current_facts
+                     SET active_assertion_id = NULL
+                     WHERE fact_id = ?1",
+                    params![fact_id.as_str()],
+                )
+                .await
+                .expect("clear canonical assertion reference"),
+            1
+        );
+        transaction
+            .commit()
+            .await
+            .expect("commit source corruption transaction");
+        let observer = database.project_memory_reconciliation_telemetry_observer();
+        let before = observer.snapshot();
+
+        let error = load_source(&database, &FactOwnerV1::Profile, None, Some(&database))
+            .await
+            .expect_err("missing canonical assertion must fail source loading");
+        assert!(matches!(error, FactStoreError::PayloadAccessMismatch));
+
+        let failed = observer.snapshot();
+        assert!(failed.source_rows_loaded > before.source_rows_loaded);
+        assert!(failed.source_bytes_loaded > before.source_bytes_loaded);
     }
 }

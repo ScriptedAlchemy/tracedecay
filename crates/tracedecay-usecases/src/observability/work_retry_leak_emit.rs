@@ -7,7 +7,7 @@ use tracedecay_domain::{
 };
 
 use super::{
-    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityEmissionOutcomeV1,
     ObservabilityProducerIdentityV1, execution_owner_fact_envelope,
 };
 
@@ -67,14 +67,16 @@ pub(crate) fn work_retry_observation_envelope(
     execution_owner_fact_envelope(
         identity,
         canonical_project_scope,
-        &owner_ref,
-        "retry_work_attempt",
-        receipt.restarted_at,
-        Some(receipt.retry_required_at),
-        Some(receipt.restarted_at),
-        None,
-        CoverageStateV1::Known,
-        payload,
+        ExecutionOwnerFactInputV1 {
+            owner_transition_ref: &owner_ref,
+            operation: "retry_work_attempt",
+            event_time: receipt.restarted_at,
+            valid_from: Some(receipt.retry_required_at),
+            valid_until: Some(receipt.restarted_at),
+            terminal_result: None,
+            coverage: CoverageStateV1::Known,
+            payload,
+        },
     )
     .ok()
 }
@@ -112,16 +114,18 @@ pub(crate) fn work_leak_observation_envelope(
     execution_owner_fact_envelope(
         identity,
         canonical_project_scope,
-        &owner_ref,
-        "adjudicate_work_leak",
-        receipt.evidence.scan_completed_at,
-        Some(receipt.evidence.scan_started_at),
-        Some(receipt.evidence.scan_completed_at),
-        None,
-        receipt.evidence.coverage,
-        match receipt.observability_payload() {
-            Ok(payload) => ObservabilityPayloadV1::WorkExecutionLeak(payload),
-            Err(_) => return None,
+        ExecutionOwnerFactInputV1 {
+            owner_transition_ref: &owner_ref,
+            operation: "adjudicate_work_leak",
+            event_time: receipt.evidence.scan_completed_at,
+            valid_from: Some(receipt.evidence.scan_started_at),
+            valid_until: Some(receipt.evidence.scan_completed_at),
+            terminal_result: None,
+            coverage: receipt.evidence.coverage,
+            payload: match receipt.observability_payload() {
+                Ok(payload) => ObservabilityPayloadV1::WorkExecutionLeak(payload),
+                Err(_) => return None,
+            },
         },
     )
     .ok()

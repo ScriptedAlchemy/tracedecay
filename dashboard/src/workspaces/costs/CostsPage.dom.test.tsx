@@ -94,6 +94,40 @@ describe('CostsPage truth claims', () => {
     expect(screen.queryByText(/reported no messages/i)).toBeNull();
   });
 
+  it('renders an unmounted session source as typed unavailable, not as a read failure', async () => {
+    const payload = savingsOverviewPayload();
+    // The daemon's shape when the LCM store is simply not mounted: available
+    // is false and there is no status and no error. Nothing failed, so the
+    // page must not say "read failed".
+    payload['sessions'] = {
+      available: false,
+      db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
+      status: null,
+      error: null,
+      scope: null,
+      messages: null,
+      provider_usage_events: null,
+      tokenized_messages: null,
+      estimated_messages: null,
+      cost_basis: null,
+      provider_actual: null,
+      tokenized: null,
+      estimated: null,
+      session_count: null,
+      model_count: null,
+      unknown_model_messages: null,
+      token_counting: null,
+    };
+
+    renderCosts(payload);
+
+    expect(await screen.findAllByText('Source unavailable')).not.toHaveLength(0);
+    expect(
+      screen.getAllByText(/the daemon reported this source unavailable without an error/i).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/session ledger read failed/i)).toBeNull();
+  });
+
   it('keeps the canonical cost read alive when the savings ledger read fails', async () => {
     const payload = savingsOverviewPayload();
     // `savings_api::read_failed_block` shape: the block reports the failure and

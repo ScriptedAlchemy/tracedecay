@@ -272,6 +272,51 @@ trusted_hash = "sha256:stop"
     );
 }
 
+/// The install-output follow-up must stand until Codex itself records
+/// explicit, current trust for every managed hook — the one activation step
+/// TraceDecay cannot perform — and clear the moment it has.
+#[test]
+fn codex_hook_trust_followup_clears_only_after_explicit_current_trust() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let hooks_dir = codex_plugin_install_dir(home.path()).join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    let seed = codex_embedded_plugin_files()
+        .into_iter()
+        .find_map(|(relative, contents)| (relative == "hooks/hooks.json").then_some(contents))
+        .unwrap();
+    std::fs::write(
+        hooks_dir.join("hooks.json"),
+        codex_plugin_hooks(seed, TEST_BIN).unwrap(),
+    )
+    .unwrap();
+
+    let followup = codex_hook_trust_followup(home.path())
+        .expect("untrusted hooks must keep the /hooks follow-up in place");
+    assert!(
+        followup.contains("/hooks"),
+        "guidance must name the Codex-owned trust step: {followup}"
+    );
+
+    // Record explicit, current trust exactly as Codex's own `/hooks` flow
+    // writes it: an explicit [hooks.state] table plus one record per hook.
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let mut config = String::from("[hooks.state]\n");
+    for entry in managed_entries(TEST_BIN) {
+        config.push_str(&format!(
+            "[hooks.state.\"{}\"]\ntrusted_hash = \"{}\"\n",
+            entry.trust_key, entry.hash
+        ));
+    }
+    std::fs::write(&config_path, config).unwrap();
+
+    assert_eq!(
+        codex_hook_trust_followup(home.path()),
+        None,
+        "explicit current trust for every managed hook ends the follow-up"
+    );
+}
+
 #[test]
 fn codex_marketplace_identity_rejects_path_and_trust_key_injection() {
     let home = tempfile::tempdir().expect("tempdir");

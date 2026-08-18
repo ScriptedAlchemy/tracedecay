@@ -47,7 +47,7 @@ pub struct AutomationRunControl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AutomationCommittedReceipt {
     MemoryCuration(ProjectMemoryFactCurationReceiptV1),
-    AutomaticFacts(NonEmptyAutomaticFactReceipts),
+    AutomaticFacts(Box<NonEmptyAutomaticFactReceipts>),
     UserJobDelivery(ExternalAutomationEffectReceipt),
     SkillWriting(ExternalAutomationEffectReceipt),
 }
@@ -84,12 +84,12 @@ pub enum AutomationRunError {
     /// bind it to typed application settlement before ledger publication.
     RecordedFailure {
         error: TraceDecayError,
-        ledger_record: AutomationRunLedgerRecord,
+        ledger_record: Box<AutomationRunLedgerRecord>,
     },
     PartialEffect {
         run_id: String,
-        committed_receipt: AutomationCommittedReceipt,
-        ledger_record: Option<AutomationRunLedgerRecord>,
+        committed_receipt: Box<AutomationCommittedReceipt>,
+        ledger_record: Option<Box<AutomationRunLedgerRecord>>,
         detail: &'static str,
     },
 }
@@ -101,7 +101,7 @@ pub struct ReusedSchedulerSkip {
     pub requested_run_id: String,
     pub task_key: String,
     pub reason: String,
-    pub prior_record: AutomationRunLedgerRecord,
+    pub prior_record: Box<AutomationRunLedgerRecord>,
 }
 
 struct RetainedAutomationSettlementState {
@@ -198,6 +198,13 @@ impl<T> RetainedAutomationRun<T> {
     }
 }
 
+/// Ledger publication mode plus the optional retained settlement guard that
+/// defers terminal publication until typed application settlement.
+pub(crate) struct AutomationRunPublication<'a> {
+    pub(crate) ledger: AutomationRunLedgerPublication,
+    pub(crate) settlement_guard: Option<&'a AutomationRunSettlementGuard>,
+}
+
 /// Selects the authority that publishes one runner terminal to the durable
 /// automation ledger.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -220,7 +227,7 @@ impl AutomationRunError {
         match self {
             Self::Runtime(_) => None,
             Self::RecordedFailure { ledger_record, .. } => Some(ledger_record),
-            Self::PartialEffect { ledger_record, .. } => ledger_record.as_ref(),
+            Self::PartialEffect { ledger_record, .. } => ledger_record.as_deref(),
         }
     }
 }
@@ -425,7 +432,7 @@ impl<'a> AgentTaskRunContext<'a> {
             requested_run_id: self.run_id.clone(),
             task_key: task_key(self.task).to_owned(),
             reason: reason.to_owned(),
-            prior_record: prior_record.clone(),
+            prior_record: Box::new(prior_record.clone()),
         };
         state.reused_scheduler_skip.set(reused).map_err(|_| {
             config_error("automation retained settlement already selected a scheduler skip")
@@ -1065,7 +1072,7 @@ impl<'a> AgentRunFinalizer<'a> {
                     .await?;
                 Err(AutomationRunError::RecordedFailure {
                     error: err,
-                    ledger_record,
+                    ledger_record: Box::new(ledger_record),
                 })
             }
         }
@@ -1100,7 +1107,7 @@ impl<'a> AgentRunFinalizer<'a> {
             .await?;
         Err(AutomationRunError::RecordedFailure {
             error: err,
-            ledger_record,
+            ledger_record: Box::new(ledger_record),
         })
     }
 
@@ -1317,7 +1324,7 @@ mod recorded_failure_tests {
                 requested_run_id: "current_scheduler_run".to_owned(),
                 task_key: task_key(AgentTaskKind::SessionReflector).to_owned(),
                 reason: "interval_not_elapsed".to_owned(),
-                prior_record: prior_record.clone(),
+                prior_record: Box::new(prior_record.clone()),
             })
             .expect("single reuse marker");
 
@@ -1331,7 +1338,7 @@ mod recorded_failure_tests {
         assert_eq!(reused.requested_run_id, "current_scheduler_run");
         assert_eq!(reused.task_key, "session_reflector");
         assert_eq!(reused.reason, "interval_not_elapsed");
-        assert_eq!(reused.prior_record, prior_record);
+        assert_eq!(*reused.prior_record, prior_record);
     }
 
     #[tokio::test]
@@ -1418,7 +1425,7 @@ mod recorded_failure_tests {
             error: TraceDecayError::Config {
                 message: "failed".to_owned(),
             },
-            ledger_record,
+            ledger_record: Box::new(ledger_record),
         };
         let runtime = AutomationRunError::Runtime(TraceDecayError::Config {
             message: "failed before terminal construction".to_owned(),

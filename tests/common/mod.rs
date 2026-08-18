@@ -756,7 +756,7 @@ pub fn stop_managed_daemon(home: &Path) {
 fn take_managed_daemon(home: &Path) -> Option<DaemonProcess> {
     TEST_DAEMONS.with(|daemons| {
         let mut daemons = daemons.borrow_mut();
-        daemons.retain(|existing_home, daemon| existing_home == &home && daemon.is_running());
+        daemons.retain(|existing_home, daemon| existing_home == home && daemon.is_running());
         daemons.remove(home)
     })
 }

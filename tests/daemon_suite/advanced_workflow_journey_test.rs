@@ -803,7 +803,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
                 initiative: synthesis_seed.initiative,
                 plan: synthesis_seed.plan,
                 milestone: synthesis_seed.milestone,
-                item: synthesis_seed.item,
+                item: Box::new(synthesis_seed.item),
             },
             causation_event_id: None,
             evidence: Vec::new(),

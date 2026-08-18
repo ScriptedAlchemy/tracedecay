@@ -22,7 +22,9 @@ mod ignored_dependency;
 
 #[cfg(test)]
 pub(super) use self::ignored_dependency::ignored_dependency_candidate_failure;
-use self::ignored_dependency::{admit_ignored_dependency, validate_claim_generation};
+use self::ignored_dependency::{
+    IgnoredDependencyRequest, admit_ignored_dependency, validate_claim_generation,
+};
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use crate::primitives::concrete::SymbolGraphCursorSnapshot;
 
@@ -168,12 +170,14 @@ where
                 context,
                 &graph,
                 &self.cursors,
-                "search",
-                &claim,
-                records.is_empty(),
-                request.lazy_index_ignored_dependencies,
-                request.query.as_str(),
-                &request.scope,
+                IgnoredDependencyRequest {
+                    lane: "search",
+                    claim: &claim,
+                    normal_results_empty: records.is_empty(),
+                    requested: request.lazy_index_ignored_dependencies,
+                    query: request.query.as_str(),
+                    scope: &request.scope,
+                },
             )
             .await
             {
@@ -231,12 +235,14 @@ where
                 context,
                 &graph,
                 &self.cursors,
-                "exact",
-                &claim,
-                records.is_empty(),
-                request.lazy_index_ignored_dependencies,
-                &request.name,
-                &request.scope,
+                IgnoredDependencyRequest {
+                    lane: "exact",
+                    claim: &claim,
+                    normal_results_empty: records.is_empty(),
+                    requested: request.lazy_index_ignored_dependencies,
+                    query: &request.name,
+                    scope: &request.scope,
+                },
             )
             .await
             {

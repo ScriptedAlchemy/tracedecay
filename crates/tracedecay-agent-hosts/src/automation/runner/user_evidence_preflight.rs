@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::automation::backend::AgentTaskBackend;
 use crate::automation::backend::AgentTaskKind;
 use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::{
@@ -13,6 +12,7 @@ use tracedecay_domain::FactOwnerV1;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_usecases::memory::MemoryApplication;
 
+use super::AutomationTaskIo;
 use super::evidence::{
     SessionReflectorEvidenceOutcome, SkillWriterEvidenceOutcome, build_session_reflector_evidence,
     build_skill_writer_evidence,
@@ -45,10 +45,10 @@ pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
     config: &AutomationConfig,
     run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    retrieval: &dyn AutomationSessionRetrieval,
+    io: AutomationTaskIo<'_>,
     options: SessionReflectorAutomationOptions,
 ) -> AutomationRunResult<SessionReflectorAutomationRun> {
+    let AutomationTaskIo { backend, retrieval } = io;
     let authority = super::profile_curation_authority(
         session_registry.as_ref(),
         "automation:session-reflector",

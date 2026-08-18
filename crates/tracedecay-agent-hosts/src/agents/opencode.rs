@@ -306,6 +306,11 @@ impl AgentIntegration for OpenCodeIntegration {
         mcp.and_then(|v| v.get("tracedecay")).is_some()
     }
 
+    fn detected_host_surface(&self, home: &Path) -> Option<std::path::PathBuf> {
+        let config_path = opencode_config_path(home);
+        config_path.exists().then_some(config_path)
+    }
+
     fn export_managed_skills(
         &self,
         home: &Path,

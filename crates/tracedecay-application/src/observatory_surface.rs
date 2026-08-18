@@ -167,11 +167,11 @@ pub fn observatory_read_catalog_contribution()
 
 pub fn observatory_read_handler_descriptor()
 -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
-    Ok(ApplicationHandlerDescriptor::new(
+    ApplicationHandlerDescriptor::new(
         observatory_read_operation()?,
         observatory_read_request_schema()?,
         observatory_read_result_schema()?,
-    )?)
+    )
 }
 
 pub fn observatory_read_operation() -> Result<ApplicationOperation, ApplicationContractError> {

@@ -1,12 +1,13 @@
 use tracedecay_domain::SanitizerDispositionV1;
 
 use super::{
-    StructuredTextFormatV1, sanitize_code_source_bytes, sanitize_provider_metadata_text,
-    sanitize_structured_text,
+    CodeSourceShapeV1, StructuredTextFormatV1, sanitize_code_source_bytes,
+    sanitize_provider_metadata_text, sanitize_structured_text,
 };
 
 fn assert_ordinary_rust_source_is_preserved(raw: &str) {
-    let sanitized = sanitize_code_source_bytes(raw.as_bytes()).expect("ordinary Rust sanitizes");
+    let sanitized = sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::CodeOrProse)
+        .expect("ordinary Rust sanitizes");
 
     assert_eq!(sanitized.sanitized_bytes(), raw.as_bytes());
     assert_eq!(

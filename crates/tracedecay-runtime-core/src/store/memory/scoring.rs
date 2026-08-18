@@ -210,6 +210,10 @@ mod tests {
         .expect("fixture fact id")
     }
 
+    fn assert_f64_bits_eq(actual: f64, expected: f64) {
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+
     #[test]
     fn shipped_bm25_coverage_and_retrieval_modifiers_remain_exact() {
         let first = fact_id("bm25-first");
@@ -218,9 +222,9 @@ mod tests {
             (first.clone(), -0.000_002),
             (second.clone(), -0.000_001),
         ]);
-        assert_eq!(scores[&first], 1.0);
-        assert_eq!(scores[&second], 0.5);
-        assert_eq!(project_memory_fts_component(scores[&first], 0.5), 0.75);
+        assert_f64_bits_eq(scores[&first], 1.0);
+        assert_f64_bits_eq(scores[&second], 0.5);
+        assert_f64_bits_eq(project_memory_fts_component(scores[&first], 0.5), 0.75);
 
         let unboosted = project_memory_combined_score(0.75, 0.4, 0.6, 0.8, 0.9, 0);
         let expected_relevance = 0.75_f64.mul_add(0.40, 0.4_f64.mul_add(0.30, 0.6 * 0.30));
@@ -240,19 +244,19 @@ mod tests {
         let query = project_memory_tokens("sqlite graph memory");
         let fact = project_memory_tokens("sqlite graph retrieval");
         assert!((project_memory_jaccard(&query, &fact) - 0.5).abs() < f64::EPSILON);
-        assert_eq!(project_memory_holographic_midpoint(-1.0), 0.0);
-        assert_eq!(project_memory_holographic_midpoint(0.0), 0.5);
-        assert_eq!(project_memory_holographic_midpoint(1.0), 1.0);
+        assert_f64_bits_eq(project_memory_holographic_midpoint(-1.0), 0.0);
+        assert_f64_bits_eq(project_memory_holographic_midpoint(0.0), 0.5);
+        assert_f64_bits_eq(project_memory_holographic_midpoint(1.0), 1.0);
     }
 
     #[test]
     fn nonpositive_and_future_timestamps_do_not_decay() {
         let now = UtcMicros(1_000_000);
-        assert_eq!(project_memory_temporal_decay(UtcMicros(0), now), 1.0);
-        assert_eq!(project_memory_temporal_decay(UtcMicros(-1), now), 1.0);
-        assert_eq!(
+        assert_f64_bits_eq(project_memory_temporal_decay(UtcMicros(0), now), 1.0);
+        assert_f64_bits_eq(project_memory_temporal_decay(UtcMicros(-1), now), 1.0);
+        assert_f64_bits_eq(
             project_memory_temporal_decay(UtcMicros(2_000_000), now),
-            1.0
+            1.0,
         );
     }
 }

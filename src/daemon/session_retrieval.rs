@@ -806,7 +806,7 @@ impl DaemonSessionRetrievalService {
         };
         Ok(PageRenderingResult::Rendered(SessionMessageSearchResult {
             session,
-            message,
+            message: *message,
             score: ranked.normalized_score_micros as f64 / 1_000_000.0,
         }))
     }

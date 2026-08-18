@@ -495,7 +495,9 @@ fn close_unpublished_runtime(published: PublishedShardRuntime) -> Result<(), Str
     let draining = runtime
         .transition(RuntimeMaintenanceStateV1::Draining)
         .map_err(|error| error.to_string());
-    let closed = attachment.drain().and_then(|_| attachment.close_and_join());
+    let closed = attachment
+        .drain()
+        .and_then(|()| attachment.close_and_join());
     let outcome = draining.and(closed);
     let target = if outcome.is_ok() {
         RuntimeMaintenanceStateV1::Closed

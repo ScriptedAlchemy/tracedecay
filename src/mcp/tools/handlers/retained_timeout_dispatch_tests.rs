@@ -53,7 +53,7 @@ fn post_commit_partial_effect(
             "The daemon committed the retained effect before its settlement response.",
         )
         .expect("fixture diagnostic"),
-        committed_receipt: EffectReceipt {
+        committed_receipt: Box::new(EffectReceipt {
             operation: tracedecay_application::retained_surface_application_operation(operation)
                 .expect("retained application operation")
                 .use_case_id()
@@ -73,7 +73,7 @@ fn post_commit_partial_effect(
             outcome: EffectTermination::Partial,
             committed_state: Some(digest('1')),
             external_proof: None,
-        },
+        }),
         retry: RetryDirective::Never,
         legal_actions: vec![LegalAction::Reconcile],
     }

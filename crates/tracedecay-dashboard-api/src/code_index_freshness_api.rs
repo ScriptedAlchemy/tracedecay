@@ -17,7 +17,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::DashboardState;
 use super::read_model::{
@@ -26,7 +26,11 @@ use super::read_model::{
 };
 
 /// Freshness/generation state for one mounted worktree.
-#[derive(Clone, Debug, Serialize, JsonSchema)]
+///
+/// `Deserialize` is part of the wire contract: the CLI status command decodes
+/// exactly this type back out of the daemon's `tracedecay_status` response,
+/// keeping one authority for the freshness shape.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct CodeIndexWorktreeFreshnessV1 {
     /// Display path of the mounted worktree root.
     pub worktree_root: String,

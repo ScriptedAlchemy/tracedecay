@@ -958,7 +958,8 @@ mod tests {
                 "{agent_id} owns a canonical component set"
             );
         }
-        for agent_id in ["zed"] {
+        {
+            let agent_id = "zed";
             assert!(
                 !host_owns_canonical_component_set(agent_id),
                 "{agent_id} has no canonical component set and keeps the generated refresh"

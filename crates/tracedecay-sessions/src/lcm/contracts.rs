@@ -503,6 +503,13 @@ pub enum LcmError {
     Cancelled,
     DeadlineExceeded,
     BudgetExhausted,
+    /// The content deterministically failed privacy sanitization or receipt
+    /// binding. These are pure functions of the bytes, so retrying the same
+    /// content can never succeed; callers must record a durable refusal
+    /// instead of scheduling a retry.
+    SanitizationRefused {
+        reason: String,
+    },
     Db(String),
     Io(String),
 }
@@ -585,6 +592,9 @@ impl std::fmt::Display for LcmError {
             }
             Self::BudgetExhausted => {
                 write!(f, "LCM payload verification budget was exhausted")
+            }
+            Self::SanitizationRefused { reason } => {
+                write!(f, "content sanitization refused: {reason}")
             }
             Self::Db(message) => write!(f, "payload database error: {message}"),
             Self::Io(message) => write!(f, "payload IO error: {message}"),

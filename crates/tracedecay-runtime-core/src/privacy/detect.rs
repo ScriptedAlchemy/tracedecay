@@ -404,6 +404,11 @@ pub enum DetectionError {
     ScanLimitExceeded,
     #[error("privacy sanitizer receipt construction failed")]
     Receipt,
+    /// The document declared a structured data format but could not be parsed
+    /// without ambiguity, so field semantics cannot be proven scanned. This is
+    /// the sanitizer's own fail-closed refusal, not a construction fault.
+    #[error("privacy sanitizer quarantined an ambiguous structured document")]
+    StructuredQuarantine,
 }
 
 pub enum MemoryFactSanitizationV1 {

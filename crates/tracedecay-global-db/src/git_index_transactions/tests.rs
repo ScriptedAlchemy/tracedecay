@@ -671,7 +671,6 @@ async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() 
         Err(GitIndexTransactionStoreError::ReceiptConflict),
         "a proven clear must retain its resolution evidence rather than reactivate"
     );
-    drop(store);
     let reopened = reopened.restart().await;
     let store = test_store(reopened.registered.as_ref());
     assert!(
@@ -817,6 +816,9 @@ async fn failed_inspection_terminal_insert_rolls_back_journal_and_quarantine() {
         .await
         .expect("start transaction");
     database
+        .registered
+        .writer_connection()
+        .expect("writer connection for fault trigger")
         .execute_batch(
             "CREATE TRIGGER fail_git_index_terminal_receipt
              BEFORE INSERT ON git_index_transaction_receipts

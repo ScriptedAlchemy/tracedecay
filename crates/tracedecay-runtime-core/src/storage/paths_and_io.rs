@@ -308,16 +308,13 @@ impl PrivateStoreIo {
             "private store durable file",
         )
         .map_err(io::Error::other)?;
-        if let Err(error) = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(path)
             .and_then(|file| file.sync_all())
             .and_then(|()| inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterRename))
-            .and_then(|()| sync_parent_directory(path))
-        {
-            return Err(error);
-        }
+            .and_then(|()| sync_parent_directory(path))?;
         Ok(())
     }
 

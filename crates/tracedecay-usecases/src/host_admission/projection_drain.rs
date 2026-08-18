@@ -58,17 +58,31 @@ impl HostAdmissionFacade<'_> {
                     observation_deferred = true;
                     break;
                 }
-                Err(error @ ProjectionStoreError::Contract(_)) => {
+                Err(
+                    error @ (ProjectionStoreError::Contract(_)
+                    | ProjectionStoreError::SanitizationRefused { .. }),
+                ) => {
+                    // Both classes are deterministic, content-dependent
+                    // rejections: the store has already committed the skip
+                    // disposition and advanced the checkpoint, so the drain
+                    // records the refusal and keeps the queue moving.
                     tracing::warn!(
                         %error,
                         observation = observation_id.as_str(),
-                        "deterministic projection contract rejection committed"
+                        "deterministic projection rejection committed"
                     );
                     outcome.skipped = outcome.skipped.saturating_add(1);
                     continue;
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "projection store operation failed during host drain");
+                    // The head-of-queue failure aborts the drain (fail-closed
+                    // sequence ordering); the full source chain must land in
+                    // the log or the stall is undiagnosable from outside.
+                    tracing::warn!(
+                        error = %error.durable_detail(),
+                        observation = observation_id.as_str(),
+                        "projection store operation failed during host drain"
+                    );
                     return Err(projection_error_outcome(&error));
                 }
             };

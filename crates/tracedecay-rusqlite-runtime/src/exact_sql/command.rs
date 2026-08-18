@@ -76,17 +76,17 @@ pub(super) fn retry_busy_begin<T>(
     let mut attempts_remaining = BEGIN_BUSY_ATTEMPT_BUDGET;
     let mut original_busy_error = None;
     loop {
-        if shutdown_requested.load(Ordering::Acquire) {
-            if let Some(original) = original_busy_error {
-                return Err(original);
-            }
+        if shutdown_requested.load(Ordering::Acquire)
+            && let Some(original) = original_busy_error
+        {
+            return Err(original);
         }
         match begin() {
             Ok(value) => {
-                if shutdown_requested.load(Ordering::Acquire) {
-                    if let Some(original) = original_busy_error {
-                        return Err(original);
-                    }
+                if shutdown_requested.load(Ordering::Acquire)
+                    && let Some(original) = original_busy_error
+                {
+                    return Err(original);
                 }
                 return Ok(value);
             }

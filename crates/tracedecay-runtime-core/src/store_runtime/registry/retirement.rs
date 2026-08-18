@@ -545,7 +545,7 @@ impl StoreRuntimeRegistry {
             let profile_pins = state
                 .profile_pin_tokens
                 .get(&key)
-                .map_or(0, |tokens| tokens.len());
+                .map_or(0, std::collections::BTreeSet::len);
             if profile_pins != 0 {
                 blockers.push(StoreRuntimeRetirementBlocker::ProfilePins {
                     binding: Box::new(binding.clone()),
@@ -611,7 +611,7 @@ impl StoreRuntimeRegistry {
                 None => Err(StoreRuntimeRetirementBlocker::Missing {
                     binding: Box::new(target.binding.clone()),
                 }),
-                Some(RegistryEntry::Opening(_)) | Some(RegistryEntry::Evicting(_)) => {
+                Some(RegistryEntry::Opening(_) | RegistryEntry::Evicting(_)) => {
                     Err(StoreRuntimeRetirementBlocker::RuntimeState {
                         binding: Box::new(target.binding.clone()),
                         state: RuntimeMaintenanceStateV1::Opening,
@@ -944,7 +944,7 @@ impl StoreRuntimeRetirementReservation {
                     {
                         Ok(()) => outcomes.push(StoreRuntimeRetirementOutcome::Closed { target }),
                         Err(error) => {
-                            outcomes.push(StoreRuntimeRetirementOutcome::Faulted { target, error })
+                            outcomes.push(StoreRuntimeRetirementOutcome::Faulted { target, error });
                         }
                     }
                 }

@@ -188,8 +188,7 @@ pub(super) async fn claim_and_settle_durable(
     next_sequence: &AtomicU64,
     envelope: ObservabilityEnvelopeV1,
     owner_fact_json: String,
-    persisted: &mut u64,
-    first_error: &mut Option<ApplicationContractError>,
+    progress: &mut ProducerWorkerProgress,
     persistence_deadline: Duration,
 ) {
     let existing = match timeout(
@@ -204,12 +203,15 @@ pub(super) async fn claim_and_settle_durable(
     {
         Ok(Ok(existing)) => existing,
         Ok(Err(error)) => {
-            retain_first_error(first_error, ApplicationContractError::Domain(error));
+            retain_first_error(
+                &mut progress.first_error,
+                ApplicationContractError::Domain(error),
+            );
             return;
         }
         Err(_) => {
             retain_first_error(
-                first_error,
+                &mut progress.first_error,
                 ApplicationContractError::Domain("observability_persistence_deadline".to_owned()),
             );
             return;
@@ -225,7 +227,7 @@ pub(super) async fn claim_and_settle_durable(
         Ok(envelope) => envelope,
         Err(error) => {
             retain_first_error(
-                first_error,
+                &mut progress.first_error,
                 ApplicationContractError::Domain(error.to_owned()),
             );
             return;
@@ -235,7 +237,7 @@ pub(super) async fn claim_and_settle_durable(
         Ok(delivery) => delivery,
         Err(error) => {
             retain_first_error(
-                first_error,
+                &mut progress.first_error,
                 ApplicationContractError::Domain(format!(
                     "observability delivery serialization failed: {error}"
                 )),
@@ -256,12 +258,15 @@ pub(super) async fn claim_and_settle_durable(
     {
         Ok(Ok(claim)) => claim,
         Ok(Err(error)) => {
-            retain_first_error(first_error, ApplicationContractError::Domain(error));
+            retain_first_error(
+                &mut progress.first_error,
+                ApplicationContractError::Domain(error),
+            );
             return;
         }
         Err(_) => {
             retain_first_error(
-                first_error,
+                &mut progress.first_error,
                 ApplicationContractError::Domain("observability_persistence_deadline".to_owned()),
             );
             return;
@@ -275,7 +280,7 @@ pub(super) async fn claim_and_settle_durable(
             Ok(delivery) => delivery,
             Err(error) => {
                 retain_first_error(
-                    first_error,
+                    &mut progress.first_error,
                     ApplicationContractError::Domain(format!(
                         "observability pending delivery decode failed: {error}"
                     )),
@@ -289,8 +294,8 @@ pub(super) async fn claim_and_settle_durable(
         db,
         delivery,
         owner_fact_json,
-        persisted,
-        first_error,
+        &mut progress.persisted,
+        &mut progress.first_error,
         persistence_deadline,
     )
     .await;

@@ -493,6 +493,18 @@ impl DaemonEngine {
                                 }
                             }
                             ProjectOpenTaskState::Ready => {
+                                // The open task publishes the server before it
+                                // flips to Ready, but this waiter read the
+                                // cache before it read the state, so a
+                                // publication that raced this iteration must
+                                // be honored with one final cache check
+                                // instead of a spurious failure.
+                                if let Some(server) = self
+                                    .cached_project_server_for_requirement(handshake, requirement)
+                                    .await?
+                                {
+                                    return Ok(server);
+                                }
                                 return Err(TraceDecayError::Config {
                                     message: "project open completed without publishing a server"
                                         .to_string(),

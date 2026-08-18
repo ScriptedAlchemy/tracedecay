@@ -13,7 +13,7 @@ use tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskSessionRetrievalOutcomeV1 {
-    Complete(TaskSessionTemporalExecutionReportV1),
+    Complete(Box<TaskSessionTemporalExecutionReportV1>),
     Omitted(TaskSessionExecutionOmissionV1),
     WrongScope,
     Denied,

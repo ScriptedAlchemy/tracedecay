@@ -140,7 +140,6 @@ impl SourceAuthorizationDecisionV1 {
             },
         )
     }
-
 }
 
 /// Expected JSON truth-table projection. It intentionally asserts only public

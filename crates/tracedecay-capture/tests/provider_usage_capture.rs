@@ -65,7 +65,10 @@ fn cursor_transcript_token_count_lands_as_correlated_provider_usage() {
         ..
     } = facts[0]
     else {
-        panic!("cursor tokenCount must land as ProviderUsage, got {:?}", facts[0]);
+        panic!(
+            "cursor tokenCount must land as ProviderUsage, got {:?}",
+            facts[0]
+        );
     };
     assert_eq!(
         *model,
@@ -124,7 +127,10 @@ fn cursor_transcript_usage_without_model_stays_typed_unknown() {
         ..
     } = facts[0]
     else {
-        panic!("message.usage must land as ProviderUsage, got {:?}", facts[0]);
+        panic!(
+            "message.usage must land as ProviderUsage, got {:?}",
+            facts[0]
+        );
     };
     assert_eq!(
         *model,
@@ -250,7 +256,10 @@ fn claude_real_usage_shape_records_true_counts_and_model() {
         model, counters, ..
     } = facts[0]
     else {
-        panic!("claude usage must land as ProviderUsage, got {:?}", facts[0]);
+        panic!(
+            "claude usage must land as ProviderUsage, got {:?}",
+            facts[0]
+        );
     };
     assert_eq!(
         *model,

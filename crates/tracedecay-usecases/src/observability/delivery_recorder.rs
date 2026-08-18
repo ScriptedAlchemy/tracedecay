@@ -263,10 +263,7 @@ async fn drain_once(
 
 fn pending_count(spool: &DeliveryRecorderSpoolV1) -> u64 {
     match spool.len() {
-        Ok(pending) => match u64::try_from(pending) {
-            Ok(count) => count,
-            Err(_) => u64::MAX,
-        },
+        Ok(pending) => u64::try_from(pending).unwrap_or(u64::MAX),
         Err(_) => u64::MAX,
     }
 }

@@ -343,7 +343,8 @@ impl BucketScanState {
     /// name) into the shared retention state, stopping at `max_total_files`
     /// retained paths overall. Returns whether the bucket was fully scanned.
     fn scan_bucket(&mut self, bucket: &Path, max_total_files: usize) -> bool {
-        self.scan_bucket_skipping(bucket, max_total_files, 0).complete
+        self.scan_bucket_skipping(bucket, max_total_files, 0)
+            .complete
     }
 
     /// [`Self::scan_bucket`] resuming past the bucket's first `skip` directory

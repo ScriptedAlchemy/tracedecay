@@ -420,9 +420,9 @@ mod tests {
                 project_root,
                 candidate,
                 output,
-            } if project_root == PathBuf::from("project")
-                && candidate == PathBuf::from("candidate.json")
-                && output == PathBuf::from("qualification.json")
+            } if project_root == *"project"
+                && candidate == *"candidate.json"
+                && output == *"qualification.json"
         ));
     }
 

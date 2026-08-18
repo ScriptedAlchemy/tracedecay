@@ -117,7 +117,7 @@ fn duplicate_adjudication_receipt_pins_actor_revision_and_input_digest() {
     assert_eq!(payload.wall_micros, Some(42));
     assert_eq!(
         payload.local_anchor_refs,
-        [payload.adjudication_ref.clone()]
+        std::slice::from_ref(&payload.adjudication_ref)
     );
     payload.validate().unwrap();
     let mut invalid_revision = payload.clone();

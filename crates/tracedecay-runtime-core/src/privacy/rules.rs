@@ -1,7 +1,7 @@
-//! Credential rules: a vendored community catalogue plus TraceDecay's local
+//! Credential rules: a vendored community catalogue plus `TraceDecay`'s local
 //! supplement.
 //!
-//! TraceDecay used to carry its own short list of provider token shapes. Seven
+//! `TraceDecay` used to carry its own short list of provider token shapes. Seven
 //! alternations maintained by hand is not a credible answer to "what does a
 //! leaked key look like", so the catalogue is now vendored from gitleaks (MIT)
 //! and this module compiles it. See
@@ -11,7 +11,7 @@
 //!
 //! What is *not* vendored is the engine. The bounded scan, the parse-before-scan
 //! structured layer, the entropy kernel, the typed findings and assessments, and
-//! the redaction merge all stay TraceDecay's. Vendored rules are data feeding
+//! the redaction merge all stay `TraceDecay`'s. Vendored rules are data feeding
 //! the same [`CredentialPattern`] the detector always consumed, which is why
 //! this change is invisible to `detect.rs`, `structured_text.rs`, and
 //! `memory::hygiene` beyond the error type.
@@ -335,7 +335,7 @@ pub(crate) fn compile_credential_patterns(
 enum RuleOrigin {
     /// Upstream schema: kind is inferred, every rule runs in every profile.
     Vendored,
-    /// TraceDecay schema: kind and profiles are mandatory, because they are the
+    /// `TraceDecay` schema: kind and profiles are mandatory, because they are the
     /// part upstream has no way to express.
     Supplement,
 }
@@ -886,7 +886,7 @@ fn looks_like_rust_type_annotation(value: &str) -> bool {
     }
 
     let type_name = candidate
-        .trim_start_matches(|character| matches!(character, '&' | '*' | '\'' | ' ' | '\t'))
+        .trim_start_matches(['&', '*', '\'', ' ', '\t'])
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .find(|name| !name.is_empty());
     type_name.is_some_and(|name| {
@@ -918,10 +918,7 @@ fn looks_like_rust_type_annotation(value: &str) -> bool {
 }
 
 fn looks_like_non_literal_call_expression(value: &str) -> bool {
-    let value = value
-        .trim()
-        .trim_end_matches(|character| matches!(character, ';' | ',' | '}'))
-        .trim_end();
+    let value = value.trim().trim_end_matches([';', ',', '}']).trim_end();
     if !value.contains('(')
         || !value.ends_with(')')
         || !value.chars().all(|character| {

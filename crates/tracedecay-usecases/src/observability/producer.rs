@@ -598,8 +598,7 @@ async fn run_worker(
                     &state.durable_emission_lock,
                     &state.next_sequence,
                     observation,
-                    &mut progress.persisted,
-                    &mut progress.first_error,
+                    &mut progress,
                     state.deadlines.persistence,
                 )
                 .await;
@@ -730,8 +729,7 @@ async fn settle_worker(
                 &state.durable_emission_lock,
                 &state.next_sequence,
                 observation,
-                &mut progress.persisted,
-                &mut progress.first_error,
+                progress,
                 state.deadlines.persistence,
             )
             .await;
@@ -814,8 +812,7 @@ async fn record_queued(
     durable_emission_lock: &AsyncMutex<()>,
     next_sequence: &AtomicU64,
     observation: QueuedObservation,
-    persisted: &mut u64,
-    first_error: &mut Option<ApplicationContractError>,
+    progress: &mut ProducerWorkerProgress,
     persistence_deadline: Duration,
 ) {
     if let Some(owner_fact) = observation.owner_fact {
@@ -825,8 +822,8 @@ async fn record_queued(
                 db,
                 observation.envelope,
                 owner_fact.json,
-                persisted,
-                first_error,
+                &mut progress.persisted,
+                &mut progress.first_error,
                 persistence_deadline,
             )
             .await;
@@ -837,8 +834,7 @@ async fn record_queued(
                 next_sequence,
                 observation.envelope,
                 owner_fact.json,
-                persisted,
-                first_error,
+                progress,
                 persistence_deadline,
             )
             .await;
@@ -850,8 +846,8 @@ async fn record_queued(
         record(
             db,
             drop_envelope,
-            persisted,
-            first_error,
+            &mut progress.persisted,
+            &mut progress.first_error,
             persistence_deadline,
         )
         .await;
@@ -859,8 +855,8 @@ async fn record_queued(
     record(
         db,
         observation.envelope,
-        persisted,
-        first_error,
+        &mut progress.persisted,
+        &mut progress.first_error,
         persistence_deadline,
     )
     .await;

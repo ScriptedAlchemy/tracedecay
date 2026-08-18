@@ -716,7 +716,9 @@ impl RegisteredGlobalDb {
     /// the final nullable columns in place. Purely additive: existing rows
     /// are preserved and every other schema drift still fails validation.
     /// Reads first so an already-final store never opens a write transaction.
-    async fn migrate_released_registry_columns(&self) -> tracedecay_runtime_core::errors::Result<()> {
+    async fn migrate_released_registry_columns(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         const OPERATION: &str = "migrate released code_projects registry columns";
         let snapshot = self
             .read_snapshot()

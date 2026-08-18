@@ -649,18 +649,18 @@ pub(in crate::execution_topology_metrics) fn project_reduced_execution_topology_
         dropped: Some(dropped),
         sampled_events: Some(state.producer.sampled_events),
     };
-    Ok(finalize_rollup_projection(
+    Ok(finalize_rollup_projection(ExecutionTopologyMetricsV1 {
         authorized_scope_ref,
         horizon,
-        observed_at_micros,
         watermark,
-        complete,
-        family_coverage,
+        observed_at_micros,
+        current: complete,
+        coverage: family_coverage,
         emission_coverage,
         github_stack_capability,
         drill_anchors,
         measurements,
-    ))
+    }))
 }
 
 fn protected_rollup_key_is_valid(reference: &str) -> bool {
@@ -672,31 +672,22 @@ fn protected_rollup_key_is_valid(reference: &str) -> bool {
 }
 
 fn finalize_rollup_projection(
-    authorized_scope_ref: String,
-    horizon: ObservabilityHorizonV1,
-    observed_at_micros: i64,
-    watermark: String,
-    complete: bool,
-    family_coverage: MetricCoverageV1,
-    emission_coverage: ExecutionTopologyEmissionCoverageV1,
-    github_stack_capability: ExecutionGitHubStackCapabilityReadingV1,
-    drill_anchors: Vec<ExecutionTopologyDrillAnchorV1>,
-    mut measurements: Vec<super::super::ExecutionTopologyMeasurementV1>,
+    mut model: ExecutionTopologyMetricsV1,
 ) -> ExecutionTopologyRollupProjectionV1 {
-    suppress_low_support_cells(&mut measurements);
-    if measurements.len() > MAX_EXECUTION_TOPOLOGY_CELLS_V1 {
+    suppress_low_support_cells(&mut model.measurements);
+    if model.measurements.len() > MAX_EXECUTION_TOPOLOGY_CELLS_V1 {
         let mut capped = unavailable_model_at(
-            authorized_scope_ref,
-            horizon,
-            observed_at_micros,
-            watermark,
+            model.authorized_scope_ref,
+            model.horizon,
+            model.observed_at_micros,
+            model.watermark,
             ExecutionMetricUnavailableV1::CellBudgetExceeded,
         );
         capped.coverage = MetricCoverageV1 {
             state: CoverageStateV1::Capped,
-            ..family_coverage
+            ..model.coverage
         };
-        capped.emission_coverage = emission_coverage;
+        capped.emission_coverage = model.emission_coverage;
         capped.github_stack_capability = ExecutionGitHubStackCapabilityReadingV1 {
             capability: None,
             standard_git_fallback_available: None,
@@ -712,23 +703,10 @@ fn finalize_rollup_projection(
             },
             unavailable: Some(ExecutionMetricUnavailableV1::CellBudgetExceeded),
         };
-        capped.drill_anchors = drill_anchors;
+        capped.drill_anchors = model.drill_anchors;
         return ExecutionTopologyRollupProjectionV1 { model: capped };
     }
-    ExecutionTopologyRollupProjectionV1 {
-        model: ExecutionTopologyMetricsV1 {
-            authorized_scope_ref,
-            horizon,
-            watermark,
-            observed_at_micros,
-            current: complete,
-            coverage: family_coverage,
-            emission_coverage,
-            github_stack_capability,
-            drill_anchors,
-            measurements,
-        },
-    }
+    ExecutionTopologyRollupProjectionV1 { model }
 }
 
 fn suppress_low_support_cells(measurements: &mut [super::super::ExecutionTopologyMeasurementV1]) {

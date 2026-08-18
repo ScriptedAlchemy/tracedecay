@@ -382,14 +382,6 @@ pub(super) const TABLES: &[Table] = &[
         []
     ),
     table!(
-        "observation_backfill_watermarks",
-        [
-            column("migration", "TEXT", true, None, 1),
-            column("backfilled_through", "INTEGER", true, None, 0),
-        ],
-        []
-    ),
-    table!(
         "projection_queue",
         [
             column("observation_id", "TEXT", false, None, 1),
@@ -1732,8 +1724,6 @@ pub(super) const REGISTRY_TABLE_NAMES: &[&str] = &[
     // fail-closed admission check in `ensure_registered_schema_for_admission`.
     "remote_deletion_tombstones",
 ];
-
-pub(super) const OBSERVATIONS_TABLE_NAME: &str = "observations";
 
 #[derive(Clone, Copy)]
 pub(super) struct Index {

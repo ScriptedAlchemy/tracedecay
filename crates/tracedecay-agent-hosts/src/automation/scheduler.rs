@@ -1139,7 +1139,7 @@ fn process_state(pid: u32) -> ProcessState {
             return ProcessState::Live;
         }
         let error = std::io::Error::last_os_error();
-        return if error.kind() == std::io::ErrorKind::PermissionDenied
+        if error.kind() == std::io::ErrorKind::PermissionDenied
             || error.raw_os_error() == Some(UNIX_EPERM)
         {
             ProcessState::Live
@@ -1147,7 +1147,7 @@ fn process_state(pid: u32) -> ProcessState {
             ProcessState::Dead
         } else {
             ProcessState::Unknown
-        };
+        }
     }
     #[cfg(windows)]
     {

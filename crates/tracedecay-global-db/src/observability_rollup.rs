@@ -173,15 +173,13 @@ impl RegisteredGlobalDb {
                 );
             }
         }
-        if let Some(claim) = &request.empty_day_claim {
-            if !settle_empty_day_claim(&transaction, claim).await? {
-                transaction.rollback().await.map_err(|error| {
-                    format!("failed to close unadvanced empty-day rebuild: {error}")
-                })?;
-                return Err(
-                    "observability rollup empty-day claim changed during rebuild".to_owned(),
-                );
-            }
+        if let Some(claim) = &request.empty_day_claim
+            && !settle_empty_day_claim(&transaction, claim).await?
+        {
+            transaction.rollback().await.map_err(|error| {
+                format!("failed to close unadvanced empty-day rebuild: {error}")
+            })?;
+            return Err("observability rollup empty-day claim changed during rebuild".to_owned());
         }
         transaction
             .commit()

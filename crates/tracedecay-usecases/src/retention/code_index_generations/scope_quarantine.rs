@@ -514,11 +514,11 @@ fn rename_noreplace(
                 libc::RENAME_NOREPLACE,
             )
         };
-        return if result == 0 {
+        if result == 0 {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
-        };
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -540,11 +540,11 @@ fn rename_noreplace(
                 libc::RENAME_EXCL,
             )
         };
-        return if result == 0 {
+        if result == 0 {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
-        };
+        }
     }
     #[cfg(windows)]
     {
@@ -592,9 +592,12 @@ mod tests {
     fn rename_uses_open_quarantine_parent_after_ambient_parent_becomes_symlink() {
         let (store, scope) = fixture();
         let external = tempfile::TempDir::new().expect("create external target");
-        let mut authority =
-            ScopeQuarantineAuthority::prepare(store.path(), RECEIPT_DIGEST, &[scope.clone()])
-                .expect("open quarantine authority");
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
         let quarantine = store.path().join(SCOPE_RETENTION_QUARANTINE_DIRECTORY);
         let held = store.path().join("quarantine-held");
         std::fs::rename(&quarantine, &held).expect("swap quarantine parent");
@@ -622,9 +625,12 @@ mod tests {
         std::fs::create_dir_all(&external_scope).expect("create external sentinel tree");
         std::fs::write(external_scope.join("sentinel"), b"preserve")
             .expect("write external sentinel");
-        let mut authority =
-            ScopeQuarantineAuthority::prepare(store.path(), RECEIPT_DIGEST, &[scope.clone()])
-                .expect("open quarantine authority");
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
         authority
             .stage(std::slice::from_ref(&scope))
             .expect("stage scope");
@@ -647,9 +653,12 @@ mod tests {
     #[test]
     fn rename_refuses_a_replacement_scope_with_the_same_name() {
         let (store, scope) = fixture();
-        let mut authority =
-            ScopeQuarantineAuthority::prepare(store.path(), RECEIPT_DIGEST, &[scope.clone()])
-                .expect("open quarantine authority");
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
         let source = store.path().join(SCOPE_HASH);
         let displaced = store.path().join("scope-held");
         std::fs::rename(&source, &displaced).expect("displace fenced scope");
@@ -677,9 +686,12 @@ mod tests {
     #[test]
     fn unlink_refuses_a_replacement_at_the_quarantined_name() {
         let (store, scope) = fixture();
-        let mut authority =
-            ScopeQuarantineAuthority::prepare(store.path(), RECEIPT_DIGEST, &[scope.clone()])
-                .expect("open quarantine authority");
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
         authority
             .stage(std::slice::from_ref(&scope))
             .expect("stage scope");

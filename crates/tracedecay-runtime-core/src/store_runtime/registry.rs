@@ -539,8 +539,8 @@ impl StoreRuntimeLeaseSource {
             .database_attachments
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .filter_map(|(_, state)| match state {
+            .values()
+            .filter_map(|state| match state {
                 DatabaseAttachmentState::Active { client_token, .. }
                 | DatabaseAttachmentState::OwnerReserved { client_token, .. } => {
                     Some(*client_token)
@@ -1341,7 +1341,7 @@ pub enum StoreRuntimeRegistryFailure {
         message: String,
     },
     PhysicalRuntimeNotDrained {
-        snapshot: PhysicalRuntimeSnapshot,
+        snapshot: Box<PhysicalRuntimeSnapshot>,
     },
     ProfileAuthorityRequired {
         key: Box<StoreRuntimeKey>,

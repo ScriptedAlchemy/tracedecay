@@ -371,7 +371,11 @@ impl ProductionConfigurationDaemonClient {
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
         self.mutate_direct(
             authority,
-            DirectConfigurationMutation::Set { layer, key, value },
+            DirectConfigurationMutation::Set {
+                layer,
+                key,
+                value: Box::new(value),
+            },
             expected_revision,
         )
     }

@@ -439,7 +439,13 @@ fn collect_tree_fields(
                 match policy.classify(&NormalizedSensitiveKey::new(key)) {
                     Some(origin) => collect_scalars(child, key, origin, sensitive),
                     None => {
-                        collect_tree_fields(child, policy, patterns, sensitive, quarantine_findings)
+                        collect_tree_fields(
+                            child,
+                            policy,
+                            patterns,
+                            sensitive,
+                            quarantine_findings,
+                        );
                     }
                 }
             }
@@ -544,8 +550,8 @@ fn locate_key_line_tail(raw: &str, key: &str) -> Option<Range<usize>> {
 /// A qualifying occurrence sits at the start of its line, modulo leading
 /// whitespace or quote characters, and is followed — after an optional
 /// closing quote and whitespace — by a `:` or `=` separator. A bare
-/// substring match inside a comment ("# rotate the api_key monthly") or an
-/// earlier string value ("remember to rotate the api_key weekly") does not
+/// substring match inside a comment ("# rotate the `api_key` monthly") or an
+/// earlier string value ("remember to rotate the `api_key` weekly") does not
 /// qualify, so it can never redirect the redaction span away from the real
 /// key's line.
 fn find_key_occurrence(raw: &str, key: &str) -> Option<usize> {
@@ -589,14 +595,42 @@ pub fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
     Some(result.into_parts().0)
 }
 
+/// Declared document shape of one code source handed to the sanitizer.
+///
+/// The caller already resolved the file's language from its registry
+/// descriptor, so whether whole-document structured-format parsing applies is
+/// a declared fact, never something to sniff back out of the bytes. Sniffing
+/// misclassified ordinary code and prose — markdown with YAML frontmatter,
+/// shell scripts with variable assignments — as malformed structured
+/// documents and quarantined them wholesale.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodeSourceShapeV1 {
+    /// A declared structured data format (JSON/YAML/TOML): whole-document
+    /// field semantics apply, and an ambiguous parse stays a fail-closed
+    /// quarantine.
+    StructuredData,
+    /// Ordinary code or prose: the bounded raw credential scan applies — the
+    /// exact treatment an unparseable document always received — and the
+    /// document is never quarantined for failing to be a data format it
+    /// never claimed to be.
+    CodeOrProse,
+}
+
 /// Sanitizes arbitrary source bytes and issues receipt evidence bound to both
-/// raw input and sanitized text. Structured source files retain their shape.
-pub fn sanitize_code_source_bytes(raw: &[u8]) -> Result<CodeSourceSanitizationV1, DetectionError> {
+/// raw input and sanitized text. Declared structured source files retain
+/// their shape.
+pub fn sanitize_code_source_bytes(
+    raw: &[u8],
+    shape: CodeSourceShapeV1,
+) -> Result<CodeSourceSanitizationV1, DetectionError> {
     let source = String::from_utf8_lossy(raw);
     let invalid_utf8 = matches!(&source, std::borrow::Cow::Owned(_));
-    let detected = sanitize_structured_text(&source)?;
+    let detected = match shape {
+        CodeSourceShapeV1::StructuredData => sanitize_structured_text(&source)?,
+        CodeSourceShapeV1::CodeOrProse => raw_only(&source, credential_patterns()?),
+    };
     if !detected.quarantine_findings().is_empty() {
-        return Err(DetectionError::Receipt);
+        return Err(DetectionError::StructuredQuarantine);
     }
     let (sanitized, findings) = detected.into_parts();
     let clean = findings.is_empty() && !invalid_utf8;

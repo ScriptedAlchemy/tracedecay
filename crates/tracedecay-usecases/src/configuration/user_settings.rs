@@ -249,7 +249,7 @@ fn set(
     Ok(DirectConfigurationMutation::Set {
         layer,
         key: setting_key(raw_key)?,
-        value,
+        value: Box::new(value),
     })
 }
 

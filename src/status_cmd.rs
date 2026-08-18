@@ -139,7 +139,6 @@ pub(crate) async fn handle_status_command(
     project_path: Option<String>,
     json: bool,
     short: bool,
-    details: bool,
     runtime: bool,
 ) -> tracedecay::errors::Result<()> {
     let deadline = Instant::now() + status_command_deadline();
@@ -152,7 +151,6 @@ pub(crate) async fn handle_status_command(
             project_path,
             json,
             short,
-            details,
             runtime,
         ),
     )
@@ -170,7 +168,6 @@ async fn handle_status_command_within(
     project_path: Option<String>,
     json: bool,
     short: bool,
-    details: bool,
     runtime: bool,
 ) -> tracedecay::errors::Result<()> {
     let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
@@ -206,7 +203,24 @@ async fn handle_status_command_within(
         println!("{}", serde_json::to_string_pretty(&daemon_status)?);
         return Ok(());
     }
-    let stats: tracedecay::types::GraphStats = serde_json::from_value(daemon_status.clone())?;
+    // Decode the exact wire types the daemon route serialized. Both sides use
+    // the same Rust contracts (`GenerationCensusSnapshot`,
+    // `CodeIndexWorktreeFreshnessV1`), so absence or drift is a typed decode
+    // failure rather than a silently defaulted table.
+    let census: tracedecay::runtime_telemetry::GenerationCensusSnapshot =
+        serde_json::from_value(daemon_status.get("graph_statistics").cloned().ok_or_else(
+            || tracedecay::errors::TraceDecayError::Config {
+                message: "daemon status response omitted graph_statistics".to_string(),
+            },
+        )?)?;
+    let freshness: Option<
+        tracedecay::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1,
+    > = daemon_status
+        .get("code_index_freshness")
+        .and_then(|freshness| freshness.get("worktree"))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
     let accounting = daemon_tool_json_within(
         deadline,
         &project_path,
@@ -289,7 +303,8 @@ async fn handle_status_command_within(
     let cost_info = None;
     if short {
         tracedecay::display::print_status_header(
-            &stats,
+            &census,
+            freshness.as_ref(),
             tokens_saved,
             global_tokens_saved,
             worldwide,
@@ -299,14 +314,14 @@ async fn handle_status_command_within(
         );
     } else {
         tracedecay::display::print_status_table_with(tracedecay::display::StatusTable {
-            stats: &stats,
+            census: &census,
+            freshness: freshness.as_ref(),
             tokens_saved,
             global_tokens_saved,
             worldwide,
             country_flags: &country_flags,
             branch_info: branch_info.as_ref(),
             cost_info: cost_info.as_ref(),
-            details,
         });
     }
 

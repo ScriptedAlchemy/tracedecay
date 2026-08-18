@@ -419,7 +419,6 @@ async fn terminal_receipts_replay_and_survive_restart() {
         other => panic!("unexpected replay result: {other:?}"),
     }
 
-    drop(store);
     let database = database.restart().await;
     let store = test_store(database.registered.as_ref());
     let restored = store
@@ -475,7 +474,6 @@ async fn needs_inspection_quarantines_the_repository_until_recovery() {
     );
 
     // The fence survives restart.
-    drop(store);
     let database = database.restart().await;
     let store = test_store(database.registered.as_ref());
     assert_eq!(
@@ -496,7 +494,6 @@ async fn pending_transactions_expose_unfinished_work_for_restart_recovery() {
         .await
         .expect("begin starts");
 
-    drop(store);
     let database = database.restart().await;
     let store = test_store(database.registered.as_ref());
     let pending = store

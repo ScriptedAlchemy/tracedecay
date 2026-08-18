@@ -274,11 +274,16 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
         rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
         rollback_history: Vec::new(),
     };
-    assert!(receipt.artifacts.iter().all(|artifact| {
-        artifact
-            .relative_path
-            .starts_with(".cursor/extensions/tracedecay.cursor-native-0.0.0/")
-    }));
+    let extension_prefix = format!(
+        ".cursor/extensions/tracedecay.cursor-native-{}/",
+        tracedecay_agent_hosts::PRODUCT_VERSION
+    );
+    assert!(
+        receipt
+            .artifacts
+            .iter()
+            .all(|artifact| { artifact.relative_path.starts_with(&extension_prefix) })
+    );
     let control = lifecycle_root.path().join(".tracedecay-host-bundle-v1");
     fs::create_dir_all(&control).unwrap();
     fs::write(
@@ -391,16 +396,18 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
         request.lifecycle.operation,
     )
     .unwrap();
-    assert_eq!(
-        dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
-            home.path(),
-            lifecycle.path(),
-            &component_set.component_set,
-            &request,
-            &component_set,
-            &mut conflicting_registration,
+    assert!(
+        matches!(
+            dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
+                home.path(),
+                lifecycle.path(),
+                &component_set.component_set,
+                &request,
+                &component_set,
+                &mut conflicting_registration,
+            ),
+            Err(HostBundleError::OwnershipConflict(_))
         ),
-        Err(HostBundleError::OwnershipConflict),
         "dry run must refuse a third-party registration aliasing TraceDecay"
     );
 }

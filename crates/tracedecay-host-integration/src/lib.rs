@@ -844,7 +844,7 @@ macro_rules! host_bundle_stale_preview {
     };
 }
 
-#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum HostBundleError {
     #[error("host capability is unsupported and must not be emulated")]
     UnsupportedCapability,
@@ -868,8 +868,12 @@ pub enum HostBundleError {
     WrongTarget,
     #[error("lifecycle mutation requires explicit confirmation")]
     ConfirmationRequired,
-    #[error("bundle ownership marker conflicts or is ambiguous")]
-    OwnershipConflict,
+    /// A deploy path or registration surface is claimed by something other
+    /// than this component. The payload names the conflicting path (and the
+    /// observed vs expected ownership marker where one exists) so the
+    /// operator can resolve the exact file instead of guessing.
+    #[error("bundle ownership conflict: {0}")]
+    OwnershipConflict(String),
     #[error("install target is absolute, traversing, symlinked, or otherwise unsafe")]
     UnsafeInstallPath,
     #[error(
