@@ -9,7 +9,9 @@
 //! and ownership records.
 
 use super::*;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -131,6 +133,74 @@ pub(super) struct ProjectOpenFailure {
     pub(super) message: String,
     pub(super) retry_at: Option<Instant>,
     pub(super) typed: Option<ProjectOpenTypedFailure>,
+    /// On-disk identity of the refused store's graph databases at the moment
+    /// a `ResetRequired` refusal was recorded. A cached refusal is a property
+    /// of exactly those files; when they change (an operator reset deleted or
+    /// replaced them) the refusal no longer describes the store and must not
+    /// be served from this cache.
+    refused_store: Option<RefusedStoreFingerprintV1>,
+}
+
+/// Identity of one refused store file when its refusal was recorded. Length,
+/// modification time, and (on unix) device/inode together distinguish "the
+/// same refused file" from "deleted, replaced, or rewritten since".
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RefusedStoreFileIdentityV1 {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+/// Every graph database the refused project store carried when the refusal
+/// was recorded: the root graph DB plus the per-branch graph DBs under
+/// `branches/`. Comparing the whole map catches deletions, replacements, and
+/// newly recreated databases alike.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RefusedStoreFingerprintV1 {
+    graph_dbs: BTreeMap<PathBuf, RefusedStoreFileIdentityV1>,
+}
+
+fn refused_store_file_identity(path: &Path) -> Option<RefusedStoreFileIdentityV1> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some(RefusedStoreFileIdentityV1 {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+    })
+}
+
+/// Fingerprints the route's project store graph databases from the same
+/// persisted layout authority the open itself resolves. `None` when the route
+/// resolves no persisted store, in which case a recorded refusal keeps its
+/// plain time-based backoff.
+fn refused_store_fingerprint(route: &ProjectRouteKey) -> Option<RefusedStoreFingerprintV1> {
+    let layout = crate::storage::resolve_persisted_layout(&route.project_path, &route.profile_root)
+        .ok()
+        .flatten()?;
+    let mut graph_dbs = BTreeMap::new();
+    if let Some(identity) = refused_store_file_identity(&layout.graph_db_path) {
+        graph_dbs.insert(layout.graph_db_path.clone(), identity);
+    }
+    if let Ok(entries) = std::fs::read_dir(layout.data_root.join("branches")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) == Some("db")
+                && let Some(identity) = refused_store_file_identity(&path)
+            {
+                graph_dbs.insert(path, identity);
+            }
+        }
+    }
+    Some(RefusedStoreFingerprintV1 { graph_dbs })
 }
 
 #[derive(Clone)]
@@ -303,6 +373,17 @@ pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Dura
 }
 
 impl ProjectOpenFailure {
+    /// An admission-side denial with no typed classification, no backoff, and
+    /// no refused-store fingerprint.
+    pub(super) fn untyped(message: String) -> Self {
+        Self {
+            message,
+            retry_at: None,
+            typed: None,
+            refused_store: None,
+        }
+    }
+
     fn from_error(error: &TraceDecayError) -> Self {
         // Operator-repairable authority rejections decline implicit repair.
         // Reopening before maintenance changes that state is not useful and
@@ -329,7 +410,35 @@ impl ProjectOpenFailure {
                 }
                 _ => None,
             },
+            refused_store: None,
         }
+    }
+
+    /// Records a failed open for its route. A `ResetRequired` refusal
+    /// additionally captures the refused store's on-disk fingerprint so a
+    /// later retry can distinguish "still the refused files" from "the
+    /// operator reset the store on disk".
+    fn recorded_for_route(error: &TraceDecayError, route: &ProjectRouteKey) -> Self {
+        let mut failure = Self::from_error(error);
+        if matches!(
+            failure.typed,
+            Some(ProjectOpenTypedFailure::ResetRequired { .. })
+        ) {
+            failure.refused_store = refused_store_fingerprint(route);
+        }
+        failure
+    }
+
+    /// Whether this cached refusal no longer describes the store on disk.
+    /// Serving a refusal recorded against files that have since been deleted
+    /// or replaced forced a daemon restart after `storage
+    /// reset-project-store`; a stale entry is dropped so the next open
+    /// re-derives the typed truth from disk.
+    fn is_stale_for(&self, route: &ProjectRouteKey) -> bool {
+        let Some(recorded) = &self.refused_store else {
+            return false;
+        };
+        refused_store_fingerprint(route).as_ref() != Some(recorded)
     }
 
     fn is_backed_off(&self, now: Instant) -> bool {
@@ -459,12 +568,9 @@ impl ProjectOpenTasks {
         let mut registry = self.lock_registry();
         registry.prune(now);
         if registry.closed_profiles.contains(&route.profile_root) {
-            return ProjectOpenTaskClaim::Failed(ProjectOpenFailure {
-                message: "project open denied: authenticated profile was remotely deleted"
-                    .to_owned(),
-                retry_at: None,
-                typed: None,
-            });
+            return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
+                "project open denied: authenticated profile was remotely deleted".to_owned(),
+            ));
         }
         if registry.quiesced_projects.iter().any(|identity| {
             project_route_matches_identity(
@@ -474,22 +580,33 @@ impl ProjectOpenTasks {
                 &identity.project_roots,
             )
         }) {
-            return ProjectOpenTaskClaim::Failed(ProjectOpenFailure {
-                message: "project open temporarily unavailable during remote recovery".to_owned(),
-                retry_at: None,
-                typed: None,
-            });
+            return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
+                "project open temporarily unavailable during remote recovery".to_owned(),
+            ));
         }
         if let Some(entry) = registry.retiring.get(&route) {
             return ProjectOpenTaskClaim::InFlight(entry.state.clone());
         }
         if let Some(entry) = registry.routes.get(&route) {
-            return match entry.state.borrow().clone() {
-                ProjectOpenTaskState::Failed(failure) => ProjectOpenTaskClaim::Failed(failure),
-                ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => {
-                    ProjectOpenTaskClaim::InFlight(entry.state.clone())
+            let state = entry.state.borrow().clone();
+            let receiver = entry.state.clone();
+            let finished = entry.task.is_finished();
+            match state {
+                // The refusal's on-disk basis changed (an operator reset the
+                // store): drop the cached route and fall through to a fresh
+                // open that re-derives the typed state from disk.
+                ProjectOpenTaskState::Failed(failure)
+                    if finished && failure.is_stale_for(&route) =>
+                {
+                    registry.routes.remove(&route);
                 }
-            };
+                ProjectOpenTaskState::Failed(failure) => {
+                    return ProjectOpenTaskClaim::Failed(failure);
+                }
+                ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => {
+                    return ProjectOpenTaskClaim::InFlight(receiver);
+                }
+            }
         }
         if registry.active_task_count() >= MAX_TRACKED_PROJECT_OPEN_TASKS {
             return ProjectOpenTaskClaim::Saturated;
@@ -499,11 +616,15 @@ impl ProjectOpenTasks {
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let (task_completion, completion) = tokio::sync::watch::channel(false);
+        let failure_route = route.clone();
         let task = tokio::spawn(async move {
             let _completion = ProjectOpenTaskCompletionFinalizer(task_completion);
             let state = match open(task_cancellation).await {
                 Ok(()) => ProjectOpenTaskState::Ready,
-                Err(error) => ProjectOpenTaskState::Failed(ProjectOpenFailure::from_error(&error)),
+                Err(error) => ProjectOpenTaskState::Failed(ProjectOpenFailure::recorded_for_route(
+                    &error,
+                    &failure_route,
+                )),
             };
             updates.send_replace(state);
         });
@@ -526,9 +647,20 @@ impl ProjectOpenTasks {
         let now = Instant::now();
         let mut registry = self.lock_registry();
         registry.prune(now);
-        let entry = registry.routes.get(route)?;
-        match entry.state.borrow().clone() {
-            ProjectOpenTaskState::Failed(failure) if failure.is_backed_off(now) => Some(failure),
+        let (state, finished) = {
+            let entry = registry.routes.get(route)?;
+            (entry.state.borrow().clone(), entry.task.is_finished())
+        };
+        match state {
+            ProjectOpenTaskState::Failed(failure) if failure.is_backed_off(now) => {
+                if finished && failure.is_stale_for(route) {
+                    // The store changed on disk since the refusal was
+                    // recorded; the next open must re-derive it.
+                    registry.routes.remove(route);
+                    return None;
+                }
+                Some(failure)
+            }
             ProjectOpenTaskState::Opening
             | ProjectOpenTaskState::Ready
             | ProjectOpenTaskState::Failed(_) => None,
@@ -577,10 +709,10 @@ impl ProjectOpenTasks {
             tokio::pin!(sleep);
             tokio::select! {
                 biased;
-                _ = request_cancellation.cancelled() => {
+                () = request_cancellation.cancelled() => {
                     return ProjectOpenWaitOutcome::Cancelled;
                 }
-                _ = &mut sleep => {
+                () = &mut sleep => {
                     return ProjectOpenWaitOutcome::TimedOut;
                 }
                 changed = state.changed() => {
@@ -918,6 +1050,158 @@ mod typed_failure_tests {
                 ref reason,
             } if authority == "workflow" && reason == "partial workflow schema"
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod refused_store_invalidation_tests {
+    use super::*;
+
+    fn route_for(profile_root: &Path, project_root: &Path) -> ProjectRouteKey {
+        ProjectRouteKey {
+            profile_root: profile_root.to_path_buf(),
+            global_db_path: profile_root.join("global.db"),
+            project_path: project_root.to_path_buf(),
+            scope_prefix: None,
+        }
+    }
+
+    fn store_data_root(profile_root: &Path, project_root: &Path) -> PathBuf {
+        let project_id = crate::storage::default_profile_project_id(project_root);
+        crate::storage::profile_sharded_data_root(profile_root, &project_id)
+    }
+
+    fn seed_refused_store(profile_root: &Path, project_root: &Path) -> PathBuf {
+        let data_root = store_data_root(profile_root, project_root);
+        std::fs::create_dir_all(&data_root).unwrap();
+        let db_path = data_root.join(crate::config::db_filename(&data_root));
+        std::fs::write(&db_path, b"refused-store-stand-in").unwrap();
+        db_path
+    }
+
+    async fn record_reset_required_failure(tasks: &ProjectOpenTasks, route: ProjectRouteKey) {
+        let claim = tasks
+            .start_cancellable(route, |_| async {
+                Err(TraceDecayError::reset_required(
+                    "graph",
+                    "unsupported schema version 18",
+                ))
+            })
+            .await;
+        let ProjectOpenTaskClaim::InFlight(state) = claim else {
+            panic!("the first open must start a tracked task");
+        };
+        assert!(
+            ProjectOpenTasks::wait_for_completion(state).await.is_err(),
+            "the scripted open must record its refusal"
+        );
+        // The watch publishes `Failed` just before the task itself finishes,
+        // and staleness eviction only acts on finished tasks.
+        while tasks.tracked_task_count().await > 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Live recovery bug: after `storage reset-project-store` deleted the
+    /// refused graph DB on disk, the daemon kept serving the recorded
+    /// `ResetRequired` from this cache until it was restarted. An unchanged
+    /// store keeps its backed-off refusal, but a refusal whose on-disk basis
+    /// changed must be dropped so the next open re-derives the state.
+    #[tokio::test]
+    async fn on_disk_reset_invalidates_the_cached_refusal_without_restart() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let db_path = seed_refused_store(&profile_root, &project_root);
+        let route = route_for(&profile_root, &project_root);
+        let tasks = ProjectOpenTasks::default();
+        record_reset_required_failure(&tasks, route.clone()).await;
+
+        // Unchanged store: the refusal stays cached and backed off.
+        assert!(tasks.cached_failure(&route).await.is_some());
+        let claim = tasks
+            .start_cancellable(route.clone(), |_| async { Ok(()) })
+            .await;
+        assert!(
+            matches!(claim, ProjectOpenTaskClaim::Failed(_)),
+            "an unchanged refused store must keep declining reopen"
+        );
+
+        // The operator reset deletes the refused graph DB on disk.
+        std::fs::remove_file(&db_path).unwrap();
+
+        assert!(
+            tasks.cached_failure(&route).await.is_none(),
+            "a refusal recorded against deleted files must not be served"
+        );
+        let claim = tasks
+            .start_cancellable(route.clone(), |_| async { Ok(()) })
+            .await;
+        let ProjectOpenTaskClaim::InFlight(state) = claim else {
+            panic!("the reset store must admit a fresh open without a daemon restart");
+        };
+        ProjectOpenTasks::wait_for_completion(state).await.unwrap();
+    }
+
+    /// Per-branch graph DBs are part of the refused store's fingerprint, so
+    /// a reset that removes only `branches/*.db` also clears the refusal.
+    #[tokio::test]
+    async fn branch_graph_db_reset_invalidates_the_cached_refusal() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        seed_refused_store(&profile_root, &project_root);
+        let branches_dir = store_data_root(&profile_root, &project_root).join("branches");
+        std::fs::create_dir_all(&branches_dir).unwrap();
+        let branch_db = branches_dir.join("develop.db");
+        std::fs::write(&branch_db, b"refused-branch-stand-in").unwrap();
+        let route = route_for(&profile_root, &project_root);
+        let tasks = ProjectOpenTasks::default();
+        record_reset_required_failure(&tasks, route.clone()).await;
+        assert!(tasks.cached_failure(&route).await.is_some());
+
+        std::fs::remove_file(&branch_db).unwrap();
+
+        assert!(
+            tasks.cached_failure(&route).await.is_none(),
+            "a branch graph DB reset must invalidate the cached refusal"
+        );
+    }
+
+    /// The invalidation is scoped to typed `ResetRequired` refusals: other
+    /// backed-off failures carry no store fingerprint and keep their plain
+    /// time-based backoff even when store files change.
+    #[tokio::test]
+    async fn non_reset_failures_keep_their_backoff_when_files_change() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let db_path = seed_refused_store(&profile_root, &project_root);
+        let route = route_for(&profile_root, &project_root);
+        let tasks = ProjectOpenTasks::default();
+        let claim = tasks
+            .start_cancellable(route.clone(), |_| async {
+                Err(TraceDecayError::Database {
+                    operation: "ensure global database authority invariants".to_string(),
+                    message: "persisted row violates an invariant".to_string(),
+                })
+            })
+            .await;
+        let ProjectOpenTaskClaim::InFlight(state) = claim else {
+            panic!("the first open must start a tracked task");
+        };
+        assert!(ProjectOpenTasks::wait_for_completion(state).await.is_err());
+
+        std::fs::remove_file(&db_path).unwrap();
+
+        assert!(
+            tasks.cached_failure(&route).await.is_some(),
+            "non-ResetRequired backoffs are time-based and must survive file churn"
+        );
     }
 }
 

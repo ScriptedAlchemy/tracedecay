@@ -37,11 +37,9 @@ where
     OpenFuture: std::future::Future<Output = Result<Arc<crate::mcp::McpServer>>> + Send + 'static,
 {
     if !lifecycle.accepting() {
-        return ProjectOpenTaskClaim::Failed(ProjectOpenFailure {
-            message: "daemon is draining before project warm-up".to_string(),
-            retry_at: None,
-            typed: None,
-        });
+        return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
+            "daemon is draining before project warm-up".to_string(),
+        ));
     }
     tasks
         .start_cancellable(route, move |cancellation| async move {
