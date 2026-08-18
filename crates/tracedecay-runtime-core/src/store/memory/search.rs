@@ -112,8 +112,10 @@ fn rank_and_seek(
             .find(|(hit, updated_at)| {
                 hit.fact().fact_id() == after.fact_id() && *updated_at == after.updated_at()
             })
-            .map(|(hit, updated_at)| (hit.score_millionths(), *updated_at))
-            .unwrap_or((after.score_millionths(), after.updated_at()));
+            .map_or(
+                (after.score_millionths(), after.updated_at()),
+                |(hit, updated_at)| (hit.score_millionths(), *updated_at),
+            );
         ranked.retain(|(hit, updated_at)| {
             hit.score_millionths() < after_score
                 || (hit.score_millionths() == after_score
@@ -397,12 +399,12 @@ async fn project_memory_graph_assist(
         },
     };
     let before = candidates.fact_ids.len();
-    candidates
-        .fact_ids
-        .extend(page.facts().iter().filter_map(|fact| {
-            matches!(fact, ProjectMemoryFactProjectionV1::Available(_))
-                .then(|| fact.fact_id().clone())
-        }));
+    candidates.fact_ids.extend(
+        page.facts()
+            .iter()
+            .filter(|&fact| matches!(fact, ProjectMemoryFactProjectionV1::Available(_)))
+            .map(|fact| fact.fact_id().clone()),
+    );
     Ok(ProjectMemoryFactSearchGraphCoverageV1::Complete {
         root_count: roots.len(),
         relation_count: page.relations().len(),
@@ -563,7 +565,6 @@ pub(super) async fn find_project_memory_contradictions_tx(
         }
     }
     ProjectMemoryFactContradictionPageV1::new(query.owner().clone(), contradictions)
-        .map_err(Into::into)
 }
 
 async fn project_memory_update_retrieval_projection_tx(
@@ -725,8 +726,7 @@ pub(super) async fn record_project_memory_fact_retrieval_tx(
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
             "retrieval projection is missing",
-        )
-        .into());
+        ));
     }
     let receipt = ProjectMemoryFactRetrievalReceiptV1::recorded(
         request.owner().clone(),

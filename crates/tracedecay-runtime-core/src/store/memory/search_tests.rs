@@ -294,7 +294,10 @@ async fn eligible_low_limit_search_reaches_older_facts_across_stable_pages() {
     assert_eq!(tracked.receipt().owner(), &FactOwnerV1::Profile);
     assert_eq!(tracked.receipt().operation_id(), &retrieval_operation);
     assert_eq!(tracked.receipt().input_digest(), retrieval_input_digest);
-    assert_eq!(tracked.receipt().fact_ids(), &[tracked_target.clone()]);
+    assert_eq!(
+        tracked.receipt().fact_ids(),
+        std::slice::from_ref(&tracked_target)
+    );
     assert!(tracked.receipt().recall());
     assert!(!tracked.receipt().replayed());
     assert_eq!(tracked.projections().len(), 1);
