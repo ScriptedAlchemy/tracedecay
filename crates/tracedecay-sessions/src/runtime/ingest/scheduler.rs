@@ -16,6 +16,16 @@ use super::failure::{
 pub const USER_INGEST_PROVIDER_FRONTIER_KEY: &str =
     "tracedecay-internal:user-ingest-provider-frontier:v1";
 
+/// Durable rotation cursor for Codex historical transcript discovery.
+///
+/// Codex discovery is recent-first; this monotonically advancing counter
+/// selects which historical buckets the bounded catch-up slice of each pass
+/// covers (`rotation % older-bucket-count`), so a backlog larger than one
+/// discovery pass converges across passes instead of starving or being
+/// dropped.
+pub const USER_INGEST_CODEX_HISTORY_FRONTIER_KEY: &str =
+    "tracedecay-internal:user-ingest-codex-history-frontier:v1";
+
 /// Production bounds for transcript multi-source passes (discovery/queue/work).
 pub(super) fn default_ingest_pass_bounds() -> IngestPassBounds {
     let jsonl_bytes = u64::try_from(MAX_JSONL_RECORD_BYTES)

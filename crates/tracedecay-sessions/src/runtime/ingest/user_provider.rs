@@ -17,8 +17,11 @@ use super::failure::{
     cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
     warn_transcript_catch_up_failure,
 };
+use super::scheduler::{
+    USER_INGEST_CODEX_HISTORY_FRONTIER_KEY, read_ingest_frontier, write_ingest_frontier,
+};
 use super::user::{
-    BoundedProviderFailure, BoundedProviderOutcome, try_ingest_user_codex_sessions_with_db_bounded,
+    BoundedProviderFailure, BoundedProviderOutcome, try_ingest_user_codex_sessions_rotated,
     try_ingest_user_cursor_sessions_with_db_bounded,
 };
 
@@ -103,7 +106,7 @@ pub(super) async fn run_user_provider<S: TranscriptIngestStore>(
     cancellation: &ObservationCancellation,
 ) -> UserProviderRunResult {
     UserProviderUnit {
-        _store: store,
+        store,
         profile_root,
         roots,
         facade,
@@ -116,7 +119,7 @@ pub(super) async fn run_user_provider<S: TranscriptIngestStore>(
 }
 
 struct UserProviderUnit<'a, S> {
-    _store: &'a S,
+    store: &'a S,
     profile_root: &'a Path,
     roots: &'a [PathBuf],
     facade: &'a dyn HostAdmission,
@@ -146,21 +149,40 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
     }
 
     async fn run_codex(self) -> ProviderRunOutcome {
-        match try_ingest_user_codex_sessions_with_db_bounded(
+        // Recent-first with a durable historical rotation: the frontier picks
+        // which older discovery buckets this pass covers. A missing frontier
+        // (fresh store) truthfully starts the rotation at zero.
+        let rotation = read_ingest_frontier(self.store, USER_INGEST_CODEX_HISTORY_FRONTIER_KEY)
+            .await
+            .unwrap_or(0);
+        match try_ingest_user_codex_sessions_rotated(
             self.profile_root,
             None,
             self.roots.to_vec(),
             self.facade,
             Some(self.max_new_bytes),
             self.cancellation,
+            rotation,
         )
         .await
         {
-            Ok(outcome) => ProviderRunOutcome::bounded(
-                outcome.stats,
-                outcome.bytes_consumed,
-                outcome.deferred_by_byte_cap,
-            ),
+            Ok((outcome, next_rotation)) => {
+                // A failed advance repeats the same historical window next
+                // pass — at-least-once coverage, never a skipped range.
+                let advance = next_rotation.saturating_sub(rotation);
+                let _ = write_ingest_frontier(
+                    self.store,
+                    USER_INGEST_CODEX_HISTORY_FRONTIER_KEY,
+                    rotation,
+                    usize::try_from(advance).unwrap_or(usize::MAX),
+                )
+                .await;
+                ProviderRunOutcome::bounded(
+                    outcome.stats,
+                    outcome.bytes_consumed,
+                    outcome.deferred_by_byte_cap,
+                )
+            }
             Err(error) => {
                 if let Some(cancelled) = cancelled_provider_outcome(&error) {
                     return cancelled;

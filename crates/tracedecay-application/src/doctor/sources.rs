@@ -1347,6 +1347,88 @@ pub fn observability_finding(
     }
 }
 
+/// Count of durably refused source records for one provider and coverage
+/// reason, read from the observation authority's cursor-advance ledger.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IngestRefusalCountV1 {
+    /// Session provider that produced the refused records (e.g. `cursor`).
+    pub provider: String,
+    /// Durable coverage reason recorded when coverage advanced past the
+    /// records (e.g. `admission_refused`, `unsupported_fact`).
+    pub reason: String,
+    /// Refused source records carried under this provider/reason pair.
+    pub count: u64,
+}
+
+/// Census of durable ingest-coverage refusals (Observability family).
+///
+/// Deterministic refusals advance coverage with a durable typed reason so the
+/// stream converges instead of re-reporting the same records; the plans treat
+/// those refusals as visible typed outcomes, never silent drops. This read
+/// surfaces the recorded counts truthfully — re-admission of a deterministic
+/// refusal would deterministically fail again, so Doctor reports rather than
+/// retries.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum IngestRefusalCensusReadV1 {
+    /// The cursor-advance ledger was consulted; an empty census means no
+    /// source record was durably refused.
+    Observed { refusals: Vec<IngestRefusalCountV1> },
+    /// The ledger could not be consulted.
+    Unknown,
+}
+
+/// Map the durable refusal census into its `Observability` finding.
+pub fn ingest_refusal_finding(
+    read: &IngestRefusalCensusReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::Observability;
+    match read {
+        IngestRefusalCensusReadV1::Observed { refusals } if refusals.is_empty() => clean_finding(
+            family,
+            "observability.ingest-coverage.converged",
+            DoctorCoverageCompletenessV1::Complete,
+            "durable ingest coverage records no refused source records",
+        ),
+        IngestRefusalCensusReadV1::Observed { refusals } => {
+            // The coverage statement is bounded (512 bytes); list the largest
+            // provider/reason pairs and summarize the rest so the finding
+            // always constructs.
+            const MAX_LISTED_PAIRS: usize = 6;
+            let total: u64 = refusals.iter().map(|entry| entry.count).sum();
+            let mut ordered = refusals.clone();
+            ordered.sort_unstable_by(|a, b| b.count.cmp(&a.count).then_with(|| a.cmp(b)));
+            let mut breakdown: Vec<String> = ordered
+                .iter()
+                .take(MAX_LISTED_PAIRS)
+                .map(|entry| format!("{} {}={}", entry.provider, entry.reason, entry.count))
+                .collect();
+            if ordered.len() > MAX_LISTED_PAIRS {
+                breakdown.push(format!("+{} more", ordered.len() - MAX_LISTED_PAIRS));
+            }
+            let statement = format!(
+                "durable ingest coverage advanced past {total} refused source records ({}); \
+                 refusals are deterministic typed outcomes recorded in the cursor-advance \
+                 ledger, not silently dropped data",
+                breakdown.join(", ")
+            );
+            source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "observability.ingest-coverage.durably-refused",
+                DoctorCoverageCompletenessV1::Complete,
+                &statement,
+            )
+        }
+        IngestRefusalCensusReadV1::Unknown => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "observability.ingest-coverage.unknown",
+            "durable ingest-coverage refusal census undetermined",
+        ),
+    }
+}
+
 /// Narrow source port for the canonical durable feedback read model.
 pub trait ObservabilityDoctorPort: Send + Sync {
     /// Read current durable feedback-observation state.
@@ -1354,6 +1436,12 @@ pub trait ObservabilityDoctorPort: Send + Sync {
         &'a self,
         context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, ObservabilityReadV1>;
+
+    /// Read the durable ingest-coverage refusal census.
+    fn ingest_refusal_census<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, IngestRefusalCensusReadV1>;
 }
 
 // --- Storage retention/size (Storage family) ---------------------------------
@@ -1580,5 +1668,61 @@ mod tests {
         .expect("finding");
         assert_eq!(finding.family(), DoctorFindingFamilyV1::Observability);
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
+    }
+
+    #[test]
+    fn ingest_refusals_surface_as_a_degraded_observed_finding() {
+        let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
+            refusals: vec![
+                IngestRefusalCountV1 {
+                    provider: "cursor".to_owned(),
+                    reason: "admission_refused".to_owned(),
+                    count: 160,
+                },
+                IngestRefusalCountV1 {
+                    provider: "codex".to_owned(),
+                    reason: "admission_refused".to_owned(),
+                    count: 27,
+                },
+            ],
+        })
+        .expect("finding");
+        assert_eq!(finding.family(), DoctorFindingFamilyV1::Observability);
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "observability.ingest-coverage.durably-refused"
+        );
+        let statement = finding.coverage().statement().to_owned();
+        assert!(
+            statement.contains("187 refused source records"),
+            "statement must carry the total: {statement}"
+        );
+        assert!(
+            statement.contains("cursor admission_refused=160")
+                && statement.contains("codex admission_refused=27"),
+            "statement must break counts down per provider and reason: {statement}"
+        );
+    }
+
+    #[test]
+    fn empty_ingest_refusal_census_is_healthy_converged_coverage() {
+        let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
+            refusals: Vec::new(),
+        })
+        .expect("finding");
+        assert!(finding.state().is_healthy_complete());
+        assert_eq!(
+            finding.evidence()[0].reference().as_str(),
+            "observability.ingest-coverage.converged"
+        );
+    }
+
+    #[test]
+    fn unknown_ingest_refusal_census_cannot_claim_health() {
+        let finding =
+            ingest_refusal_finding(&IngestRefusalCensusReadV1::Unknown).expect("finding");
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Unknown);
+        assert!(!finding.state().is_healthy_complete());
     }
 }

@@ -5,7 +5,7 @@ use super::authority::{IngestAdmissionBinding, SessionIngestAuthority};
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::runtime::source::{self, TranscriptDiscoveryBounds, TranscriptSource};
+use crate::runtime::source::{self, TranscriptDiscoveryBounds};
 use crate::runtime::{SessionProvider, claude_observation, codex, cursor, cursor_composer};
 use tracedecay_domain::{BrainId, ObservationScopeV1, UserProfileId};
 use tracedecay_store::StoreShardScopeV1;
@@ -67,16 +67,51 @@ pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
     max_total_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> source::TranscriptIngestResult<BoundedProviderOutcome> {
+    try_ingest_user_codex_sessions_rotated(
+        profile_root,
+        session_id,
+        registered_roots,
+        admission,
+        max_total_new_bytes,
+        cancellation,
+        0,
+    )
+    .await
+    .map(|(outcome, _)| outcome)
+}
+
+/// Recent-first Codex catch-up: discovery serves the newest sessions first and
+/// rotates a bounded slice through the historical backlog at the packed
+/// `history_rotation` frontier. Returns the advanced frontier so the caller
+/// persists it durably — the backlog stays tracked pending work behind the
+/// present, never a dropped range.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn try_ingest_user_codex_sessions_rotated(
+    _profile_root: &Path,
+    session_id: Option<String>,
+    registered_roots: Vec<PathBuf>,
+    admission: &dyn HostAdmission,
+    max_total_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+    history_rotation: u64,
+) -> source::TranscriptIngestResult<(BoundedProviderOutcome, u64)> {
     let Some(source) = codex::CodexSource::new() else {
-        return Ok(BoundedProviderOutcome {
-            stats: TranscriptIngestStats::default(),
-            bytes_consumed: 0,
-            deferred_by_byte_cap: false,
-        });
+        return Ok((
+            BoundedProviderOutcome {
+                stats: TranscriptIngestStats::default(),
+                bytes_consumed: 0,
+                deferred_by_byte_cap: false,
+            },
+            0,
+        ));
     };
     let source = source.for_user_scope(session_id.clone(), registered_roots.clone());
-    let discovery =
-        source.discover_transcript_paths(profile_root, TranscriptDiscoveryBounds::default_walk());
+    let pass = source.discover_transcript_paths_with_rotation(
+        TranscriptDiscoveryBounds::default_walk(),
+        history_rotation,
+    );
+    let next_history_rotation = pass.next_history_rotation;
+    let discovery = pass.report;
     let mut remaining = max_total_new_bytes;
     let mut bytes_consumed = 0u64;
     let mut deferred_by_byte_cap = discovery.is_truncated();
@@ -108,11 +143,14 @@ pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
         cancellation,
     )
     .await?;
-    Ok(BoundedProviderOutcome {
-        stats,
-        bytes_consumed,
-        deferred_by_byte_cap,
-    })
+    Ok((
+        BoundedProviderOutcome {
+            stats,
+            bytes_consumed,
+            deferred_by_byte_cap,
+        },
+        next_history_rotation,
+    ))
 }
 
 pub(super) struct BoundedProviderOutcome {

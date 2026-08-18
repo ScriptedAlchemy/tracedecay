@@ -1,9 +1,11 @@
 mod codec;
 mod persist;
+mod refusal_census;
 mod reset;
 pub mod retention;
 mod schema;
 
+pub use refusal_census::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
 pub use reset::{ObservationAuthorityResetV1, reset_refused_observation_authority};
 pub use schema::OBSERVATION_AUTHORITY;
 pub(super) use schema::{ensure_observation_schema, require_admitted_observation_shape};

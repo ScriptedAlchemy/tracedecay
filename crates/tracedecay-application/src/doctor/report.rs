@@ -21,8 +21,9 @@ use super::sources::{
     DoctorStorageFamilyReadV1, DoctorStorageIncompleteReasonV1, HostIntegrationDoctorPort,
     LanguageServerDoctorPort, ObservabilityDoctorPort, OperationalAuditDoctorPort,
     RuntimeHealthDoctorPort, StorageDoctorPort, advisory_feedback_findings, code_index_finding,
-    configuration_finding, host_integration_finding, language_server_finding,
-    observability_finding, operational_audit_findings, runtime_health_finding,
+    configuration_finding, host_integration_finding, ingest_refusal_finding,
+    language_server_finding, observability_finding, operational_audit_findings,
+    runtime_health_finding,
 };
 use super::types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
@@ -704,7 +705,17 @@ impl<'a> DoctorReportComposerV1<'a> {
             Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
         };
         let finding = observability_finding(&read)?;
-        Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
+        // Durable ingest-coverage refusals are typed outcomes recorded next to
+        // the observation authority; they are reported alongside the feedback
+        // projection so refused source records stay visible, never silent.
+        let refusal_finding = ingest_refusal_finding(&port.ingest_refusal_census(context).await)?;
+        Ok((
+            vec![
+                DoctorReportEntryV1::new(finding, None)?,
+                DoctorReportEntryV1::new(refusal_finding, None)?,
+            ],
+            consultation,
+        ))
     }
 
     async fn compose_storage(

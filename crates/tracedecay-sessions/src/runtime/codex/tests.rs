@@ -957,3 +957,166 @@ mod source_matcher_cache_tests {
         assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod recent_first_discovery_tests {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+
+    use super::CodexSource;
+    use crate::runtime::source::TranscriptDiscoveryBounds;
+
+    /// Creates `sessions/YYYY/MM/DD/rollout-<name>.jsonl` under the Codex home.
+    fn write_dated_rollout(home: &Path, date: (&str, &str, &str), name: &str) -> PathBuf {
+        let dir = home
+            .join(".codex/sessions")
+            .join(date.0)
+            .join(date.1)
+            .join(date.2);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-{name}.jsonl"));
+        std::fs::write(&path, "{}\n").unwrap();
+        path
+    }
+
+    /// The starvation regression: with a historical backlog far larger than the
+    /// discovery file cap, one pass must still discover TODAY's session first
+    /// instead of exhausting the cap on the oldest days.
+    #[test]
+    fn codex_discovery_serves_newest_sessions_before_backlog() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        // 30 historical days x 4 rollouts = 120 backlog files.
+        for day in 1..=30 {
+            for item in 0..4 {
+                write_dated_rollout(
+                    home,
+                    ("2025", "11", &format!("{day:02}")),
+                    &format!("old-{day:02}-{item}"),
+                );
+            }
+        }
+        let today = write_dated_rollout(home, ("2026", "08", "17"), "today");
+
+        // Cap far below the backlog so oldest-first discovery could never
+        // reach the newest file.
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
+        let pass = CodexSource::with_home(home).discover_transcript_paths_with_rotation(bounds, 0);
+
+        assert_eq!(
+            pass.report.paths.first(),
+            Some(&today),
+            "the newest session must be discovered first, before any backlog"
+        );
+        assert!(
+            pass.report.is_truncated(),
+            "an over-cap backlog must report truncation so catch-up stays scheduled"
+        );
+    }
+
+    /// Coverage: advancing the rotation frontier across passes must visit every
+    /// historical bucket — tracked pending work, never a skipped range.
+    #[test]
+    fn codex_history_rotation_covers_every_backlog_bucket_across_passes() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let mut all: BTreeSet<PathBuf> = BTreeSet::new();
+        for day in 1..=12 {
+            for item in 0..2 {
+                all.insert(write_dated_rollout(
+                    home,
+                    ("2025", "11", &format!("{day:02}")),
+                    &format!("old-{day:02}-{item}"),
+                ));
+            }
+        }
+        all.insert(write_dated_rollout(home, ("2026", "08", "17"), "today"));
+
+        // 8 units/pass: 7 recent + 1 history slice against 25 files.
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let source = CodexSource::with_home(home);
+
+        let mut rotation = 0u64;
+        let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
+        for _pass in 0..64 {
+            let pass = source.discover_transcript_paths_with_rotation(bounds, rotation);
+            covered.extend(pass.report.paths.iter().cloned());
+            assert!(
+                pass.next_history_rotation > rotation,
+                "a truncated pass must advance the rotation so the backlog converges"
+            );
+            rotation = pass.next_history_rotation;
+            if covered.len() == all.len() {
+                break;
+            }
+        }
+        assert_eq!(
+            covered, all,
+            "rotating passes must cover the entire backlog, no skipped-and-forgotten range"
+        );
+    }
+
+    /// A backlog under the cap needs no rotation: one pass discovers everything
+    /// and reports no truncation, so no catch-up is scheduled.
+    #[test]
+    fn codex_discovery_under_cap_is_complete_without_rotation() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let a = write_dated_rollout(home, ("2026", "08", "16"), "yesterday");
+        let b = write_dated_rollout(home, ("2026", "08", "17"), "today");
+
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
+        let pass = CodexSource::with_home(home).discover_transcript_paths_with_rotation(bounds, 0);
+
+        assert_eq!(pass.report.paths, vec![b, a], "newest-first ordering");
+        assert!(!pass.report.is_truncated());
+        assert_eq!(
+            pass.next_history_rotation, 0,
+            "a complete pass leaves the rotation frontier untouched"
+        );
+    }
+
+    /// A single historical bucket larger than the whole per-pass budget must
+    /// converge file-by-file through the intra-bucket offset instead of
+    /// starving its tail (rotation jumping past it) or pinning forever
+    /// (rotation never advancing).
+    #[test]
+    fn codex_oversized_bucket_converges_through_intra_bucket_offset() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let mut all: BTreeSet<PathBuf> = BTreeSet::new();
+        for item in 0..40 {
+            all.insert(write_dated_rollout(
+                home,
+                ("2025", "11", "01"),
+                &format!("old-{item:02}"),
+            ));
+        }
+        all.insert(write_dated_rollout(home, ("2026", "08", "17"), "today"));
+
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let source = CodexSource::with_home(home);
+
+        let mut rotation = 0u64;
+        let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
+        for _pass in 0..64 {
+            let pass = source.discover_transcript_paths_with_rotation(bounds, rotation);
+            covered.extend(pass.report.paths.iter().cloned());
+            if covered.len() == all.len() {
+                break;
+            }
+            assert!(
+                pass.next_history_rotation > rotation,
+                "an unfinished oversized bucket must still advance the intra-bucket offset"
+            );
+            rotation = pass.next_history_rotation;
+        }
+        assert_eq!(
+            covered, all,
+            "an oversized bucket's tail must be reached across passes"
+        );
+    }
+}

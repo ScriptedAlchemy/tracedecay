@@ -165,8 +165,9 @@ mod tests {
         AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
         CodeIndexMountReadV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
         DoctorReportComposerV1, DoctorReportV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
-        HostIntegrationDoctorPort, HostIntegrationReadV1, LanguageServerDoctorPort,
-        LanguageServerReadV1, ObservabilityDoctorPort, ObservabilityReadV1,
+        HostIntegrationDoctorPort, HostIntegrationReadV1, IngestRefusalCensusReadV1,
+        LanguageServerDoctorPort, LanguageServerReadV1, ObservabilityDoctorPort,
+        ObservabilityReadV1,
         OperationalAuditDoctorPort, OperationalAuditReadV1, ProfileAuthorityReadV1,
         RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
     };
@@ -266,6 +267,13 @@ mod tests {
             _context: &'a RequestContext,
         ) -> DoctorSourceFuture<'a, ObservabilityReadV1> {
             Box::pin(async { ObservabilityReadV1::Unknown })
+        }
+
+        fn ingest_refusal_census<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+        ) -> DoctorSourceFuture<'a, IngestRefusalCensusReadV1> {
+            Box::pin(async { IngestRefusalCensusReadV1::Unknown })
         }
     }
 

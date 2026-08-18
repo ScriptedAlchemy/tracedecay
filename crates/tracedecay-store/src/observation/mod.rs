@@ -323,6 +323,22 @@ impl ObservationCoverageReason {
         }
     }
 
+    /// True when the evidence could have produced a durable observation but
+    /// was refused — the counts Doctor surfaces as a degraded (yet observed
+    /// and final) condition. Blank, out-of-scope, unsupported-fact, and
+    /// duplicate dispositions are expected coverage outcomes, not refusals.
+    pub fn is_refusal(self) -> bool {
+        matches!(
+            self,
+            Self::MalformedFrame
+                | Self::OversizedFrame
+                | Self::UnknownVersion
+                | Self::SanitizerRejected
+                | Self::SanitizerQuarantined
+                | Self::AdmissionRefused
+        )
+    }
+
     /// True when this reason never carries a sanitization receipt, i.e. the
     /// evidence was disposed of before it ever reached the sanitizer.
     pub fn is_receiptless(self) -> bool {

@@ -36,7 +36,8 @@ use tracedecay_application::doctor::{
     ConfigurationDriftV1, DoctorCoverageCompletenessV1, DoctorReportComposerV1, DoctorReportV1,
     DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageFindingV1,
     DoctorStorageIncompleteReasonV1, HostConformanceV1, HostIntegrationDoctorPort,
-    HostIntegrationReadV1, LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1,
+    HostIntegrationReadV1, IngestRefusalCensusReadV1, IngestRefusalCountV1,
+    LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1,
     ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort,
     OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteOperationalReadV1,
     RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort,
@@ -573,15 +574,61 @@ pub fn observability_read_from_model(
     }
 }
 
+/// Map the durable cursor-advance refusal censuses of the consulted sessions
+/// stores into one truthful kernel read. Counts merge by provider/reason; a
+/// single unavailable store makes the whole census `Unknown` rather than a
+/// silently partial healthy claim.
+#[must_use]
+pub fn ingest_refusal_read_from_censuses(
+    censuses: &[crate::global_db::observation::ObservationRefusalCensusV1],
+) -> IngestRefusalCensusReadV1 {
+    let mut merged: std::collections::BTreeMap<(String, String), u64> =
+        std::collections::BTreeMap::new();
+    for census in censuses {
+        match census {
+            crate::global_db::observation::ObservationRefusalCensusV1::Observed { refusals } => {
+                for refusal in refusals {
+                    let key = (refusal.provider.clone(), refusal.reason.clone());
+                    let entry = merged.entry(key).or_insert(0);
+                    *entry = entry.saturating_add(refusal.count);
+                }
+            }
+            crate::global_db::observation::ObservationRefusalCensusV1::Unavailable => {
+                return IngestRefusalCensusReadV1::Unknown;
+            }
+        }
+    }
+    IngestRefusalCensusReadV1::Observed {
+        refusals: merged
+            .into_iter()
+            .map(|((provider, reason), count)| IngestRefusalCountV1 {
+                provider,
+                reason,
+                count,
+            })
+            .collect(),
+    }
+}
+
 /// Adapter over the canonical durable Plan-26 observation read model.
 pub struct ObservabilityDoctorAdapterV1 {
     read: ObservabilityReadV1,
+    refusals: IngestRefusalCensusReadV1,
 }
 
 impl ObservabilityDoctorAdapterV1 {
     #[must_use]
     pub fn from_read(read: ObservabilityReadV1) -> Self {
-        Self { read }
+        Self {
+            read,
+            refusals: IngestRefusalCensusReadV1::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub fn with_refusals(mut self, refusals: IngestRefusalCensusReadV1) -> Self {
+        self.refusals = refusals;
+        self
     }
 }
 
@@ -591,6 +638,14 @@ impl ObservabilityDoctorPort for ObservabilityDoctorAdapterV1 {
         _context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, ObservabilityReadV1> {
         let read = self.read.clone();
+        Box::pin(async move { read })
+    }
+
+    fn ingest_refusal_census<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, IngestRefusalCensusReadV1> {
+        let read = self.refusals.clone();
         Box::pin(async move { read })
     }
 }
@@ -1180,6 +1235,8 @@ pub struct DoctorKernelInputsV1 {
     pub code_index: CodeIndexMountReadV1,
     /// Canonical durable Plan-26 feedback read (`Observability` family).
     pub observability: ObservabilityReadV1,
+    /// Durable ingest-coverage refusal census (`Observability` family).
+    pub ingest_refusals: IngestRefusalCensusReadV1,
     /// Storage retention/size read (Storage family).
     pub storage: DoctorStorageFamilyReadV1,
 }
@@ -1205,7 +1262,8 @@ pub async fn compose_doctor_report(
         AdvisoryFeedbackDoctorAdapterV1::from_read(inputs.advisory_feedback.clone());
     let language_server = LanguageServerDoctorAdapterV1::from_read(inputs.language_server.clone());
     let code_index = CodeIndexMountDoctorAdapterV1::from_read(inputs.code_index.clone());
-    let observability = ObservabilityDoctorAdapterV1::from_read(inputs.observability.clone());
+    let observability = ObservabilityDoctorAdapterV1::from_read(inputs.observability.clone())
+        .with_refusals(inputs.ingest_refusals.clone());
     let storage = StorageDoctorAdapterV1::from_read(inputs.storage.clone());
 
     let composer = DoctorReportComposerV1::new()
@@ -1382,6 +1440,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 code_generation_retention,
                 language_server,
                 observability_read,
+                (profile_refusal_census, project_refusal_census),
                 advisory_feedback,
                 host_read,
                 code_index,
@@ -1402,6 +1461,12 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 ),
                 language_server_read_from_broker(&diagnostic_broker),
                 tracedecay_usecases::feedback::concrete::feedback_observation_read_model(&graph,),
+                async {
+                    tokio::join!(
+                        profile_sessions.observation_refusal_census(),
+                        project_sessions.observation_refusal_census(),
+                    )
+                },
                 advisory_feedback_read,
                 host_scan,
                 code_index_read_from_registry(&schedulers, &project_root),
@@ -1440,6 +1505,10 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             .reduce(merge_storage_reads)
             .unwrap_or(DoctorStorageFamilyReadV1::Absent);
             let observability = observability_read_from_model(observability_read);
+            let ingest_refusals = ingest_refusal_read_from_censuses(&[
+                profile_refusal_census,
+                project_refusal_census,
+            ]);
             let host = match host_read {
                 Ok(read) => read,
                 Err(_) => HostIntegrationReadV1::Unknown,
@@ -1475,6 +1544,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 language_server,
                 code_index,
                 observability,
+                ingest_refusals,
                 storage,
             };
             let report = compose_doctor_report(&context, &inputs).await?;

@@ -313,6 +313,109 @@ async fn enrollment_marker_without_a_store_is_still_rejected() {
     assert_missing_enrollment_admission(&error);
 }
 
+/// Regression for the orphaned-store deadlock: a repository whose durable
+/// identity marker (`.git/tracedecay-project.json`) survived while both its
+/// in-repo enrollment marker and its registry rows were lost, with the profile
+/// store still fully materialized on disk. Identity resolution answers through
+/// the durable marker (so first-touch never runs), while the store resolver
+/// demands the enrollment marker nothing would ever rewrite — `tracedecay
+/// init` failed deterministically with `MissingEnrollment` and hooks kept
+/// writing into the orphan. Recovery must re-adopt: admit the route, restore
+/// the enrollment marker under exactly the identity the durable marker names
+/// (never a freshly minted alias), and leave the store's data untouched.
+#[cfg(unix)]
+#[tokio::test]
+async fn orphaned_store_with_repository_identity_is_readopted_without_aliasing() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("repository");
+    std::fs::create_dir_all(&project).expect("create repository");
+    run_git(&project, &["init", "--quiet"]);
+
+    // The durable repository identity marker names a project id that is NOT
+    // the path-derived hash of this checkout, so a re-adoption that silently
+    // minted a fresh identity would fail the assertions below.
+    let project_id = "proj_orphan_readopt";
+    crate::storage::write_repository_identity_marker(&project, project_id)
+        .expect("repository identity marker");
+
+    // Materialize the orphan store exactly as `enroll_project_on_disk_only`
+    // does, then remove the enrollment marker to reproduce the orphan shape.
+    let layout = enroll_project_on_disk_only(&project, &profile_root, project_id);
+    crate::storage::remove_enrollment_marker(&project, project_id).expect("drop enrollment marker");
+    assert!(
+        crate::storage::read_enrollment_marker(&project)
+            .expect("read enrollment marker")
+            .is_none(),
+        "fixture must reproduce the missing-enrollment orphan shape"
+    );
+    let graph_bytes_before = std::fs::read(&layout.graph_db_path).expect("orphan graph bytes");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "orphan store re-adoption");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+
+    // The route guard must admit the orphan without allow_init: its durable
+    // identity resolves an existing store, so this is recovery, not init.
+    engine
+        .ensure_registered_project_route(&project, false)
+        .await
+        .expect("orphaned store with durable identity must be admitted");
+
+    // Identity resolution must answer with the durable marker's exact id.
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    let open_options = crate::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: None,
+    };
+    let store_layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+        &project,
+        &open_options,
+        registry.as_ref(),
+    )
+    .await
+    .expect("durable identity must resolve the registered layout");
+    assert_eq!(
+        store_layout.identity.project_id.as_deref(),
+        Some(project_id),
+        "re-adoption must keep the durable identity, never mint an alias"
+    );
+
+    // Enrollment restoration is the re-adoption step: the same resolution the
+    // session mount performs must rewrite the missing marker in place.
+    let typed_project_id =
+        tracedecay_store::ProjectId::new(project_id.to_owned()).expect("typed project id");
+    let roots = crate::tracedecay::TraceDecay::registered_enrollment_roots(
+        &project,
+        &store_layout,
+        &typed_project_id,
+        registry.as_ref(),
+    )
+    .await
+    .expect("re-adoption must restore the enrollment root");
+    assert!(!roots.is_empty(), "re-adoption must produce enrollment roots");
+    let restored = crate::storage::read_enrollment_marker(&project)
+        .expect("read restored enrollment marker")
+        .expect("enrollment marker must be restored");
+    assert_eq!(
+        restored.project_id, project_id,
+        "restored enrollment must name the durable identity"
+    );
+    assert_eq!(restored.storage_mode, crate::storage::StorageMode::ProfileSharded);
+
+    // Re-adoption restores identity only; the store's data is never replaced.
+    let graph_bytes_after = std::fs::read(&layout.graph_db_path).expect("graph bytes after");
+    assert_eq!(
+        graph_bytes_before, graph_bytes_after,
+        "re-adoption must not rewrite or replace the existing store"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_project_deletion_stays_settling_until_transferred_reaper_joins() {
