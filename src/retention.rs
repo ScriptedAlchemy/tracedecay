@@ -19,7 +19,7 @@ pub use tracedecay_automation::config::{
     DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, DEFAULT_LEGACY_SESSION_RETENTION_DAYS, RetentionConfig,
 };
 
-use crate::db::engine::{Executor, QueryExecutor};
+use crate::db::engine::Executor;
 use crate::errors::{Result, TraceDecayError};
 
 /// Free-page compaction for tracked branch databases, off the hot path
@@ -108,21 +108,6 @@ impl RetentionTableReport {
     }
 }
 
-/// Whether a retention pass mutates the database.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RetentionMode {
-    /// Count matching rows without deleting anything.
-    DryRun,
-    /// Delete matching rows.
-    Apply,
-}
-
-impl RetentionMode {
-    fn is_apply(self) -> bool {
-        matches!(self, Self::Apply)
-    }
-}
-
 /// Computes the cutoff unix-second timestamp for a `window_days` retention
 /// window relative to `now_secs`. Rows strictly older than the cutoff are
 /// eligible for pruning.
@@ -142,9 +127,6 @@ mod backend {
 pub trait RetentionBackend: backend::Sealed {
     #[doc(hidden)]
     async fn delete_before(&self, table: RetentionTable, cutoff: i64) -> Result<u64>;
-
-    #[doc(hidden)]
-    async fn count_before(&self, table: RetentionTable, cutoff: i64) -> Result<u64>;
 }
 
 async fn delete_before(
@@ -162,32 +144,6 @@ async fn delete_before(
         .execute(&sql, crate::db::engine::params![cutoff])
         .await
         .map_err(|error| retention_error(name, "delete", &error))
-}
-
-async fn count_before(
-    executor: &(impl QueryExecutor + ?Sized),
-    table: RetentionTable,
-    cutoff: i64,
-) -> Result<u64> {
-    let name = table.table_name();
-    let eligibility = retention_eligibility(table);
-    let sql = format!(
-        "SELECT COUNT(*) FROM {name} \
-         WHERE {TIMESTAMP_COLUMN} IS NOT NULL AND {TIMESTAMP_COLUMN} < ?1
-         AND {eligibility}"
-    );
-    let mut result = executor
-        .query(&sql, crate::db::engine::params![cutoff])
-        .await
-        .map_err(|error| retention_error(name, "count", &error))?;
-    let row = result
-        .next()
-        .await
-        .map_err(|error| retention_error(name, "count", &error))?;
-    Ok(row
-        .and_then(|row| row.get::<i64>(0).ok())
-        .unwrap_or(0)
-        .max(0) as u64)
 }
 
 /// Legacy session windows still obey the current projection-durability
@@ -229,14 +185,6 @@ macro_rules! retention_backend {
                 ) -> Result<u64> {
                     delete_before(self, table, cutoff).await
                 }
-
-                async fn count_before(
-                    &self,
-                    table: RetentionTable,
-                    cutoff: i64,
-                ) -> Result<u64> {
-                    count_before(self, table, cutoff).await
-                }
             }
         )+
     };
@@ -250,14 +198,12 @@ retention_backend!(
     crate::db::engine::Transaction,
 );
 
-/// Prunes (or, in [`RetentionMode::DryRun`], counts) rows in `table` older
-/// than its configured window. A disabled window is a no-op that reports
-/// `rows = 0`.
+/// Prunes rows in `table` older than its configured window. A disabled
+/// window is a no-op that reports `rows = 0`.
 pub async fn prune_table<E>(
     conn: &E,
     table: RetentionTable,
     window_days: Option<u32>,
-    mode: RetentionMode,
     now_secs: i64,
 ) -> Result<RetentionTableReport>
 where
@@ -268,17 +214,12 @@ where
     };
     let cutoff = cutoff_secs(window_days, now_secs);
     let name = table.table_name();
-
-    let rows = if mode.is_apply() {
-        conn.delete_before(table, cutoff).await?
-    } else {
-        conn.count_before(table, cutoff).await?
-    };
+    let rows = conn.delete_before(table, cutoff).await?;
 
     Ok(RetentionTableReport {
         table: name,
         window_days: Some(window_days),
-        applied: mode.is_apply(),
+        applied: true,
         rows,
     })
 }
@@ -289,7 +230,6 @@ where
 pub async fn prune_global_tables<E>(
     conn: &E,
     config: &RetentionConfig,
-    mode: RetentionMode,
     now_secs: i64,
 ) -> Result<Vec<RetentionTableReport>>
 where
@@ -302,28 +242,12 @@ where
                 conn,
                 table,
                 retention_window_days(config, table),
-                mode,
                 now_secs,
             )
             .await?,
         );
     }
     Ok(reports)
-}
-
-/// Reports global-database retention eligibility without committing any
-/// mutation.
-pub async fn global_retention_report(
-    database: &crate::global_db::RegisteredGlobalDb,
-    config: &RetentionConfig,
-    now_secs: i64,
-) -> Result<Vec<RetentionTableReport>> {
-    let transaction = database.begin_write_transaction().await?;
-    let report = prune_global_tables(&transaction, config, RetentionMode::DryRun, now_secs).await;
-    match transaction.rollback().await {
-        Ok(()) => report,
-        Err(error) => Err(error.into()),
-    }
 }
 
 /// Applies global-database retention in one registered write transaction.
@@ -333,7 +257,7 @@ pub async fn prune_global_retention(
     now_secs: i64,
 ) -> Result<Vec<RetentionTableReport>> {
     let transaction = database.begin_write_transaction().await?;
-    let reports = prune_global_tables(&transaction, config, RetentionMode::Apply, now_secs).await?;
+    let reports = prune_global_tables(&transaction, config, now_secs).await?;
     transaction.commit().await?;
     Ok(reports)
 }
@@ -430,48 +354,12 @@ mod tests {
         let now = 1_000_000_000;
         seed_analytics(&conn, &[Some(now - 10 * SECONDS_PER_DAY), Some(now)]).await;
 
-        let report = prune_table(
-            &*conn,
-            RetentionTable::AnalyticsEvents,
-            None,
-            RetentionMode::Apply,
-            now,
-        )
-        .await
-        .unwrap();
+        let report = prune_table(&*conn, RetentionTable::AnalyticsEvents, None, now)
+            .await
+            .unwrap();
         assert_eq!(report.rows, 0);
         assert!(!report.applied);
         assert_eq!(count(&conn).await, 2, "disabled window must delete nothing");
-    }
-
-    #[tokio::test]
-    async fn dry_run_counts_but_does_not_delete() {
-        let directory = tempfile::tempdir().unwrap();
-        let conn = test_conn(&directory);
-        let now = 1_000_000_000;
-        seed_analytics(
-            &conn,
-            &[
-                Some(now - 200 * SECONDS_PER_DAY),
-                Some(now - 181 * SECONDS_PER_DAY),
-                Some(now - 5 * SECONDS_PER_DAY),
-                None,
-            ],
-        )
-        .await;
-
-        let report = prune_table(
-            &*conn,
-            RetentionTable::AnalyticsEvents,
-            Some(180),
-            RetentionMode::DryRun,
-            now,
-        )
-        .await
-        .unwrap();
-        assert_eq!(report.rows, 2, "two rows are older than 180 days");
-        assert!(!report.applied);
-        assert_eq!(count(&conn).await, 4, "dry run must not mutate");
     }
 
     #[tokio::test]
@@ -491,15 +379,9 @@ mod tests {
         )
         .await;
 
-        let report = prune_table(
-            &*conn,
-            RetentionTable::AnalyticsEvents,
-            Some(180),
-            RetentionMode::Apply,
-            now,
-        )
-        .await
-        .unwrap();
+        let report = prune_table(&*conn, RetentionTable::AnalyticsEvents, Some(180), now)
+            .await
+            .unwrap();
         assert_eq!(report.rows, 2);
         assert!(report.applied);
         assert_eq!(
@@ -546,7 +428,6 @@ mod tests {
             &*conn,
             RetentionTable::SessionMessages,
             config.session_messages_days,
-            RetentionMode::Apply,
             now,
         )
         .await
@@ -555,7 +436,6 @@ mod tests {
             &*conn,
             RetentionTable::LcmRawMessages,
             config.lcm_raw_messages_days,
-            RetentionMode::Apply,
             now,
         )
         .await
@@ -575,10 +455,9 @@ mod tests {
         seed_analytics(&conn, &[Some(now - 400 * SECONDS_PER_DAY)]).await;
         // session_messages must exist for the (disabled) count/skip path; with
         // a None window it is never queried, so no table is required.
-        let reports =
-            prune_global_tables(&*conn, &config_days(Some(180)), RetentionMode::Apply, now)
-                .await
-                .unwrap();
+        let reports = prune_global_tables(&*conn, &config_days(Some(180)), now)
+            .await
+            .unwrap();
         assert_eq!(reports.len(), 3);
         let analytics = reports
             .iter()

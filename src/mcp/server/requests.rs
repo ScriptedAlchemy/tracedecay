@@ -354,9 +354,7 @@ impl McpServer {
                 .map(|id| tool_error_response(id, &request.method, &error));
         }
         let method = classify_mcp_method(&request.method);
-        if matches!(&method, McpMethod::Initialize)
-            && self.initialize_root_routing_enabled.load(Ordering::Relaxed)
-        {
+        if matches!(&method, McpMethod::Initialize) {
             connection
                 .observe_initialize(
                     request.params.as_ref(),

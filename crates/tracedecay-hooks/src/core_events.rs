@@ -134,21 +134,4 @@ impl DaemonHookEvent {
     pub fn kiro_post_tool_use(rel_paths: Vec<String>, cwd: Option<PathBuf>) -> Self {
         Self::new(HookAgent::Kiro, "postToolUse", rel_paths, None, cwd)
     }
-
-    pub fn hermes_terminal_receipt(
-        cwd: PathBuf,
-        route: HookRouteMetadata,
-        receipt: HookTerminalReceipt,
-    ) -> Self {
-        let mut event = Self::new(
-            HookAgent::Hermes,
-            "terminalReceipt",
-            Vec::new(),
-            None,
-            Some(cwd),
-        );
-        event.route = Some(route);
-        event.receipt = Some(receipt);
-        event
-    }
 }

@@ -3,6 +3,7 @@
 
 use super::*;
 
+#[cfg(any(test, feature = "test-transport"))]
 mod response_delivery;
 
 const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
@@ -512,24 +513,15 @@ impl McpServer {
     }
 
     /// Runs one client connection without shutting down the server when that
-    /// connection closes. Daemon-owned servers use this so the engine remains
-    /// shared across independent clients.
+    /// connection closes. Production daemon connections go through
+    /// [`Self::run_daemon_connection_with_timings`]; this is the in-process
+    /// test-transport harness entry for the same connection loop.
+    #[cfg(any(test, feature = "test-transport"))]
     pub async fn run_connection(
         self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
     ) -> Result<()> {
         self.run_with_shutdown_policy(transport, false, false, None, None)
-            .await
-    }
-
-    /// Runs one daemon client connection using connection-local timing
-    /// settings. The shared server's default timing flag remains unchanged.
-    pub async fn run_connection_with_timings(
-        self: &Arc<Self>,
-        transport: &mut impl crate::mcp::transport::McpTransport,
-        timings_enabled: bool,
-    ) -> Result<()> {
-        self.run_with_shutdown_policy(transport, false, false, Some(timings_enabled), None)
             .await
     }
 

@@ -648,23 +648,6 @@ pub fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Res
     operation_result
 }
 
-pub fn refresh_service(spec: &DaemonServiceSpec) -> Result<PathBuf> {
-    let guard = QuiescedDaemonLifecycle::acquire("daemon service refresh")?;
-    let desired_state = match guard.previous_state() {
-        DaemonServiceState::Missing => DaemonServiceState::RunningEnabled,
-        state => state,
-    };
-    let stopped_state = match desired_state {
-        DaemonServiceState::RunningEnabled => DaemonServiceState::StoppedEnabled,
-        DaemonServiceState::RunningDisabled => DaemonServiceState::StoppedDisabled,
-        state => state,
-    };
-    let runner = ServiceRunner::current()?;
-    let operation_result = refresh_service_with_runner(&runner, spec, stopped_state);
-    let restore_result = guard.finish_with_state(desired_state);
-    combine_operation_and_restore("daemon service refresh", operation_result, restore_result)
-}
-
 fn refresh_service_with_runner(
     runner: &ServiceRunner,
     spec: &DaemonServiceSpec,
@@ -693,17 +676,6 @@ fn refresh_service_with_runner(
         previous_state,
     )?;
     Ok(service_path)
-}
-
-pub fn refresh_installed_service(spec: &DaemonServiceSpec) -> Result<Option<PathBuf>> {
-    with_quiesced_installed_service("daemon service refresh", |_| {
-        refresh_installed_service_under_lease(spec)
-    })
-}
-
-#[doc(hidden)]
-pub fn refresh_installed_service_under_lease(spec: &DaemonServiceSpec) -> Result<Option<PathBuf>> {
-    refresh_installed_service_with_state(spec, None)
 }
 
 #[doc(hidden)]

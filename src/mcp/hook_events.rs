@@ -1454,23 +1454,29 @@ mod tests {
     fn hook_boundary_protects_credential_ids_once_across_durable_receipt_joins() {
         let raw = ["AKIA", "SYNTHETIC", "CANARY", "6"].concat();
         let protected = crate::privacy::protect_sensitive_structural_id(&raw).unwrap();
-        let params = serde_json::to_value(crate::daemon::DaemonHookEvent::hermes_terminal_receipt(
-            PathBuf::from("/tmp/project"),
-            crate::daemon::HookRouteMetadata {
+        // The sender-side wire shape the Hermes plugin emits; production only
+        // deserializes these events.
+        let params = serde_json::to_value(crate::daemon::DaemonHookEvent {
+            agent: HookAgent::Hermes.as_wire().to_string(),
+            event: "terminalReceipt".to_string(),
+            rel_paths: Vec::new(),
+            command: None,
+            cwd: Some(PathBuf::from("/tmp/project")),
+            route: Some(crate::daemon::HookRouteMetadata {
                 session_id: Some(raw.clone()),
                 thread_id: Some(raw.clone()),
                 cwd: Some(PathBuf::from("/tmp/project")),
                 worktree: None,
                 branch: Some("main".to_string()),
-            },
-            crate::daemon::HookTerminalReceipt {
+            }),
+            receipt: Some(crate::daemon::HookTerminalReceipt {
                 tool_call_id: Some(raw.clone()),
                 turn_id: Some(raw.clone()),
                 status: Some("success".to_string()),
                 duration_ms: Some(1),
                 transcript_watermark: Some(raw.clone()),
-            },
-        ))
+            }),
+        })
         .unwrap();
         let event = parse_or_panic(&params);
         let plan = plan_hook_event(&event, Path::new("/tmp/project"), Some("main"));

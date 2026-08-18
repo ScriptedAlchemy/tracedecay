@@ -27,8 +27,26 @@ fn session_start(root: PathBuf) -> Value {
     serde_json::to_value(DaemonHookEvent::session_start(HookAgent::Codex, root)).unwrap()
 }
 
+/// Builds the terminal-receipt wire event the Hermes plugin sends. Production
+/// only deserializes these, so the tests own the sender-side construction.
+fn hermes_terminal_receipt_event(
+    cwd: PathBuf,
+    route: HookRouteMetadata,
+    receipt: HookTerminalReceipt,
+) -> DaemonHookEvent {
+    DaemonHookEvent {
+        agent: HookAgent::Hermes.as_wire().to_string(),
+        event: "terminalReceipt".to_string(),
+        rel_paths: Vec::new(),
+        command: None,
+        cwd: Some(cwd),
+        route: Some(route),
+        receipt: Some(receipt),
+    }
+}
+
 fn terminal_receipt(root: PathBuf) -> Value {
-    serde_json::to_value(DaemonHookEvent::hermes_terminal_receipt(
+    serde_json::to_value(hermes_terminal_receipt_event(
         root.clone(),
         HookRouteMetadata {
             session_id: Some("session-admission-test".to_string()),
@@ -1420,14 +1438,14 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
         duration_ms: Some(1),
         transcript_watermark: Some(raw.clone()),
     };
-    let terminal = serde_json::to_value(DaemonHookEvent::hermes_terminal_receipt(
+    let terminal = serde_json::to_value(hermes_terminal_receipt_event(
         project.path().to_path_buf(),
         route.clone(),
         receipt.clone(),
     ))
     .unwrap();
     let mut turn_ingested =
-        DaemonHookEvent::hermes_terminal_receipt(project.path().to_path_buf(), route, receipt);
+        hermes_terminal_receipt_event(project.path().to_path_buf(), route, receipt);
     turn_ingested.event = "turnIngested".to_string();
     let turn_ingested = serde_json::to_value(turn_ingested).unwrap();
     let mut routes = HookProjectRouteCache::default();

@@ -7,9 +7,9 @@ use crate::mcp::server::tool_errors::serialize_response_line;
 use crate::mcp::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 impl McpServer {
-    /// Process a single raw JSON-RPC line and write the response.
-    /// Used to replay a peeked `initialize` message that was consumed before
-    /// the server's main loop started.
+    /// Process a single raw JSON-RPC line and write the response. The
+    /// in-process test-transport harness drives single requests through this
+    /// without running the full connection loop (the module mount is gated).
     pub async fn handle_and_write(
         &self,
         line: &str,

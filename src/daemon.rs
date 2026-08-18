@@ -192,6 +192,7 @@ pub(crate) use dashboard_configuration_test_runtime::{
 };
 pub(crate) mod query_authority_provider;
 #[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 pub(crate) mod retained_test_support;
 mod semantic_activation_reconciler;
 mod semantic_evaluation;
@@ -215,8 +216,9 @@ mod graph_resolution;
 pub(crate) mod native_integration;
 use graph_resolution::retained_project_server_resolver;
 mod http_application;
+pub(crate) use http_application::live_remote_operational_status;
 mod http_application_router;
-mod remote_protocol;
+pub(crate) mod remote_protocol;
 mod remote_query;
 mod remote_replay_transaction;
 pub(crate) mod retained_owner;
@@ -373,9 +375,8 @@ pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
     default_socket_path, install_service, install_service_under_lease,
     installed_service_socket_path, prepare_scoop_package_service,
-    quiesce_installed_service_before_lease, refresh_installed_service,
-    refresh_installed_service_under_lease, refresh_installed_service_under_lease_with_state,
-    refresh_service, restore_installed_service_after_update, restore_scoop_package_service,
+    quiesce_installed_service_before_lease, refresh_installed_service_under_lease_with_state,
+    restore_installed_service_after_update, restore_scoop_package_service,
     service_spec, service_spec_with_remote_tls, service_status, socket_path_or_default,
     start_service, stop_service, uninstall_service, verify_installed_service_quiesced_under_lease,
     wait_for_installed_service_state, with_exclusive_maintenance_window,

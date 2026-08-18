@@ -923,58 +923,6 @@ fn atomic_service_write_sets_permissions_and_orders_durability_steps() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn refresh_service_rewrites_unit_and_restarts_daemon() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().expect("temp dir");
-    let config_home = dir.path().join("config");
-    let fake_bin = dir.path().join("bin");
-    let home = dir.path().join("home");
-    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
-    std::fs::create_dir_all(&home).expect("home dir");
-
-    let systemctl = fake_bin.join("systemctl");
-    let log = dir.path().join("systemctl.log");
-    std::fs::write(
-        &systemctl,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n",
-    )
-    .expect("fake systemctl");
-    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-        .expect("systemctl permissions");
-
-    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
-    let _home_guard = EnvVarGuard::set("HOME", &home);
-    let _data_guard =
-        EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
-    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
-    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
-    let spec = DaemonServiceSpec {
-        tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
-        socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
-        data_dir_override: None,
-        remote_tls: None,
-    };
-
-    let service_path = super::refresh_service(&spec).expect("refresh service");
-
-    assert_eq!(
-        service_path,
-        config_home
-            .join("systemd/user")
-            .join(crate::daemon::SERVICE_NAME)
-    );
-    let unit = std::fs::read_to_string(&service_path).expect("service unit");
-    assert!(unit.contains(
-            "ExecStart=/opt/tracedecay/bin/tracedecay daemon run --socket /run/user/1000/tracedecay.sock"
-        ));
-    assert_eq!(
-        std::fs::read_to_string(log).expect("systemctl log"),
-        "--user daemon-reload\n--user enable tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
 fn refresh_installed_service_skips_missing_unit() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
@@ -999,7 +947,10 @@ fn refresh_installed_service_skips_missing_unit() {
     let service_path = config_home
         .join("systemd/user")
         .join(crate::daemon::SERVICE_NAME);
-    let outcome = super::refresh_installed_service(&spec).expect("refresh service");
+    let outcome = super::with_quiesced_installed_service("daemon service refresh", |_| {
+        super::refresh_installed_service_with_state(&spec, None)
+    })
+    .expect("refresh service");
 
     assert_eq!(outcome, None);
     assert!(!service_path.exists());
@@ -1190,7 +1141,10 @@ fn refresh_installed_service_preserves_stopped_state() {
         remote_tls: None,
     };
 
-    super::refresh_installed_service(&spec).expect("refresh service");
+    super::with_quiesced_installed_service("daemon service refresh", |_| {
+        super::refresh_installed_service_with_state(&spec, None)
+    })
+    .expect("refresh service");
 
     let commands = std::fs::read_to_string(log).expect("systemctl log");
     assert!(commands.contains("--user is-active --quiet tracedecay.service"));
