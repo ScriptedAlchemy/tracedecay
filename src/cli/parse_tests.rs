@@ -2,7 +2,7 @@ use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunsAction,
     AutomationSkillsAction, BranchAction, Cli, Commands, DaemonAction, FeedbackRollbackAction,
     HostBundleAction, LspAction, MemoryAction, PackageHookAction, ProfileStorageAction,
-    ScoopPackageHookAction, SessionsAction, SessionsRefreshAction,
+    RemoteAction, ScoopPackageHookAction, SessionsAction, SessionsRefreshAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
@@ -896,6 +896,8 @@ fn init_and_sync_parse_runtime_skip_and_include_folders() {
             path,
             skip_folders,
             include_folders,
+            adopt_project: None,
+            fresh: false,
         }) if path.as_deref() == Some("/tmp/project")
             && skip_folders == strings(&["vendor", "dist"])
             && include_folders == strings(&["dist/generated"])
@@ -923,6 +925,43 @@ fn init_and_sync_parse_runtime_skip_and_include_folders() {
             && force
             && skip_folders.is_empty()
             && include_folders == strings(&["dist", "vendor/generated"])
+    ));
+}
+
+#[test]
+fn init_parses_adopt_project_flag() {
+    let adopt = Cli::try_parse_from([
+        "tracedecay",
+        "init",
+        "/tmp/moved",
+        "--adopt-project",
+        "proj_nongit_moved",
+    ])
+    .expect("init --adopt-project should parse");
+    assert!(matches!(
+        adopt.command,
+        Some(Commands::Init {
+            path,
+            adopt_project,
+            fresh: false,
+            ..
+        }) if path.as_deref() == Some("/tmp/moved")
+            && adopt_project.as_deref() == Some("proj_nongit_moved")
+    ));
+}
+
+#[test]
+fn init_parses_fresh_flag() {
+    let fresh = Cli::try_parse_from(["tracedecay", "init", "/tmp/new", "--fresh"])
+        .expect("init --fresh should parse");
+    assert!(matches!(
+        fresh.command,
+        Some(Commands::Init {
+            path,
+            adopt_project: None,
+            fresh: true,
+            ..
+        }) if path.as_deref() == Some("/tmp/new")
     ));
 }
 
@@ -2071,4 +2110,140 @@ fn sessions_refresh_help_lists_modes_and_exact_selectors() {
             "{mode} help must explain that it returns an opaque handle"
         );
     }
+}
+
+#[test]
+fn remote_status_parses_json_flag() {
+    let cli = Cli::try_parse_from(["tracedecay", "remote", "status", "--json"])
+        .expect("remote status should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Remote {
+            action: RemoteAction::Status { json: true }
+        })
+    ));
+    assert!(Cli::try_parse_from(["tracedecay", "remote", "status"]).is_ok());
+}
+
+#[test]
+fn remote_protocol_actions_require_endpoint_credential_and_request_file() {
+    for action in ["enroll", "replay", "backup", "restore", "failover"] {
+        let error = match Cli::try_parse_from(["tracedecay", "remote", action]) {
+            Ok(_) => panic!("{action} must require authority flags"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind(),
+            ErrorKind::MissingRequiredArgument,
+            "{action} must require endpoint, credential-file, and request-file"
+        );
+    }
+
+    let enroll_without_enrollment_credential = match Cli::try_parse_from([
+        "tracedecay",
+        "remote",
+        "enroll",
+        "--endpoint",
+        "https://brain.example/remote/",
+        "--credential-file",
+        "grant.bin",
+        "--request-file",
+        "enroll.json",
+    ]) {
+        Ok(_) => panic!("enroll must require --enrollment-credential-file"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        enroll_without_enrollment_credential.kind(),
+        ErrorKind::MissingRequiredArgument
+    );
+}
+
+#[test]
+fn remote_replay_parses_request_file_and_optional_trust_root() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "remote",
+        "replay",
+        "--endpoint",
+        "https://brain.example/remote/",
+        "--credential-file",
+        "cred.bin",
+        "--trust-root-file",
+        "root.pem",
+        "--timeout-secs",
+        "45",
+        "--request-file",
+        "-",
+        "--json",
+    ])
+    .expect("remote replay should parse");
+
+    let Some(Commands::Remote {
+        action: RemoteAction::Replay { authority },
+    }) = cli.command
+    else {
+        panic!("unexpected remote replay command");
+    };
+    assert_eq!(authority.endpoint, "https://brain.example/remote/");
+    assert_eq!(authority.credential_file, std::path::Path::new("cred.bin"));
+    assert_eq!(
+        authority.trust_root_file.as_deref(),
+        Some(std::path::Path::new("root.pem"))
+    );
+    assert_eq!(authority.timeout_secs, 45);
+    assert_eq!(authority.request_file, std::path::Path::new("-"));
+    assert!(authority.json);
+}
+
+#[test]
+fn remote_status_rejects_protocol_request_file_flags() {
+    let error = match Cli::try_parse_from([
+        "tracedecay",
+        "remote",
+        "status",
+        "--request-file",
+        "request.json",
+    ]) {
+        Ok(_) => panic!("status must not accept --request-file"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn remote_enroll_parses_both_credential_files() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "remote",
+        "enroll",
+        "--endpoint",
+        "https://brain.example/remote/",
+        "--credential-file",
+        "grant.bin",
+        "--enrollment-credential-file",
+        "enroll.bin",
+        "--request-file",
+        "enroll.json",
+    ])
+    .expect("remote enroll should parse");
+
+    let Some(Commands::Remote {
+        action:
+            RemoteAction::Enroll {
+                authority,
+                enrollment_credential_file,
+            },
+    }) = cli.command
+    else {
+        panic!("unexpected remote enroll command");
+    };
+    assert_eq!(authority.credential_file, std::path::Path::new("grant.bin"));
+    assert_eq!(
+        enrollment_credential_file,
+        std::path::Path::new("enroll.bin")
+    );
+    assert_eq!(authority.request_file, std::path::Path::new("enroll.json"));
+    assert!(!authority.json);
 }

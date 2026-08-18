@@ -60,6 +60,9 @@ pub(crate) async fn handle_no_command() -> tracedecay::errors::Result<()> {
             Some(project_path.to_string_lossy().into_owned()),
             Vec::new(),
             Vec::new(),
+            None,
+            false,
+            false,
         )
         .await?;
     }
@@ -70,6 +73,9 @@ pub(crate) async fn handle_init(
     path: Option<String>,
     skip_folders: Vec<String>,
     include_folders: Vec<String>,
+    adopt_project: Option<String>,
+    fresh: bool,
+    assume_yes: bool,
 ) -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(path);
     let profile_root = tracedecay::storage::default_profile_root()?;
@@ -78,12 +84,14 @@ pub(crate) async fn handle_init(
     {
         return Err(tracedecay::errors::TraceDecayError::Config { message });
     }
-    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+    let adoption = moved_store_adoption_request(adopt_project, fresh, assume_yes)?;
+    let mut handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
         Some(project_path.clone()),
         None,
         false,
         true,
     )?;
+    handshake.moved_store_adoption = adoption;
     #[cfg(unix)]
     let daemon_available = tracedecay::daemon::daemon_reachable();
     #[cfg(not(unix))]
@@ -99,6 +107,33 @@ pub(crate) async fn handle_init(
     )
     .await
     .map_err(|error| annotate_reset_required_init_error(error, &project_path_for_remedy))
+}
+
+/// Maps explicit `tracedecay init` flags to the adoption request the daemon
+/// honors. Only init escalates past `Never`: `--adopt-project` names the
+/// project, bare `--yes` confirms a unique candidate, `--fresh` opts out of
+/// adoption entirely, and no flags means candidates are offered in a typed
+/// refusal instead of silently remapped.
+fn moved_store_adoption_request(
+    adopt_project: Option<String>,
+    fresh: bool,
+    assume_yes: bool,
+) -> tracedecay::errors::Result<tracedecay::tracedecay::MovedStoreAdoption> {
+    if fresh && adopt_project.is_some() {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "--fresh mints a new project identity and contradicts --adopt-project; \
+                      pass exactly one"
+                .to_owned(),
+        });
+    }
+    Ok(match (adopt_project, fresh, assume_yes) {
+        (Some(project_id), _, _) => {
+            tracedecay::tracedecay::MovedStoreAdoption::AdoptNamed(project_id)
+        }
+        (None, true, _) => tracedecay::tracedecay::MovedStoreAdoption::Never,
+        (None, false, true) => tracedecay::tracedecay::MovedStoreAdoption::AdoptUnique,
+        (None, false, false) => tracedecay::tracedecay::MovedStoreAdoption::OfferCandidates,
+    })
 }
 
 /// A refused store surfaces from init as the typed ResetRequired state. The
@@ -202,6 +237,7 @@ mod init_bootstrap_tests {
             client_instance_id: "commands-init-test".to_string(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
+            moved_store_adoption: tracedecay::tracedecay::MovedStoreAdoption::Never,
         }
     }
 

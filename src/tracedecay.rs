@@ -26,6 +26,7 @@ mod project_runtime_port;
 pub(crate) mod queries;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
+pub use lifecycle::MovedStoreAdoption;
 pub(crate) use lifecycle::{git_remote_url, is_fts_only_corruption};
 
 /// Central orchestrator that coordinates all subsystems of the code graph.

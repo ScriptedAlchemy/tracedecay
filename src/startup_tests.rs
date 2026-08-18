@@ -231,6 +231,8 @@ fn representative_commands_route_to_their_dispatch_family() {
                 path: None,
                 skip_folders: Vec::new(),
                 include_folders: Vec::new(),
+                adopt_project: None,
+                fresh: false,
             },
             CommandFamily::Project,
         ),
@@ -443,6 +445,8 @@ fn agent_install_maintenance_is_selective() {
         path: None,
         skip_folders: Vec::new(),
         include_folders: Vec::new(),
+        adopt_project: None,
+        fresh: false,
     }));
     assert!(!should_skip_agent_install_maintenance(&Commands::Status {
         path: None,

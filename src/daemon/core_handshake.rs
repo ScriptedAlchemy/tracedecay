@@ -44,6 +44,15 @@ pub struct DaemonHandshake {
     /// generation-local daemon state decides whether a refresh is due.
     #[serde(default)]
     pub catalog_version: String,
+    /// First-touch adoption policy for a moved non-git project store.
+    ///
+    /// Rebinding a registered identity onto a new root is an operator
+    /// decision, so only explicit `tracedecay init` flags escalate past the
+    /// [`crate::tracedecay::MovedStoreAdoption::Never`] default. Old clients
+    /// omit the field (`Never`), and old daemons ignore it — mixed-version
+    /// pairs degrade to no adoption, never to a silent remap.
+    #[serde(default)]
+    pub moved_store_adoption: crate::tracedecay::MovedStoreAdoption,
 }
 
 impl DaemonHandshake {
@@ -64,6 +73,7 @@ impl DaemonHandshake {
             client_instance_id: crate::runtime_identity::process_run_id().to_string(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
+            moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
         })
     }
 

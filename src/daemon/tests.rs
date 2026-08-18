@@ -301,6 +301,7 @@ fn test_handshake_defaults() -> DaemonHandshake {
         client_instance_id: crate::runtime_identity::process_run_id().to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
+        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     }
 }
 

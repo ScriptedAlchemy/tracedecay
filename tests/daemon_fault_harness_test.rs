@@ -358,6 +358,7 @@ async fn assert_daemon_crash_stage(
         client_instance_id: "daemon-fault-harness".to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
+        moved_store_adoption: tracedecay::tracedecay::MovedStoreAdoption::Never,
     };
     let ingest_args = |session_id: &str| {
         json!({

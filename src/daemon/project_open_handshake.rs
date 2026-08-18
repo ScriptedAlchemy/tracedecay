@@ -32,10 +32,11 @@ pub(super) async fn open_project_for_handshake(
             // mint a fresh path-derived identity and let the missing-index
             // fallback below bootstrap it.
             Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => (
-                crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout(
+                crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
                     project_path,
                     &open_options,
                     registry_database.as_ref(),
+                    &handshake.moved_store_adoption,
                 )
                 .await?,
                 true,

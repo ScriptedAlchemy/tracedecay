@@ -154,6 +154,7 @@ async fn controlled_client(
         client_instance_id: format!("client.{request_id}"),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
+        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
     (
         DaemonInvocationClient::for_connection_for_test(
@@ -262,6 +263,7 @@ async fn reset_then_reconnect_client(
         client_instance_id: "client.remote-effect-reconnect".to_owned(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
+        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
     (
         DaemonInvocationClient::for_connection_for_test(
@@ -354,6 +356,7 @@ async fn unsettled_client(
         client_instance_id: format!("client.{request_id}"),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
+        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
     };
     (
         DaemonInvocationClient::for_connection_for_test(
@@ -620,6 +623,7 @@ async fn semantic_qualification_uses_the_submitted_deadline_and_maps_canonical_b
             client_instance_id: "client.semantic-qualification-success".to_owned(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
+            moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
         },
     );
     let cancellation = CancellationSignal::active(CANCELLATION_ID).expect("cancellation");
@@ -707,6 +711,7 @@ async fn semantic_qualification_cancellation_controls_the_same_payload_request()
             client_instance_id: "client.semantic-qualification-cancel".to_owned(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
+            moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
         },
     );
     let cancellation = CancellationSignal::active(CANCELLATION_ID).expect("cancellation");

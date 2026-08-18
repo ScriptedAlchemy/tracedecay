@@ -8,7 +8,7 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::storage::{self, StoreLayout};
 use tracedecay_store::ProjectId;
 
-use super::{TraceDecay, TraceDecayOpenOptions};
+use super::{MovedStoreAdoption, TraceDecay, TraceDecayOpenOptions};
 
 impl TraceDecay {
     pub(in crate::tracedecay) fn registered_project_id(
@@ -38,6 +38,7 @@ impl TraceDecay {
             open_options,
             Some(registry_database),
             false,
+            &MovedStoreAdoption::Never,
         )
         .await
     }
@@ -54,11 +55,31 @@ impl TraceDecay {
         open_options: &TraceDecayOpenOptions,
         registry_database: &RegisteredGlobalDb,
     ) -> Result<StoreLayout> {
+        Self::resolve_first_touch_configuration_layout_with_adoption(
+            project_root,
+            open_options,
+            registry_database,
+            &MovedStoreAdoption::Never,
+        )
+        .await
+    }
+
+    /// First-touch resolution that can remap a moved non-git project whose
+    /// store evidence still names the previous registry root — only under an
+    /// explicit operator adoption decision; ambient first-touch passes
+    /// [`MovedStoreAdoption::Never`] and always mints fresh.
+    pub(crate) async fn resolve_first_touch_configuration_layout_with_adoption(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+        registry_database: &RegisteredGlobalDb,
+        adoption: &MovedStoreAdoption,
+    ) -> Result<StoreLayout> {
         Self::resolve_store_layout_for_authority(
             project_root,
             open_options,
             Some(registry_database),
             true,
+            adoption,
         )
         .await
     }
@@ -171,6 +192,7 @@ impl TraceDecay {
         open_options: &TraceDecayOpenOptions,
         registry_database: Option<&RegisteredGlobalDb>,
         allow_default_identity: bool,
+        adoption: &MovedStoreAdoption,
     ) -> Result<StoreLayout> {
         let profile_root = open_options.resolved_profile_root()?;
         let mut selected = storage::resolve_persisted_layout(project_root, &profile_root)?;
@@ -215,9 +237,35 @@ impl TraceDecay {
             }
         }
 
+        if allow_default_identity
+            && let MovedStoreAdoption::AdoptNamed(requested) = adoption
+            && let Some(layout) = selected.as_ref()
+            && layout.identity.project_id.as_deref() != Some(requested.as_str())
+        {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "cannot adopt project '{requested}' onto root '{}' that already \
+                     resolves to registered project '{}'",
+                    project_root.display(),
+                    layout.identity.project_id.as_deref().unwrap_or("<unknown>")
+                ),
+            });
+        }
+
         match selected {
             Some(layout) => Ok(layout),
             None if allow_default_identity => {
+                if let Some(registry_database) = registry_database
+                    && let Some(layout) = Self::adopt_moved_nongit_project(
+                        project_root,
+                        &profile_root,
+                        registry_database,
+                        adoption,
+                    )
+                    .await?
+                {
+                    return Ok(layout);
+                }
                 storage::default_profile_sharded_layout(project_root, &profile_root)
             }
             None => Err(TraceDecayError::Config {
@@ -312,6 +360,13 @@ impl TraceDecay {
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
-        Self::resolve_store_layout_for_authority(project_root, open_options, None, true).await
+        Self::resolve_store_layout_for_authority(
+            project_root,
+            open_options,
+            None,
+            true,
+            &MovedStoreAdoption::Never,
+        )
+        .await
     }
 }

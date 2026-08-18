@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::PossibleValuesParser};
 
 mod automation;
@@ -195,6 +197,16 @@ pub enum Commands {
         /// Folders to include even when ignored by default skips or .gitignore (can be repeated)
         #[arg(long = "include-folder", num_args = 1..)]
         include_folders: Vec<String>,
+        /// Adopt this registered project id onto the new path when its moved
+        /// non-git store no longer resolves at its recorded root. Adoption
+        /// never happens without this flag or `--yes`; a root that already
+        /// belongs to a different project is refused.
+        #[arg(long = "adopt-project")]
+        adopt_project: Option<String>,
+        /// Mint a fresh project identity even when a moved non-git store
+        /// could be adopted at this root.
+        #[arg(long)]
+        fresh: bool,
     },
     /// Incremental sync (project must already be initialized with `tracedecay init`)
     #[command(long_about = SYNC_LONG_ABOUT, after_help = SYNC_AFTER_HELP)]
@@ -288,6 +300,12 @@ pub enum Commands {
     Lsp {
         #[command(subcommand)]
         action: LspAction,
+    },
+    /// Operate the Remote Brain: live status and enrolled protocol actions
+    #[command(long_about = REMOTE_LONG_ABOUT, after_help = REMOTE_AFTER_HELP)]
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
     },
     /// Configure agent integration (MCP server, permissions, hooks, prompt rules)
     #[command(
@@ -739,6 +757,106 @@ pub enum ProjectsAction {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Args, Clone, Debug, PartialEq, Eq)]
+pub struct RemoteAuthorityArgs {
+    /// Authenticated Remote Brain HTTPS authority endpoint
+    #[arg(long, value_name = "URL")]
+    pub endpoint: String,
+    /// File containing the enrollment credential bytes (never a bare secret)
+    #[arg(long, value_name = "FILE")]
+    pub credential_file: PathBuf,
+    /// Optional single PEM trust anchor for the Remote Brain HTTPS listener
+    #[arg(long, value_name = "FILE")]
+    pub trust_root_file: Option<PathBuf>,
+    /// Request timeout in seconds
+    #[arg(long, default_value_t = tracedecay::remote_command::DEFAULT_REMOTE_TIMEOUT_SECS)]
+    pub timeout_secs: u64,
+    /// Strict typed `RemoteProtocolRequestV1` JSON file, or `-` to read stdin
+    #[arg(long, value_name = "FILE")]
+    pub request_file: PathBuf,
+    /// Emit one canonical JSON object and newline
+    #[arg(long)]
+    pub json: bool,
+}
+
+impl From<RemoteAuthorityArgs> for tracedecay::remote_command::RemoteProtocolArgs {
+    fn from(args: RemoteAuthorityArgs) -> Self {
+        Self {
+            endpoint: args.endpoint,
+            credential_file: args.credential_file,
+            trust_root_file: args.trust_root_file,
+            timeout_secs: args.timeout_secs,
+            request_file: args.request_file,
+            json: args.json,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum RemoteAction {
+    /// Read the running daemon's mounted Remote Brain operational state
+    Status {
+        /// Emit one canonical JSON object and newline
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enroll a node using a one-time grant (`--credential-file`) and new credential
+    Enroll {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+        /// File containing the new enrollment credential bytes
+        #[arg(long, value_name = "FILE")]
+        enrollment_credential_file: PathBuf,
+    },
+    /// Replay pending offline-capture frames through the current authority
+    Replay {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+    /// Create a verified Remote Brain backup
+    Backup {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+    /// Restore a verified backup into isolated staging
+    Restore {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+    /// Fail over to a standby under a higher installed fence
+    Failover {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+}
+
+impl From<RemoteAction> for tracedecay::remote_command::RemoteCommand {
+    fn from(action: RemoteAction) -> Self {
+        match action {
+            RemoteAction::Status { json } => Self::Status { json },
+            RemoteAction::Enroll {
+                authority,
+                enrollment_credential_file,
+            } => Self::Enroll {
+                args: authority.into(),
+                enrollment_credential_file,
+            },
+            RemoteAction::Replay { authority } => Self::Replay {
+                args: authority.into(),
+            },
+            RemoteAction::Backup { authority } => Self::Backup {
+                args: authority.into(),
+            },
+            RemoteAction::Restore { authority } => Self::Restore {
+                args: authority.into(),
+            },
+            RemoteAction::Failover { authority } => Self::Failover {
+                args: authority.into(),
+            },
+        }
+    }
 }
 
 #[derive(Subcommand)]

@@ -66,6 +66,46 @@ fn daemon_handshake_round_trips_project_scope_and_timings() {
     assert_eq!(decoded, handshake);
 }
 
+/// Old clients omit the adoption field entirely; the daemon must default it
+/// to `Never` so a mixed-version pair can never remap a moved store.
+#[test]
+fn daemon_handshake_defaults_missing_moved_store_adoption_to_never() {
+    let mut handshake = test_handshake_defaults();
+    handshake.project_path = Some(PathBuf::from("/work/repo"));
+    let encoded = serde_json::json!({
+        "project_path": "/work/repo",
+        "scope_prefix": null,
+        "timings": false,
+        "allow_init": false,
+        "client_identity": handshake.client_identity,
+        "client_version": handshake.client_version,
+        "client_instance_id": handshake.client_instance_id,
+    })
+    .to_string();
+
+    let decoded = DaemonHandshake::from_line(&encoded).expect("legacy handshake should decode");
+    assert_eq!(
+        decoded.moved_store_adoption,
+        crate::tracedecay::MovedStoreAdoption::Never
+    );
+}
+
+/// The adoption request survives the wire in both explicit shapes.
+#[test]
+fn daemon_handshake_round_trips_moved_store_adoption() {
+    for adoption in [
+        crate::tracedecay::MovedStoreAdoption::OfferCandidates,
+        crate::tracedecay::MovedStoreAdoption::AdoptUnique,
+        crate::tracedecay::MovedStoreAdoption::AdoptNamed("proj_nongit_moved".to_owned()),
+    ] {
+        let mut handshake = test_handshake_defaults();
+        handshake.moved_store_adoption = adoption.clone();
+        let encoded = handshake.to_line().expect("handshake should encode");
+        let decoded = DaemonHandshake::from_line(&encoded).expect("handshake should decode");
+        assert_eq!(decoded.moved_store_adoption, adoption);
+    }
+}
+
 #[test]
 fn daemon_handshake_requires_client_identity() {
     let encoded = serde_json::json!({

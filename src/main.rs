@@ -572,6 +572,7 @@ impl CommandFamily {
             | Commands::Work { .. }
             | Commands::Workflow { .. }
             | Commands::Lsp { .. }
+            | Commands::Remote { .. }
             | Commands::ExtractWorker
             | Commands::Dashboard { .. }
             | Commands::Serve { .. }
@@ -718,8 +719,18 @@ async fn dispatch_project_command(
             path,
             skip_folders,
             include_folders,
+            adopt_project,
+            fresh,
         } => {
-            commands::handle_init(path, skip_folders, include_folders).await?;
+            commands::handle_init(
+                path,
+                skip_folders,
+                include_folders,
+                adopt_project,
+                fresh,
+                assume_yes,
+            )
+            .await?;
         }
         Commands::Sync {
             path,
@@ -807,6 +818,7 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
         }
         Commands::Work { invocation } => work_command::run(invocation).await?,
         Commands::Workflow { invocation } => workflow_command::run(invocation).await?,
+        Commands::Remote { action } => tracedecay::remote_command::run(action.into())?,
         Commands::Lsp { action } => {
             lsp_cmd::handle_lsp_action(action).await?;
         }
@@ -1343,6 +1355,7 @@ impl CommandStartupPolicy {
             Commands::Tool { .. }
             | Commands::Work { .. }
             | Commands::Workflow { .. }
+            | Commands::Remote { .. }
             | Commands::Git { .. } => Self::SkipAll,
             // Explicit lifecycle/maintenance commands manage their own work.
             // Serve is also latency-sensitive: clients impose a 30 s MCP

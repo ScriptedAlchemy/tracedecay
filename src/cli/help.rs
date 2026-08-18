@@ -38,6 +38,9 @@ Examples:
   tracedecay init /path/to/repo                  Index another repository
   tracedecay init --skip-folder vendor --skip-folder dist
   tracedecay init --include-folder dist/generated
+  tracedecay init /new/path --adopt-project proj_abc123
+  tracedecay init /new/path --yes                Adopt the unique moved non-git store
+  tracedecay init /new/path --fresh              Mint a new identity, never adopt
 
 Related: tracedecay sync (incremental refresh), tracedecay status,
 tracedecay gitignore, tracedecay wipe (delete local stores).";
@@ -631,3 +634,32 @@ Examples:
 
 Related: tracedecay projects list/search (global registry), tracedecay
 status (one project's statistics).";
+
+pub(crate) const REMOTE_LONG_ABOUT: &str = "\
+Operates the Remote Brain production journey from the shell: live mounted \
+status from the running daemon, plus enrolled enroll/replay/backup/restore/\
+failover against an authenticated authority endpoint. `status` never probes \
+local stores; it reads the daemon's in-memory remote mount. Protocol actions \
+take a typed `RemoteProtocolRequestV1` JSON body from `--request-file` \
+(`-` reads stdin) and send credentials only from files. `--json` emits one \
+canonical JSON line.";
+
+pub(crate) const REMOTE_AFTER_HELP: &str = "\
+Examples:
+  tracedecay remote status                       Live daemon remote readiness
+  tracedecay remote status --json                Canonical operational read
+  tracedecay remote enroll --endpoint https://brain.example/remote/ \\
+      --credential-file grant.bin --enrollment-credential-file enroll.bin \\
+      --request-file enroll.json --json
+  tracedecay remote replay --endpoint https://brain.example/remote/ \\
+      --credential-file cred.bin --request-file replay.json
+  tracedecay remote backup --endpoint https://brain.example/remote/ \\
+      --credential-file cred.bin --request-file backup.json --json
+  tracedecay remote restore --endpoint https://brain.example/remote/ \\
+      --credential-file cred.bin --trust-root-file root.pem \\
+      --request-file restore.json --timeout-secs 60
+  tracedecay remote failover --endpoint https://brain.example/remote/ \\
+      --credential-file cred.bin --request-file failover.json
+
+Related: tracedecay daemon (local HTTP + optional Remote Brain TLS listener),
+tracedecay doctor (same operational identities).";
