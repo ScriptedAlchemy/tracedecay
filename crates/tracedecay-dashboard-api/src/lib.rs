@@ -436,6 +436,7 @@ pub struct DashboardState {
 /// Test-only lifetime owner for the same registered authorities retained by a
 /// daemon dashboard. Integration tests pass the typed host-admission runtime;
 /// raw database handles never cross the public test seam.
+#[cfg(feature = "test-transport")]
 pub struct DashboardHostAdmissionTestAuthorityV1 {
     _runtime: Arc<dyn Send + Sync>,
     project_sessions: RegisteredGlobalDbLeaseV1,
@@ -450,6 +451,7 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
 }
 
+#[cfg(feature = "test-transport")]
 impl DashboardHostAdmissionTestAuthorityV1 {
     pub fn new<T>(
         runtime: Arc<T>,
@@ -880,6 +882,7 @@ where
     .await
 }
 
+#[cfg(feature = "test-transport")]
 struct DashboardRunRequest<'a> {
     host: &'a str,
     port: u16,
@@ -889,6 +892,7 @@ struct DashboardRunRequest<'a> {
     test_project_graph: Option<Arc<TraceDecay>>,
 }
 
+#[cfg(feature = "test-transport")]
 async fn run_until_shutdown_inner<F>(
     cg: &TraceDecay,
     request: DashboardRunRequest<'_>,
