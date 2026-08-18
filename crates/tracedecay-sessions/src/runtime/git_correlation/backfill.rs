@@ -227,15 +227,6 @@ pub enum BackfillSkipReason {
     GitError,
 }
 
-impl BackfillSkipReason {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::NoActivityWindow => "no_activity_window",
-            Self::NotAWorktree => "not_a_worktree",
-            Self::GitError => "git_error",
-        }
-    }
-}
 
 /// Tunables for [`run_backfill`].
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -749,10 +749,6 @@ impl DiagnosticBroker {
         );
     }
 
-    pub fn project_root(&self) -> &Path {
-        &self.project_root
-    }
-
     fn validate_semantic_scope(&self, workspace_root: &Path, root_uri: &str) -> Result<()> {
         let project_root =
             self.project_root

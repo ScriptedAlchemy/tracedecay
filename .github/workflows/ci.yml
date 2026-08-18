@@ -380,6 +380,49 @@ jobs:
       - name: Run blocking Clippy policy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  # Additive visibility lint. Not a required check yet — introduce Hawk, then
+  # promote once the workspace is clean under `-D warnings`.
+  hawk:
+    name: Hawk
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 10
+      # renovate: datasource=github-releases depName=astral-sh/hawk
+      HAWK_VERSION: 0.1.12
+      RUSTUP_MAX_RETRIES: 10
+      TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/hawk"
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1
+
+      - name: Install Hawk
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
+
+      - name: Seed dashboard app-dist for the root build script
+        run: |
+          set -euo pipefail
+          mkdir -p dashboard/app-dist
+          printf '%s\n' '{"allFiles":["index.html"]}' > dashboard/app-dist/asset-manifest.json
+          printf '%s\n' '<!doctype html><title>hawk</title>' > dashboard/app-dist/index.html
+
+      - name: Hawk
+        run: cargo +1.97.1 hawk check --target-dir target/hawk -D warnings
+
   fmt:
     name: Format
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}

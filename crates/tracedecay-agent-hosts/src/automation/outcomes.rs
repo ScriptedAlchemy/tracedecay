@@ -172,12 +172,6 @@ pub struct AutomationOutcomesSnapshot {
     pub facts_refreshed_at: Option<i64>,
 }
 
-impl AutomationOutcomesSnapshot {
-    pub fn is_empty(&self) -> bool {
-        self.skills.is_empty() && self.facts.is_empty()
-    }
-}
-
 /// Computes the adoption verdict for one activated skill. `None` when the
 /// skill has never been activated (no post-activation window to measure).
 pub fn skill_outcome(summary: &SkillUsageSummary, now_unix: i64) -> Option<SkillOutcomeRecord> {

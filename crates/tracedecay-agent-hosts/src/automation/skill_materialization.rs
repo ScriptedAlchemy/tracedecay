@@ -152,17 +152,6 @@ pub enum MaterializeAction {
     SkippedForked,
 }
 
-impl MaterializeAction {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Written => "written",
-            Self::Unchanged => "unchanged",
-            Self::SkippedForeign => "skipped_foreign",
-            Self::SkippedForked => "skipped_forked",
-        }
-    }
-}
-
 /// Outcome of removing one materialized skill from one scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -175,17 +164,6 @@ pub enum RemoveAction {
     SkippedForeign,
     /// A managed file was user-edited (fork); left untouched.
     SkippedForked,
-}
-
-impl RemoveAction {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Removed => "removed",
-            Self::Absent => "absent",
-            Self::SkippedForeign => "skipped_foreign",
-            Self::SkippedForked => "skipped_forked",
-        }
-    }
 }
 
 /// A single materialize result within a reconcile report.
@@ -227,18 +205,6 @@ impl ReconcileReport {
             .iter()
             .filter(|entry| entry.action == RemoveAction::Removed)
             .count()
-    }
-
-    pub fn forked_count(&self) -> usize {
-        self.materialized
-            .iter()
-            .filter(|entry| entry.action == MaterializeAction::SkippedForked)
-            .count()
-            + self
-                .removed
-                .iter()
-                .filter(|entry| entry.action == RemoveAction::SkippedForked)
-                .count()
     }
 }
 

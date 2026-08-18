@@ -113,8 +113,14 @@ macro_rules! plugin_file {
     };
 }
 
-// Every shared skill and canonical/generated agent file, embedded by build.rs.
-include!(concat!(env!("OUT_DIR"), "/plugin_bundle_generated.rs"));
+// Every shared skill and canonical/generated agent file, embedded by build.rs
+// into an isolated module so Hawk can exclude the OUT_DIR surface.
+mod plugin_bundle_generated {
+    use super::PluginFile;
+
+    include!(concat!(env!("OUT_DIR"), "/plugin_bundle_generated.rs"));
+}
+use plugin_bundle_generated::*;
 
 pub(crate) fn codex_agent_files() -> &'static [PluginFile] {
     GENERATED_CODEX_AGENT_FILES
