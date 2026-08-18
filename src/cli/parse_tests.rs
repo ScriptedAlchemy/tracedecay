@@ -815,7 +815,6 @@ fn status_and_branch_add_commands_dispatch_to_expected_variants() {
         "/tmp/project",
         "--json",
         "--short",
-        "--details",
         "--runtime",
     ])
     .expect("status command should parse");
@@ -827,14 +826,12 @@ fn status_and_branch_add_commands_dispatch_to_expected_variants() {
             project_path,
             json,
             short,
-            details,
             runtime,
         }) if path.as_deref() == Some("/tmp/project")
             && project_id.is_none()
             && project_path.is_none()
             && json
             && short
-            && details
             && runtime
     ));
 

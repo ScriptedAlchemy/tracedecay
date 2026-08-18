@@ -46,7 +46,7 @@ pub enum GenerationCensusUnavailableReason {
 }
 
 impl GenerationCensusUnavailableReason {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::AuthorityUnavailable => "authority_unavailable",
             Self::ExactScopeGenerationNotReady => "exact_scope_generation_not_ready",

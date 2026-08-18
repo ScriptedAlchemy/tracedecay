@@ -248,7 +248,6 @@ fn normal_commands_keep_startup_maintenance() {
         project_path: None,
         json: false,
         short: false,
-        details: false,
         runtime: false,
     }));
 }
@@ -345,7 +344,6 @@ fn agent_install_maintenance_is_selective() {
         project_path: None,
         json: false,
         short: false,
-        details: false,
         runtime: false,
     }));
 }

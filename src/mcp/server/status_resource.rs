@@ -8,13 +8,24 @@ impl McpServer {
     /// Returns project identity and typed graph-statistics availability.
     pub(crate) async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
         let cg = self.reopen_if_branch_drifted().await;
+        let graph_statistics = match crate::mcp::tools::handlers::info::graph_statistics_value(
+            self.generation_census_reader().as_ref(),
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    ErrorCode::InternalError,
+                    format!("failed to serialize graph statistics: {error}"),
+                );
+            }
+        };
         let output = json!({
             "project_root": cg.project_root(),
             "branch_diagnostics": cg.branch_diagnostics(),
-            "graph_statistics": {
-                "status": "unavailable",
-                "reason": "sealed_generation_statistics_not_published",
-            },
+            "graph_statistics": graph_statistics,
         });
         match serde_json::to_string_pretty(&output) {
             Ok(text) => {

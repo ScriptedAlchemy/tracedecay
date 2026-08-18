@@ -89,6 +89,7 @@ pub(crate) async fn handle_init(
     #[cfg(not(unix))]
     let daemon_available = true;
 
+    let project_path_for_remedy = project_path.clone();
     handle_init_with_daemon_availability(
         project_path,
         skip_folders,
@@ -97,6 +98,36 @@ pub(crate) async fn handle_init(
         daemon_available,
     )
     .await
+    .map_err(|error| annotate_reset_required_init_error(error, &project_path_for_remedy))
+}
+
+/// A refused store surfaces from init as the typed ResetRequired state. The
+/// remedy is the scoped operator reset, not manual directory removal, so init
+/// names the exact command for this project instead of leaving the raw
+/// refusal as the last word.
+fn annotate_reset_required_init_error(
+    error: tracedecay::errors::TraceDecayError,
+    project_path: &Path,
+) -> tracedecay::errors::TraceDecayError {
+    let is_reset_required = match &error {
+        tracedecay::errors::TraceDecayError::ResetRequired { .. } => true,
+        // Daemon-brokered opens serialize the typed state over JSON-RPC; the
+        // schema-shape refusal text is the stable marker that survives it.
+        other => other.to_string().contains("shape this binary creates"),
+    };
+    if !is_reset_required {
+        return error;
+    }
+    tracedecay::errors::TraceDecayError::Config {
+        message: format!(
+            "{error}\n\nthis store cannot be opened until it is reset; run:\n  \
+             tracedecay storage reset-project-store --project-root {} --yes\n\
+             then re-run `tracedecay init {}` — sessions re-ingest from the \
+             preserved transcripts",
+            project_path.display(),
+            project_path.display()
+        ),
+    }
 }
 
 async fn handle_init_with_daemon_availability(

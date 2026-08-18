@@ -1,10 +1,8 @@
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay::display::{
     StatusTable, format_bytes, format_number, format_relative_time, format_token_count,
-    print_status_header, print_status_table, print_status_table_with,
+    print_status_header, print_status_table_with,
 };
-use tracedecay::types::GraphStats;
 
 // ── format_token_count ──────────────────────────────────────────────────────
 
@@ -205,120 +203,70 @@ fn test_format_relative_time_future_timestamp() {
 
 // ── helpers for status table tests ──────────────────────────────────────────
 
-fn sample_stats() -> GraphStats {
-    let mut nodes_by_kind = HashMap::new();
-    nodes_by_kind.insert("function".to_string(), 100);
-    nodes_by_kind.insert("struct".to_string(), 20);
-    nodes_by_kind.insert("method".to_string(), 50);
+use tracedecay::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1;
+use tracedecay::runtime_telemetry::{GenerationCensusSnapshot, GenerationCensusUnavailableReason};
+use tracedecay_code_index::production::CodeIndexGenerationStatisticsV1;
 
-    let mut files_by_language = HashMap::new();
-    files_by_language.insert("Rust".to_string(), 30);
-    files_by_language.insert("Go".to_string(), 10);
-
-    GraphStats {
-        node_count: 170,
-        edge_count: 300,
-        file_count: 40,
-        db_size_bytes: 1_048_576,
-        nodes_by_kind,
-        files_by_language,
-        last_sync_at: 1000,
-        last_full_sync_at: 500,
-        last_sync_duration_ms: 0,
-        edges_by_kind: HashMap::new(),
-        last_updated: 1000,
-        total_source_bytes: 2_000_000,
+fn observed_census() -> GenerationCensusSnapshot {
+    GenerationCensusSnapshot::Observed {
+        statistics: CodeIndexGenerationStatisticsV1 {
+            source_total_bytes: 2_000_000,
+            symbol_count: 170,
+            edge_count: 300,
+        },
     }
 }
 
-fn empty_stats() -> GraphStats {
-    GraphStats {
-        node_count: 0,
-        edge_count: 0,
-        file_count: 0,
-        db_size_bytes: 0,
-        nodes_by_kind: HashMap::new(),
-        files_by_language: HashMap::new(),
-        last_sync_at: 0,
-        last_full_sync_at: 0,
-        last_sync_duration_ms: 0,
-        edges_by_kind: HashMap::new(),
-        last_updated: 0,
-        total_source_bytes: 0,
+fn unavailable_census() -> GenerationCensusSnapshot {
+    GenerationCensusSnapshot::Unavailable {
+        reason: GenerationCensusUnavailableReason::ExactScopeGenerationNotReady,
     }
 }
 
-fn many_kinds_stats() -> GraphStats {
-    let mut nodes_by_kind = HashMap::new();
-    for kind in &[
-        "function",
-        "struct",
-        "method",
-        "enum",
-        "trait",
-        "impl",
-        "const",
-        "static",
-        "type_alias",
-        "field",
-        "macro",
-        "use",
-        "class",
-        "interface",
-        "constructor",
-        "module",
-    ] {
-        nodes_by_kind.insert(kind.to_string(), 10);
-    }
-
-    let mut files_by_language = HashMap::new();
-    files_by_language.insert("Rust".to_string(), 50);
-    files_by_language.insert("Go".to_string(), 30);
-    files_by_language.insert("Java".to_string(), 20);
-    files_by_language.insert("Python".to_string(), 15);
-    files_by_language.insert("TypeScript".to_string(), 10);
-
-    GraphStats {
-        node_count: 160,
-        edge_count: 500,
-        file_count: 125,
-        db_size_bytes: 5_242_880,
-        nodes_by_kind,
-        files_by_language,
-        last_sync_at: now_secs() - 120,
-        last_full_sync_at: now_secs() - 86400,
-        last_sync_duration_ms: 0,
-        edges_by_kind: HashMap::new(),
-        last_updated: now_secs(),
-        total_source_bytes: 10_000_000,
+fn sample_freshness() -> CodeIndexWorktreeFreshnessV1 {
+    CodeIndexWorktreeFreshnessV1 {
+        worktree_root: "/tmp/project".to_owned(),
+        repository_id: None,
+        worktree_id: None,
+        source_reference: None,
+        source_revision: None,
+        latest_generation_id: Some("generation-1".to_owned()),
+        snapshot_content_identity: None,
+        sealed_at_micros: Some(1_700_000_000_000_000),
+        last_reconcile_micros: Some(1_700_000_100_000_000),
+        staleness_state: Some("fresh".to_owned()),
+        hook_hint_count: None,
+        coverage: "complete".to_owned(),
     }
 }
 
-// ── print_status_table ──────────────────────────────────────────────────────
+// ── print_status_table_with ─────────────────────────────────────────────────
 
-fn status_table(stats: &GraphStats) -> StatusTable<'_> {
+fn status_table<'a>(census: &'a GenerationCensusSnapshot) -> StatusTable<'a> {
     StatusTable {
-        stats,
+        census,
+        freshness: None,
         tokens_saved: 0,
         global_tokens_saved: None,
         worldwide: None,
         country_flags: &[],
         branch_info: None,
         cost_info: None,
-        details: true,
     }
 }
 
 #[test]
 fn test_print_status_table_no_flags_no_worldwide() {
-    let stats = sample_stats();
-    // Should not panic
-    print_status_table(&stats, 50_000, None, None, &[], None, None, true);
+    let census = observed_census();
+    print_status_table_with(StatusTable {
+        tokens_saved: 50_000,
+        ..status_table(&census)
+    });
 }
 
 #[test]
 fn test_print_status_table_with_flags() {
-    let stats = sample_stats();
+    let census = observed_census();
     let flags = vec![
         "\u{1f1fa}\u{1f1f8}".to_string(),
         "\u{1f1ec}\u{1f1e7}".to_string(),
@@ -326,135 +274,75 @@ fn test_print_status_table_with_flags() {
     print_status_table_with(StatusTable {
         tokens_saved: 50_000,
         country_flags: &flags,
-        ..status_table(&stats)
+        ..status_table(&census)
     });
 }
 
 #[test]
 fn test_print_status_table_with_worldwide() {
-    let stats = sample_stats();
+    let census = observed_census();
     print_status_table_with(StatusTable {
         tokens_saved: 50_000,
         worldwide: Some(10_000_000),
-        ..status_table(&stats)
+        ..status_table(&census)
     });
 }
 
 #[test]
 fn test_print_status_table_with_global_tokens() {
-    let stats = sample_stats();
+    let census = observed_census();
     print_status_table_with(StatusTable {
         tokens_saved: 50_000,
         global_tokens_saved: Some(200_000),
-        ..status_table(&stats)
+        ..status_table(&census)
     });
 }
 
 #[test]
 fn test_print_status_table_with_all_options() {
-    let stats = sample_stats();
+    let census = observed_census();
+    let freshness = sample_freshness();
     let flags = vec![
         "\u{1f1fa}\u{1f1f8}".to_string(),
         "\u{1f1e9}\u{1f1ea}".to_string(),
         "\u{1f1ef}\u{1f1f5}".to_string(),
     ];
     print_status_table_with(StatusTable {
+        freshness: Some(&freshness),
         tokens_saved: 100_000,
         global_tokens_saved: Some(500_000),
         worldwide: Some(50_000_000),
         country_flags: &flags,
-        ..status_table(&stats)
+        ..status_table(&census)
     });
 }
 
 #[test]
-fn test_print_status_table_empty_stats() {
-    let stats = empty_stats();
-    // Empty stats with file_count=0 and node_count=0 should satisfy debug_assert
-    print_status_table_with(status_table(&stats));
-}
-
-#[test]
-fn test_print_status_table_many_node_kinds() {
-    let stats = many_kinds_stats();
-    // 16 node kinds should exercise column wrapping
-    print_status_table_with(StatusTable {
-        tokens_saved: 1_000_000,
-        global_tokens_saved: Some(5_000_000),
-        worldwide: Some(100_000_000),
-        ..status_table(&stats)
-    });
-}
-
-#[test]
-fn test_print_status_table_zero_tokens() {
-    let stats = sample_stats();
-    print_status_table_with(status_table(&stats));
+fn test_print_status_table_unavailable_census_prints_typed_reason() {
+    let census = unavailable_census();
+    print_status_table_with(status_table(&census));
 }
 
 #[test]
 fn test_print_status_table_large_token_values() {
-    let stats = sample_stats();
+    let census = observed_census();
     print_status_table_with(StatusTable {
         tokens_saved: 999_999_999,
         global_tokens_saved: Some(1_000_000_000),
         worldwide: Some(50_000_000_000),
-        ..status_table(&stats)
-    });
-}
-
-#[test]
-fn test_print_status_table_no_source_bytes() {
-    let mut stats = sample_stats();
-    stats.total_source_bytes = 0;
-    print_status_table_with(StatusTable {
-        tokens_saved: 10_000,
-        ..status_table(&stats)
-    });
-}
-
-#[test]
-fn test_print_status_table_no_languages() {
-    let mut stats = sample_stats();
-    stats.files_by_language.clear();
-    print_status_table_with(StatusTable {
-        tokens_saved: 10_000,
-        ..status_table(&stats)
+        ..status_table(&census)
     });
 }
 
 #[test]
 fn test_print_status_table_many_flags() {
-    let stats = sample_stats();
-    // 30 flags — exceeds MAX_DISPLAY_FLAGS (25), should trigger truncation with "..."
+    let census = observed_census();
+    // 30 flags — exceeds MAX_DISPLAY_FLAGS (25), should trigger truncation.
     let flags: Vec<String> = (0..30).map(|_| "\u{1f1fa}\u{1f1f8}".to_string()).collect();
     print_status_table_with(StatusTable {
         tokens_saved: 50_000,
         country_flags: &flags,
-        ..status_table(&stats)
-    });
-}
-
-#[test]
-fn test_print_status_table_single_node_kind() {
-    let mut stats = empty_stats();
-    stats.node_count = 5;
-    stats.file_count = 5;
-    stats.nodes_by_kind.insert("function".to_string(), 5);
-    print_status_table_with(StatusTable {
-        tokens_saved: 100,
-        ..status_table(&stats)
-    });
-}
-
-#[test]
-fn test_print_status_table_recent_sync_times() {
-    let mut stats = sample_stats();
-    stats.last_sync_at = now_secs() - 5;
-    stats.last_full_sync_at = now_secs() - 3600;
-    print_status_table_with(StatusTable {
-        tokens_saved: 10_000,
-        ..status_table(&stats)
+        ..status_table(&census)
     });
 }
 
@@ -462,42 +350,41 @@ fn test_print_status_table_recent_sync_times() {
 
 #[test]
 fn test_print_status_header_no_flags_no_worldwide() {
-    let stats = sample_stats();
-    print_status_header(&stats, 50_000, None, None, &[], None, None);
+    let census = observed_census();
+    print_status_header(&census, None, 50_000, None, None, &[], None, None);
 }
 
 #[test]
-fn test_print_status_header_with_flags() {
-    let stats = sample_stats();
+fn test_print_status_header_with_freshness_and_flags() {
+    let census = observed_census();
+    let freshness = sample_freshness();
     let flags = vec![
         "\u{1f1fa}\u{1f1f8}".to_string(),
         "\u{1f1ec}\u{1f1e7}".to_string(),
     ];
-    print_status_header(&stats, 50_000, None, None, &flags, None, None);
-}
-
-#[test]
-fn test_print_status_header_with_worldwide() {
-    let stats = sample_stats();
-    print_status_header(&stats, 50_000, None, Some(10_000_000), &[], None, None);
-}
-
-#[test]
-fn test_print_status_header_with_global_tokens() {
-    let stats = sample_stats();
-    print_status_header(&stats, 50_000, Some(200_000), None, &[], None, None);
+    print_status_header(
+        &census,
+        Some(&freshness),
+        50_000,
+        None,
+        None,
+        &flags,
+        None,
+        None,
+    );
 }
 
 #[test]
 fn test_print_status_header_with_all_options() {
-    let stats = sample_stats();
+    let census = observed_census();
     let flags = vec![
         "\u{1f1fa}\u{1f1f8}".to_string(),
         "\u{1f1e9}\u{1f1ea}".to_string(),
         "\u{1f1ef}\u{1f1f5}".to_string(),
     ];
     print_status_header(
-        &stats,
+        &census,
+        None,
         100_000,
         Some(500_000),
         Some(50_000_000),
@@ -508,36 +395,7 @@ fn test_print_status_header_with_all_options() {
 }
 
 #[test]
-fn test_print_status_header_empty_stats() {
-    let stats = empty_stats();
-    print_status_header(&stats, 0, None, None, &[], None, None);
-}
-
-#[test]
-fn test_print_status_header_many_node_kinds() {
-    let stats = many_kinds_stats();
-    print_status_header(
-        &stats,
-        1_000_000,
-        Some(5_000_000),
-        Some(100_000_000),
-        &[],
-        None,
-        None,
-    );
-}
-
-#[test]
-fn test_print_status_header_many_flags() {
-    let stats = sample_stats();
-    let flags: Vec<String> = (0..30).map(|_| "\u{1f1fa}\u{1f1f8}".to_string()).collect();
-    print_status_header(&stats, 50_000, None, None, &flags, None, None);
-}
-
-#[test]
-fn test_print_status_header_never_synced() {
-    let mut stats = sample_stats();
-    stats.last_sync_at = 0;
-    stats.last_full_sync_at = 0;
-    print_status_header(&stats, 10_000, None, None, &[], None, None);
+fn test_print_status_header_unavailable_census() {
+    let census = unavailable_census();
+    print_status_header(&census, None, 0, None, None, &[], None, None);
 }

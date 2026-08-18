@@ -372,8 +372,16 @@ async fn run_startup_preamble(command: &Commands) {
     // Skip the worldwide-counter flush on hot startup paths. `try_flush`
     // makes a synchronous HTTP call (#84) which can add seconds to
     // `tracedecay serve` startup on slow networks — long enough to blow the
-    // MCP client's 30 s `initialize` timeout.
+    // MCP client's 30 s `initialize` timeout. The canonical setting lookup is
+    // only consulted when there are pending tokens to flush: with nothing
+    // pending the setting cannot change behavior, and probing it on every
+    // command turned the daemon's transient "runtime still mounting" state
+    // into per-command stderr noise. A failed lookup on an ordinary command
+    // is deferred (the next command retries); the flush-bearing commands
+    // (`init`, `sync`, `status`) still surface it, so a persistent failure
+    // stays visible exactly where the flush is expected to happen.
     if startup_policy.runs_startup_maintenance()
+        && user_config.pending_upload > 0
         && let Ok(cwd) = std::env::current_dir()
         && let Some(project_root) =
             tracedecay::config::discover_project_root_with_identity(&cwd).await
@@ -382,9 +390,15 @@ async fn run_startup_preamble(command: &Commands) {
             Ok(upload_enabled) => {
                 global::try_flush(&mut user_config, is_force_flush, upload_enabled);
             }
-            Err(error) => {
+            Err(error) if is_force_flush => {
                 eprintln!(
                     "warning: canonical worldwide-counter upload setting is unavailable: {error}"
+                );
+            }
+            Err(error) => {
+                tracing::debug!(
+                    "worldwide-counter flush deferred: canonical upload setting unavailable: \
+                     {error}"
                 );
             }
         }
@@ -705,19 +719,10 @@ async fn dispatch_project_command(
             project_path,
             json,
             short,
-            details,
             runtime,
         } => {
-            status_cmd::handle_status_command(
-                path,
-                project_id,
-                project_path,
-                json,
-                short,
-                details,
-                runtime,
-            )
-            .await?;
+            status_cmd::handle_status_command(path, project_id, project_path, json, short, runtime)
+                .await?;
         }
         Commands::Projects { action } => {
             project_cmd::handle_projects_action(action).await?;

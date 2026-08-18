@@ -136,14 +136,15 @@ fn reset_refused_project_graph_store(
             ),
         });
     }
-    let has_header = tracedecay::storage::has_sqlite_database_header(&graph_db_path).map_err(
-        |error| tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "could not verify the store header at {}: {error}",
-                graph_db_path.display()
-            ),
-        },
-    )?;
+    let has_header =
+        tracedecay::storage::has_sqlite_database_header(&graph_db_path).map_err(|error| {
+            tracedecay::errors::TraceDecayError::Config {
+                message: format!(
+                    "could not verify the store header at {}: {error}",
+                    graph_db_path.display()
+                ),
+            }
+        })?;
     if !has_header {
         return Err(tracedecay::errors::TraceDecayError::Config {
             message: format!(
@@ -182,10 +183,7 @@ fn reset_refused_project_graph_store(
         let path = if sidecar_suffix.is_empty() {
             graph_db_path.clone()
         } else {
-            let mut file_name = graph_db_path
-                .file_name()
-                .unwrap_or_default()
-                .to_os_string();
+            let mut file_name = graph_db_path.file_name().unwrap_or_default().to_os_string();
             file_name.push(sidecar_suffix);
             graph_db_path.with_file_name(file_name)
         };
@@ -262,9 +260,8 @@ fn handle_reset_authority(
             message: error.to_string(),
         }
     })?;
-    let report = tracedecay_global_db::observation::reset_refused_observation_authority(
-        &mut connection,
-    )?;
+    let report =
+        tracedecay_global_db::observation::reset_refused_observation_authority(&mut connection)?;
     println!(
         "reset the refused '{authority}' authority in {}",
         db_path.display()
@@ -561,7 +558,11 @@ fn handle_rehearse_profile_backup(
 mod reset_project_store_tests {
     use super::*;
 
-    fn write_store_with_user_version(profile_root: &Path, project_id: &str, version: u32) -> PathBuf {
+    fn write_store_with_user_version(
+        profile_root: &Path,
+        project_id: &str,
+        version: u32,
+    ) -> PathBuf {
         let data_root = tracedecay::storage::profile_sharded_data_root(profile_root, project_id);
         std::fs::create_dir_all(&data_root).expect("store dir");
         let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
@@ -587,8 +588,7 @@ mod reset_project_store_tests {
         let sessions_path = data_root.join("sessions.db");
         std::fs::write(&sessions_path, b"session archive").unwrap();
 
-        let outcome =
-            reset_refused_project_graph_store(&profile_root, "proj_refused_v18").unwrap();
+        let outcome = reset_refused_project_graph_store(&profile_root, "proj_refused_v18").unwrap();
 
         assert_eq!(outcome.previous_schema_version, 18);
         assert!(!db_path.exists(), "refused graph database must be removed");
@@ -597,7 +597,10 @@ mod reset_project_store_tests {
             sessions_path.exists(),
             "the session archive is a durable re-ingest input and must survive"
         );
-        assert!(data_root.exists(), "the store directory itself must survive");
+        assert!(
+            data_root.exists(),
+            "the store directory itself must survive"
+        );
     }
 
     #[test]
@@ -610,8 +613,7 @@ mod reset_project_store_tests {
             tracedecay::db::migrations::SCHEMA_VERSION,
         );
 
-        let error =
-            reset_refused_project_graph_store(&profile_root, "proj_canonical").unwrap_err();
+        let error = reset_refused_project_graph_store(&profile_root, "proj_canonical").unwrap_err();
 
         assert!(
             error
@@ -639,7 +641,10 @@ mod reset_project_store_tests {
             error.to_string().contains("is not a SQLite database"),
             "unexpected refusal: {error}"
         );
-        assert!(db_path.exists(), "an unrecognized file must never be deleted");
+        assert!(
+            db_path.exists(),
+            "an unrecognized file must never be deleted"
+        );
     }
 
     #[test]
@@ -647,8 +652,7 @@ mod reset_project_store_tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
 
-        let error =
-            reset_refused_project_graph_store(&profile_root, "proj_absent").unwrap_err();
+        let error = reset_refused_project_graph_store(&profile_root, "proj_absent").unwrap_err();
 
         assert!(
             error.to_string().contains("nothing to reset"),
