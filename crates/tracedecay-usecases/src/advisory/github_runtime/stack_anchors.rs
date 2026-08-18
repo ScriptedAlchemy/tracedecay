@@ -50,7 +50,7 @@ pub enum GitHubStackAnchorPublicationOutcomeV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitHubStackAnchorReadOutcomeV1 {
-    Current(RetrievalAnchorRecordV2),
+    Current(Box<RetrievalAnchorRecordV2>),
     Denied,
     Stale,
     Unavailable,
@@ -460,7 +460,7 @@ async fn resolve_v2(
 ) -> Option<RetrievalAnchorRecordV2> {
     let resolution = GitTopologyAnchorResolutionV2::new(owner.clone(), anchor_id.clone()).ok()?;
     match authority.resolve(resolution).await.ok()? {
-        GitTopologyAnchorResolutionOutcomeV2::Resolved(record) => Some(record),
+        GitTopologyAnchorResolutionOutcomeV2::Resolved(record) => Some(*record),
         GitTopologyAnchorResolutionOutcomeV2::Unavailable => None,
     }
 }

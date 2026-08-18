@@ -5,11 +5,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
 use tracedecay_domain::feedback::{
-    GitHubReviewAuthorClassV1, GitHubReviewCommentIdV1, GitHubReviewCoverageV1,
-    GitHubReviewCurrentBranchRemapV1, GitHubReviewIdV1, GitHubReviewImmutableAnchorV1,
-    GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1, GitHubReviewItemV1,
-    GitHubReviewLifecycleV1, GitHubReviewReadOperationV1, GitHubReviewRemapStateV1,
-    GitHubReviewStateV1, GitHubReviewThreadIdV1,
+    GitHubPullRequestSnapshotV1, GitHubPullRequestStateV1, GitHubReviewAuthorClassV1,
+    GitHubReviewCommentIdV1, GitHubReviewCoverageV1, GitHubReviewCurrentBranchRemapV1,
+    GitHubReviewIdV1, GitHubReviewImmutableAnchorV1, GitHubReviewIngressProviderOutcomeV1,
+    GitHubReviewIngressResultV1, GitHubReviewItemV1, GitHubReviewLifecycleV1,
+    GitHubReviewReadOperationV1, GitHubReviewRemapStateV1, GitHubReviewStateV1,
+    GitHubReviewThreadIdV1, MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1,
 };
 use tracedecay_domain::{CommitId, ManifestDigest, ProviderId, RetrievalAnchorId, UtcMicros};
 
@@ -181,9 +182,10 @@ where
                 return self.ingress(request, outcome, coverage, Vec::new(), now_micros()?);
             }
             let fetched_at = now_micros()?;
+            let mut pull_request = None;
             let items = match request.operation {
                 GitHubReviewReadOperationV1::RestGetPullRequest => {
-                    self.decode_pull_request(request, body)?;
+                    pull_request = Some(self.decode_pull_request(request, body)?);
                     Vec::new()
                 }
                 GitHubReviewReadOperationV1::RestListPullRequestReviews => {
@@ -199,7 +201,14 @@ where
                         .await?
                 }
             };
-            self.ingress(request, outcome, coverage, items, fetched_at)
+            self.ingress_with_pull_request(
+                request,
+                outcome,
+                coverage,
+                items,
+                pull_request,
+                fetched_at,
+            )
         })
     }
 }
@@ -216,6 +225,18 @@ where
         items: Vec<GitHubReviewItemV1>,
         fetched_at: UtcMicros,
     ) -> Option<GitHubReviewIngressResultV1> {
+        self.ingress_with_pull_request(request, outcome, coverage, items, None, fetched_at)
+    }
+
+    fn ingress_with_pull_request(
+        &self,
+        request: &GitHubReviewReadRequestV1,
+        outcome: GitHubReviewIngressProviderOutcomeV1,
+        coverage: GitHubReviewCoverageV1,
+        items: Vec<GitHubReviewItemV1>,
+        pull_request: Option<GitHubPullRequestSnapshotV1>,
+        fetched_at: UtcMicros,
+    ) -> Option<GitHubReviewIngressResultV1> {
         let ingress = GitHubReviewIngressResultV1 {
             provider: self.identity.provider.clone(),
             scope: request.scope.clone(),
@@ -227,19 +248,41 @@ where
             outcome,
             coverage,
             items,
+            pull_request,
             fetched_at,
         };
         ingress.validate().ok()?;
         Some(ingress)
     }
 
-    fn decode_pull_request(&self, request: &GitHubReviewReadRequestV1, body: &[u8]) -> Option<()> {
+    fn decode_pull_request(
+        &self,
+        request: &GitHubReviewReadRequestV1,
+        body: &[u8],
+    ) -> Option<GitHubPullRequestSnapshotV1> {
         let response = serde_json::from_slice::<RestPullRequestV1>(body).ok()?;
         (response.id.to_string() == request.pull_request_id.as_str()
             && response.number == self.identity.pull_request_number
             && response.base.sha == self.identity.base_commit_id.as_str()
             && response.head.sha == self.identity.head_commit_id.as_str())
-        .then_some(())
+        .then_some(())?;
+        let title = retained_pull_request_title(&response.title)?;
+        let state = match (response.merged, response.state.as_str()) {
+            (true, _) => GitHubPullRequestStateV1::Merged,
+            (false, "open") => GitHubPullRequestStateV1::Open,
+            (false, "closed") => GitHubPullRequestStateV1::Closed,
+            (false, _) => return None,
+        };
+        let snapshot = GitHubPullRequestSnapshotV1 {
+            title,
+            state,
+            draft: response.draft,
+            additions: response.additions,
+            deletions: response.deletions,
+            changed_files: response.changed_files,
+        };
+        snapshot.validate().ok()?;
+        Some(snapshot)
     }
 
     fn decode_reviews(&self, body: &[u8]) -> Option<()> {
@@ -405,6 +448,9 @@ where
             thread_id,
             comment_id,
             reply_to_comment_id,
+            path: seed.path.clone(),
+            line: seed.current_line,
+            original_line: seed.original_line,
             version_digest,
             author_anchor: anchors.author_anchor,
             author_class: author_class(&author_kind, &author_association),
@@ -576,6 +622,15 @@ fn retained_review_body(body: &str) -> Option<String> {
     }
     let retained = tracedecay_runtime_core::privacy::sanitize_provider_metadata_text(body)?;
     (!retained.is_empty() && retained.len() <= MAX_GITHUB_REVIEW_BODY_BYTES_V1).then_some(retained)
+}
+
+fn retained_pull_request_title(title: &str) -> Option<String> {
+    if title.is_empty() || title.len() > MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1 {
+        return None;
+    }
+    let retained = tracedecay_runtime_core::privacy::sanitize_provider_metadata_text(title)?;
+    (!retained.is_empty() && retained.len() <= MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1)
+        .then_some(retained)
 }
 
 fn review_version_digest(

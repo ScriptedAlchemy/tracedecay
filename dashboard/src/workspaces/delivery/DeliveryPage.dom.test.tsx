@@ -190,6 +190,7 @@ function pullRequest(provider: string, pullRequestId = '42'): DeliveryPullReques
     label: `${provider} PR ${pullRequestId}`,
     provider,
     pull_request_id: pullRequestId,
+    identity: null,
     operations: [
       {
         operation: 'pull_request' as const,
@@ -421,6 +422,7 @@ describe('DeliveryPage', () => {
         value: {
           expected_head_commit: 'c'.repeat(40),
           retained_head_commit: 'a'.repeat(40),
+          total_retained: 2,
           truncated: false,
           items: [pullRequest('github'), pullRequest('gitlab')],
         },
@@ -435,15 +437,57 @@ describe('DeliveryPage', () => {
     expect(within(projection).getAllByText('aaaaaaaa').length).toBeGreaterThan(0);
     expect(within(projection).getAllByLabelText('latest attempt')).toHaveLength(2);
     expect(within(projection).getAllByLabelText('last complete')).toHaveLength(2);
+    // No identity generation is retained: the gap is typed on the row, never
+    // backfilled from thread evidence.
+    expect(
+      within(projection).getAllByText(/no retained PR identity read yet/),
+    ).toHaveLength(2);
   });
 
-  it('preserves every review observation and suppresses absent optional identities', async () => {
+  it('renders retained PR identity as title, state, draftness and diff shape', async () => {
+    const item = pullRequest('github', '421');
+    item.identity = {
+      title: 'consolidate delivery reads',
+      state: 'open',
+      draft: true,
+      additions: 1204,
+      deletions: 88,
+      changed_files: 17,
+    };
+    renderDelivery(PROJECTS, 200, overviewWith({
+      pull_requests: {
+        state: 'ready',
+        value: {
+          expected_head_commit: 'a'.repeat(40),
+          retained_head_commit: 'a'.repeat(40),
+          total_retained: 6,
+          truncated: true,
+          items: [item],
+        },
+      },
+    }));
+
+    const projection = await screen.findByRole('region', { name: 'Pull requests' });
+    expect(
+      within(projection).getByText('github · PR 421 — consolidate delivery reads'),
+    ).toBeTruthy();
+    expect(
+      within(projection).getByText(/open · draft · \+1204 −88 · 17 files changed/),
+    ).toBeTruthy();
+    // Truncation honesty: the retained total stays beside the shown count.
+    expect(
+      within(projection).getByText(/1 of 6 pull requests shown · more evidence not shown/),
+    ).toBeTruthy();
+  });
+
+  it('renders review threads as review comments: path, state, author and body', async () => {
     renderDelivery(PROJECTS, 200, overviewWith({
       review_comments: {
         state: 'partial',
         value: {
           expected_head_commit: 'a'.repeat(40),
           retained_head_commit: 'a'.repeat(40),
+          total_retained: 5,
           truncated: true,
           items: [
             {
@@ -455,27 +499,47 @@ describe('DeliveryPage', () => {
               observations: [
                 {
                   author_class: 'maintainer',
+                  body_preview: {
+                    text: 'Batch the shared source anchor lookup.',
+                    truncated: false,
+                  },
                   kind: 'latest_attempt',
-                  lifecycle: 'edited',
+                  lifecycle: 'resolved',
+                  line: 12,
                   observed_at_micros: 108,
-                  operation: 'review_comments',
+                  operation: 'review_threads',
+                  original_line: 9,
+                  path: 'src/lib.rs',
                   provider_outcome: 'partial',
                   reply_to_comment_id: null,
                   repository_id: 'repo-1',
                   review_id: 'review-9',
                   review_state: 'changes_requested',
                   source_url: null,
-                  thread_id: null,
+                  thread_id: 'thread-3',
                   version_digest: 'sha256:latest-review-version',
                 },
+              ],
+            },
+            {
+              comment_id: 'comment-8',
+              id: 'github:42:comment-8',
+              label: 'review comment 8',
+              provider: 'github',
+              pull_request_id: '42',
+              observations: [
                 {
                   author_class: 'bot',
+                  body_preview: null,
                   kind: 'last_complete',
                   lifecycle: 'resolved',
+                  line: 12,
                   observed_at_micros: 100,
                   operation: 'review_comments',
+                  original_line: 9,
+                  path: 'src/lib.rs',
                   provider_outcome: 'complete',
-                  reply_to_comment_id: 'comment-1',
+                  reply_to_comment_id: 'comment-7',
                   repository_id: 'repo-1',
                   review_id: null,
                   review_state: 'approved',
@@ -492,16 +556,83 @@ describe('DeliveryPage', () => {
 
     const projection = await screen.findByRole('region', { name: 'Review observations' });
     expect(projection.getAttribute('data-projection-state')).toBe('partial');
-    expect(within(projection).getByText('github · PR 42 · comment comment-7')).toBeTruthy();
-    expect(within(projection).getByText('latest attempt')).toBeTruthy();
-    expect(within(projection).getByText('last complete')).toBeTruthy();
-    expect(within(projection).getByText('review-9')).toBeTruthy();
-    expect(within(projection).getByText('thread-3')).toBeTruthy();
-    expect(within(projection).getByText('comment-1')).toBeTruthy();
-    expect(within(projection).getByText(/more evidence not shown/)).toBeTruthy();
+    // Both comments group under one thread located at path:line.
+    expect(within(projection).getByText('src/lib.rs:12')).toBeTruthy();
+    expect(within(projection).getByText('thread thread-3')).toBeTruthy();
+    // The thread carries its resolved lifecycle, and each comment carries its
+    // author class and review state.
+    expect(within(projection).getAllByText(/resolved/).length).toBeGreaterThan(0);
+    expect(within(projection).getByText(/maintainer · changes requested/)).toBeTruthy();
+    expect(within(projection).getByText(/bot · approved/)).toBeTruthy();
+    // The root comment renders its sanitized body preview; the reply's
+    // unexpanded body stays a typed gap with its digest, never empty prose.
+    expect(
+      within(projection).getByText('Batch the shared source anchor lookup.'),
+    ).toBeTruthy();
+    expect(
+      within(projection).getByText(/body retained but not expanded for this read/),
+    ).toBeTruthy();
+    expect(within(projection).getByText(/reply to comment-7/)).toBeTruthy();
+    // Truncation honesty: retained total beside shown count.
+    expect(
+      within(projection).getByText(/2 of 5 review comments shown · more evidence not shown/),
+    ).toBeTruthy();
     expect(within(projection).queryByText('null')).toBeNull();
     expect(within(projection).queryByText(/javascript:/)).toBeNull();
     expect(within(projection).queryByRole('link')).toBeNull();
+  });
+
+  it('locates an outdated thread on its original diff line instead of faking a current one', async () => {
+    renderDelivery(PROJECTS, 200, overviewWith({
+      review_comments: {
+        state: 'ready',
+        value: {
+          expected_head_commit: 'a'.repeat(40),
+          retained_head_commit: 'a'.repeat(40),
+          total_retained: 1,
+          truncated: false,
+          items: [
+            {
+              comment_id: 'comment-9',
+              id: 'github:42:comment-9',
+              label: 'review comment 9',
+              provider: 'github',
+              pull_request_id: '42',
+              observations: [
+                {
+                  author_class: 'other_observed_role',
+                  body_preview: {
+                    text: 'This anchor moved.',
+                    truncated: true,
+                  },
+                  kind: 'latest_attempt',
+                  lifecycle: 'outdated',
+                  line: null,
+                  observed_at_micros: 108,
+                  operation: 'review_threads',
+                  original_line: 33,
+                  path: 'src/moved.rs',
+                  provider_outcome: 'complete',
+                  reply_to_comment_id: null,
+                  repository_id: 'repo-1',
+                  review_id: null,
+                  review_state: 'commented',
+                  source_url: null,
+                  thread_id: 'thread-4',
+                  version_digest: 'sha256:outdated-review-version',
+                },
+              ],
+            },
+          ],
+        },
+      },
+    }));
+
+    const projection = await screen.findByRole('region', { name: 'Review observations' });
+    expect(
+      within(projection).getByText('src/moved.rs:33 (original diff)'),
+    ).toBeTruthy();
+    expect(within(projection).getByText('This anchor moved.…')).toBeTruthy();
   });
 
   it('keeps opaque CI identities and nullable conclusions exact', async () => {
@@ -511,10 +642,20 @@ describe('DeliveryPage', () => {
         value: {
           expected_head_commit: 'a'.repeat(40),
           retained_head_commit: 'a'.repeat(40),
-          truncated: false,
+          total_retained: 21,
+          truncated: true,
           items: [
             {
               annotation_count: 3,
+              annotations: [
+                {
+                  end_line: 12,
+                  level: 'failure',
+                  path: 'crates/foo/src/lib.rs',
+                  start_line: 10,
+                  title: 'mismatched types',
+                },
+              ],
               check_conclusion: 'failure',
               check_status: 'completed',
               failed_step: null,
@@ -560,6 +701,15 @@ describe('DeliveryPage', () => {
     expect(within(checks).getByText('in progress')).toBeTruthy();
     expect(within(checks).getByText('completed · failure')).toBeTruthy();
     expect(within(checks).queryByText(/success/)).toBeNull();
+    // Truncation honesty: real failures no longer fall off silently — the
+    // retained total stays beside the shown count.
+    expect(
+      within(checks).getByText(/1 of 21 CI checks shown · more evidence not shown/),
+    ).toBeTruthy();
+    // Retained annotation summaries render beside the provider count.
+    expect(within(checks).getByText(/1 of 3 annotations shown/)).toBeTruthy();
+    expect(within(checks).getByText('crates/foo/src/lib.rs:10-12')).toBeTruthy();
+    expect(within(checks).getByText(/failure · mismatched types/)).toBeTruthy();
 
     const localization = screen.getByRole('region', { name: 'Failure localization' });
     expect(localization.getAttribute('data-projection-state')).toBe('unavailable');
@@ -684,6 +834,7 @@ describe('DeliveryPage', () => {
           expected_head_commit: 'c'.repeat(40),
           retained_head_commit: 'a'.repeat(40),
           items: [item],
+          total_retained: 1,
           truncated: true,
         },
       },

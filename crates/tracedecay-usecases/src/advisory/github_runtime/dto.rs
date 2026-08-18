@@ -13,6 +13,13 @@ pub(crate) struct RestCommitRefV1 {
 pub(crate) struct RestPullRequestV1 {
     pub(crate) id: u64,
     pub(crate) number: u64,
+    pub(crate) title: String,
+    pub(crate) state: String,
+    pub(crate) draft: bool,
+    pub(crate) merged: bool,
+    pub(crate) additions: u64,
+    pub(crate) deletions: u64,
+    pub(crate) changed_files: u64,
     pub(crate) base: RestCommitRefV1,
     pub(crate) head: RestCommitRefV1,
 }

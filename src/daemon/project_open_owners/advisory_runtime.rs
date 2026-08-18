@@ -42,13 +42,14 @@ use tracedecay_usecases::advisory::{
     GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1,
     ProductionCiFailureDiscoveryOutcomeV1, ProductionCiProviderConfigV1,
     ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
-    discover_production_ci_failure_request_v1, register_advisory_hook_notice_queue,
-    unregister_advisory_hook_notice_queue,
+    discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
+    register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
 };
 use tracedecay_usecases::context::MonotonicDeadline;
 use tracedecay_usecases::delivery::{
-    ProjectDeliveryReadAuthorityOpenOutcomeV1, ProjectDeliveryReadOpenV1,
-    open_project_delivery_read_authority_v1,
+    ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadAuthorityOpenOutcomeV1,
+    ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,
+    gated_project_delivery_read_handle_v1, open_project_delivery_read_authority_v1,
 };
 use tracedecay_usecases::feedback::{
     FeedbackCycleLspInput, FeedbackCycleRuntime, ProductionFeedbackCycleAuthorizationFuture,
@@ -612,26 +613,48 @@ async fn register_production_advisory_owner(
     let remote =
         resolve_production_github_provider_config(invocation, project_root, state, &feedback_scope)
             .await;
-    let delivery_read = remote.as_ref().and_then(|remote| {
-        match open_project_delivery_read_authority_v1(ProjectDeliveryReadOpenV1 {
-            database: state.database.clone(),
-            profile_id: state.session_db.binding().shard_id.profile_id.clone(),
-            resolved_scope: state.scope.clone(),
-            feedback_scope: feedback_scope.clone(),
-            github_target: remote.target.clone(),
-            github_http: remote.http.clone(),
-        }) {
-            ProjectDeliveryReadAuthorityOpenOutcomeV1::Ready(handle) => {
-                Some(RegisteredDeliveryReadAuthorityV1::new(
-                    project_root.to_path_buf(),
-                    state.scope.clone(),
-                    Arc::clone(state.graph.configuration_runtime()),
-                    handle,
-                ))
+    let delivery_read = match &remote {
+        Ok(remote) => {
+            let review_bodies = github_anchor_authorities_arc_v1(
+                state.database.clone(),
+                project_root.to_path_buf(),
+                feedback_scope.clone(),
+                Arc::clone(&state.code_graph),
+                Arc::new(invocation.code_index_schedulers.clone()),
+            )
+            .map(|authorities| ProjectDeliveryReviewBodySourceV1 {
+                evidence: authorities.github_anchors,
+                source_access: Arc::clone(&remote.github_source_access),
+            });
+            match open_project_delivery_read_authority_v1(ProjectDeliveryReadOpenV1 {
+                database: state.database.clone(),
+                profile_id: state.session_db.binding().shard_id.profile_id.clone(),
+                resolved_scope: state.scope.clone(),
+                feedback_scope: feedback_scope.clone(),
+                github_target: remote.target.clone(),
+                github_http: remote.http.clone(),
+                review_bodies,
+            }) {
+                ProjectDeliveryReadAuthorityOpenOutcomeV1::Ready(handle) => {
+                    Some(RegisteredDeliveryReadAuthorityV1::new(
+                        project_root.to_path_buf(),
+                        state.scope.clone(),
+                        Arc::clone(state.graph.configuration_runtime()),
+                        handle,
+                    ))
+                }
+                ProjectDeliveryReadAuthorityOpenOutcomeV1::Unavailable => None,
             }
-            ProjectDeliveryReadAuthorityOpenOutcomeV1::Unavailable => None,
         }
-    });
+        // The provider mount gate is retained as a typed Delivery answer so
+        // the dashboard can tell "configure a token" apart from "broken".
+        Err(gate) => Some(RegisteredDeliveryReadAuthorityV1::new(
+            project_root.to_path_buf(),
+            state.scope.clone(),
+            Arc::clone(state.graph.configuration_runtime()),
+            gated_project_delivery_read_handle_v1(feedback_scope.clone(), *gate),
+        )),
+    };
     let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
         (remote.github, Some(remote.github_source_access), remote.ci)
     });
@@ -743,9 +766,13 @@ async fn resolve_production_github_provider_config(
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
     feedback_scope: &FeedbackScopeV1,
-) -> Option<ProductionGitHubProviderConfigV1> {
-    let (owner, repository) =
-        super::github_repository_from_remote(&crate::tracedecay::git_remote_url(project_root)?)?;
+) -> std::result::Result<ProductionGitHubProviderConfigV1, ProjectDeliveryProviderMountGateV1> {
+    let Some(remote_url) = crate::tracedecay::git_remote_url(project_root) else {
+        return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
+    };
+    let Some((owner, repository)) = super::github_repository_from_remote(&remote_url) else {
+        return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
+    };
     let profile_id = &state.session_db.binding().shard_id.profile_id;
     let credential = match invocation.mount_github_read_only_credential_authority_for_project(
         profile_id,
@@ -755,25 +782,34 @@ async fn resolve_production_github_provider_config(
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public => {
             GitHubReadOnlyCredentialV1::anonymous()
         }
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured
-        | ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => return None,
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured => {
+            return Err(ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured);
+        }
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => {
+            return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
+        }
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted => {
             match resolve_registered_github_read_only_credential_v1(&owner, &repository) {
                 RegisteredGitHubReadOnlyCredentialV1::Verified(credential) => credential,
                 RegisteredGitHubReadOnlyCredentialV1::Missing
-                | RegisteredGitHubReadOnlyCredentialV1::Rejected => return None,
+                | RegisteredGitHubReadOnlyCredentialV1::Rejected => {
+                    return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
+                }
             }
         }
     };
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         state.session_db.clone(),
     );
-    let configured_source_access = Arc::new(ConfiguredGitHubSourceAccessAuthorityV1::new(
+    let Some(configured_source_access) = ConfiguredGitHubSourceAccessAuthorityV1::new(
         configuration,
         state.scope.clone(),
         &owner,
         &repository,
-    )?);
+    ) else {
+        return Err(ProjectDeliveryProviderMountGateV1::GitHubSourceAccessUnavailable);
+    };
+    let configured_source_access = Arc::new(configured_source_access);
     let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> = configured_source_access.clone();
     let ci_source_access: Arc<dyn CiSourceAccessAuthorityV1> = configured_source_access;
     let target = GitHubCiRepositoryTargetV1 {
@@ -784,17 +820,7 @@ async fn resolve_production_github_provider_config(
     let ci = if credential.permits(GitHubReadPermissionV1::Actions)
         && credential.permits(GitHubReadPermissionV1::Checks)
     {
-        Some(ProductionCiProviderConfigV1 {
-            provider: ProviderId::new("provider.github-actions").ok()?,
-            parser: CiFailureParserIdentityV1 {
-                parser_id: "parser.github-actions.v1".to_owned(),
-                parser_version: "1".to_owned(),
-            },
-            target: target.clone(),
-            credential: credential.clone(),
-            http: http.clone(),
-            source_access: ci_source_access,
-        })
+        production_ci_provider_config(&target, &credential, &http, ci_source_access)
     } else {
         None
     };
@@ -849,12 +875,34 @@ async fn resolve_production_github_provider_config(
         }
         _ => None,
     };
-    Some(ProductionGitHubProviderConfigV1 {
+    Ok(ProductionGitHubProviderConfigV1 {
         target,
         http,
         github,
         github_source_access: source_access,
         ci,
+    })
+}
+
+/// Assembles the CI provider config for a credential that already proved
+/// Actions and Checks read permissions. `None` covers only the statically
+/// impossible identity-constant failures, never a permission decision.
+fn production_ci_provider_config(
+    target: &GitHubCiRepositoryTargetV1,
+    credential: &GitHubReadOnlyCredentialV1,
+    http: &GitHubHttpReadConfigV1,
+    source_access: Arc<dyn CiSourceAccessAuthorityV1>,
+) -> Option<ProductionCiProviderConfigV1> {
+    Some(ProductionCiProviderConfigV1 {
+        provider: ProviderId::new("provider.github-actions").ok()?,
+        parser: CiFailureParserIdentityV1 {
+            parser_id: "parser.github-actions.v1".to_owned(),
+            parser_version: "1".to_owned(),
+        },
+        target: target.clone(),
+        credential: credential.clone(),
+        http: http.clone(),
+        source_access,
     })
 }
 

@@ -7,7 +7,8 @@ use tracedecay_domain::{
     CiFailureLocalizationResultV1, CiFailureLocalizationStateV1, CiFailureParserIdentityV1,
     CiFailureRunIdentityV1, CommitId, CoverageReportV1, EvidenceAvailabilityV1, EvidenceClass,
     FeedbackScopeV1, GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitHubPullRequestIdV1,
-    GitHubReviewCoverageV1, GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
+    GitHubPullRequestSnapshotV1, GitHubPullRequestStateV1, GitHubReviewCoverageV1,
+    GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
     GitHubReviewReadOperationV1, GitHubStackCapabilitySnapshotV1, GitHubStackCapabilityStateV1,
     GitHubStackLayerSnapshotV1, GitHubStackSnapshotV1, GitIndexCommitIntentV1,
     GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1, GitIndexReceiptId,
@@ -399,6 +400,14 @@ fn github_stack_layer(
         outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
         coverage: GitHubReviewCoverageV1::Complete,
         items: vec![],
+        pull_request: Some(GitHubPullRequestSnapshotV1 {
+            title: "stack layer fixture".to_owned(),
+            state: GitHubPullRequestStateV1::Open,
+            draft: false,
+            additions: 1,
+            deletions: 1,
+            changed_files: 1,
+        }),
         fetched_at: UtcMicros(1),
     };
     GitHubStackLayerSnapshotV1 {

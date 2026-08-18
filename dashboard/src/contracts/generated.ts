@@ -642,7 +642,11 @@ export const CodeIndexFreshnessPayloadV1Schema = z.object({
 });
 export type CodeIndexFreshnessPayloadV1 = z.infer<typeof CodeIndexFreshnessPayloadV1Schema>;
 
-/** Freshness/generation state for one mounted worktree. */
+/** Freshness/generation state for one mounted worktree.
+
+`Deserialize` is part of the wire contract: the CLI status command decodes
+exactly this type back out of the daemon's `tracedecay_status` response,
+keeping one authority for the freshness shape. */
 export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   coverage: z.string(),
   hook_hint_count: z.number().int().safe().min(0).nullable(),
@@ -910,8 +914,21 @@ export const DecideWorkRelationReplanRequestV1Schema = z.object({
 }).strict();
 export type DecideWorkRelationReplanRequestV1 = z.infer<typeof DecideWorkRelationReplanRequestV1Schema>;
 
+export const DeliveryCiAnnotationLevelV1Schema = z.enum(["failure", "notice", "warning"]);
+export type DeliveryCiAnnotationLevelV1 = z.infer<typeof DeliveryCiAnnotationLevelV1Schema>;
+
+export const DeliveryCiAnnotationV1Schema = z.object({
+  end_line: z.number().int().min(0),
+  level: z.lazy(() => DeliveryCiAnnotationLevelV1Schema),
+  path: z.string(),
+  start_line: z.number().int().min(0),
+  title: z.string().nullable(),
+});
+export type DeliveryCiAnnotationV1 = z.infer<typeof DeliveryCiAnnotationV1Schema>;
+
 export const DeliveryCiCheckV1Schema = z.object({
   annotation_count: z.number().int().safe().min(0),
+  annotations: z.array(z.lazy(() => DeliveryCiAnnotationV1Schema)),
   check_conclusion: z.union([z.lazy(() => DeliveryCiConclusionV1Schema), z.null()]),
   check_status: z.lazy(() => DeliveryCiStatusV1Schema),
   failed_step: z.string().nullable(),
@@ -953,6 +970,7 @@ export const DeliveryCiTimelineV1Schema = z.object({
   expected_head_commit: z.string(),
   items: z.array(z.lazy(() => DeliveryCiCheckV1Schema)),
   retained_head_commit: z.string(),
+  total_retained: z.number().int().safe().min(0),
   truncated: z.boolean(),
 });
 export type DeliveryCiTimelineV1 = z.infer<typeof DeliveryCiTimelineV1Schema>;
@@ -1333,6 +1351,16 @@ export const DeliveryProjectionV18Schema = z.discriminatedUnion("state", [z.obje
 })]);
 export type DeliveryProjectionV18 = z.infer<typeof DeliveryProjectionV18Schema>;
 
+export const DeliveryPullRequestIdentityV1Schema = z.object({
+  additions: z.number().int().safe().min(0),
+  changed_files: z.number().int().safe().min(0),
+  deletions: z.number().int().safe().min(0),
+  draft: z.boolean(),
+  state: z.lazy(() => DeliveryPullRequestStateV1Schema),
+  title: z.string(),
+});
+export type DeliveryPullRequestIdentityV1 = z.infer<typeof DeliveryPullRequestIdentityV1Schema>;
+
 export const DeliveryPullRequestOperationV1Schema = z.object({
   last_complete: z.union([z.lazy(() => DeliveryGitHubOperationSnapshotV1Schema), z.null()]),
   latest_attempt: z.union([z.lazy(() => DeliveryGitHubOperationSnapshotV1Schema), z.null()]),
@@ -1340,16 +1368,21 @@ export const DeliveryPullRequestOperationV1Schema = z.object({
 });
 export type DeliveryPullRequestOperationV1 = z.infer<typeof DeliveryPullRequestOperationV1Schema>;
 
+export const DeliveryPullRequestStateV1Schema = z.enum(["closed", "merged", "open"]);
+export type DeliveryPullRequestStateV1 = z.infer<typeof DeliveryPullRequestStateV1Schema>;
+
 export const DeliveryPullRequestTimelineV1Schema = z.object({
   expected_head_commit: z.string(),
   items: z.array(z.lazy(() => DeliveryPullRequestV1Schema)),
   retained_head_commit: z.string(),
+  total_retained: z.number().int().safe().min(0),
   truncated: z.boolean(),
 });
 export type DeliveryPullRequestTimelineV1 = z.infer<typeof DeliveryPullRequestTimelineV1Schema>;
 
 export const DeliveryPullRequestV1Schema = z.object({
   id: z.string(),
+  identity: z.union([z.lazy(() => DeliveryPullRequestIdentityV1Schema), z.null()]),
   label: z.string(),
   operations: z.array(z.lazy(() => DeliveryPullRequestOperationV1Schema)),
   provider: z.string(),
@@ -1402,6 +1435,12 @@ export type DeliveryReleaseV1 = z.infer<typeof DeliveryReleaseV1Schema>;
 export const DeliveryReviewAuthorClassV1Schema = z.enum(["bot", "maintainer", "other_observed_role"]);
 export type DeliveryReviewAuthorClassV1 = z.infer<typeof DeliveryReviewAuthorClassV1Schema>;
 
+export const DeliveryReviewBodyPreviewV1Schema = z.object({
+  text: z.string(),
+  truncated: z.boolean(),
+});
+export type DeliveryReviewBodyPreviewV1 = z.infer<typeof DeliveryReviewBodyPreviewV1Schema>;
+
 export const DeliveryReviewItemV1Schema = z.object({
   comment_id: z.string(),
   id: z.string(),
@@ -1420,10 +1459,14 @@ export type DeliveryReviewObservationKindV1 = z.infer<typeof DeliveryReviewObser
 
 export const DeliveryReviewObservationV1Schema = z.object({
   author_class: z.lazy(() => DeliveryReviewAuthorClassV1Schema),
+  body_preview: z.union([z.lazy(() => DeliveryReviewBodyPreviewV1Schema), z.null()]),
   kind: z.lazy(() => DeliveryReviewObservationKindV1Schema),
   lifecycle: z.lazy(() => DeliveryReviewLifecycleV1Schema),
+  line: z.number().int().safe().min(0).nullable(),
   observed_at_micros: z.number().int().safe(),
   operation: z.lazy(() => DeliveryGitHubReadOperationV1Schema),
+  original_line: z.number().int().safe().min(0).nullable(),
+  path: z.string(),
   provider_outcome: z.lazy(() => DeliveryGitHubOutcomeV1Schema),
   reply_to_comment_id: z.string().nullable(),
   repository_id: z.string(),
@@ -1442,6 +1485,7 @@ export const DeliveryReviewTimelineV1Schema = z.object({
   expected_head_commit: z.string(),
   items: z.array(z.lazy(() => DeliveryReviewItemV1Schema)),
   retained_head_commit: z.string(),
+  total_retained: z.number().int().safe().min(0),
   truncated: z.boolean(),
 });
 export type DeliveryReviewTimelineV1 = z.infer<typeof DeliveryReviewTimelineV1Schema>;

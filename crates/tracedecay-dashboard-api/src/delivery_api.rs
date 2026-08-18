@@ -22,14 +22,17 @@ use tracedecay_usecases::advisory::GitHubReleaseV1;
 use tracedecay_usecases::delivery::{
     MAX_PROJECT_DELIVERY_CI_CHECKS_V1, MAX_PROJECT_DELIVERY_PULL_REQUESTS_V1,
     MAX_PROJECT_DELIVERY_RELEASES_V1, MAX_PROJECT_DELIVERY_REVIEW_ITEMS_V1,
-    ProjectDeliveryCiCheckV1, ProjectDeliveryCiConclusionV1, ProjectDeliveryCiSourceV1,
-    ProjectDeliveryCiStatusV1, ProjectDeliveryCiTimelineV1,
-    ProjectDeliveryFailureLocalizationSourceV1, ProjectDeliveryGitHubOperationSnapshotV1,
-    ProjectDeliveryGitHubSourceV1, ProjectDeliveryGitHubTimelineV1,
-    ProjectDeliveryPullRequestOperationV1, ProjectDeliveryPullRequestV1,
+    ProjectDeliveryCiAnnotationLevelV1, ProjectDeliveryCiAnnotationV1, ProjectDeliveryCiCheckV1,
+    ProjectDeliveryCiConclusionV1, ProjectDeliveryCiSourceV1, ProjectDeliveryCiStatusV1,
+    ProjectDeliveryCiTimelineV1, ProjectDeliveryFailureLocalizationSourceV1,
+    ProjectDeliveryGitHubOperationSnapshotV1, ProjectDeliveryGitHubSourceV1,
+    ProjectDeliveryGitHubTimelineV1, ProjectDeliveryProviderMountGateV1,
+    ProjectDeliveryPullRequestIdentityV1, ProjectDeliveryPullRequestOperationV1,
+    ProjectDeliveryPullRequestStateV1, ProjectDeliveryPullRequestV1,
     ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1, ProjectDeliveryReleaseSourceV1,
-    ProjectDeliveryReviewItemV1, ProjectDeliveryReviewObservationKindV1,
-    ProjectDeliveryReviewObservationV1, ProjectDeliverySnapshotV1,
+    ProjectDeliveryReviewBodyPreviewV1, ProjectDeliveryReviewItemV1,
+    ProjectDeliveryReviewObservationKindV1, ProjectDeliveryReviewObservationV1,
+    ProjectDeliverySnapshotV1,
 };
 
 use crate::application::git_reads::{
@@ -251,6 +254,8 @@ pub struct DeliveryPullRequestTimelineV1 {
     pub retained_head_commit: String,
     pub expected_head_commit: String,
     pub items: Vec<DeliveryPullRequestV1>,
+    /// Retained pull requests known to the source read, shown or not.
+    pub total_retained: u64,
     pub truncated: bool,
 }
 
@@ -260,7 +265,28 @@ pub struct DeliveryPullRequestV1 {
     pub label: String,
     pub provider: String,
     pub pull_request_id: String,
+    /// Retained PR identity from the allowlisted `RestGetPullRequest` read;
+    /// absent when no identity generation is retained yet.
+    pub identity: Option<DeliveryPullRequestIdentityV1>,
     pub operations: Vec<DeliveryPullRequestOperationV1>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DeliveryPullRequestIdentityV1 {
+    pub title: String,
+    pub state: DeliveryPullRequestStateV1,
+    pub draft: bool,
+    pub additions: u64,
+    pub deletions: u64,
+    pub changed_files: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryPullRequestStateV1 {
+    Open,
+    Closed,
+    Merged,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -285,6 +311,8 @@ pub struct DeliveryReviewTimelineV1 {
     pub retained_head_commit: String,
     pub expected_head_commit: String,
     pub items: Vec<DeliveryReviewItemV1>,
+    /// Retained review items enumerated by the source read, shown or not.
+    pub total_retained: u64,
     pub truncated: bool,
 }
 
@@ -307,12 +335,28 @@ pub struct DeliveryReviewObservationV1 {
     pub review_id: Option<String>,
     pub thread_id: Option<String>,
     pub reply_to_comment_id: Option<String>,
+    /// Provider-observed repository-relative path of the review thread.
+    pub path: String,
+    /// Current-diff line; absent when the thread is outdated on the provider.
+    pub line: Option<u64>,
+    /// Line on the original reviewed commit.
+    pub original_line: Option<u64>,
     pub author_class: DeliveryReviewAuthorClassV1,
     pub review_state: DeliveryReviewStateV1,
     pub lifecycle: DeliveryReviewLifecycleV1,
     pub provider_outcome: DeliveryGitHubOutcomeV1,
+    /// Bounded sanitized preview hydrated through the canonical body
+    /// authority; `None` is the typed not-expanded state. The retained body
+    /// anchor and digest stay server-private and never cross this wire.
+    pub body_preview: Option<DeliveryReviewBodyPreviewV1>,
     pub observed_at_micros: i64,
     pub source_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DeliveryReviewBodyPreviewV1 {
+    pub text: String,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
@@ -327,6 +371,8 @@ pub struct DeliveryCiTimelineV1 {
     pub retained_head_commit: String,
     pub expected_head_commit: String,
     pub items: Vec<DeliveryCiCheckV1>,
+    /// Retained checks in the source inventory, shown or not.
+    pub total_retained: u64,
     pub truncated: bool,
 }
 
@@ -344,10 +390,30 @@ pub struct DeliveryCiCheckV1 {
     pub check_status: DeliveryCiStatusV1,
     pub check_conclusion: Option<DeliveryCiConclusionV1>,
     pub failed_step: Option<String>,
+    /// Bounded retained annotation summaries beside the provider's total
+    /// `annotation_count`.
+    pub annotations: Vec<DeliveryCiAnnotationV1>,
     pub annotation_count: u64,
     pub provider_head_commit: String,
     pub failure_kind: DeliveryCiFailureKindV1,
     pub observed_at_micros: i64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DeliveryCiAnnotationV1 {
+    pub path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub level: DeliveryCiAnnotationLevelV1,
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryCiAnnotationLevelV1 {
+    Notice,
+    Warning,
+    Failure,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -685,7 +751,7 @@ struct DeliverySourceProjections {
 
 fn delivery_projections(outcome: ProjectDeliveryReadOutcomeV1) -> DeliverySourceProjections {
     match outcome {
-        ProjectDeliveryReadOutcomeV1::Ready { snapshot } => snapshot_projections(snapshot),
+        ProjectDeliveryReadOutcomeV1::Ready { snapshot } => snapshot_projections(*snapshot),
         ProjectDeliveryReadOutcomeV1::Denied => DeliverySourceProjections {
             pull_requests: DeliveryProjectionV1::Denied { value: None },
             review_comments: DeliveryProjectionV1::Denied { value: None },
@@ -696,9 +762,31 @@ fn delivery_projections(outcome: ProjectDeliveryReadOutcomeV1) -> DeliverySource
             ),
             releases: DeliveryProjectionV1::Denied { value: None },
         },
+        ProjectDeliveryReadOutcomeV1::NotMounted { gate } => {
+            unavailable_delivery_sources(provider_mount_gate_reason(gate))
+        }
         ProjectDeliveryReadOutcomeV1::Unavailable => unavailable_delivery_sources(
             "the daemon-owned Delivery read authority is not mounted or unavailable",
         ),
+    }
+}
+
+/// The exact project-open gate, rendered so a reader can tell "configure a
+/// token" apart from "broken".
+fn provider_mount_gate_reason(gate: ProjectDeliveryProviderMountGateV1) -> &'static str {
+    match gate {
+        ProjectDeliveryProviderMountGateV1::NoGitRemote => {
+            "the admitted checkout has no recognizable GitHub remote, so no provider read can be mounted"
+        }
+        ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured => {
+            "no GitHub read-only credential is configured for this profile and repository — configure a token (or register the repository as public) to mount provider reads"
+        }
+        ProjectDeliveryProviderMountGateV1::GitHubAccessRefused => {
+            "the configured GitHub credential was refused for this repository (missing, rejected, or write-capable), so provider reads stay unmounted"
+        }
+        ProjectDeliveryProviderMountGateV1::GitHubSourceAccessUnavailable => {
+            "the project's GitHub source-access configuration authority could not be opened"
+        }
     }
 }
 
@@ -873,6 +961,7 @@ fn map_github_timeline(
                 .into_iter()
                 .map(map_pull_request)
                 .collect(),
+            total_retained: timeline.pull_requests_total as u64,
             truncated: timeline.pull_requests_truncated,
         },
         DeliveryReviewTimelineV1 {
@@ -883,6 +972,7 @@ fn map_github_timeline(
                 .into_iter()
                 .map(map_review_item)
                 .collect(),
+            total_retained: timeline.review_items_total as u64,
             truncated: timeline.review_items_truncated,
         },
     )
@@ -893,14 +983,35 @@ fn map_pull_request(item: ProjectDeliveryPullRequestV1) -> DeliveryPullRequestV1
     let pull_request_id = item.pull_request_id.as_str().to_owned();
     DeliveryPullRequestV1 {
         id: format!("{provider}:{pull_request_id}"),
-        label: format!("Pull request #{pull_request_id}"),
+        label: match item.identity.as_ref() {
+            Some(identity) => format!("Pull request #{pull_request_id} — {}", identity.title),
+            None => format!("Pull request #{pull_request_id}"),
+        },
         provider,
         pull_request_id,
+        identity: item.identity.map(map_pull_request_identity),
         operations: item
             .operations
             .into_iter()
             .map(map_pull_request_operation)
             .collect(),
+    }
+}
+
+fn map_pull_request_identity(
+    identity: ProjectDeliveryPullRequestIdentityV1,
+) -> DeliveryPullRequestIdentityV1 {
+    DeliveryPullRequestIdentityV1 {
+        title: identity.title,
+        state: match identity.state {
+            ProjectDeliveryPullRequestStateV1::Open => DeliveryPullRequestStateV1::Open,
+            ProjectDeliveryPullRequestStateV1::Closed => DeliveryPullRequestStateV1::Closed,
+            ProjectDeliveryPullRequestStateV1::Merged => DeliveryPullRequestStateV1::Merged,
+        },
+        draft: identity.draft,
+        additions: identity.additions,
+        deletions: identity.deletions,
+        changed_files: identity.changed_files,
     }
 }
 
@@ -966,12 +1077,23 @@ fn map_review_observation(
         reply_to_comment_id: item
             .reply_to_comment_id
             .map(|value| value.as_str().to_owned()),
+        path: item.path,
+        line: item.line,
+        original_line: item.original_line,
         author_class: map_review_author_class(item.author_class),
         review_state: map_review_state(item.review_state),
         lifecycle: map_review_lifecycle(item.lifecycle),
         provider_outcome: map_github_outcome(item.provider_outcome),
+        body_preview: observation.body_preview.map(map_review_body_preview),
         observed_at_micros: item.observed_at.0,
         source_url: item.safe_url,
+    }
+}
+
+fn map_review_body_preview(preview: ProjectDeliveryReviewBodyPreviewV1) -> DeliveryReviewBodyPreviewV1 {
+    DeliveryReviewBodyPreviewV1 {
+        text: preview.text,
+        truncated: preview.truncated,
     }
 }
 
@@ -1015,6 +1137,7 @@ fn map_ci_timeline(
         retained_head_commit: retained_head.to_owned(),
         expected_head_commit: expected_head.to_owned(),
         items: timeline.checks.into_iter().map(map_ci_check).collect(),
+        total_retained: timeline.total_retained as u64,
         truncated: timeline.truncated,
     }
 }
@@ -1054,10 +1177,25 @@ fn map_ci_check(check: ProjectDeliveryCiCheckV1) -> DeliveryCiCheckV1 {
         check_status: map_ci_status(check.check_status),
         check_conclusion: check.check_conclusion.map(map_ci_conclusion),
         failed_step: check.failed_step,
+        annotations: check.annotations.into_iter().map(map_ci_annotation).collect(),
         annotation_count: check.annotation_count,
         provider_head_commit: check.provider_head_sha,
         failure_kind: map_ci_failure_kind(check.failure_kind),
         observed_at_micros: check.observed_at.0,
+    }
+}
+
+fn map_ci_annotation(annotation: ProjectDeliveryCiAnnotationV1) -> DeliveryCiAnnotationV1 {
+    DeliveryCiAnnotationV1 {
+        path: annotation.path,
+        start_line: annotation.start_line,
+        end_line: annotation.end_line,
+        level: match annotation.level {
+            ProjectDeliveryCiAnnotationLevelV1::Notice => DeliveryCiAnnotationLevelV1::Notice,
+            ProjectDeliveryCiAnnotationLevelV1::Warning => DeliveryCiAnnotationLevelV1::Warning,
+            ProjectDeliveryCiAnnotationLevelV1::Failure => DeliveryCiAnnotationLevelV1::Failure,
+        },
+        title: annotation.title,
     }
 }
 
@@ -1396,6 +1534,8 @@ mod tests {
                 timeline: ProjectDeliveryGitHubTimelineV1 {
                     pull_requests: Vec::new(),
                     review_items: Vec::new(),
+                    pull_requests_total: 0,
+                    review_items_total: 0,
                     pull_requests_truncated: false,
                     review_items_truncated: false,
                 },
@@ -1403,6 +1543,7 @@ mod tests {
             ci_checks: ProjectDeliveryCiSourceV1::Ready {
                 timeline: ProjectDeliveryCiTimelineV1 {
                     checks: Vec::new(),
+                    total_retained: 0,
                     truncated: false,
                 },
             },
@@ -1462,6 +1603,45 @@ mod tests {
     }
 
     #[test]
+    fn provider_mount_gate_serves_an_actionable_reason_distinct_from_broken() {
+        let gated = delivery_projections(ProjectDeliveryReadOutcomeV1::NotMounted {
+            gate: ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+        });
+        let DeliveryProjectionV1::Unavailable { reason, .. } = gated.pull_requests else {
+            panic!("a gated mount must project as typed unavailable");
+        };
+        assert!(
+            reason.contains("configure a token"),
+            "the credential gate must tell the reader what to do: {reason}"
+        );
+
+        let generic = delivery_projections(ProjectDeliveryReadOutcomeV1::Unavailable);
+        let DeliveryProjectionV1::Unavailable {
+            reason: generic_reason,
+            ..
+        } = generic.pull_requests
+        else {
+            panic!("an unmounted authority must project as typed unavailable");
+        };
+        assert_ne!(
+            reason, generic_reason,
+            "a missing credential must be distinguishable from a broken authority"
+        );
+
+        let refused = delivery_projections(ProjectDeliveryReadOutcomeV1::NotMounted {
+            gate: ProjectDeliveryProviderMountGateV1::GitHubAccessRefused,
+        });
+        let DeliveryProjectionV1::Unavailable {
+            reason: refused_reason,
+            ..
+        } = refused.review_comments
+        else {
+            panic!("a refused credential must project as typed unavailable");
+        };
+        assert!(refused_reason.contains("refused"));
+    }
+
+    #[test]
     fn provider_qualified_pull_request_preserves_optional_generations() {
         let complete = ProjectDeliveryGitHubOperationSnapshotV1 {
             provider_base_commit_id: CommitId::new("commit.base").unwrap(),
@@ -1479,6 +1659,7 @@ mod tests {
         let mapped = map_pull_request(ProjectDeliveryPullRequestV1 {
             provider: ProviderId::new("provider.github").unwrap(),
             pull_request_id: GitHubPullRequestIdV1::new("42").unwrap(),
+            identity: None,
             operations: vec![ProjectDeliveryPullRequestOperationV1 {
                 operation: GitHubReviewReadOperationV1::RestListPullRequestReviews,
                 latest_attempt: None,

@@ -157,7 +157,7 @@ pub enum ProjectGitHubReleaseReadOutcomeV1 {
 
 /// Project-open result before the authority can be retained by daemon state.
 pub enum ProjectGitHubReleaseAuthorityOpenOutcomeV1 {
-    Ready(ProjectGitHubReleaseReadAuthorityV1),
+    Ready(Box<ProjectGitHubReleaseReadAuthorityV1>),
     Denied,
     Unavailable,
 }
@@ -233,15 +233,17 @@ pub fn open_project_github_release_read_authority_v1(
     if !credential.permits(GitHubReadPermissionV1::Contents) {
         return ProjectGitHubReleaseAuthorityOpenOutcomeV1::Denied;
     }
-    ProjectGitHubReleaseAuthorityOpenOutcomeV1::Ready(ProjectGitHubReleaseReadAuthorityV1 {
-        profile_id: profile_id.clone(),
-        project_id,
-        repository_id,
-        target,
-        credential,
-        access,
-        config,
-    })
+    ProjectGitHubReleaseAuthorityOpenOutcomeV1::Ready(Box::new(
+        ProjectGitHubReleaseReadAuthorityV1 {
+            profile_id: profile_id.clone(),
+            project_id,
+            repository_id,
+            target,
+            credential,
+            access,
+            config,
+        },
+    ))
 }
 
 impl ProjectGitHubReleaseReadAuthorityV1 {

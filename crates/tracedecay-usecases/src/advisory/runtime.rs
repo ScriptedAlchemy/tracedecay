@@ -22,8 +22,8 @@ use tracedecay_application::{
 use tracedecay_domain::feedback::{
     CiFailureCoverageV1, CiFailureLocalizationResultV1, CiFailureLocalizationStateV1,
     FeedbackFindingV1, FeedbackScopeV1, GitHubReviewIngressProviderOutcomeV1,
-    GitHubReviewIngressResultV1, GitHubReviewLifecycleV1, ProviderEvaluationStateV1,
-    ProximityInclusionV1,
+    GitHubReviewIngressResultV1, GitHubReviewLifecycleV1, GitHubReviewReadOperationV1,
+    ProviderEvaluationStateV1, ProximityInclusionV1,
 };
 
 use crate::configuration::ConfigurationControlStore;

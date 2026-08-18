@@ -13,13 +13,14 @@ use serde::Serialize;
 use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
     GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-    GitHubReviewReadResponseV1,
+    GitHubReviewReadRequestV1, GitHubReviewReadResponseV1,
 };
 use tracedecay_application::{RequestAdmission, RequestContext, ResolvedScope, now_micros};
 use tracedecay_domain::feedback::{
-    CiFailureKindV1, CiFailureRunIdentityV1, FeedbackScopeV1, GitHubReviewCommentIdV1,
-    GitHubReviewCoverageV1, GitHubReviewIngressProviderOutcomeV1, GitHubReviewItemV1,
-    GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
+    CiFailureKindV1, CiFailureRunIdentityV1, FeedbackScopeV1, GitHubPullRequestSnapshotV1,
+    GitHubPullRequestStateV1, GitHubReviewCommentIdV1, GitHubReviewCoverageV1,
+    GitHubReviewIngressProviderOutcomeV1, GitHubReviewItemV1, GitHubReviewRateLimitCheckpointV1,
+    GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
     CommitId, ProviderId, UserProfileId, UtcMicros, feedback::GitHubPullRequestIdV1,
@@ -27,25 +28,33 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::db::Database;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
+use crate::advisory::github_runtime::GitHubSourceAccessAuthorityV1;
 use crate::advisory::{
     CiRetainedObservationManifestLoadOutcomeV1, GitHubActionsConclusionV1, GitHubActionsStatusV1,
-    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReleaseReadControlV1,
-    GitHubReviewStoreManifestLoadOutcomeV1, ProjectCiRetainedObservationStoreV1,
-    ProjectGitHubReleaseAuthorityOpenOutcomeV1, ProjectGitHubReleasePageV1,
-    ProjectGitHubReleaseReadAuthorityV1, ProjectGitHubReleaseReadOutcomeV1,
-    ProjectGitHubReleaseReadRequestV1, ProjectGitHubReviewStoreV1,
-    open_project_github_release_read_authority_v1,
+    GitHubCiAnnotationLevelV1, GitHubCiCheckAnnotationV1, GitHubCiRepositoryTargetV1,
+    GitHubHttpReadConfigV1, GitHubReleaseReadControlV1, GitHubReviewBodyEvidenceAuthorityV1,
+    GitHubReviewBodyReadOutcomeV1, GitHubReviewStoreManifestLoadOutcomeV1,
+    ProjectCiRetainedObservationStoreV1, ProjectGitHubReleaseAuthorityOpenOutcomeV1,
+    ProjectGitHubReleasePageV1, ProjectGitHubReleaseReadAuthorityV1,
+    ProjectGitHubReleaseReadOutcomeV1, ProjectGitHubReleaseReadRequestV1,
+    ProjectGitHubReviewStoreV1, open_project_github_release_read_authority_v1,
 };
 
 pub const MAX_PROJECT_DELIVERY_PULL_REQUESTS_V1: usize = 4;
 pub const MAX_PROJECT_DELIVERY_REVIEW_ITEMS_V1: usize = 256;
-pub const MAX_PROJECT_DELIVERY_CI_CHECKS_V1: usize = 16;
+pub const MAX_PROJECT_DELIVERY_CI_CHECKS_V1: usize = 64;
 pub const MAX_PROJECT_DELIVERY_RELEASES_V1: usize = 256;
 /// Point reads are capped independently of caller output bounds.
 pub const MAX_PROJECT_DELIVERY_GITHUB_POINT_READS_V1: usize = 16;
-pub const MAX_PROJECT_DELIVERY_CI_POINT_READS_V1: usize = 16;
+pub const MAX_PROJECT_DELIVERY_CI_POINT_READS_V1: usize = 64;
 /// Maximum successfully decoded input retained during one source projection.
 pub const MAX_PROJECT_DELIVERY_SOURCE_BYTES_V1: usize = 16 * 1024 * 1024;
+/// Bounded sanitized-review-prose preview served on each review observation.
+pub const MAX_PROJECT_DELIVERY_REVIEW_BODY_PREVIEW_BYTES_V1: usize = 400;
+/// Retained-body expansions are point reads and capped per projection.
+pub const MAX_PROJECT_DELIVERY_REVIEW_BODY_READS_V1: usize = 32;
+/// Annotation rows served per CI check beside the total annotation count.
+pub const MAX_PROJECT_DELIVERY_CI_ANNOTATIONS_V1: usize = 8;
 
 /// Independent caller bounds. No provider URL, database key, or source
 /// identity is caller-selectable.
@@ -86,10 +95,32 @@ pub struct ProjectDeliveryPullRequestOperationV1 {
     pub last_complete: Option<ProjectDeliveryGitHubOperationSnapshotV1>,
 }
 
+/// Retained pull-request identity and diff shape from the allowlisted
+/// `RestGetPullRequest` read. Absent when no identity read has been retained
+/// for this pull request.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectDeliveryPullRequestIdentityV1 {
+    pub title: String,
+    pub state: ProjectDeliveryPullRequestStateV1,
+    pub draft: bool,
+    pub additions: u64,
+    pub deletions: u64,
+    pub changed_files: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectDeliveryPullRequestStateV1 {
+    Open,
+    Closed,
+    Merged,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProjectDeliveryPullRequestV1 {
     pub provider: ProviderId,
     pub pull_request_id: GitHubPullRequestIdV1,
+    pub identity: Option<ProjectDeliveryPullRequestIdentityV1>,
     pub operations: Vec<ProjectDeliveryPullRequestOperationV1>,
 }
 
@@ -100,11 +131,23 @@ pub enum ProjectDeliveryReviewObservationKindV1 {
     LastComplete,
 }
 
+/// Bounded preview of the sanitized retained review prose, hydrated through
+/// the canonical body-evidence authority. `None` is the typed not-expanded
+/// state (no body source mounted, expansion denied/stale/unavailable, or the
+/// per-projection expansion budget was already spent); the observation still
+/// carries `item.body_digest` and `item.body_anchor` for exact expansion.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectDeliveryReviewBodyPreviewV1 {
+    pub text: String,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProjectDeliveryReviewObservationV1 {
     pub operation: GitHubReviewReadOperationV1,
     pub kind: ProjectDeliveryReviewObservationKindV1,
     pub item: GitHubReviewItemV1,
+    pub body_preview: Option<ProjectDeliveryReviewBodyPreviewV1>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -119,6 +162,12 @@ pub struct ProjectDeliveryReviewItemV1 {
 pub struct ProjectDeliveryGitHubTimelineV1 {
     pub pull_requests: Vec<ProjectDeliveryPullRequestV1>,
     pub review_items: Vec<ProjectDeliveryReviewItemV1>,
+    /// Distinct retained pull requests known to this read before any bound
+    /// was applied, so a truncated projection can say "N of M".
+    pub pull_requests_total: usize,
+    /// Retained review items enumerated by this read before caller bounds
+    /// and pull-request bounding dropped rows.
+    pub review_items_total: usize,
     pub pull_requests_truncated: bool,
     pub review_items_truncated: bool,
 }
@@ -165,11 +214,32 @@ pub struct ProjectDeliveryCiCheckV1 {
     pub check_status: ProjectDeliveryCiStatusV1,
     pub check_conclusion: Option<ProjectDeliveryCiConclusionV1>,
     pub failed_step: Option<String>,
+    /// Retained annotation summaries, bounded to
+    /// [`MAX_PROJECT_DELIVERY_CI_ANNOTATIONS_V1`] rows beside the provider's
+    /// total `annotation_count`.
+    pub annotations: Vec<ProjectDeliveryCiAnnotationV1>,
     pub annotation_count: u64,
     pub provider_head_sha: String,
     pub failure_anchor: tracedecay_domain::RetrievalAnchorId,
     pub failure_kind: CiFailureKindV1,
     pub observed_at: UtcMicros,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectDeliveryCiAnnotationV1 {
+    pub path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub level: ProjectDeliveryCiAnnotationLevelV1,
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectDeliveryCiAnnotationLevelV1 {
+    Notice,
+    Warning,
+    Failure,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -198,6 +268,9 @@ pub enum ProjectDeliveryCiConclusionV1 {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProjectDeliveryCiTimelineV1 {
     pub checks: Vec<ProjectDeliveryCiCheckV1>,
+    /// Retained checks in the source inventory, so a truncated projection can
+    /// say "N of M checks".
+    pub total_retained: usize,
     pub truncated: bool,
 }
 
@@ -266,9 +339,33 @@ pub struct ProjectDeliverySnapshotV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectDeliveryReadOutcomeV1 {
-    Ready { snapshot: ProjectDeliverySnapshotV1 },
+    Ready {
+        snapshot: Box<ProjectDeliverySnapshotV1>,
+    },
     Denied,
+    /// Project-open resolved no GitHub provider for this checkout; the exact
+    /// typed gate tells "configure a token" apart from "broken".
+    NotMounted {
+        gate: ProjectDeliveryProviderMountGateV1,
+    },
     Unavailable,
+}
+
+/// The exact reason project-open could not mount a GitHub provider read
+/// authority for this checkout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectDeliveryProviderMountGateV1 {
+    /// The admitted checkout has no recognizable GitHub remote.
+    NoGitRemote,
+    /// No GitHub read-only credential is configured for this profile and
+    /// repository, and the repository is not registered as public.
+    GitHubCredentialNotConfigured,
+    /// A credential configuration exists but was refused (rejected, missing
+    /// at resolution, or write-capable), so reads stay unmounted.
+    GitHubAccessRefused,
+    /// The project's GitHub source-access configuration authority could not
+    /// be opened.
+    GitHubSourceAccessUnavailable,
 }
 
 pub type ProjectDeliveryReadFutureV1<'a> =
@@ -285,6 +382,15 @@ pub trait ProjectDeliveryReadPortV1: Send + Sync {
 
 pub type ProjectDeliveryReadHandleV1 = Arc<dyn ProjectDeliveryReadPortV1>;
 
+/// Canonical authorities for expanding retained review prose. Both halves
+/// come from the same advisory production composition that ingested the
+/// bodies; Delivery never opens a parallel body store.
+#[derive(Clone)]
+pub struct ProjectDeliveryReviewBodySourceV1 {
+    pub evidence: Arc<dyn GitHubReviewBodyEvidenceAuthorityV1>,
+    pub source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+}
+
 pub struct ProjectDeliveryReadOpenV1 {
     pub database: Database,
     pub profile_id: UserProfileId,
@@ -292,6 +398,7 @@ pub struct ProjectDeliveryReadOpenV1 {
     pub feedback_scope: FeedbackScopeV1,
     pub github_target: GitHubCiRepositoryTargetV1,
     pub github_http: GitHubHttpReadConfigV1,
+    pub review_bodies: Option<ProjectDeliveryReviewBodySourceV1>,
 }
 
 pub enum ProjectDeliveryReadAuthorityOpenOutcomeV1 {
@@ -311,6 +418,46 @@ struct ProjectDeliveryReadAuthorityV1 {
     github_reviews: ProjectGitHubReviewStoreV1,
     ci_checks: ProjectCiRetainedObservationStoreV1,
     releases: ProjectDeliveryReleaseMountV1,
+    review_bodies: Option<ProjectDeliveryReviewBodySourceV1>,
+}
+
+/// A typed stand-in mounted when project-open resolved no GitHub provider.
+/// It answers every admitted read with the exact gate instead of a generic
+/// unavailable state.
+struct GatedProjectDeliveryReadV1 {
+    scope: FeedbackScopeV1,
+    gate: ProjectDeliveryProviderMountGateV1,
+}
+
+impl ProjectDeliveryReadPortV1 for GatedProjectDeliveryReadV1 {
+    fn read<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a ProjectDeliveryReadRequestV1,
+        _control: &'a GitHubReleaseReadControlV1,
+    ) -> ProjectDeliveryReadFutureV1<'a> {
+        Box::pin(async move {
+            if !request.validate() || !context_matches_delivery_scope(context, &self.scope) {
+                return ProjectDeliveryReadOutcomeV1::Denied;
+            }
+            if context.admission_at(now_micros()) != RequestAdmission::Admitted {
+                return ProjectDeliveryReadOutcomeV1::Unavailable;
+            }
+            ProjectDeliveryReadOutcomeV1::NotMounted { gate: self.gate }
+        })
+    }
+}
+
+/// Mounts the typed gate reporter for a checkout whose GitHub provider
+/// resolution ended in `gate`.
+pub fn gated_project_delivery_read_handle_v1(
+    feedback_scope: FeedbackScopeV1,
+    gate: ProjectDeliveryProviderMountGateV1,
+) -> ProjectDeliveryReadHandleV1 {
+    Arc::new(GatedProjectDeliveryReadV1 {
+        scope: feedback_scope,
+        gate,
+    })
 }
 
 pub fn open_project_delivery_read_authority_v1(
@@ -340,7 +487,7 @@ pub fn open_project_delivery_read_authority_v1(
         input.github_http,
     ) {
         ProjectGitHubReleaseAuthorityOpenOutcomeV1::Ready(authority) => {
-            ProjectDeliveryReleaseMountV1::Ready(Arc::new(authority))
+            ProjectDeliveryReleaseMountV1::Ready(Arc::from(authority))
         }
         ProjectGitHubReleaseAuthorityOpenOutcomeV1::Denied => ProjectDeliveryReleaseMountV1::Denied,
         ProjectGitHubReleaseAuthorityOpenOutcomeV1::Unavailable => {
@@ -353,6 +500,7 @@ pub fn open_project_delivery_read_authority_v1(
         github_reviews,
         ci_checks,
         releases,
+        review_bodies: input.review_bodies,
     }))
 }
 
@@ -409,14 +557,14 @@ impl ProjectDeliveryReadPortV1 for ProjectDeliveryReadAuthorityV1 {
                 return ProjectDeliveryReadOutcomeV1::Unavailable;
             }
             ProjectDeliveryReadOutcomeV1::Ready {
-                snapshot: ProjectDeliverySnapshotV1 {
+                snapshot: Box::new(ProjectDeliverySnapshotV1 {
                     scope: self.scope.clone(),
                     expected_head_commit_id: request.expected_head_commit_id.clone(),
                     github_reviews,
                     ci_checks,
                     failure_localization: ProjectDeliveryFailureLocalizationSourceV1::NotConfigured,
                     releases,
-                },
+                }),
             }
         })
     }
@@ -443,6 +591,11 @@ impl ProjectDeliveryReadAuthorityV1 {
         }
         let total_entries = manifest.entries.len();
         let mut entries = manifest.entries;
+        let manifest_pull_requests = entries
+            .iter()
+            .map(|entry| entry.request.pull_request_id.as_str().to_owned())
+            .collect::<BTreeSet<_>>()
+            .len();
         entries.sort_by(|left, right| {
             (
                 left.request.pull_request_id.as_str(),
@@ -459,19 +612,15 @@ impl ProjectDeliveryReadAuthorityV1 {
         let mut outcomes = Vec::new();
         let mut rate_limits = Vec::new();
         let mut unavailable = false;
-        let mut point_reads = 0usize;
         let mut encoded_bytes = 0usize;
         let mut pull_requests_truncated = total_entries > entries.len();
         let mut review_items_truncated = total_entries > entries.len();
         for entry in entries {
-            if point_reads == MAX_PROJECT_DELIVERY_GITHUB_POINT_READS_V1
-                || encoded_bytes == MAX_PROJECT_DELIVERY_SOURCE_BYTES_V1
-            {
+            if encoded_bytes == MAX_PROJECT_DELIVERY_SOURCE_BYTES_V1 {
                 pull_requests_truncated = true;
                 review_items_truncated = true;
                 break;
             }
-            point_reads += 1;
             let remaining = MAX_PROJECT_DELIVERY_SOURCE_BYTES_V1 - encoded_bytes;
             let Some((state, consumed)) = self
                 .github_reviews
@@ -527,6 +676,7 @@ impl ProjectDeliveryReadAuthorityV1 {
                 .operations
                 .sort_by_key(|operation| github_operation_rank(operation.operation));
         });
+        let pull_requests_total = manifest_pull_requests.max(pull_requests.len());
         if pull_requests.len() > request.max_pull_requests {
             pull_requests.truncate(request.max_pull_requests);
             pull_requests_truncated = true;
@@ -567,9 +717,13 @@ impl ProjectDeliveryReadAuthorityV1 {
             review_items.truncate(request.max_review_items);
             review_items_truncated = true;
         }
+        self.hydrate_review_body_previews(context, &mut review_items)
+            .await;
         let timeline = ProjectDeliveryGitHubTimelineV1 {
             pull_requests,
             review_items,
+            pull_requests_total,
+            review_items_total: before_provider_bound,
             pull_requests_truncated,
             review_items_truncated,
         };
@@ -594,6 +748,60 @@ impl ProjectDeliveryReadAuthorityV1 {
             ProjectDeliveryGitHubSourceV1::Stale { timeline }
         } else {
             ProjectDeliveryGitHubSourceV1::Ready { timeline }
+        }
+    }
+
+    /// Expands bounded sanitized body previews through the canonical
+    /// body-evidence authority. Every non-expanded state stays typed as an
+    /// absent preview beside the always-served body digest and anchor.
+    async fn hydrate_review_body_previews(
+        &self,
+        context: &RequestContext,
+        review_items: &mut [ProjectDeliveryReviewItemV1],
+    ) {
+        let Some(bodies) = self.review_bodies.as_ref() else {
+            return;
+        };
+        let mut previews: BTreeMap<(String, String), Option<ProjectDeliveryReviewBodyPreviewV1>> =
+            BTreeMap::new();
+        for item in review_items.iter_mut() {
+            for observation in &mut item.observations {
+                let key = (
+                    item.pull_request_id.as_str().to_owned(),
+                    observation.item.body_anchor.as_str().to_owned(),
+                );
+                if let Some(cached) = previews.get(&key) {
+                    observation.body_preview = cached.clone();
+                    continue;
+                }
+                if previews.len() == MAX_PROJECT_DELIVERY_REVIEW_BODY_READS_V1 {
+                    continue;
+                }
+                let request = GitHubReviewReadRequestV1 {
+                    operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+                    scope: self.scope.clone(),
+                    pull_request_id: item.pull_request_id.clone(),
+                };
+                let preview = match bodies
+                    .evidence
+                    .read_retained_body(
+                        context,
+                        &request,
+                        &observation.item.body_anchor,
+                        bodies.source_access.as_ref(),
+                    )
+                    .await
+                {
+                    GitHubReviewBodyReadOutcomeV1::Current(evidence) => {
+                        Some(review_body_preview(evidence.body()))
+                    }
+                    GitHubReviewBodyReadOutcomeV1::Denied
+                    | GitHubReviewBodyReadOutcomeV1::Stale
+                    | GitHubReviewBodyReadOutcomeV1::Unavailable => None,
+                };
+                observation.body_preview = preview.clone();
+                previews.insert(key, preview);
+            }
         }
     }
 
@@ -643,6 +851,12 @@ impl ProjectDeliveryReadAuthorityV1 {
             let job_status = delivery_ci_status(&record.workflow_job.status);
             let check_status = delivery_ci_status(&record.check_run.status);
             let failed_step = record.failed_step().map(|step| step.name.clone());
+            let annotations = record
+                .annotations
+                .iter()
+                .take(MAX_PROJECT_DELIVERY_CI_ANNOTATIONS_V1)
+                .map(delivery_ci_annotation)
+                .collect();
             checks.push(ProjectDeliveryCiCheckV1 {
                 observation_id: observation.observation_id,
                 run: entry.request.run,
@@ -666,6 +880,7 @@ impl ProjectDeliveryReadAuthorityV1 {
                     .as_ref()
                     .map(delivery_ci_conclusion),
                 failed_step,
+                annotations,
                 annotation_count: record.check_run.output.annotations_count,
                 provider_head_sha: record.check_run.head_sha,
                 failure_anchor: observation.failure_anchor,
@@ -673,8 +888,15 @@ impl ProjectDeliveryReadAuthorityV1 {
                 observed_at: observation.observed_at,
             });
         }
+        checks.sort_by(|left, right| {
+            (delivery_ci_check_rank(left), ci_run_sort_key(&left.run)).cmp(&(
+                delivery_ci_check_rank(right),
+                ci_run_sort_key(&right.run),
+            ))
+        });
         let timeline = ProjectDeliveryCiTimelineV1 {
             checks,
+            total_retained: total,
             truncated: total > selected || unavailable,
         };
         if unavailable {
@@ -775,8 +997,18 @@ fn collect_pull_request_operation(
         .or_insert_with(|| ProjectDeliveryPullRequestV1 {
             provider: response.ingress.provider.clone(),
             pull_request_id: response.ingress.pull_request_id.clone(),
+            identity: None,
             operations: Vec::new(),
         });
+    if let Some(snapshot) = response.ingress.pull_request.as_ref() {
+        // The latest attempt wins; a last-complete identity fills in only
+        // when no live attempt retained one.
+        if kind == ProjectDeliveryReviewObservationKindV1::LatestAttempt
+            || pull_request.identity.is_none()
+        {
+            pull_request.identity = Some(delivery_pull_request_identity(snapshot));
+        }
+    }
     let operation_index = match pull_request
         .operations
         .iter()
@@ -835,6 +1067,7 @@ fn collect_review_observations(
             operation: response.ingress.operation,
             kind,
             item: item.clone(),
+            body_preview: None,
         };
         if !review.observations.contains(&observation) {
             review.observations.push(observation);
@@ -889,6 +1122,90 @@ fn delivery_ci_conclusion(conclusion: &GitHubActionsConclusionV1) -> ProjectDeli
         GitHubActionsConclusionV1::Skipped => ProjectDeliveryCiConclusionV1::Skipped,
         GitHubActionsConclusionV1::Success => ProjectDeliveryCiConclusionV1::Success,
         GitHubActionsConclusionV1::TimedOut => ProjectDeliveryCiConclusionV1::TimedOut,
+    }
+}
+
+fn delivery_ci_annotation(annotation: &GitHubCiCheckAnnotationV1) -> ProjectDeliveryCiAnnotationV1 {
+    ProjectDeliveryCiAnnotationV1 {
+        path: annotation.path.clone(),
+        start_line: annotation.start_line,
+        end_line: annotation.end_line,
+        level: match annotation.annotation_level {
+            GitHubCiAnnotationLevelV1::Notice => ProjectDeliveryCiAnnotationLevelV1::Notice,
+            GitHubCiAnnotationLevelV1::Warning => ProjectDeliveryCiAnnotationLevelV1::Warning,
+            GitHubCiAnnotationLevelV1::Failure => ProjectDeliveryCiAnnotationLevelV1::Failure,
+        },
+        title: annotation.title.clone(),
+    }
+}
+
+/// Failure-first serving order: failed evidence, then undecided runs, then
+/// successful ones, each group in stable run-identity order.
+fn delivery_ci_check_rank(check: &ProjectDeliveryCiCheckV1) -> u8 {
+    let conclusions = [
+        check.workflow_conclusion,
+        check.job_conclusion,
+        check.check_conclusion,
+    ];
+    let statuses = [check.workflow_status, check.job_status, check.check_status];
+    if conclusions.iter().flatten().any(|conclusion| {
+        matches!(
+            conclusion,
+            ProjectDeliveryCiConclusionV1::Failure
+                | ProjectDeliveryCiConclusionV1::TimedOut
+                | ProjectDeliveryCiConclusionV1::ActionRequired
+        )
+    }) || statuses
+        .iter()
+        .any(|status| matches!(status, ProjectDeliveryCiStatusV1::Failed))
+    {
+        0
+    } else if statuses.iter().any(|status| {
+        matches!(
+            status,
+            ProjectDeliveryCiStatusV1::Pending
+                | ProjectDeliveryCiStatusV1::Queued
+                | ProjectDeliveryCiStatusV1::InProgress
+                | ProjectDeliveryCiStatusV1::Waiting
+        )
+    }) {
+        1
+    } else {
+        2
+    }
+}
+
+fn delivery_pull_request_identity(
+    snapshot: &GitHubPullRequestSnapshotV1,
+) -> ProjectDeliveryPullRequestIdentityV1 {
+    ProjectDeliveryPullRequestIdentityV1 {
+        title: snapshot.title.clone(),
+        state: match snapshot.state {
+            GitHubPullRequestStateV1::Open => ProjectDeliveryPullRequestStateV1::Open,
+            GitHubPullRequestStateV1::Closed => ProjectDeliveryPullRequestStateV1::Closed,
+            GitHubPullRequestStateV1::Merged => ProjectDeliveryPullRequestStateV1::Merged,
+        },
+        draft: snapshot.draft,
+        additions: snapshot.additions,
+        deletions: snapshot.deletions,
+        changed_files: snapshot.changed_files,
+    }
+}
+
+fn review_body_preview(body: &str) -> ProjectDeliveryReviewBodyPreviewV1 {
+    if body.len() <= MAX_PROJECT_DELIVERY_REVIEW_BODY_PREVIEW_BYTES_V1 {
+        return ProjectDeliveryReviewBodyPreviewV1 {
+            text: body.to_owned(),
+            truncated: false,
+        };
+    }
+    let mut cut = MAX_PROJECT_DELIVERY_REVIEW_BODY_PREVIEW_BYTES_V1;
+    while !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    ProjectDeliveryReviewBodyPreviewV1 {
+        text: body[..cut].to_owned(),
+        truncated: true,
     }
 }
 
@@ -953,6 +1270,8 @@ fn empty_github_timeline() -> ProjectDeliveryGitHubTimelineV1 {
     ProjectDeliveryGitHubTimelineV1 {
         pull_requests: Vec::new(),
         review_items: Vec::new(),
+        pull_requests_total: 0,
+        review_items_total: 0,
         pull_requests_truncated: false,
         review_items_truncated: false,
     }
@@ -961,6 +1280,7 @@ fn empty_github_timeline() -> ProjectDeliveryGitHubTimelineV1 {
 fn empty_ci_timeline() -> ProjectDeliveryCiTimelineV1 {
     ProjectDeliveryCiTimelineV1 {
         checks: Vec::new(),
+        total_retained: 0,
         truncated: false,
     }
 }
@@ -1062,6 +1382,7 @@ mod tests {
                 outcome,
                 coverage,
                 items: Vec::new(),
+                pull_request: None,
                 fetched_at: UtcMicros(11),
             },
             checkpoint: GitHubReviewReadCheckpointV1 {
@@ -1119,6 +1440,154 @@ mod tests {
             .unwrap();
         assert!(b.operations[0].latest_attempt.is_some());
         assert!(b.operations[0].last_complete.is_none());
+    }
+
+    #[test]
+    fn pull_request_identity_prefers_the_latest_attempt_generation() {
+        let fixture =
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
+        let scope = test_scope(&fixture);
+        let snapshot = |title: &str| GitHubPullRequestSnapshotV1 {
+            title: title.to_owned(),
+            state: tracedecay_domain::feedback::GitHubPullRequestStateV1::Open,
+            draft: true,
+            additions: 10,
+            deletions: 2,
+            changed_files: 3,
+        };
+        let mut complete = github_response(
+            &scope,
+            "github",
+            GitHubReviewIngressProviderOutcomeV1::Complete,
+            GitHubReviewCoverageV1::Complete,
+        );
+        complete.ingress.operation = GitHubReviewReadOperationV1::RestGetPullRequest;
+        complete.ingress.pull_request = Some(snapshot("older complete"));
+        let mut latest = complete.clone();
+        latest.ingress.pull_request = Some(snapshot("newer attempt"));
+
+        let mut pull_requests = BTreeMap::new();
+        let mut unavailable = false;
+        // A last-complete identity fills the slot only until a live attempt
+        // retains one.
+        collect_pull_request_operation(
+            &mut pull_requests,
+            &mut unavailable,
+            &complete,
+            ProjectDeliveryReviewObservationKindV1::LastComplete,
+        );
+        collect_pull_request_operation(
+            &mut pull_requests,
+            &mut unavailable,
+            &latest,
+            ProjectDeliveryReviewObservationKindV1::LatestAttempt,
+        );
+
+        let pull_request = pull_requests
+            .get(&("github".to_owned(), "42".to_owned()))
+            .unwrap();
+        let identity = pull_request.identity.as_ref().unwrap();
+        assert_eq!(identity.title, "newer attempt");
+        assert_eq!(identity.state, ProjectDeliveryPullRequestStateV1::Open);
+        assert!(identity.draft);
+        assert_eq!(
+            (identity.additions, identity.deletions, identity.changed_files),
+            (10, 2, 3)
+        );
+    }
+
+    #[test]
+    fn review_body_preview_bounds_on_a_character_boundary() {
+        let short = review_body_preview("short body");
+        assert_eq!(short.text, "short body");
+        assert!(!short.truncated);
+
+        let long = "é".repeat(MAX_PROJECT_DELIVERY_REVIEW_BODY_PREVIEW_BYTES_V1);
+        let preview = review_body_preview(&long);
+        assert!(preview.truncated);
+        assert!(preview.text.len() <= MAX_PROJECT_DELIVERY_REVIEW_BODY_PREVIEW_BYTES_V1);
+        assert!(long.starts_with(&preview.text));
+        assert!(!preview.text.is_empty());
+    }
+
+    #[test]
+    fn ci_checks_serve_failures_before_undecided_and_successful_runs() {
+        let fixture =
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
+        let record = fixture.ci_provider_record;
+        let base = ProjectDeliveryCiCheckV1 {
+            observation_id: tracedecay_domain::CanonicalObservationIdV1::new(format!(
+                "sha256:{}",
+                "a".repeat(64)
+            ))
+            .unwrap(),
+            run: record.run_identity(),
+            workflow_path: record.workflow_run.path.clone(),
+            workflow_status: ProjectDeliveryCiStatusV1::Completed,
+            workflow_conclusion: Some(ProjectDeliveryCiConclusionV1::Success),
+            job_status: ProjectDeliveryCiStatusV1::Completed,
+            job_conclusion: Some(ProjectDeliveryCiConclusionV1::Success),
+            check_status: ProjectDeliveryCiStatusV1::Completed,
+            check_conclusion: Some(ProjectDeliveryCiConclusionV1::Success),
+            failed_step: None,
+            annotations: Vec::new(),
+            annotation_count: 0,
+            provider_head_sha: record.check_run.head_sha.clone(),
+            failure_anchor: tracedecay_domain::RetrievalAnchorId::new(
+                "anchor.delivery-rank.fixture",
+            )
+            .unwrap(),
+            failure_kind: CiFailureKindV1::Unknown,
+            observed_at: UtcMicros(1),
+        };
+        let mut failed = base.clone();
+        failed.job_conclusion = Some(ProjectDeliveryCiConclusionV1::Failure);
+        let mut undecided = base.clone();
+        undecided.check_status = ProjectDeliveryCiStatusV1::InProgress;
+        undecided.check_conclusion = None;
+
+        assert_eq!(delivery_ci_check_rank(&failed), 0);
+        assert_eq!(delivery_ci_check_rank(&undecided), 1);
+        assert_eq!(delivery_ci_check_rank(&base), 2);
+    }
+
+    #[tokio::test]
+    async fn gated_mount_reports_its_exact_typed_gate_only_after_admission() {
+        let fixture =
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
+        let scope = test_scope(&fixture);
+        let context = test_context(&scope);
+        let handle = gated_project_delivery_read_handle_v1(
+            scope.clone(),
+            ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+        );
+        let request = ProjectDeliveryReadRequestV1 {
+            expected_head_commit_id: scope.head_commit_id.clone(),
+            max_pull_requests: 1,
+            max_review_items: 1,
+            max_ci_checks: 1,
+            max_releases: 1,
+        };
+        let control = GitHubReleaseReadControlV1::bounded(Instant::now() + Duration::from_secs(1));
+
+        assert_eq!(
+            handle.read(&context, &request, &control).await,
+            ProjectDeliveryReadOutcomeV1::NotMounted {
+                gate: ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured,
+            }
+        );
+
+        // A foreign-scope caller is denied before any gate is disclosed.
+        let mut foreign_scope = scope;
+        foreign_scope.project_id = ProjectId::new("project.delivery-foreign").unwrap();
+        let foreign_handle = gated_project_delivery_read_handle_v1(
+            foreign_scope,
+            ProjectDeliveryProviderMountGateV1::NoGitRemote,
+        );
+        assert_eq!(
+            foreign_handle.read(&context, &request, &control).await,
+            ProjectDeliveryReadOutcomeV1::Denied
+        );
     }
 
     #[tokio::test]
@@ -1216,6 +1685,7 @@ mod tests {
             github_reviews,
             ci_checks,
             releases: ProjectDeliveryReleaseMountV1::Unavailable,
+            review_bodies: None,
         };
         let request = ProjectDeliveryReadRequestV1 {
             expected_head_commit_id,
@@ -1264,6 +1734,7 @@ mod tests {
                 .unwrap(),
             ci_checks: ProjectCiRetainedObservationStoreV1::new(database, scope).unwrap(),
             releases: ProjectDeliveryReleaseMountV1::Unavailable,
+            review_bodies: None,
         };
         let control = GitHubReleaseReadControlV1::bounded(Instant::now() + Duration::from_secs(1));
 
@@ -1275,9 +1746,11 @@ mod tests {
 
     #[test]
     fn release_http_config_rejects_non_github_credential_destinations() {
-        let mut config = GitHubHttpReadConfigV1::default();
-        config.rest_base_uri = "https://attacker.example".to_owned();
-        config.graphql_uri = "https://attacker.example/graphql".to_owned();
+        let mut config = GitHubHttpReadConfigV1 {
+            rest_base_uri: "https://attacker.example".to_owned(),
+            graphql_uri: "https://attacker.example/graphql".to_owned(),
+            ..GitHubHttpReadConfigV1::default()
+        };
         assert!(!github_http_is_official(&config));
         config.rest_base_uri = "https://api.github.com/?redirect=attacker".to_owned();
         config.graphql_uri = "https://api.github.com/graphql".to_owned();
@@ -1310,6 +1783,7 @@ mod tests {
                 .unwrap(),
             ci_checks: ProjectCiRetainedObservationStoreV1::new(database, scope.clone()).unwrap(),
             releases: ProjectDeliveryReleaseMountV1::Unavailable,
+            review_bodies: None,
         };
         let expected_head_commit_id =
             tracedecay_domain::CommitId::new("fedcba9876543210fedcba9876543210fedcba98").unwrap();

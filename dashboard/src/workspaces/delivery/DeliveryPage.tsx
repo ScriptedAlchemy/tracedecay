@@ -36,6 +36,7 @@ import {
 import { DeliveryFieldPlot } from './DeliveryField.tsx';
 import { composeDeliveryField, type DeliveryBody, type DeliveryField } from './field.ts';
 import {
+  type DeliveryCiCheckV1,
   type DeliveryCiTimelineV1,
   type DeliveryCommitTimelineV1,
   type DeliveryFailureLocalizationTimelineV1,
@@ -44,8 +45,11 @@ import {
   type DeliveryGitStatusV1,
   type DeliveryOverviewV1,
   DeliveryOverviewV1Schema,
+  type DeliveryPullRequestIdentityV1,
   type DeliveryPullRequestTimelineV1,
   type DeliveryReleaseTimelineV1,
+  type DeliveryReviewItemV1,
+  type DeliveryReviewObservationV1,
   type DeliveryReviewTimelineV1,
   type ProjectRepoGroup,
   type ProjectsPayloadV1,
@@ -530,6 +534,7 @@ function renderPullRequests(timeline: DeliveryPullRequestTimelineV1) {
       />
       <TimelineItems
         count={timeline.items.length}
+        total={timeline.total_retained}
         singular="pull request"
         truncated={timeline.truncated}
       >
@@ -540,7 +545,16 @@ function renderPullRequests(timeline: DeliveryPullRequestTimelineV1) {
           >
             <span className="font-medium text-text-secondary">
               {pullRequest.provider} · PR {pullRequest.pull_request_id}
+              {pullRequest.identity ? ` — ${pullRequest.identity.title}` : ''}
             </span>
+            {pullRequest.identity ? (
+              <PullRequestIdentity identity={pullRequest.identity} />
+            ) : (
+              <span className="text-3xs text-text-muted">
+                no retained PR identity read yet — title, state and diff shape
+                appear after the next provider refresh
+              </span>
+            )}
             {pullRequest.operations.map((operation) => (
               <div key={operation.operation} className="flex flex-col gap-1 border-l border-edge-subtle pl-1.5">
                 <span className="td-legend text-text-muted">{humanize(operation.operation)}</span>
@@ -556,6 +570,18 @@ function renderPullRequests(timeline: DeliveryPullRequestTimelineV1) {
         ))}
       </TimelineItems>
     </div>
+  );
+}
+
+/** PR identity and diff shape from the retained `RestGetPullRequest` read:
+ * state, draftness and diff stats without a per-file listing. */
+function PullRequestIdentity({ identity }: { identity: DeliveryPullRequestIdentityV1 }) {
+  return (
+    <span className="text-3xs text-text-muted">
+      {humanize(identity.state)}
+      {identity.draft ? ' · draft' : ''} · +{identity.additions} −{identity.deletions} ·{' '}
+      {countLabel(identity.changed_files, 'file')} changed
+    </span>
   );
 }
 
@@ -577,7 +603,88 @@ function OperationSnapshot({
   );
 }
 
+/** One review comment with the observation this page treats as current: the
+ * most recently observed one, preferring the live latest attempt on ties. */
+type ReviewComment = {
+  item: DeliveryReviewItemV1;
+  current: DeliveryReviewObservationV1;
+};
+
+type ReviewThread = {
+  key: string;
+  threadId: string | null;
+  path: string;
+  line: number | null;
+  originalLine: number | null;
+  lifecycle: DeliveryReviewObservationV1['lifecycle'];
+  comments: ReviewComment[];
+};
+
+function currentObservation(
+  item: DeliveryReviewItemV1,
+): DeliveryReviewObservationV1 | null {
+  let current: DeliveryReviewObservationV1 | null = null;
+  for (const observation of item.observations) {
+    if (
+      current === null ||
+      observation.observed_at_micros > current.observed_at_micros ||
+      (observation.observed_at_micros === current.observed_at_micros &&
+        observation.kind === 'latest_attempt' &&
+        current.kind !== 'latest_attempt')
+    ) {
+      current = observation;
+    }
+  }
+  return current;
+}
+
+/** Groups retained review comments into their provider threads. Comments
+ * without a thread identity stand alone under their comment id. */
+function groupReviewThreads(items: readonly DeliveryReviewItemV1[]): ReviewThread[] {
+  const threads = new Map<string, ReviewThread>();
+  for (const item of items) {
+    const current = currentObservation(item);
+    if (!current) continue;
+    const key = current.thread_id
+      ? `${item.provider}:${item.pull_request_id}:thread:${current.thread_id}`
+      : `${item.provider}:${item.pull_request_id}:comment:${item.comment_id}`;
+    const existing = threads.get(key);
+    if (existing) {
+      existing.comments.push({ item, current });
+    } else {
+      threads.set(key, {
+        key,
+        threadId: current.thread_id,
+        path: current.path,
+        line: current.line,
+        originalLine: current.original_line,
+        lifecycle: current.lifecycle,
+        comments: [{ item, current }],
+      });
+    }
+  }
+  for (const thread of threads.values()) {
+    thread.comments.sort((left, right) => {
+      // Root comment first, then provider observation order.
+      const leftRoot = left.current.reply_to_comment_id === null ? 0 : 1;
+      const rightRoot = right.current.reply_to_comment_id === null ? 0 : 1;
+      if (leftRoot !== rightRoot) return leftRoot - rightRoot;
+      return left.current.observed_at_micros - right.current.observed_at_micros;
+    });
+  }
+  return [...threads.values()];
+}
+
+function threadLocation(thread: ReviewThread): string {
+  if (thread.line != null) return `${thread.path}:${thread.line}`;
+  if (thread.originalLine != null) {
+    return `${thread.path}:${thread.originalLine} (original diff)`;
+  }
+  return thread.path;
+}
+
 function renderReviews(timeline: DeliveryReviewTimelineV1) {
+  const threads = groupReviewThreads(timeline.items);
   return (
     <div className="flex flex-col gap-1.5">
       <HeadComparison
@@ -586,37 +693,63 @@ function renderReviews(timeline: DeliveryReviewTimelineV1) {
       />
       <TimelineItems
         count={timeline.items.length}
+        total={timeline.total_retained}
         singular="review comment"
         truncated={timeline.truncated}
       >
-        {timeline.items.map((item) => (
+        {threads.map((thread) => (
           <li
-            key={`${item.provider}:${item.pull_request_id}:${item.comment_id}`}
+            key={thread.key}
             className="flex flex-col gap-1 border-b border-edge-subtle px-1.5 py-1 last:border-b-0"
           >
-            <span className="font-medium text-text-secondary">
-              {item.provider} · PR {item.pull_request_id} · comment {item.comment_id}
-            </span>
-            {item.observations.map((observation) => (
-              <dl
-                key={`${observation.operation}:${observation.kind}:${observation.version_digest}`}
-                className="grid grid-cols-2 gap-x-2 border-l border-edge-subtle pl-1.5 text-3xs text-text-muted"
-              >
-                <Fact label={humanize(observation.kind)} value={humanize(observation.operation)} />
-                <Fact label="state" value={`${humanize(observation.review_state)} · ${humanize(observation.lifecycle)}`} />
-                <Fact label="provider outcome" value={humanize(observation.provider_outcome)} />
-                <Fact label="author class" value={humanize(observation.author_class)} />
-                <Fact label="repository" value={observation.repository_id} />
-                <Fact label="version" value={shortOpaque(observation.version_digest)} />
-                <Fact label="observed at" value={`${observation.observed_at_micros} µs`} />
-                {observation.review_id ? <Fact label="review" value={observation.review_id} /> : null}
-                {observation.thread_id ? <Fact label="thread" value={observation.thread_id} /> : null}
-                {observation.reply_to_comment_id ? <Fact label="reply to" value={observation.reply_to_comment_id} /> : null}
-              </dl>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="td-value font-medium text-text-secondary">
+                {threadLocation(thread)}
+              </span>
+              <span className="td-legend text-text-muted">{humanize(thread.lifecycle)}</span>
+              {thread.threadId ? (
+                <span className="td-legend text-text-muted">thread {thread.threadId}</span>
+              ) : null}
+            </div>
+            {thread.comments.map((comment) => (
+              <ReviewCommentRow
+                key={comment.item.comment_id}
+                comment={comment}
+              />
             ))}
           </li>
         ))}
       </TimelineItems>
+    </div>
+  );
+}
+
+function ReviewCommentRow({ comment }: { comment: ReviewComment }) {
+  const { item, current } = comment;
+  return (
+    <div className="flex flex-col gap-0.5 border-l border-edge-subtle pl-1.5">
+      <span className="text-3xs text-text-muted">
+        {humanize(current.author_class)} · {humanize(current.review_state)} ·{' '}
+        {humanize(current.lifecycle)}
+        {current.reply_to_comment_id ? ` · reply to ${current.reply_to_comment_id}` : ''}
+        {' · '}comment {item.comment_id}
+      </span>
+      {current.body_preview ? (
+        <p className="whitespace-pre-wrap text-2xs leading-relaxed text-text-secondary">
+          {current.body_preview.text}
+          {current.body_preview.truncated ? '…' : ''}
+        </p>
+      ) : (
+        <span className="text-3xs text-text-muted">
+          body retained but not expanded for this read
+        </span>
+      )}
+      <span className="text-3xs text-text-muted">
+        {item.observations.length === 1
+          ? `1 observation · ${humanize(current.operation)}`
+          : `${item.observations.length} observations · latest ${humanize(current.operation)} (${humanize(current.kind)})`}
+        {' · '}observed at {current.observed_at_micros} µs
+      </span>
     </div>
   );
 }
@@ -628,7 +761,12 @@ function renderCiChecks(timeline: DeliveryCiTimelineV1) {
         expected={timeline.expected_head_commit}
         retained={timeline.retained_head_commit}
       />
-      <TimelineItems count={timeline.items.length} singular="CI check" truncated={timeline.truncated}>
+      <TimelineItems
+        count={timeline.items.length}
+        total={timeline.total_retained}
+        singular="CI check"
+        truncated={timeline.truncated}
+      >
         {timeline.items.map((check) => (
           <li
             key={check.observation_id}
@@ -649,12 +787,50 @@ function renderCiChecks(timeline: DeliveryCiTimelineV1) {
               <Fact label="job ID" value={check.run.job_id} />
               <Fact label="check run ID" value={check.run.check_run_id} />
               {check.failed_step ? <Fact label="failed step" value={check.failed_step} /> : null}
-              <Fact label="annotations" value={String(check.annotation_count)} />
               <Fact label="observed at" value={`${check.observed_at_micros} µs`} />
             </dl>
+            <CiAnnotations check={check} />
           </li>
         ))}
       </TimelineItems>
+    </div>
+  );
+}
+
+/** Retained annotation summaries. The provider count stays authoritative, so
+ * a bounded listing says how many rows it is showing of that count. */
+function CiAnnotations({ check }: { check: DeliveryCiCheckV1 }) {
+  if (check.annotation_count === 0) {
+    return <span className="text-3xs text-text-muted">no annotations reported</span>;
+  }
+  const shown = check.annotations.length;
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="text-3xs text-text-muted">
+        {shown < check.annotation_count
+          ? `${shown} of ${check.annotation_count} annotations shown`
+          : countLabel(shown, 'annotation')}
+      </span>
+      {shown > 0 ? (
+        <ul
+          aria-label={`Annotations for ${check.workflow_path}`}
+          className="border-l border-edge-subtle pl-1.5"
+        >
+          {check.annotations.map((annotation, index) => (
+            <li
+              key={`${annotation.path}:${annotation.start_line}:${index}`}
+              className="text-3xs text-text-muted"
+            >
+              <span className="td-value text-text-secondary">
+                {annotation.path}:{annotation.start_line}
+                {annotation.end_line !== annotation.start_line ? `-${annotation.end_line}` : ''}
+              </span>{' '}
+              · {humanize(annotation.level)}
+              {annotation.title ? ` · ${annotation.title}` : ''}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }
@@ -729,19 +905,26 @@ function HeadComparison({ expected, retained }: { expected: string; retained: st
 
 function TimelineItems({
   count,
+  total,
   singular,
   truncated,
   children,
 }: {
   count: number;
+  /** Retained rows known to the source, shown or not; renders "N of M". */
+  total?: number;
   singular: string;
   truncated: boolean;
   children: React.ReactNode;
 }) {
+  const counted =
+    total != null && total > count
+      ? `${count} of ${total} ${singular}${total === 1 ? '' : 's'}`
+      : countLabel(count, singular);
   return (
     <div className="flex flex-col gap-1">
       <span className="text-3xs text-text-muted">
-        {countLabel(count, singular)}{truncated ? ' shown · more evidence not shown' : ''}
+        {counted}{truncated ? ' shown · more evidence not shown' : ''}
       </span>
       {count > 0 ? (
         <ul className="max-h-52 overflow-auto border border-edge-subtle">{children}</ul>

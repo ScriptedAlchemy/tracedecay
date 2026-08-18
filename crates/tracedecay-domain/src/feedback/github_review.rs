@@ -64,6 +64,45 @@ impl GitHubReviewReadOperationV1 {
     }
 }
 
+/// Provider-reported pull-request state observed by the read-only ingress.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubPullRequestStateV1 {
+    Open,
+    Closed,
+    Merged,
+}
+
+pub const MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1: usize = 400;
+
+/// Observed pull-request identity and diff shape from one allowlisted
+/// `RestGetPullRequest` read. It carries no branch names, labels, or prose
+/// beyond the sanitized title.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubPullRequestSnapshotV1 {
+    pub title: String,
+    pub state: GitHubPullRequestStateV1,
+    pub draft: bool,
+    pub additions: u64,
+    pub deletions: u64,
+    pub changed_files: u64,
+}
+
+impl GitHubPullRequestSnapshotV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if self.title.is_empty()
+            || self.title.len() > MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1
+            || self.title.chars().any(char::is_control)
+        {
+            return Err(DomainError::NonCanonical {
+                field: "github pull request title",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Observed lifecycle of an item or thread. This remains independent from
 /// [`GitHubReviewIngressProviderOutcomeV1`], which describes a fetch attempt.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -298,6 +337,13 @@ pub struct GitHubReviewItemV1 {
     pub thread_id: Option<GitHubReviewThreadIdV1>,
     pub comment_id: GitHubReviewCommentIdV1,
     pub reply_to_comment_id: Option<GitHubReviewCommentIdV1>,
+    /// Provider-observed repository-relative file path of the review thread.
+    pub path: String,
+    /// Provider-observed current-diff line, absent when the thread is
+    /// outdated on the provider's current diff.
+    pub line: Option<u64>,
+    /// Provider-observed line on the original reviewed commit.
+    pub original_line: Option<u64>,
     pub version_digest: ManifestDigest,
     pub author_anchor: RetrievalAnchorId,
     pub author_class: GitHubReviewAuthorClassV1,
@@ -328,6 +374,16 @@ impl GitHubReviewItemV1 {
         self.reply_to_comment_id
             .as_ref()
             .map_or(Ok(()), GitHubReviewCommentIdV1::validate)?;
+        if !valid_review_thread_path(&self.path) {
+            return Err(DomainError::NonCanonical {
+                field: "github review thread path",
+            });
+        }
+        if matches!((self.line, self.original_line), (Some(0), _) | (_, Some(0))) {
+            return Err(DomainError::NonCanonical {
+                field: "github review thread line",
+            });
+        }
         self.version_digest.validate()?;
         self.author_anchor.validate()?;
         self.body_digest.validate()?;
@@ -361,6 +417,19 @@ impl GitHubReviewItemV1 {
     }
 }
 
+pub const MAX_GITHUB_REVIEW_THREAD_PATH_BYTES_V1: usize = 1_024;
+
+fn valid_review_thread_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_GITHUB_REVIEW_THREAD_PATH_BYTES_V1
+        && !value.chars().any(char::is_control)
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && value
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
 fn safe_github_url(value: &str) -> bool {
     if value.len() > 2_048 {
         return false;
@@ -391,6 +460,10 @@ pub struct GitHubReviewIngressResultV1 {
     pub outcome: GitHubReviewIngressProviderOutcomeV1,
     pub coverage: GitHubReviewCoverageV1,
     pub items: Vec<GitHubReviewItemV1>,
+    /// Present exactly for every complete `RestGetPullRequest` read; every
+    /// other operation observes review items only and never a PR identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<GitHubPullRequestSnapshotV1>,
     pub fetched_at: UtcMicros,
 }
 
@@ -438,6 +511,24 @@ impl GitHubReviewIngressResultV1 {
             return Err(DomainError::NonCanonical {
                 field: "github review ingress coverage",
             });
+        }
+        match (&self.pull_request, self.operation, self.outcome) {
+            (
+                Some(snapshot),
+                GitHubReviewReadOperationV1::RestGetPullRequest,
+                GitHubReviewIngressProviderOutcomeV1::Complete,
+            ) => snapshot.validate()?,
+            (
+                None,
+                GitHubReviewReadOperationV1::RestGetPullRequest,
+                GitHubReviewIngressProviderOutcomeV1::Complete,
+            )
+            | (Some(_), _, _) => {
+                return Err(DomainError::NonCanonical {
+                    field: "github review ingress pull request snapshot",
+                });
+            }
+            (None, _, _) => {}
         }
         for item in &self.items {
             item.validate()?;

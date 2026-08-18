@@ -641,6 +641,7 @@ mod tests {
                 outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
                 coverage: GitHubReviewCoverageV1::Complete,
                 items: Vec::new(),
+                pull_request: None,
                 fetched_at: UtcMicros(11),
             },
             checkpoint: GitHubReviewReadCheckpointV1 {

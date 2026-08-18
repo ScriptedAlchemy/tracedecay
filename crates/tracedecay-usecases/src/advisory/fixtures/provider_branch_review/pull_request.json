@@ -1,6 +1,7 @@
 {
   "capture": {
     "captured_at": "2026-07-21T21:53:30Z",
+    "identity_fields_recaptured_at": "2026-08-17T00:00:00Z",
     "method": "GET",
     "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/421",
     "api_version": "2022-11-28",
@@ -9,7 +10,13 @@
   "response": {
     "id": 4026204542,
     "number": 421,
+    "title": "feat: consolidate TraceDecay V2 PR8-PR13 delivery",
     "state": "open",
+    "draft": true,
+    "merged": false,
+    "additions": 1993112,
+    "deletions": 1162896,
+    "changed_files": 4884,
     "node_id": "PR_kwDOSzKG2s7v-wF-",
     "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/421",
     "html_url": "https://github.com/ScriptedAlchemy/tracedecay/pull/421",

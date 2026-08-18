@@ -164,6 +164,46 @@ where
                         ));
                     }
                 };
+                // Retain the allowlisted pull-request identity read beside a
+                // usable thread refresh so Delivery can serve PR title, state,
+                // and diff shape. It contributes no advisory findings and a
+                // rate-limited or denied thread refresh never spends a second
+                // provider read.
+                if provider_request.operation
+                    == GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
+                    && matches!(
+                        outcome,
+                        GitHubReviewRefreshOutcomeV1::Stored(_) | GitHubReviewRefreshOutcomeV1::Stale
+                    )
+                {
+                    let identity_request = GitHubReviewReadRequestV1 {
+                        operation: GitHubReviewReadOperationV1::RestGetPullRequest,
+                        scope: provider_request.scope.clone(),
+                        pull_request_id: provider_request.pull_request_id.clone(),
+                    };
+                    match await_provider(&mut control, github.refresh(context, &identity_request))
+                        .await
+                    {
+                        Ok(
+                            GitHubReviewRefreshOutcomeV1::Stored(_)
+                            | GitHubReviewRefreshOutcomeV1::Stale,
+                        ) => {}
+                        Ok(identity_outcome) => {
+                            tracing::warn!(
+                                event = "github_pull_request_identity_refresh_not_stored",
+                                outcome = ?identity_outcome,
+                                "the pull-request identity read was not retained; Delivery keeps serving without a PR identity"
+                            );
+                        }
+                        Err(interruption) => {
+                            return Ok(self.finish_interruption(
+                                &request.feedback.input,
+                                interruption,
+                                contributions,
+                            ));
+                        }
+                    }
+                }
                 match outcome {
                     GitHubReviewRefreshOutcomeV1::Stored(state) => {
                         let ingress = &state.state.latest_attempt.ingress;

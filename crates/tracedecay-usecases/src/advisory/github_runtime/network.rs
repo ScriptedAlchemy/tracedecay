@@ -2527,6 +2527,13 @@ mod tests {
                 &json!({
                     "id": 4_026_204_542_u64,
                     "number": 421,
+                    "title": "feat: consolidate TraceDecay V2 PR8-PR13 delivery",
+                    "state": "open",
+                    "draft": true,
+                    "merged": false,
+                    "additions": 1_993_112_u64,
+                    "deletions": 1_162_896_u64,
+                    "changed_files": 4_884_u64,
                     "base": {"sha": "commit.github.base"},
                     "head": {"sha": "commit.github.head"}
                 }),
@@ -2636,6 +2643,7 @@ mod tests {
                 outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
                 coverage: GitHubReviewCoverageV1::Complete,
                 items: Vec::new(),
+                pull_request: None,
                 fetched_at: UtcMicros(10),
             },
             checkpoint: GitHubReviewReadCheckpointV1 {

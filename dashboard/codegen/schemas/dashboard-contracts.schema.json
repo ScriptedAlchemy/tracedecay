@@ -2185,7 +2185,7 @@
       "type": "object"
     },
     "CodeIndexWorktreeFreshnessV1": {
-      "description": "Freshness/generation state for one mounted worktree.",
+      "description": "Freshness/generation state for one mounted worktree.\n\n`Deserialize` is part of the wire contract: the CLI status command decodes\nexactly this type back out of the daemon's `tracedecay_status` response,\nkeeping one authority for the freshness shape.",
       "properties": {
         "coverage": {
           "description": "Whether this read covers the complete mounted scheduler state.",
@@ -4801,12 +4801,61 @@
       ],
       "type": "object"
     },
+    "DeliveryCiAnnotationLevelV1": {
+      "enum": [
+        "notice",
+        "warning",
+        "failure"
+      ],
+      "type": "string"
+    },
+    "DeliveryCiAnnotationV1": {
+      "properties": {
+        "end_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "level": {
+          "$ref": "#/$defs/DeliveryCiAnnotationLevelV1"
+        },
+        "path": {
+          "type": "string"
+        },
+        "start_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "start_line",
+        "end_line",
+        "level",
+        "title"
+      ],
+      "type": "object"
+    },
     "DeliveryCiCheckV1": {
       "properties": {
         "annotation_count": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "annotations": {
+          "description": "Bounded retained annotation summaries beside the provider's total\n`annotation_count`.",
+          "items": {
+            "$ref": "#/$defs/DeliveryCiAnnotationV1"
+          },
+          "type": "array"
         },
         "check_conclusion": {
           "anyOf": [
@@ -4892,6 +4941,7 @@
         "check_status",
         "check_conclusion",
         "failed_step",
+        "annotations",
         "annotation_count",
         "provider_head_commit",
         "failure_kind",
@@ -4977,6 +5027,12 @@
         "retained_head_commit": {
           "type": "string"
         },
+        "total_retained": {
+          "description": "Retained checks in the source inventory, shown or not.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "truncated": {
           "type": "boolean"
         }
@@ -4985,6 +5041,7 @@
         "retained_head_commit",
         "expected_head_commit",
         "items",
+        "total_retained",
         "truncated"
       ],
       "type": "object"
@@ -6917,6 +6974,43 @@
         }
       ]
     },
+    "DeliveryPullRequestIdentityV1": {
+      "properties": {
+        "additions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "changed_files": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deletions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "draft": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "#/$defs/DeliveryPullRequestStateV1"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "state",
+        "draft",
+        "additions",
+        "deletions",
+        "changed_files"
+      ],
+      "type": "object"
+    },
     "DeliveryPullRequestOperationV1": {
       "properties": {
         "last_complete": {
@@ -6950,6 +7044,14 @@
       ],
       "type": "object"
     },
+    "DeliveryPullRequestStateV1": {
+      "enum": [
+        "open",
+        "closed",
+        "merged"
+      ],
+      "type": "string"
+    },
     "DeliveryPullRequestTimelineV1": {
       "properties": {
         "expected_head_commit": {
@@ -6964,6 +7066,12 @@
         "retained_head_commit": {
           "type": "string"
         },
+        "total_retained": {
+          "description": "Retained pull requests known to the source read, shown or not.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "truncated": {
           "type": "boolean"
         }
@@ -6972,6 +7080,7 @@
         "retained_head_commit",
         "expected_head_commit",
         "items",
+        "total_retained",
         "truncated"
       ],
       "type": "object"
@@ -6980,6 +7089,17 @@
       "properties": {
         "id": {
           "type": "string"
+        },
+        "identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryPullRequestIdentityV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Retained PR identity from the allowlisted `RestGetPullRequest` read;\nabsent when no identity generation is retained yet."
         },
         "label": {
           "type": "string"
@@ -7002,6 +7122,7 @@
         "label",
         "provider",
         "pull_request_id",
+        "identity",
         "operations"
       ],
       "type": "object"
@@ -7181,6 +7302,21 @@
       ],
       "type": "string"
     },
+    "DeliveryReviewBodyPreviewV1": {
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "truncated"
+      ],
+      "type": "object"
+    },
     "DeliveryReviewItemV1": {
       "properties": {
         "comment_id": {
@@ -7237,11 +7373,31 @@
         "author_class": {
           "$ref": "#/$defs/DeliveryReviewAuthorClassV1"
         },
+        "body_preview": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryReviewBodyPreviewV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Bounded sanitized preview hydrated through the canonical body\nauthority; `None` is the typed not-expanded state. The retained body\nanchor and digest stay server-private and never cross this wire."
+        },
         "kind": {
           "$ref": "#/$defs/DeliveryReviewObservationKindV1"
         },
         "lifecycle": {
           "$ref": "#/$defs/DeliveryReviewLifecycleV1"
+        },
+        "line": {
+          "description": "Current-diff line; absent when the thread is outdated on the provider.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "observed_at_micros": {
           "format": "int64",
@@ -7249,6 +7405,19 @@
         },
         "operation": {
           "$ref": "#/$defs/DeliveryGitHubReadOperationV1"
+        },
+        "original_line": {
+          "description": "Line on the original reviewed commit.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Provider-observed repository-relative path of the review thread.",
+          "type": "string"
         },
         "provider_outcome": {
           "$ref": "#/$defs/DeliveryGitHubOutcomeV1"
@@ -7295,10 +7464,14 @@
         "review_id",
         "thread_id",
         "reply_to_comment_id",
+        "path",
+        "line",
+        "original_line",
         "author_class",
         "review_state",
         "lifecycle",
         "provider_outcome",
+        "body_preview",
         "observed_at_micros",
         "source_url"
       ],
@@ -7329,6 +7502,12 @@
         "retained_head_commit": {
           "type": "string"
         },
+        "total_retained": {
+          "description": "Retained review items enumerated by the source read, shown or not.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "truncated": {
           "type": "boolean"
         }
@@ -7337,6 +7516,7 @@
         "retained_head_commit",
         "expected_head_commit",
         "items",
+        "total_retained",
         "truncated"
       ],
       "type": "object"
@@ -7553,7 +7733,7 @@
         },
         {
           "const": "storage_runtime",
-          "description": "Store, graph, and temporal runtime health plus migration coverage\n(`RuntimeReadOperationV1` health family, `StoreRuntimeHandle`).",
+          "description": "Store, graph, and temporal runtime health plus migration coverage\n(`RuntimeReadOperationV1` health family, `StoreRuntimeClientLease`).",
           "type": "string"
         },
         {
