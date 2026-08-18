@@ -160,10 +160,16 @@ use connection_serving::{
 };
 mod core_admission;
 mod engine;
+#[cfg(unix)]
 use engine::DaemonEngine;
 use engine::{
     ensure_context_scout_owner_before_advertising,
     ensure_git_index_transactions_for_mutation_owners,
+};
+mod automation_observation;
+pub(crate) use automation_observation::{
+    project_run_observation_producer as project_automation_observation_producer,
+    record_project_run as record_project_automation_run,
 };
 mod core_client;
 mod core_doctor;
@@ -247,7 +253,6 @@ mod maintenance;
 mod maintenance_tasks;
 pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
 use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
-#[cfg(unix)]
 pub mod pr_autotrack;
 mod production_harness;
 #[path = "daemon/git_watch/store_maintenance.rs"]
@@ -327,11 +332,8 @@ use project_server_lifecycle::{
 pub(crate) mod lcm_effects;
 mod lcm_summarization;
 mod query_mcp_admission;
+#[cfg(unix)]
 mod scheduler;
-pub(crate) use scheduler::automation_observation::{
-    project_run_observation_producer as project_automation_observation_producer,
-    record_project_run as record_project_automation_run,
-};
 mod service;
 pub(crate) mod session_retrieval;
 pub(crate) mod session_sync;

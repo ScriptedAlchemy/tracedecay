@@ -6,9 +6,11 @@ use std::sync::atomic::AtomicBool;
 
 use tracedecay_global_db::RegisteredGlobalDb;
 
+#[cfg(unix)]
+use super::DaemonEngine;
 #[cfg(any(not(unix), test, feature = "test-transport"))]
 use super::portable_database_owner_reconciler;
-use super::{DaemonEngine, DaemonHandshake, ProjectServerKey, StoreAdministration};
+use super::{DaemonHandshake, ProjectServerKey, StoreAdministration};
 
 pub(super) async fn bind_verified_project_graph_runtime(
     database: Arc<crate::db::Database>,
