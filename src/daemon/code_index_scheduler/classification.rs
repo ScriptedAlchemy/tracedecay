@@ -156,6 +156,7 @@ impl WorktreeChangeClassificationV1 {
     }
 
     /// Paths removed from the present snapshot (staged or unstaged deletions).
+    #[cfg(test)]
     pub(crate) fn deleted_paths(&self) -> BTreeSet<String> {
         self.changes
             .iter()
@@ -170,6 +171,7 @@ impl WorktreeChangeClassificationV1 {
     }
 
     /// The class recorded for `path`, if any change touched it.
+    #[cfg(test)]
     pub(crate) fn class_of(&self, path: &str) -> Option<WorktreeChangeClassV1> {
         self.changes
             .iter()

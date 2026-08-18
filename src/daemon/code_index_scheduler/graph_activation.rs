@@ -159,7 +159,10 @@ impl LatestCompleteCodeIndexV1 {
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?,
             graph_cancellation,
         )?;
-        self.install_query_owners(reader, CodeGraphServingAuthorityV1::Persistent(authority))
+        self.install_query_owners(
+            reader,
+            CodeGraphServingAuthorityV1::Persistent { _lease: authority },
+        )
             .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         // First activation of a generation retains its store; a repeat
         // activation keeps the original, which is pinned to the same verified

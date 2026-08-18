@@ -31,9 +31,6 @@ use tracedecay_query::retrieval::graph::{
 use tracedecay_query::retrieval::lexical::{
     LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
 };
-use tracedecay_query::retrieval::observation::{
-    RetrievalPipelineObservationV1, observe_composition,
-};
 use tracedecay_query::retrieval::{
     AuthorizedQueryFallbackV1, QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1,
     RetrievalPortError, SanitizedRetrievalRequestV1,
@@ -312,16 +309,6 @@ pub(in crate::daemon) struct ExecutedQuerySearchV1 {
     /// for `generation`; freshness is not. Callers must report the lanes as
     /// `CodeIndexLaneStatusV1::Stale` rather than complete.
     pub served_stale: bool,
-    /// Plan 26 retrieval measurement for this execution, projected from the
-    /// composition the pipeline actually produced (planner admission,
-    /// per-lane candidate accounting, fusion synthesis, and the source
-    /// census). It is measurement only: it never changes what is served, and
-    /// a caller that does not persist it simply loses the observation.
-    ///
-    /// Context tokens are unmeasured here because hydration happens above this
-    /// boundary, so the synthesis observation carries partial coverage rather
-    /// than a fabricated zero.
-    pub observation: RetrievalPipelineObservationV1,
 }
 
 #[derive(Debug, Error)]
@@ -494,9 +481,6 @@ where
     let sanitized = RawRetrievalRequestV1::new(input.query, request)
         .sanitize(input.sanitizer_revision, input.normalization_revision)?;
     let request = sanitized.request();
-    // Copied before composition so the Plan 26 retriever accounting can report
-    // the per-lane budget its counts were measured against.
-    let budget = request.budget;
     let query_view = sanitized.query_view();
     let owners = latest.production_query_owners()?;
     let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
@@ -566,21 +550,11 @@ where
             input.cursor.as_ref(),
         )
         .await?;
-    // Measurement reads the composition the authority already returned,
-    // including the compact lane inputs it retained, so observing a query
-    // costs no extra retrieval work and cannot alter the served result.
-    let observation = observe_composition(
-        &authorized.fallback_lanes,
-        &authorized.composition,
-        &budget,
-        None,
-    );
     Ok(ExecutedQuerySearchV1 {
         generation,
         authorized,
         sanitized,
         served_stale,
-        observation,
     })
 }
 

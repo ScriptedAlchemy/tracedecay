@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
+#[cfg(test)]
 use std::path::Path;
 use std::pin::Pin;
 use std::time::Duration;
@@ -74,6 +75,7 @@ pub(in crate::daemon) const UNPINNED_LATEST_GENERATION_SENTINEL: &str =
 /// Construct the reserved unpinned-latest [`CodeGenerationId`] sentinel a caller
 /// passes when it wants the freshness-resolved latest complete generation
 /// rather than a pinned one.
+#[cfg(test)]
 pub(in crate::daemon) fn unpinned_latest_generation() -> CodeGenerationId {
     CodeGenerationId::new(UNPINNED_LATEST_GENERATION_SENTINEL)
         .unwrap_or_else(|_| panic!("static unpinned-latest generation sentinel is valid"))
@@ -93,6 +95,7 @@ fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
     generation.as_str() == UNPINNED_LATEST_GENERATION_SENTINEL
 }
 
+#[cfg(test)]
 pub(super) fn semantic_mcp_reason(
     current_source: Option<&CodeGenerationId>,
     latest_code_generation: &CodeGenerationId,
@@ -177,6 +180,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// authority exists. That keeps ordinary query fallback byte-stable and
     /// makes a strict request fail with a typed reason instead of inventing a
     /// score, profile, or candidate.
+    #[cfg(test)]
     pub(in crate::daemon) async fn semantic_mcp_abstention(
         &self,
         project_root: &Path,
@@ -428,21 +432,6 @@ fn remaining_generation_resolution_wait(request: &RequestContext) -> Option<Dura
     let remaining = request.deadline().expires_at.0.checked_sub(now.0)?;
     let remaining = u64::try_from(remaining).ok().map(Duration::from_micros)?;
     Some(remaining.min(MAX_GENERATION_RESOLUTION_WAIT))
-}
-
-fn reject_unresolved_cursor<T>(
-    requested_page: &tracedecay_application::PageRequest,
-    generation: &CodeGenerationId,
-) -> RetrievalPortOutcome<T> {
-    if requested_page.cursor.is_some() {
-        rejected_cursor(
-            query_finished_at(),
-            generation.clone(),
-            CallableCodeCursorError::Invalid,
-        )
-    } else {
-        unavailable(query_finished_at())
-    }
 }
 
 fn base_request(

@@ -125,31 +125,10 @@ impl IndexingIdentityV1 {
         self.repository_id == prior.repository_id && self.worktree_id == prior.worktree_id
     }
 
-    /// Whether `self` and `other` point at the same source revision. Used to
-    /// decide whether a previously published generation is still current for the
-    /// resolved HEAD or is stale-but-correctly-attributed to a prior revision.
+    /// Whether `self` and `other` point at the same source revision.
+    #[cfg(test)]
     pub(crate) fn same_source_revision(&self, other: &IndexingIdentityV1) -> bool {
         self.head_commit == other.head_commit && self.head_tree == other.head_tree
-    }
-
-    /// A stable, structural identity key derived from the repository and
-    /// worktree identities only. Source revision (HEAD/commit/tree) is
-    /// deliberately excluded so the key is invariant across commits within one
-    /// worktree, while remaining distinct for every other worktree — even a
-    /// byte-identical one. Generations are keyed off this value so
-    /// cross-worktree reuse is structurally impossible, not merely checked.
-    pub(crate) fn identity_key(&self) -> String {
-        format!(
-            "sha256:{}",
-            super::sha256_hex(
-                format!(
-                    "{}\0{}",
-                    self.repository_id.as_str(),
-                    self.worktree_id.as_str()
-                )
-                .as_bytes()
-            )
-        )
     }
 }
 

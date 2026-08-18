@@ -26,7 +26,7 @@ use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::fusion::{CompositionOutputV1, digest_candidate_set};
 use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
 use tracedecay_query::retrieval::semantic::{
-    SemanticAbstentionDispositionV1, SemanticAbstentionV1, SemanticCalibrationEvidenceV1,
+    SemanticAbstentionDispositionV1, SemanticAbstentionV1,
     SemanticCompositionExecutionAuthorityV1, SemanticCompositionExecutionOutcomeV1,
     SemanticExecutionControl, SemanticQueryModeV1, SemanticQueryServiceError,
     SemanticRerankExecutionPortV1, SemanticRerankReadinessV1, SemanticRetrievalRequestV1,
@@ -178,9 +178,8 @@ pub(in crate::daemon) struct SemanticAugmentedCompositionV1 {
     pub composition: CompositionOutputV1,
     pub cursor: Option<tracedecay_domain::RetrievalCursor>,
     pub hydration_budget: tracedecay_domain::RetrievalBudget,
-    pub calibration: SemanticCalibrationEvidenceV1,
-    pub rerank: OptionalStagePublicStatus,
-    pub fallback: Arc<tracedecay_domain::QueryFallbackSubpayload>,
+    /// Shared query fallback carried for test identity assertions only.
+    pub _fallback: Arc<tracedecay_domain::QueryFallbackSubpayload>,
 }
 
 pub(in crate::daemon) enum SemanticAugmentationOutcomeV1 {
@@ -191,10 +190,11 @@ pub(in crate::daemon) enum SemanticAugmentationOutcomeV1 {
     },
 }
 
+#[cfg(test)]
 impl SemanticAugmentationOutcomeV1 {
     fn fallback(&self) -> &Arc<tracedecay_domain::QueryFallbackSubpayload> {
         match self {
-            Self::Augmented(augmented) => &augmented.fallback,
+            Self::Augmented(augmented) => &augmented._fallback,
             Self::Fallback { fallback, .. } => fallback,
         }
     }
@@ -320,27 +320,6 @@ impl CodeIndexSchedulerRegistryV1 {
             ));
         }
         worktree.semantic_query_authority = Some((scope.scope_digest.clone(), authority));
-        Ok(())
-    }
-
-    pub(in crate::daemon) async fn clear_semantic_query_authority(
-        &self,
-        scope: &ResolvedScope,
-    ) -> Result<(), SemanticQueryAuthorityErrorV1> {
-        let mut mounted = self.mounted.lock().await;
-        for worktree in mounted.values_mut() {
-            if worktree.repository_id == scope.repository_id
-                && worktree.worktree_id == scope.worktree_id
-            {
-                if worktree.query_activation_revision.is_some() {
-                    return Err(SemanticQueryAuthorityErrorV1::Mount(
-                        "standalone semantic clear cannot reset a committed authority pair"
-                            .to_owned(),
-                    ));
-                }
-                worktree.semantic_query_authority = None;
-            }
-        }
         Ok(())
     }
 
@@ -566,9 +545,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         composition,
                         cursor,
                         hydration_budget: authority.execution.profile().retrieval_budget,
-                        calibration: executed.calibration,
-                        rerank: executed.rerank,
-                        fallback: executed.fallback,
+                        _fallback: executed.fallback,
                     },
                 )))
             }

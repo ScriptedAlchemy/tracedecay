@@ -5,9 +5,8 @@ use tracedecay_domain::CodeGenerationId;
 
 use super::{
     GraphVectorGenerationStoreV1, ProjectSemanticVectorCodeScopeLiveness,
-    ProjectSemanticVectorPublishedDependency, ProjectSemanticVectorRetentionStep,
-    ProjectSemanticVectorSourceLiveness, ProjectVectorReadableSources,
-    RetainedSemanticVectorGraphV1,
+    ProjectSemanticVectorRetentionStep, ProjectSemanticVectorSourceLiveness,
+    ProjectVectorReadableSources, RetainedSemanticVectorGraphV1,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,18 +79,6 @@ impl ProjectVectorRetentionFailure {
         }
     }
 
-    pub(super) fn published_dependency(self) -> ProjectSemanticVectorPublishedDependency {
-        match self {
-            Self::ResetRequired(message) => {
-                ProjectSemanticVectorPublishedDependency::ResetRequired(message)
-            }
-            Self::Corrupt(message) => ProjectSemanticVectorPublishedDependency::Corrupt(message),
-            Self::Unavailable(message) => {
-                ProjectSemanticVectorPublishedDependency::Unavailable(message)
-            }
-            Self::Denied(message) => ProjectSemanticVectorPublishedDependency::Denied(message),
-        }
-    }
 }
 
 impl From<crate::store::vector_generations::VectorGenerationStoreErrorV1>
@@ -226,8 +213,8 @@ pub(super) async fn validate_configured_vector_roots(
 #[cfg(test)]
 mod tests {
     use super::{
-        ProjectSemanticVectorCodeScopeLiveness, ProjectSemanticVectorPublishedDependency,
-        ProjectSemanticVectorSourceLiveness, ProjectVectorRetentionFailure,
+        ProjectSemanticVectorCodeScopeLiveness, ProjectSemanticVectorSourceLiveness,
+        ProjectVectorRetentionFailure,
     };
     use crate::store::vector_generations::VectorGenerationStoreErrorV1;
 
@@ -281,23 +268,8 @@ mod tests {
                 if message == "invalid dependency"
         ));
         assert!(matches!(
-            unavailable.clone().code_scope_liveness(),
+            unavailable.code_scope_liveness(),
             ProjectSemanticVectorCodeScopeLiveness::Unavailable(message)
-                if message == "graph is closed"
-        ));
-        assert!(matches!(
-            reset.published_dependency(),
-            ProjectSemanticVectorPublishedDependency::ResetRequired(message)
-                if message == "missing root"
-        ));
-        assert!(matches!(
-            corrupt.published_dependency(),
-            ProjectSemanticVectorPublishedDependency::Corrupt(message)
-                if message == "invalid dependency"
-        ));
-        assert!(matches!(
-            unavailable.published_dependency(),
-            ProjectSemanticVectorPublishedDependency::Unavailable(message)
                 if message == "graph is closed"
         ));
     }

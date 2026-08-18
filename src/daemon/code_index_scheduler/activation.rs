@@ -180,6 +180,7 @@ impl CodeIndexActivationV1 {
 
     /// Request activation for the route's exact worktree without waiting for
     /// mount, generation publication, or query-authority installation.
+    #[cfg(test)]
     pub(in crate::daemon) fn activate_for_root(&self, project_root: &Path) -> bool {
         if !self.accepts_root(project_root) {
             return false;

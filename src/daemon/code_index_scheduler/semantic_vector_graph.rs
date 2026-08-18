@@ -107,14 +107,6 @@ pub(crate) enum ProjectSemanticVectorCodeScopeLiveness {
     Denied(String),
 }
 
-pub(crate) enum ProjectSemanticVectorPublishedDependency {
-    Ready(tracedecay_store::SemanticVectorPublishedGenerationDependencyLookup),
-    ResetRequired(String),
-    Corrupt(String),
-    Unavailable(String),
-    Denied(String),
-}
-
 /// Converge at most one semantic-vector cleanup or retirement action while
 /// returning one bounded project-wide census page.
 pub(crate) async fn retire_one_project_vector_generation(
@@ -330,45 +322,6 @@ pub(crate) async fn project_vector_source_generation_is_live(
     }
 }
 
-pub(crate) async fn project_vector_source_scope_is_live(
-    schedulers: &CodeIndexSchedulerRegistryV1,
-    project_root: &Path,
-    source_scope: &StoreShardIdV1,
-    expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
-) -> ProjectSemanticVectorSourceLiveness {
-    let Some(provider) = schedulers
-        .semantic_vector_graph_provider(project_root)
-        .await
-    else {
-        return ProjectSemanticVectorSourceLiveness::Unavailable(
-            "semantic vector graph provider is not mounted".to_owned(),
-        );
-    };
-    let retained = match provider.graph_for_current().await {
-        Ok(retained) => retained,
-        Err(SemanticVectorGraphErrorV1::Unavailable(message)) => {
-            return ProjectSemanticVectorSourceLiveness::Unavailable(message);
-        }
-        Err(SemanticVectorGraphErrorV1::Rejected(message)) => {
-            return ProjectSemanticVectorSourceLiveness::Denied(message);
-        }
-    };
-    let store = match GraphVectorGenerationStoreV1::read_only(&retained) {
-        Ok(store) => store,
-        Err(error) => {
-            return ProjectVectorRetentionFailure::from(error).source_liveness();
-        }
-    };
-    match store.source_scope_is_live(
-        source_scope,
-        expected_revision,
-        Arc::clone(retained.cancellation()),
-    ) {
-        Ok(live) => ProjectSemanticVectorSourceLiveness::Ready(live),
-        Err(error) => ProjectVectorRetentionFailure::from(error).source_liveness(),
-    }
-}
-
 pub(crate) async fn project_vector_code_scope_is_live(
     schedulers: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -478,45 +431,6 @@ pub(crate) async fn remove_project_vector_code_scope_binding(
     ) {
         Ok(removed) => ProjectSemanticVectorSourceLiveness::Ready(removed),
         Err(error) => ProjectVectorRetentionFailure::from(error).source_liveness(),
-    }
-}
-
-pub(crate) async fn project_vector_published_dependency(
-    schedulers: &CodeIndexSchedulerRegistryV1,
-    project_root: &Path,
-    generation: &tracedecay_domain::VectorGenerationIdV1,
-    expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
-) -> ProjectSemanticVectorPublishedDependency {
-    let Some(provider) = schedulers
-        .semantic_vector_graph_provider(project_root)
-        .await
-    else {
-        return ProjectSemanticVectorPublishedDependency::Unavailable(
-            "semantic vector graph provider is not mounted".to_owned(),
-        );
-    };
-    let retained = match provider.graph_for_current().await {
-        Ok(retained) => retained,
-        Err(SemanticVectorGraphErrorV1::Unavailable(message)) => {
-            return ProjectSemanticVectorPublishedDependency::Unavailable(message);
-        }
-        Err(SemanticVectorGraphErrorV1::Rejected(message)) => {
-            return ProjectSemanticVectorPublishedDependency::Denied(message);
-        }
-    };
-    let store = match GraphVectorGenerationStoreV1::read_only(&retained) {
-        Ok(store) => store,
-        Err(error) => {
-            return ProjectVectorRetentionFailure::from(error).published_dependency();
-        }
-    };
-    match store.published_generation_dependency(
-        generation,
-        expected_revision,
-        Arc::clone(retained.cancellation()),
-    ) {
-        Ok(dependency) => ProjectSemanticVectorPublishedDependency::Ready(dependency),
-        Err(error) => ProjectVectorRetentionFailure::from(error).published_dependency(),
     }
 }
 

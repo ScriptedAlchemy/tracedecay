@@ -25,13 +25,15 @@ use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryI
 use tracedecay_lsp::LspRuntimeFailure;
 
 use super::graph_activation::CodeGraphActivationAuthorityV1;
+#[cfg(test)]
+use super::{CodeIndexBytePoolStatsV1, CodeIndexCadenceReadModelV1};
 use super::{
-    CodeIndexArrivalV1, CodeIndexBytePoolStatsV1, CodeIndexCadenceOutcomeV1,
-    CodeIndexCadenceReadModelV1, CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1,
-    CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1, CodeIndexPublishEvidenceV1,
-    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
-    DaemonCodeIndexControlV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
-    PendingHintsV1, SharedCodeIndexBytePoolV1, newly_eligible_percentile, now_micros,
+    CodeIndexArrivalV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1,
+    CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1,
+    CodeIndexPublishEvidenceV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1,
+    CodeIndexWorktreeSchedulerV1, DaemonCodeIndexControlV1, GenerationDecodeAdmissionV1,
+    LatestCompleteCodeIndexV1, PendingHintsV1, SharedCodeIndexBytePoolV1,
+    newly_eligible_percentile, now_micros,
 };
 
 mod ignored_dependencies;
@@ -310,6 +312,7 @@ pub(in crate::daemon) struct QueryActivationAttemptV1 {
     token: u64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CodeIndexSchedulerMemoryStatsV1 {
     pub mounted_worktrees: u64,
@@ -364,7 +367,9 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     /// Count of in-flight owner passes; nonzero means activation or reconcile
     /// work is running for this worktree.
     reconcile_in_progress: Arc<AtomicUsize>,
-    active_generation_encoded_bytes: Arc<AtomicU64>,
+    /// Live handle to the publication's encoded-byte counter; observed only by
+    /// test memory accounting today.
+    _active_generation_encoded_bytes: Arc<AtomicU64>,
     pub(super) semantic_evaluation_publication_gate: Arc<tokio::sync::Mutex<()>>,
     pub(super) task: tokio::task::JoinHandle<()>,
 }
@@ -583,7 +588,8 @@ impl Drop for PendingWakeClaimV1 {
 #[derive(Clone)]
 pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
-    pub(super) resident_memory: Arc<resident_memory::ProcessResidentMemoryV1>,
+    /// Retained process-memory sampler handle; observed only by tests today.
+    pub(super) _resident_memory: Arc<resident_memory::ProcessResidentMemoryV1>,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
     /// Owners whose project was retired (remote deletion, replacement) but whose
@@ -1449,6 +1455,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Retires the serving generation only when this operation's metadata
     /// rollback succeeded and its exact installation token is still current.
+    #[cfg(test)]
     pub(in crate::daemon) async fn retire_owned_serving_generation(
         &self,
         project_root: &Path,
@@ -1703,6 +1710,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     /// Latest completed event-to-ready receipt for this registry, if any.
+    #[cfg(test)]
     pub(in crate::daemon) fn latest_event_to_ready_receipt(
         &self,
     ) -> Option<CodeIndexEventToReadyReceiptV1> {
@@ -1714,6 +1722,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     /// Every retained event-to-ready receipt, oldest first.
+    #[cfg(test)]
     pub(in crate::daemon) fn event_to_ready_receipts(&self) -> Vec<CodeIndexEventToReadyReceiptV1> {
         self.cadence_telemetry
             .lock()
@@ -1728,6 +1737,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Percentiles are withheld until the retained population reaches the floor
     /// each one declares, and receipts with an unobservable arrival are reported
     /// as unavailable rather than counted as zero-latency samples.
+    #[cfg(test)]
     pub(in crate::daemon) fn cadence_read_model(&self) -> CodeIndexCadenceReadModelV1 {
         self.cadence_telemetry
             .lock()
@@ -1755,6 +1765,7 @@ impl CodeIndexSchedulerRegistryV1 {
         });
     }
 
+    #[cfg(test)]
     pub(in crate::daemon) fn open_worktree(
         &self,
         project_id: ProjectId,
@@ -1774,10 +1785,12 @@ impl CodeIndexSchedulerRegistryV1 {
         )
     }
 
+    #[cfg(test)]
     pub(in crate::daemon) fn byte_pool_stats(&self) -> CodeIndexBytePoolStatsV1 {
         self.byte_pool.stats()
     }
 
+    #[cfg(test)]
     pub async fn memory_stats(&self) -> CodeIndexSchedulerMemoryStatsV1 {
         let mounted = self.mounted.lock().await;
         CodeIndexSchedulerMemoryStatsV1 {
@@ -1792,7 +1805,7 @@ impl CodeIndexSchedulerRegistryV1 {
             retained_generation_encoded_bytes: mounted.values().fold(0_u64, |total, worktree| {
                 total.saturating_add(
                     worktree
-                        .active_generation_encoded_bytes
+                        ._active_generation_encoded_bytes
                         .load(Ordering::Acquire),
                 )
             }),
@@ -2328,7 +2341,7 @@ impl CodeIndexSchedulerRegistryV1 {
             pending_wake: Arc::clone(&pending_wake),
             shutting_down,
             reconcile_in_progress,
-            active_generation_encoded_bytes,
+            _active_generation_encoded_bytes: active_generation_encoded_bytes,
             semantic_evaluation_publication_gate,
             task,
         });
@@ -2598,59 +2611,6 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(false)
     }
 
-    /// Revoke the live query authority for one exact admitted scope before a
-    /// committed profile refresh. A failed replacement therefore leaves
-    /// search unavailable instead of serving the prior profile.
-    pub(in crate::daemon) async fn clear_query_authority(
-        &self,
-        scope: &tracedecay_application::ResolvedScope,
-    ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        scope
-            .validate()
-            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-        let mut mounted = self.mounted.lock().await;
-        let roots = mounted
-            .iter()
-            .filter(|(_, worktree)| {
-                worktree.repository_id == scope.repository_id
-                    && worktree.worktree_id == scope.worktree_id
-            })
-            .map(|(root, _)| root.clone())
-            .collect::<Vec<_>>();
-        if roots.is_empty() {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "cannot clear query authority before its worktree".to_owned(),
-            ));
-        }
-        let mut scope_mismatch = false;
-        for root in &roots {
-            let worktree = mounted.get_mut(root).ok_or_else(|| {
-                CodeIndexSchedulerErrorV1::Identity("worktree disappeared".to_owned())
-            })?;
-            scope_mismatch |= worktree
-                .query_authority
-                .as_ref()
-                .is_some_and(|(digest, _)| digest != &scope.scope_digest);
-            if worktree.query_activation_revision.is_some() {
-                return Err(CodeIndexSchedulerErrorV1::Identity(
-                    "standalone query clear cannot reset a committed authority pair".to_owned(),
-                ));
-            }
-            worktree.query_authority = None;
-        }
-        if roots.len() != 1 {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "query authority scope is ambiguous".to_owned(),
-            ));
-        }
-        if scope_mismatch {
-            return Err(CodeIndexSchedulerErrorV1::Identity(
-                "query authority scope does not match the mounted authority".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
     pub(in crate::daemon) async fn query_authority_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -2742,6 +2702,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(mounted.keys().cloned().collect())
     }
 
+    #[cfg(test)]
     pub async fn notify_path(&self, project_root: &Path, path: PathBuf) -> bool {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;

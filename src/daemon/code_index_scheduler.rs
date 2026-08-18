@@ -3,8 +3,6 @@
 //! Hook events are bounded wake-up hints only. Every run reconstructs its
 //! source snapshot from gix's HEAD-tree/index/worktree status before content
 //! digests decide whether publication is necessary.
-#![allow(dead_code)] // Code-intelligence indexing and reconciliation surface.
-
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::Write,
@@ -35,7 +33,7 @@ use self::freshness_witness::RestoreFreshnessWitnessV1;
 
 use crate::{
     code_index::{
-        chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest},
+        chunks::content_digest,
         graph_projection::{
             CodeGraphEvidenceReader, CodeGraphProjectionError, CodeGraphProjectionStore,
         },
@@ -116,6 +114,7 @@ impl Default for CodeIndexHintPolicyV1 {
 type ProductionOwner =
     ProductionCodeIndexOwnerV1<DaemonCodeIndexPublicationStoreV1, DaemonProjectionSinkV1>;
 
+#[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct CodeIndexBytePoolStatsV1 {
     pub inserted: u64,
@@ -155,6 +154,7 @@ impl SharedCodeIndexBytePoolV1 {
         (digest, shared)
     }
 
+    #[cfg(test)]
     fn stats(&self) -> CodeIndexBytePoolStatsV1 {
         let physical_artifacts = self.physical_artifacts.stats();
         CodeIndexBytePoolStatsV1 {
@@ -1246,8 +1246,12 @@ pub(super) struct CodeIndexPublishEvidenceV1 {
     pub generation_id: CodeGenerationId,
     pub repository_id: RepositoryId,
     pub snapshot_content_identity: ContentDigest,
-    pub lane_digest: ManifestDigest,
-    pub file_occurrence_ids: Vec<FileOccurrenceId>,
+    /// Publication receipt evidence: asserted by determinism tests, not read
+    /// on any production path.
+    pub _lane_digest: ManifestDigest,
+    /// Publication receipt evidence: asserted by determinism tests, not read
+    /// on any production path.
+    pub _file_occurrence_ids: Vec<FileOccurrenceId>,
     pub reextracted_files: usize,
     pub changed_chunks: usize,
     pub reused_chunks: usize,
@@ -1322,9 +1326,11 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
 
 #[derive(Clone)]
 enum CodeGraphServingAuthorityV1 {
-    Persistent(
-        Arc<tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1>,
-    ),
+    Persistent {
+        /// Retained solely to keep the canonical graph store lease alive for
+        /// the lifetime of the serving owners; never read.
+        _lease: Arc<tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1>,
+    },
     #[cfg(test)]
     Memory,
 }
@@ -1393,22 +1399,6 @@ impl LatestCompleteCodeIndexV1 {
         }
     }
 
-    /// The sealed generation identity as a display string. Used by the dashboard
-    /// code-index freshness read port and Doctor code-index mapping.
-    pub(in crate::daemon) fn generation_id_string(&self) -> String {
-        self.generation.manifest().generation_id.as_str().to_owned()
-    }
-
-    /// The sealed-at watermark (microseconds since the Unix epoch) of this
-    /// generation. Serves as the last-reconcile watermark the dashboard reports.
-    pub(in crate::daemon) fn sealed_at_micros(&self) -> i64 {
-        self.generation.manifest().seal.sealed_at.0
-    }
-
-    pub(in crate::daemon) fn snapshot_digest(&self) -> &tracedecay_domain::ManifestDigest {
-        &self.generation.manifest().snapshot_digest
-    }
-
     pub(in crate::daemon) fn test_attribution_authority(
         &self,
     ) -> Result<
@@ -1418,23 +1408,27 @@ impl LatestCompleteCodeIndexV1 {
         self.generation.test_attribution_authority()
     }
 
+    #[cfg(test)]
     pub fn exact(
         &self,
     ) -> Result<
-        Arc<Vec<ExtractionAdmittedCodeSearchChunkV1>>,
+        Arc<Vec<crate::code_index::chunks::ExtractionAdmittedCodeSearchChunkV1>>,
         crate::code_index::chunks::ChunkingFailureV1,
     > {
         self.generation.admitted_chunks()
     }
 
+    #[cfg(test)]
     pub fn lexical(&self) -> &[tracedecay_domain::CodeSearchChunkV1] {
         self.generation.chunks().chunks()
     }
 
+    #[cfg(test)]
     pub fn graph_edges(&self) -> &[tracedecay_domain::CanonicalRelationEdgeV1] {
         self.generation.edges()
     }
 
+    #[cfg(test)]
     pub fn graph_abstentions(&self) -> &[crate::code_index::chunks::CodeIndexEdgeAbstentionV1] {
         self.generation.edge_abstentions()
     }
@@ -1817,6 +1811,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
     }
 
+    #[cfg(test)]
     pub fn notify_path(&self, path: PathBuf) {
         self.hints
             .lock()
@@ -1826,6 +1821,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.wake.notify_one();
     }
 
+    #[cfg(test)]
     pub fn notify_overflow(&self) {
         self.hints
             .lock()
@@ -2127,8 +2123,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                     generation_id: generation.manifest().generation_id.clone(),
                     repository_id: self.repository_id.clone(),
                     snapshot_content_identity: generation.snapshot().content_identity.clone(),
-                    lane_digest,
-                    file_occurrence_ids: generation
+                    _lane_digest: lane_digest,
+                    _file_occurrence_ids: generation
                         .snapshot()
                         .files
                         .iter()
@@ -2205,6 +2201,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Admit only already-current immutable evidence. Expensive truth capture
     /// and generation publication belong to the background worker; a request
     /// that detects stale or unproven state schedules that worker and abstains.
+    #[cfg(test)]
     fn latest_complete_ready_for_query(
         &mut self,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
@@ -2269,6 +2266,7 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     /// Deliver debounced hook hints (exact touched paths) into the incremental
     /// queue. Hints only narrow work; gix status remains the truth on reconcile.
+    #[cfg(test)]
     pub fn notify_hook_paths<I>(&self, paths: I)
     where
         I: IntoIterator<Item = PathBuf>,
@@ -2297,6 +2295,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     ///   (raw file writes, rsync, out-of-agent saves) → reconcile.
     /// - Tier 3 (identity backstop): reconciliation re-resolves identity, so a
     ///   served result is always attributed to its exact resolved identity.
+    #[cfg(test)]
     pub fn ensure_fresh_for_query(
         &mut self,
     ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
@@ -2413,6 +2412,7 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     /// [`Self::latest_complete`] restricted to an already-decoded active
     /// generation. Abstains instead of parking on the single-flight decode.
+    #[cfg(test)]
     pub(super) fn latest_complete_already_decoded(&self) -> Option<LatestCompleteCodeIndexV1> {
         self.latest_complete_with(GenerationDecodeAdmissionV1::AlreadyDecoded)
     }
@@ -2840,10 +2840,11 @@ pub(crate) mod semantic_vector_graph;
 pub(in crate::daemon) use activation::{
     CodeIndexActivationHintSinkV1, CodeIndexActivationMountV1, CodeIndexActivationV1,
 };
+#[cfg(test)]
+pub(crate) use cadence::CodeIndexCadenceReadModelV1;
 pub(crate) use cadence::{
-    CodeIndexArrivalV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceReadModelV1,
-    CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1,
-    newly_eligible_percentile,
+    CodeIndexArrivalV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1,
+    CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, newly_eligible_percentile,
 };
 pub(crate) use graph_activation::CodeGraphReplayBindingV1;
 pub(in crate::daemon) use ignored_dependencies::{
@@ -2856,4 +2857,3 @@ pub(in crate::daemon) use registry::{
     ServingGenerationInstallationOutcomeV1, ServingGenerationRollbackOutcomeV1,
 };
 pub(crate) type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
-pub(crate) type CodeIndexSchedulerMemoryStatsV1 = registry::CodeIndexSchedulerMemoryStatsV1;

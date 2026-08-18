@@ -190,6 +190,7 @@ impl CodeIndexPercentileV1 {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_available(self) -> bool {
         self.value.is_some()
     }
@@ -273,10 +274,12 @@ impl CodeIndexCadenceTelemetryV1 {
         self.receipts.push_back(receipt);
     }
 
+    #[cfg(test)]
     pub(crate) fn latest(&self) -> Option<&CodeIndexEventToReadyReceiptV1> {
         self.receipts.back()
     }
 
+    #[cfg(test)]
     pub(crate) fn receipts(
         &self,
     ) -> impl ExactSizeIterator<Item = &CodeIndexEventToReadyReceiptV1> {
