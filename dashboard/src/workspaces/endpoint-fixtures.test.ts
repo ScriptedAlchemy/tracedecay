@@ -43,6 +43,7 @@ import {
   ObservatoryReadModelV1Schema,
   ProjectContextPayloadV1Schema,
   ProjectsPayloadV1Schema,
+  RemoteOperationalStatusPayloadV1Schema,
   SavingsOverviewPayloadV1Schema,
   SavingsSessionsPayloadV1Schema,
   SettingsPayloadV1Schema,
@@ -920,5 +921,18 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(worktree?.snapshot_content_identity).toBeTruthy();
     expect(worktree?.staleness_state).toBe('fresh');
     expect(worktree?.coverage).toBe('complete');
+  });
+
+  it('GET /api/remote/status — Remote Brain operational envelope', () => {
+    const env = parse(
+      DashboardEnvelopeV1Schema(RemoteOperationalStatusPayloadV1Schema),
+      '/api/remote/status',
+    );
+    expect(env.payload.kind).toBe('observed');
+    if (env.payload.kind !== 'observed') return;
+    expect(env.payload.readiness).toBe('ready');
+    expect(env.payload.authority.state).toBe('available');
+    expect(env.payload.spool.has_sequence_gap).toBe(false);
+    expect(env.payload.recovery_required).toBe(false);
   });
 });

@@ -17,7 +17,9 @@ use tracedecay::dashboard;
 use tracedecay::global_db::AnalyticsEventInsert;
 use tracedecay_domain::{
     CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
-    ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RetrievalQueryObservedV1,
+    ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RejectedArgumentErrorClassV1,
+    RejectedArgumentNameV1, RejectedArgumentObservedV1, RejectedArgumentSurfaceV1,
+    RetrievalQueryObservedV1,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_usecases::host_admission::HostAdmissionScope;
@@ -286,6 +288,71 @@ fn observability_event(
         outcome: Some("failed".to_string()),
         metadata_json: Some(
             serde_json::to_string(&envelope).expect("serialize observability event"),
+        ),
+    }
+}
+
+fn rejected_argument_event(
+    project_id: &str,
+    timestamp: i64,
+    surface: RejectedArgumentSurfaceV1,
+    operation: &str,
+    argument: RejectedArgumentNameV1,
+    error_class: RejectedArgumentErrorClassV1,
+    sequence: u64,
+) -> AnalyticsEventInsert {
+    let payload = ObservabilityPayloadV1::RejectedArgument(RejectedArgumentObservedV1 {
+        surface,
+        operation: operation.to_owned(),
+        argument,
+        error_class,
+        schema_revision: 1,
+    });
+    let envelope = ObservabilityEnvelopeV1 {
+        event_id: format!("dashboard-rejected-argument-{sequence}"),
+        event_kind: payload.event_kind().to_owned(),
+        schema_revision: 1,
+        idempotency_key: format!("dashboard-rejected-argument-{sequence}"),
+        trace_id: format!("dashboard-rejected-argument-trace-{sequence}"),
+        scope_ref: project_id.to_string(),
+        capability: "application_surface".to_string(),
+        operation: operation.to_owned(),
+        event_time_micros: timestamp.saturating_mul(1_000_000),
+        observation_time_micros: timestamp.saturating_mul(1_000_000),
+        valid_from_micros: None,
+        valid_until_micros: None,
+        quantity: None,
+        unit: None,
+        terminal_result: Some(ObservabilityTerminalResultV1::Denied),
+        producer_revision: "dashboard-test.v1".to_string(),
+        configuration_revision: "dashboard-test.v1".to_string(),
+        policy_revision: "dashboard-test.v1".to_string(),
+        watermark: format!("dashboard-test:{sequence}"),
+        coverage: CoverageStateV1::Known,
+        sampling_probability: None,
+        retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
+        emitted_count: 1,
+        delayed_count: 0,
+        dropped_count: 0,
+        process_boot_id: "dashboard-test-boot".to_string(),
+        producer_sequence: sequence,
+        payload,
+    };
+    AnalyticsEventInsert {
+        provider: "tracedecay-observability".to_string(),
+        project_id: project_id.to_string(),
+        session_id: None,
+        timestamp,
+        event_kind: envelope.event_kind.clone(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: Some(envelope.idempotency_key.clone()),
+        outcome: Some("rejected".to_string()),
+        metadata_json: Some(
+            serde_json::to_string(&envelope).expect("serialize rejected-argument event"),
         ),
     }
 }
@@ -892,6 +959,94 @@ fn observatory_counts_canonical_failed_outcomes() {
             })
             .expect("observability failures metric");
         assert_eq!(failures["value"], 1.0);
+    });
+}
+
+#[test]
+fn observatory_serves_rejected_argument_groups_from_seeded_observations() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(false).await;
+        let project_id = DashboardTestRuntimeV1::canonical_project_key(&fixture.project_root);
+        let timestamp = tracedecay::tracedecay::current_timestamp();
+        fixture
+            .host_runtime
+            .append_analytics_event_for_test(
+                HostAdmissionScope::Profile,
+                &rejected_argument_event(
+                    &project_id,
+                    timestamp,
+                    RejectedArgumentSurfaceV1::Cli,
+                    "feedback_diagnostics",
+                    RejectedArgumentNameV1::RequestBody,
+                    RejectedArgumentErrorClassV1::InvalidShape,
+                    1,
+                ),
+            )
+            .await
+            .expect("append first rejected-argument event");
+        fixture
+            .host_runtime
+            .append_analytics_event_for_test(
+                HostAdmissionScope::Profile,
+                &rejected_argument_event(
+                    &project_id,
+                    timestamp,
+                    RejectedArgumentSurfaceV1::Cli,
+                    "feedback_diagnostics",
+                    RejectedArgumentNameV1::RequestBody,
+                    RejectedArgumentErrorClassV1::InvalidShape,
+                    2,
+                ),
+            )
+            .await
+            .expect("append second rejected-argument event");
+        fixture
+            .host_runtime
+            .append_analytics_event_for_test(
+                HostAdmissionScope::Profile,
+                &rejected_argument_event(
+                    &project_id,
+                    timestamp,
+                    RejectedArgumentSurfaceV1::Mcp,
+                    "feedback_list",
+                    RejectedArgumentNameV1::Operation,
+                    RejectedArgumentErrorClassV1::Unauthorized,
+                    3,
+                ),
+            )
+            .await
+            .expect("append mcp rejected-argument event");
+
+        let (status, observatory) = get_json(
+            &http_agent(),
+            &format!("{}/api/observatory", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        let rejected = &observatory["payload"]["rejected_arguments"];
+        assert_eq!(rejected["coverage"]["state"], "known");
+        assert_eq!(rejected["rejected_total"], 3);
+        assert!(rejected["rejection_rate"].is_null());
+        let groups = rejected["groups"]
+            .as_array()
+            .expect("rejected-argument groups");
+        assert_eq!(groups.len(), 2);
+        let cli = groups
+            .iter()
+            .find(|group| group["surface"] == "cli")
+            .expect("cli group");
+        assert_eq!(cli["count"], 2);
+        assert_eq!(cli["operation"], "feedback_diagnostics");
+        assert_eq!(cli["error_class"], "invalid_shape");
+        let mcp = groups
+            .iter()
+            .find(|group| group["surface"] == "mcp")
+            .expect("mcp group");
+        assert_eq!(mcp["count"], 1);
+        assert_eq!(mcp["error_class"], "unauthorized");
     });
 }
 

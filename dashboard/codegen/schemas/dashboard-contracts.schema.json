@@ -9138,8 +9138,8 @@
           "items": {
             "$ref": "#/$defs/ExplorerSourceIdV1"
           },
-          "maxItems": 3,
-          "minItems": 3,
+          "maxItems": 4,
+          "minItems": 4,
           "type": "array"
         },
         "run_id": {
@@ -9353,15 +9353,23 @@
       "enum": [
         "code_graph",
         "sessions",
-        "knowledge"
+        "knowledge",
+        "semantic"
       ],
       "type": "string"
     },
     "ExplorerSourceOutcomeV1": {
+      "description": "What one source truthfully concluded for this run. Every member has a real\nproducer; none is speculative:\n- `Partial`: the source answered with rows but its own read reported\n  omitted records (LCM temporal reads).\n- `Indexing`: the provider is acquiring its model or projecting vectors\n  (semantic runtime acquisition/indexing states).\n- `Stale`: the source's store exists but does not match the current\n  generation (verified graph stale reads, LCM stale projections, semantic\n  generation staleness).\n- `TimedOut`: the source's own read exceeded the admitted deadline.\n- `Unsupported`: this dashboard surface cannot consult the source at all\n  (no daemon authority attached, or the provider state cannot be consumed\n  on this surface yet).\n- `Absent`: the source's store does not exist for this project — a typed\n  absence, not a failure (semantic search not activated).",
       "enum": [
         "pending",
         "ready",
+        "partial",
+        "indexing",
+        "stale",
+        "timed_out",
         "unavailable",
+        "unsupported",
+        "absent",
         "error",
         "cancelled"
       ],
@@ -9884,6 +9892,13 @@
             }
           ]
         },
+        "rejected_argument_groups": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FeedbackRejectedArgumentGroupV1"
+          },
+          "type": "array"
+        },
         "schema_version": {
           "format": "uint16",
           "maximum": 65535,
@@ -9908,6 +9923,7 @@
         "first_observed_at",
         "last_observed_at",
         "event_counts",
+        "rejected_argument_groups",
         "coverage",
         "watermark",
         "denominators",
@@ -9951,6 +9967,37 @@
         "producer_boot_id",
         "producer_sequence",
         "observed_through"
+      ],
+      "type": "object"
+    },
+    "FeedbackRejectedArgumentGroupV1": {
+      "additionalProperties": false,
+      "description": "One surface × operation × argument × error-class cell projected from\ndispatcher rejection source events.",
+      "properties": {
+        "argument": {
+          "$ref": "#/$defs/RejectedArgumentNameV1"
+        },
+        "count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error_class": {
+          "$ref": "#/$defs/RejectedArgumentErrorClassV1"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "surface": {
+          "$ref": "#/$defs/RejectedArgumentSurfaceV1"
+        }
+      },
+      "required": [
+        "surface",
+        "operation",
+        "argument",
+        "error_class",
+        "count"
       ],
       "type": "object"
     },
@@ -14857,6 +14904,9 @@
           "format": "int64",
           "type": "integer"
         },
+        "rejected_arguments": {
+          "$ref": "#/$defs/RejectedArgumentAnalyticsV1"
+        },
         "watermark": {
           "type": "string"
         }
@@ -14869,7 +14919,8 @@
         "current",
         "metrics",
         "analytics_mode",
-        "comparison"
+        "comparison",
+        "rejected_arguments"
       ],
       "type": "object"
     },
@@ -15948,6 +15999,146 @@
       ],
       "type": "object"
     },
+    "RejectedArgumentAnalyticsV1": {
+      "description": "Frequency and rate projection for dispatcher rejected-argument observations.\n\nCounts may be known while `rejection_rate` stays absent: Plan 26 forbids\nfabricating a rate when the eligible-attempt denominator is unknown.",
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/MetricCoverageV1"
+        },
+        "eligible_attempts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/RejectedArgumentGroupV1"
+          },
+          "type": "array"
+        },
+        "projector_revision": {
+          "type": "string"
+        },
+        "redacted_name_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rejected_total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rejection_rate": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "unavailable_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "watermark": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "coverage",
+        "projector_revision",
+        "watermark",
+        "eligible_attempts",
+        "rejected_total",
+        "rejection_rate",
+        "redacted_name_count",
+        "groups",
+        "unavailable_reason"
+      ],
+      "type": "object"
+    },
+    "RejectedArgumentErrorClassV1": {
+      "description": "Closed error class for a rejected surface argument.",
+      "enum": [
+        "missing",
+        "invalid_shape",
+        "out_of_bounds",
+        "unsupported",
+        "unauthorized",
+        "stale",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "RejectedArgumentGroupV1": {
+      "description": "One surface × operation × argument × error-class cell in the rejected-argument view.",
+      "properties": {
+        "argument": {
+          "$ref": "#/$defs/RejectedArgumentNameV1"
+        },
+        "count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error_class": {
+          "$ref": "#/$defs/RejectedArgumentErrorClassV1"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "rate": {
+          "description": "Eligible-attempt rate for this cell. Absent when the attempt\ndenominator or coverage is insufficient.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "surface": {
+          "$ref": "#/$defs/RejectedArgumentSurfaceV1"
+        }
+      },
+      "required": [
+        "surface",
+        "operation",
+        "argument",
+        "error_class",
+        "count",
+        "rate"
+      ],
+      "type": "object"
+    },
+    "RejectedArgumentNameV1": {
+      "description": "Normalized rejected-argument name. Raw flags, values, and tokens never\nenter this vocabulary.",
+      "enum": [
+        "request_body",
+        "pagination",
+        "request_handle",
+        "operation",
+        "lifecycle",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "RejectedArgumentSurfaceV1": {
+      "description": "Transport that rejected a surface argument. Unknown preserves missing\nattribution instead of inventing cli/mcp/http.",
+      "enum": [
+        "cli",
+        "mcp",
+        "http",
+        "unknown"
+      ],
+      "type": "string"
+    },
     "ReleaseWorkPlacementCommand": {
       "additionalProperties": false,
       "properties": {
@@ -15973,6 +16164,252 @@
         "occurred_at"
       ],
       "title": "ReleaseWorkPlacementCommand",
+      "type": "object"
+    },
+    "RemoteAuthorityMissingReasonV1": {
+      "enum": [
+        "registry_unavailable",
+        "placement_unknown",
+        "authority_unreachable",
+        "authority_authentication_failed",
+        "caller_authentication_failed",
+        "enrollment_expired",
+        "enrollment_revoked",
+        "insufficient_capability",
+        "scope_mismatch",
+        "fence_unverified",
+        "protocol_incompatible"
+      ],
+      "type": "string"
+    },
+    "RemoteAuthoritySummaryV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "fence": {
+              "$ref": "#/$defs/RemoteFenceSummaryV1"
+            },
+            "state": {
+              "const": "available",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "fence"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "fence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RemoteFenceSummaryV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "missing": {
+              "items": {
+                "$ref": "#/$defs/RemoteAuthorityMissingReasonV1"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "partial",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "fence",
+            "missing"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/RemoteAuthorityMissingReasonV1"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RemoteFenceSummaryV1": {
+      "properties": {
+        "authority_epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "authority_node_id": {
+          "type": "string"
+        },
+        "brain_id": {
+          "type": "string"
+        },
+        "generation_id": {
+          "type": "string"
+        },
+        "placement_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shard_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "brain_id",
+        "shard_id",
+        "generation_id",
+        "placement_revision",
+        "authority_epoch",
+        "authority_node_id"
+      ],
+      "type": "object"
+    },
+    "RemoteListenerKindV1": {
+      "enum": [
+        "serving",
+        "disabled",
+        "degraded"
+      ],
+      "type": "string"
+    },
+    "RemoteOperationalStatusPayloadV1": {
+      "description": "Dashboard wire DTO for the Remote Brain operational plane.",
+      "oneOf": [
+        {
+          "properties": {
+            "authority": {
+              "$ref": "#/$defs/RemoteAuthoritySummaryV1"
+            },
+            "coverage": {
+              "$ref": "#/$defs/DoctorCoverageCompletenessV1"
+            },
+            "current_backup_verified": {
+              "type": "boolean"
+            },
+            "enrollment_configured": {
+              "type": "boolean"
+            },
+            "failover_in_progress": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "observed",
+              "type": "string"
+            },
+            "listener": {
+              "$ref": "#/$defs/RemoteListenerKindV1"
+            },
+            "observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "readiness": {
+              "$ref": "#/$defs/RemoteReadinessKindV1"
+            },
+            "recovery_required": {
+              "type": "boolean"
+            },
+            "replay_coverage_complete": {
+              "type": "boolean"
+            },
+            "spool": {
+              "$ref": "#/$defs/RemoteSpoolSummaryV1"
+            }
+          },
+          "required": [
+            "kind",
+            "listener",
+            "coverage",
+            "readiness",
+            "enrollment_configured",
+            "authority",
+            "spool",
+            "replay_coverage_complete",
+            "current_backup_verified",
+            "failover_in_progress",
+            "recovery_required",
+            "observed_at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "unconfigured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "unavailable",
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "note"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RemoteReadinessKindV1": {
+      "enum": [
+        "unconfigured",
+        "partial",
+        "ready",
+        "recovery_required"
+      ],
+      "type": "string"
+    },
+    "RemoteSpoolSummaryV1": {
+      "properties": {
+        "has_sequence_gap": {
+          "type": "boolean"
+        },
+        "pending_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "quarantined_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pending_count",
+        "quarantined_count",
+        "has_sequence_gap"
+      ],
       "type": "object"
     },
     "RepositoryId": {
@@ -27297,6 +27734,9 @@
     "projects": {
       "$ref": "#/$defs/DashboardEnvelopeV14"
     },
+    "remote_operational_status": {
+      "$ref": "#/$defs/RemoteOperationalStatusPayloadV1"
+    },
     "savings_overview": {
       "$ref": "#/$defs/DashboardEnvelopeV122"
     },
@@ -27480,6 +27920,7 @@
     "storage_telemetry",
     "storage_findings",
     "doctor_findings",
+    "remote_operational_status",
     "explorer_query_run",
     "explorer_session_size",
     "explorer_read_context",

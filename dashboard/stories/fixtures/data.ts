@@ -2687,6 +2687,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // the state the audit needs to shoot — the unattached case is a state chip
   // with no reading behind it.
   '/api/code-index/freshness': codeIndexFreshnessEnvelope(),
+  '/api/remote/status': remoteOperationalStatusEnvelope(),
   // Work. The two mounted read routes. Unlike every other fixture here these
   // are wrapped in the application's `HttpJsonEnvelope` rather than
   // `DashboardEnvelopeV1`, because `mod.rs` nests the Work routes straight
@@ -3303,6 +3304,25 @@ function observatoryEnvelope(): Record<string, unknown> {
     metrics,
     analytics_mode: analyticsModeReadModel(),
     comparison: comparisonReadModel(),
+    rejected_arguments: {
+      coverage: {
+        eligible: null,
+        observed: 0,
+        completed: 0,
+        censored: 0,
+        unknown: 1,
+        excluded: 0,
+        state: 'unknown',
+      },
+      projector_revision: 'observatory-rejected-argument-projector.v1',
+      watermark: 'analytics:918422',
+      eligible_attempts: null,
+      rejected_total: null,
+      rejection_rate: null,
+      redacted_name_count: 0,
+      groups: [],
+      unavailable_reason: 'rejected_argument_observations_not_recorded',
+    },
   };
   return {
     ...envelope(payload, 'partial', [
@@ -3399,6 +3419,38 @@ function costsEnvelope(): Record<string, unknown> {
       omission_reasons: ['incomplete_metric_coverage'],
     },
   };
+}
+
+/** GET /api/remote/status — Settings Remote Brain operational plane. */
+function remoteOperationalStatusEnvelope(): Record<string, unknown> {
+  return envelope(
+    {
+      kind: 'observed',
+      listener: 'serving',
+      coverage: 'complete',
+      readiness: 'ready',
+      enrollment_configured: true,
+      authority: {
+        state: 'available',
+        fence: {
+          brain_id: 'brain.fixture',
+          shard_id: 'shard.fixture',
+          generation_id: 'generation.fixture',
+          placement_revision: 1,
+          authority_epoch: 3,
+          authority_node_id: 'node.fixture',
+        },
+      },
+      spool: { pending_count: 0, quarantined_count: 0, has_sequence_gap: false },
+      replay_coverage_complete: true,
+      current_backup_verified: true,
+      failover_in_progress: false,
+      recovery_required: false,
+      observed_at: nowMicros,
+    },
+    'ready',
+    [{ kind: 'refresh', operation: 'use-case.dashboard.remote.status.refresh' }],
+  );
 }
 
 /** GET /api/code-index/freshness (src/dashboard/code_index_freshness_api.rs). */
@@ -3561,6 +3613,25 @@ function observatoryReadModel(): Record<string, unknown> {
     ],
     analytics_mode: analyticsModeReadModel(),
     comparison: comparisonReadModel(),
+    rejected_arguments: {
+      coverage: {
+        eligible: null,
+        observed: 0,
+        completed: 0,
+        censored: 0,
+        unknown: 1,
+        excluded: 0,
+        state: 'unknown',
+      },
+      projector_revision: 'observatory-rejected-argument-projector.v1',
+      watermark,
+      eligible_attempts: null,
+      rejected_total: null,
+      rejection_rate: null,
+      redacted_name_count: 0,
+      groups: [],
+      unavailable_reason: 'rejected_argument_observations_not_recorded',
+    },
   };
 }
 

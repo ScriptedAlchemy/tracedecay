@@ -35,6 +35,7 @@ import { PerformanceComparisons } from './PerformanceComparisons.tsx';
 import { RetrievalQuality } from './RetrievalQuality.tsx';
 import { AnalyticsControls } from './AnalyticsControls.tsx';
 import { ExecutionTopologyMetrics } from './ExecutionTopologyMetrics.tsx';
+import { RejectedArguments } from './RejectedArguments.tsx';
 import { doctorEvidencePresentation } from './doctorModel.ts';
 import {
   budgetPresentation,
@@ -120,6 +121,8 @@ export function ObservatoryPage() {
       <RetrievalQuality reads={accountingReads} />
 
       <HookHints />
+
+      <RejectedArguments reads={accountingReads} />
 
       <PerformanceBudgets />
 

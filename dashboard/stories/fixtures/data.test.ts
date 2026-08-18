@@ -49,6 +49,7 @@ import {
   ObservatoryReadModelV1Schema,
   ProjectContextPayloadV1Schema,
   ProjectsPayloadV1Schema,
+  RemoteOperationalStatusPayloadV1Schema,
   SavingsOverviewPayloadV1Schema,
   SavingsSessionsPayloadV1Schema,
   SettingsPayloadV1Schema,
@@ -121,6 +122,7 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/observatory': DashboardEnvelopeV1Schema(ObservatoryReadModelV1Schema),
   '/api/costs': DashboardEnvelopeV1Schema(CostsReadModelV1Schema),
   '/api/code-index/freshness': DashboardEnvelopeV1Schema(CodeIndexFreshnessPayloadV1Schema),
+  '/api/remote/status': DashboardEnvelopeV1Schema(RemoteOperationalStatusPayloadV1Schema),
 };
 
 /**

@@ -201,6 +201,17 @@ function accountingReads(): ObservatoryAccountingReads {
       regression_observed: null, disposition: 'insufficient_evidence',
       coverage: metricCoverage('unknown'), unavailable_reason: 'not_observed',
     },
+    rejected_arguments: {
+      coverage: metricCoverage('unknown'),
+      projector_revision: 'observatory-rejected-argument-projector.v1',
+      watermark: 'analytics:4821',
+      eligible_attempts: null,
+      rejected_total: null,
+      rejection_rate: null,
+      redacted_name_count: 0,
+      groups: [],
+      unavailable_reason: 'rejected_argument_observations_not_recorded',
+    },
   };
   return {
     observatory: {

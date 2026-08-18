@@ -2009,10 +2009,25 @@ export const ExplorerSessionSizeV1Schema = z.object({
 });
 export type ExplorerSessionSizeV1 = z.infer<typeof ExplorerSessionSizeV1Schema>;
 
-export const ExplorerSourceIdV1Schema = z.enum(["code_graph", "knowledge", "sessions"]);
+export const ExplorerSourceIdV1Schema = z.enum(["code_graph", "knowledge", "semantic", "sessions"]);
 export type ExplorerSourceIdV1 = z.infer<typeof ExplorerSourceIdV1Schema>;
 
-export const ExplorerSourceOutcomeV1Schema = z.enum(["cancelled", "error", "pending", "ready", "unavailable"]);
+/** What one source truthfully concluded for this run. Every member has a real
+producer; none is speculative:
+- `Partial`: the source answered with rows but its own read reported
+  omitted records (LCM temporal reads).
+- `Indexing`: the provider is acquiring its model or projecting vectors
+  (semantic runtime acquisition/indexing states).
+- `Stale`: the source's store exists but does not match the current
+  generation (verified graph stale reads, LCM stale projections, semantic
+  generation staleness).
+- `TimedOut`: the source's own read exceeded the admitted deadline.
+- `Unsupported`: this dashboard surface cannot consult the source at all
+  (no daemon authority attached, or the provider state cannot be consumed
+  on this surface yet).
+- `Absent`: the source's store does not exist for this project — a typed
+  absence, not a failure (semantic search not activated). */
+export const ExplorerSourceOutcomeV1Schema = z.enum(["absent", "cancelled", "error", "indexing", "partial", "pending", "ready", "stale", "timed_out", "unavailable", "unsupported"]);
 export type ExplorerSourceOutcomeV1 = z.infer<typeof ExplorerSourceOutcomeV1Schema>;
 
 export const ExplorerSourcePhaseV1Schema = z.enum(["cancelled", "completed", "queued", "reading"]);
@@ -2153,6 +2168,7 @@ export const FeedbackObservationReadModelV1Schema = z.object({
   event_counts: z.record(z.number().int().safe().min(0)),
   first_observed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   last_observed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
+  rejected_argument_groups: z.array(z.lazy(() => FeedbackRejectedArgumentGroupV1Schema)),
   schema_version: z.number().int().min(0).max(65535),
   system_quality: z.lazy(() => FeedbackSystemQualityReadModelV1Schema),
   total_count: z.number().int().safe().min(0),
@@ -2166,6 +2182,17 @@ export const FeedbackObservationWatermarkV1Schema = z.object({
   producer_sequence: z.number().int().safe().min(0).nullable(),
 }).strict();
 export type FeedbackObservationWatermarkV1 = z.infer<typeof FeedbackObservationWatermarkV1Schema>;
+
+/** One surface × operation × argument × error-class cell projected from
+dispatcher rejection source events. */
+export const FeedbackRejectedArgumentGroupV1Schema = z.object({
+  argument: z.lazy(() => RejectedArgumentNameV1Schema),
+  count: z.number().int().safe().min(0),
+  error_class: z.lazy(() => RejectedArgumentErrorClassV1Schema),
+  operation: z.string(),
+  surface: z.lazy(() => RejectedArgumentSurfaceV1Schema),
+}).strict();
+export type FeedbackRejectedArgumentGroupV1 = z.infer<typeof FeedbackRejectedArgumentGroupV1Schema>;
 
 export const FeedbackSystemMetricDenominatorV1Schema = z.enum(["eligible_observations", "eligible_source_families", "latency_samples", "outcome_observations", "relevance_labels", "returned_and_omitted_items", "revocation_observations", "stack_transition_observations"]);
 export type FeedbackSystemMetricDenominatorV1 = z.infer<typeof FeedbackSystemMetricDenominatorV1Schema>;
@@ -3416,6 +3443,7 @@ export const ObservatoryReadModelV1Schema = z.object({
   horizon: z.lazy(() => ObservabilityHorizonV1Schema),
   metrics: z.array(z.lazy(() => MetricValueV1Schema)),
   observed_at_micros: z.number().int().safe(),
+  rejected_arguments: z.lazy(() => RejectedArgumentAnalyticsV1Schema),
   watermark: z.string(),
 });
 export type ObservatoryReadModelV1 = z.infer<typeof ObservatoryReadModelV1Schema>;
@@ -3730,6 +3758,48 @@ export const RegisteredRootSelectorV1Schema = z.object({
 }).strict();
 export type RegisteredRootSelectorV1 = z.infer<typeof RegisteredRootSelectorV1Schema>;
 
+/** Frequency and rate projection for dispatcher rejected-argument observations.
+
+Counts may be known while `rejection_rate` stays absent: Plan 26 forbids
+fabricating a rate when the eligible-attempt denominator is unknown. */
+export const RejectedArgumentAnalyticsV1Schema = z.object({
+  coverage: z.lazy(() => MetricCoverageV1Schema),
+  eligible_attempts: z.number().int().safe().min(0).nullable(),
+  groups: z.array(z.lazy(() => RejectedArgumentGroupV1Schema)),
+  projector_revision: z.string(),
+  redacted_name_count: z.number().int().safe().min(0),
+  rejected_total: z.number().int().safe().min(0).nullable(),
+  rejection_rate: z.number().nullable(),
+  unavailable_reason: z.string().nullable(),
+  watermark: z.string(),
+});
+export type RejectedArgumentAnalyticsV1 = z.infer<typeof RejectedArgumentAnalyticsV1Schema>;
+
+/** Closed error class for a rejected surface argument. */
+export const RejectedArgumentErrorClassV1Schema = z.enum(["invalid_shape", "missing", "out_of_bounds", "stale", "unauthorized", "unknown", "unsupported"]);
+export type RejectedArgumentErrorClassV1 = z.infer<typeof RejectedArgumentErrorClassV1Schema>;
+
+/** One surface × operation × argument × error-class cell in the rejected-argument view. */
+export const RejectedArgumentGroupV1Schema = z.object({
+  argument: z.lazy(() => RejectedArgumentNameV1Schema),
+  count: z.number().int().safe().min(0),
+  error_class: z.lazy(() => RejectedArgumentErrorClassV1Schema),
+  operation: z.string(),
+  rate: z.number().nullable(),
+  surface: z.lazy(() => RejectedArgumentSurfaceV1Schema),
+});
+export type RejectedArgumentGroupV1 = z.infer<typeof RejectedArgumentGroupV1Schema>;
+
+/** Normalized rejected-argument name. Raw flags, values, and tokens never
+enter this vocabulary. */
+export const RejectedArgumentNameV1Schema = z.enum(["lifecycle", "operation", "pagination", "request_body", "request_handle", "unknown"]);
+export type RejectedArgumentNameV1 = z.infer<typeof RejectedArgumentNameV1Schema>;
+
+/** Transport that rejected a surface argument. Unknown preserves missing
+attribution instead of inventing cli/mcp/http. */
+export const RejectedArgumentSurfaceV1Schema = z.enum(["cli", "http", "mcp", "unknown"]);
+export type RejectedArgumentSurfaceV1 = z.infer<typeof RejectedArgumentSurfaceV1Schema>;
+
 export const ReleaseWorkPlacementCommandSchema = z.object({
   expected_authority_version: z.number().int().safe().min(0),
   occurred_at: z.lazy(() => UtcMicrosSchema),
@@ -3737,6 +3807,67 @@ export const ReleaseWorkPlacementCommandSchema = z.object({
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 export type ReleaseWorkPlacementCommand = z.infer<typeof ReleaseWorkPlacementCommandSchema>;
+
+export const RemoteAuthorityMissingReasonV1Schema = z.enum(["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch"]);
+export type RemoteAuthorityMissingReasonV1 = z.infer<typeof RemoteAuthorityMissingReasonV1Schema>;
+
+export const RemoteAuthoritySummaryV1Schema = z.discriminatedUnion("state", [z.object({
+  fence: z.lazy(() => RemoteFenceSummaryV1Schema),
+  state: z.literal("available"),
+}), z.object({
+  fence: z.union([z.lazy(() => RemoteFenceSummaryV1Schema), z.null()]),
+  missing: z.array(z.lazy(() => RemoteAuthorityMissingReasonV1Schema)),
+  state: z.literal("partial"),
+}), z.object({
+  reason: z.lazy(() => RemoteAuthorityMissingReasonV1Schema),
+  state: z.literal("unavailable"),
+})]);
+export type RemoteAuthoritySummaryV1 = z.infer<typeof RemoteAuthoritySummaryV1Schema>;
+
+export const RemoteFenceSummaryV1Schema = z.object({
+  authority_epoch: z.number().int().safe().min(0),
+  authority_node_id: z.string(),
+  brain_id: z.string(),
+  generation_id: z.string(),
+  placement_revision: z.number().int().safe().min(0),
+  shard_id: z.string(),
+});
+export type RemoteFenceSummaryV1 = z.infer<typeof RemoteFenceSummaryV1Schema>;
+
+export const RemoteListenerKindV1Schema = z.enum(["degraded", "disabled", "serving"]);
+export type RemoteListenerKindV1 = z.infer<typeof RemoteListenerKindV1Schema>;
+
+/** Dashboard wire DTO for the Remote Brain operational plane. */
+export const RemoteOperationalStatusPayloadV1Schema = z.discriminatedUnion("kind", [z.object({
+  authority: z.lazy(() => RemoteAuthoritySummaryV1Schema),
+  coverage: z.lazy(() => DoctorCoverageCompletenessV1Schema),
+  current_backup_verified: z.boolean(),
+  enrollment_configured: z.boolean(),
+  failover_in_progress: z.boolean(),
+  kind: z.literal("observed"),
+  listener: z.lazy(() => RemoteListenerKindV1Schema),
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  readiness: z.lazy(() => RemoteReadinessKindV1Schema),
+  recovery_required: z.boolean(),
+  replay_coverage_complete: z.boolean(),
+  spool: z.lazy(() => RemoteSpoolSummaryV1Schema),
+}), z.object({
+  kind: z.literal("unavailable"),
+  note: z.string(),
+}), z.object({
+  kind: z.literal("unconfigured"),
+})]);
+export type RemoteOperationalStatusPayloadV1 = z.infer<typeof RemoteOperationalStatusPayloadV1Schema>;
+
+export const RemoteReadinessKindV1Schema = z.enum(["partial", "ready", "recovery_required", "unconfigured"]);
+export type RemoteReadinessKindV1 = z.infer<typeof RemoteReadinessKindV1Schema>;
+
+export const RemoteSpoolSummaryV1Schema = z.object({
+  has_sequence_gap: z.boolean(),
+  pending_count: z.number().int().safe().min(0),
+  quarantined_count: z.number().int().safe().min(0),
+});
+export type RemoteSpoolSummaryV1 = z.infer<typeof RemoteSpoolSummaryV1Schema>;
 
 /** Strongly typed canonical identity: `RepositoryId`. */
 export const RepositoryIdSchema = z.string();

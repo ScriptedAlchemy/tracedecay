@@ -128,6 +128,17 @@ function fixture(): ObservatoryReadModelV1 {
       coverage: coverage('unknown'),
       unavailable_reason: 'comparison_evidence_not_recorded',
     },
+    rejected_arguments: {
+      coverage: coverage('unknown'),
+      projector_revision: 'observatory-rejected-argument-projector.v1',
+      watermark: 'analytics:4821',
+      eligible_attempts: null,
+      rejected_total: null,
+      rejection_rate: null,
+      redacted_name_count: 0,
+      groups: [],
+      unavailable_reason: 'rejected_argument_observations_not_recorded',
+    },
   } as ObservatoryReadModelV1;
 }
 
