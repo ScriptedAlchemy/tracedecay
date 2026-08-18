@@ -14,7 +14,23 @@ use super::*;
 /// worker probe, and code-generation retention — must gate on this one value.
 const LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION: u32 = 5;
 pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 6;
-pub const MAX_SEALED_CODE_GENERATION_BYTES_V1: u64 = 1024 * 1024 * 1024;
+/// One bound, enforced on both sides of the sealed store: encoding refuses to
+/// publish a generation larger than this, and decoding refuses to admit one.
+/// The bound previously applied only to reads while publication happily wrote
+/// larger envelopes, so a large repository sealed generations (~1.5 GB here)
+/// that every later load refused as "corrupt" — permanently denying its own
+/// graph. Two GiB admits those real generations while keeping decode memory
+/// bounded.
+pub const MAX_SEALED_CODE_GENERATION_BYTES_V1: u64 = 2 * 1024 * 1024 * 1024;
+
+fn admit_sealed_generation_len(len: u64) -> Result<(), CodeIndexProductionErrorV1> {
+    if len > MAX_SEALED_CODE_GENERATION_BYTES_V1 {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation exceeds the canonical byte limit".to_owned(),
+        ));
+    }
+    Ok(())
+}
 
 pub const fn sealed_generation_format_revision_is_compatible(revision: u32) -> bool {
     matches!(
@@ -152,11 +168,7 @@ fn read_admitted_bytes<R: std::io::Read>(
     reader: R,
     admitted_len: u64,
 ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
-    if admitted_len > MAX_SEALED_CODE_GENERATION_BYTES_V1 {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation exceeds the canonical byte limit".to_owned(),
-        ));
-    }
+    admit_sealed_generation_len(admitted_len)?;
     let read_limit = admitted_len.checked_add(1).ok_or_else(|| {
         CodeIndexProductionErrorV1::Contract("sealed generation length overflowed".to_owned())
     })?;
@@ -244,7 +256,13 @@ impl CodeIndexPublishedGenerationV1 {
             projection_receipt: self.projection.receipt(),
         };
         let (generation_bytes, state_digest) = json_generation_bytes_and_digest(&generation)?;
-        encode_sealed_envelope_bytes(&state_digest, &generation_bytes)
+        let sealed = encode_sealed_envelope_bytes(&state_digest, &generation_bytes)?;
+        // Publication and restoration share one bound: a generation this
+        // build cannot read back must never be published in the first place.
+        admit_sealed_generation_len(u64::try_from(sealed.len()).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract("sealed generation length exceeds u64".to_owned())
+        })?)?;
+        Ok(sealed)
     }
 
     /// Restore and revalidate a complete sealed generation.
@@ -435,6 +453,18 @@ mod tests {
         .expect("serde envelope serialization");
 
         assert_eq!(assembled, prior);
+    }
+
+    /// Encode and decode share one admission bound, so publication can never
+    /// seal a generation that every later load would refuse as corrupt.
+    #[test]
+    fn sealed_generation_byte_bound_is_symmetric() {
+        assert!(admit_sealed_generation_len(MAX_SEALED_CODE_GENERATION_BYTES_V1).is_ok());
+        assert!(matches!(
+            admit_sealed_generation_len(MAX_SEALED_CODE_GENERATION_BYTES_V1 + 1),
+            Err(CodeIndexProductionErrorV1::Contract(message))
+                if message.contains("canonical byte limit")
+        ));
     }
 
     #[test]
