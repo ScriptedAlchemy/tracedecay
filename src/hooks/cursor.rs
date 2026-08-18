@@ -989,13 +989,13 @@ mod tests {
             .await
             .unwrap();
         drop(graph);
-        // Model a global-only repo: identity resolvable through the registry
-        // alone, with no repo-side marker.
-        if let Some(marker_path) = crate::storage::repository_identity_path(&project_root)
-            && marker_path.exists()
-        {
-            std::fs::remove_file(marker_path).unwrap();
-        }
+        // Nothing lives in the working tree: the project's durable anchors
+        // are the `.git/` repository identity marker and the registry row
+        // that initialization published.
+        assert!(
+            !project_root.join(".tracedecay").exists(),
+            "initialization must not create working-tree project state"
+        );
 
         let nested = project_root.join("src/deep");
         std::fs::create_dir_all(&nested).unwrap();
@@ -1004,7 +1004,12 @@ mod tests {
             "workspace_roots": [project_root.clone()],
         });
 
-        assert!(cursor_project_root_from_parsed_event(&parsed).is_none());
+        // Both the synchronous walk and the identity resolver answer through
+        // the `.git/` repository identity marker.
+        assert_eq!(
+            cursor_project_root_from_parsed_event(&parsed),
+            Some(project_root.clone())
+        );
         assert_eq!(
             cursor_project_root_from_parsed_event_with_identity(&parsed).await,
             Some(project_root)

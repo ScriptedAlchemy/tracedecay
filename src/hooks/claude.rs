@@ -835,13 +835,13 @@ mod tests {
             .unwrap();
         let graph_db_path = graph.store_layout().graph_db_path.clone();
         drop(graph);
-        // Model a global-only repo: identity resolvable through the registry
-        // alone, with no repo-side marker.
-        if let Some(marker_path) = crate::storage::repository_identity_path(&project_root)
-            && marker_path.exists()
-        {
-            std::fs::remove_file(marker_path).unwrap();
-        }
+        // Nothing lives in the working tree: the project's durable anchors
+        // are the `.git/` repository identity marker and the registry row
+        // that initialization published.
+        assert!(
+            !project_root.join(".tracedecay").exists(),
+            "initialization must not create working-tree project state"
+        );
 
         let nested = project_root.join("crates/inner");
         std::fs::create_dir_all(&nested).unwrap();
@@ -866,10 +866,15 @@ mod tests {
             "a cwd outside every registered project must not resolve"
         );
 
+        // Losing both durable anchors — the `.git/` identity marker and the
+        // store's graph database — must stop resolution entirely.
+        if let Some(marker_path) = crate::storage::repository_identity_path(&project_root) {
+            std::fs::remove_file(marker_path).unwrap();
+        }
         std::fs::remove_file(graph_db_path).unwrap();
         assert!(
             event_project_root_with_identity(&event).await.is_none(),
-            "a registered project without a real graph db must not resolve"
+            "a project without durable identity or a real graph db must not resolve"
         );
     }
 }

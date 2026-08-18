@@ -864,13 +864,13 @@ mod tests {
             .await
             .unwrap();
         drop(graph);
-        // Model a global-only repo: identity resolvable through the registry
-        // alone, with no repo-side marker.
-        if let Some(marker_path) = crate::storage::repository_identity_path(&project_root)
-            && marker_path.exists()
-        {
-            std::fs::remove_file(marker_path).unwrap();
-        }
+        // Nothing lives in the working tree: the project's durable anchors
+        // are the `.git/` repository identity marker and the registry row
+        // that initialization published.
+        assert!(
+            !project_root.join(".tracedecay").exists(),
+            "initialization must not create working-tree project state"
+        );
 
         let event = serde_json::json!({ "cwd": project_root.to_string_lossy() }).to_string();
         let (_context, status) = codex_session_context_for_event(&event).await;
