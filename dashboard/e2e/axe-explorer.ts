@@ -194,7 +194,7 @@ const PLANNER_RUN = envelope(
     request_revision: 'explorer-query-request-v1',
     plan_revision: 'explorer-query-plan-v1',
     merge_revision: 'source-local-no-merge-v1',
-    required_source_ids: ['code_graph', 'sessions', 'knowledge'],
+    required_source_ids: ['code_graph', 'sessions', 'knowledge', 'semantic'],
     ordering_policy: 'source_local_no_cross_source_merge',
     explanation:
       'Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source own order and coverage.',
@@ -215,10 +215,22 @@ const PLANNER_RUN = envelope(
         completed_units: null,
         total_units: null,
       },
+      semanticAbsentProgress(),
     ],
   },
   'partial',
 );
+
+/** The live semantic source: a typed absence with complete-zero accounting. */
+function semanticAbsentProgress() {
+  return {
+    ...sourceProgress('semantic', 'Semantic', [], 0, 'indexed vectors'),
+    outcome: 'absent',
+    error_code: 'semantic_not_activated',
+    message: 'semantic search is not activated for this project',
+    page: null,
+  };
+}
 
 const SESSION_SIZE = envelope(
   {
@@ -325,7 +337,7 @@ function emptyRun(query: string, confirmed: boolean): unknown {
       request_revision: 'explorer-query-request-v1',
       plan_revision: 'explorer-query-plan-v1',
       merge_revision: 'source-local-no-merge-v1',
-      required_source_ids: ['code_graph', 'sessions', 'knowledge'],
+      required_source_ids: ['code_graph', 'sessions', 'knowledge', 'semantic'],
       ordering_policy: 'source_local_no_cross_source_merge',
       explanation:
         'Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source own order and coverage.',
@@ -338,6 +350,7 @@ function emptyRun(query: string, confirmed: boolean): unknown {
         zero('code_graph', 'Code graph', 'symbols'),
         zero('sessions', 'Sessions', 'rows'),
         zero('knowledge', 'Knowledge', 'rows'),
+        semanticAbsentProgress(),
       ],
     },
     confirmed ? 'ready' : 'partial',

@@ -39,7 +39,7 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
         assert_eq!(accepted["payload"]["state"], "pending");
         assert_eq!(
             accepted["payload"]["required_source_ids"],
-            json!(["code_graph", "sessions", "knowledge"])
+            json!(["code_graph", "sessions", "knowledge", "semantic"])
         );
         assert_eq!(
             accepted["payload"]["ordering_policy"],
@@ -56,7 +56,7 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
         let sources = completed["payload"]["sources"]
             .as_array()
             .unwrap_or_else(|| panic!("query sources missing: {completed}"));
-        assert_eq!(sources.len(), 3);
+        assert_eq!(sources.len(), 4);
         for source_id in ["code_graph", "sessions", "knowledge"] {
             let source = sources
                 .iter()
@@ -72,6 +72,19 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
                 "{source_id} must expose its real source-local page: {source}"
             );
         }
+        let semantic = sources
+            .iter()
+            .find(|source| source["source_id"] == "semantic")
+            .unwrap_or_else(|| panic!("missing semantic source: {completed}"));
+        assert_eq!(semantic["phase"], "completed");
+        assert_eq!(
+            semantic["outcome"], "unsupported",
+            "unattached semantic reader must stay typed unsupported: {semantic}"
+        );
+        assert_eq!(
+            semantic["error_code"], "semantic_status_unattached",
+            "unattached semantic reader must name the missing authority: {semantic}"
+        );
         let sessions = sources
             .iter()
             .find(|source| source["source_id"] == "sessions")

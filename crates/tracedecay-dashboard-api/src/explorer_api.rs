@@ -19,8 +19,10 @@ use tokio::task::JoinSet;
 
 mod knowledge;
 mod lifecycle;
+mod semantic;
 
 use lifecycle::{admitted_deadline_elapsed, mark_cancelled, mark_timed_out};
+pub use semantic::{ExplorerSemanticReadFuture, ExplorerSemanticReadV1, ExplorerSemanticReader};
 
 use super::lcm_api::{
     DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1,
@@ -35,10 +37,11 @@ use super::{DashboardHttpRequestControlV1, DashboardState, graph_service};
 use crate::application::context::CancellationToken;
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 
-const SOURCE_IDS: [ExplorerSourceIdV1; 3] = [
+const SOURCE_IDS: [ExplorerSourceIdV1; 4] = [
     ExplorerSourceIdV1::CodeGraph,
     ExplorerSourceIdV1::Sessions,
     ExplorerSourceIdV1::Knowledge,
+    ExplorerSourceIdV1::Semantic,
 ];
 const MAX_QUERY_RUNS: usize = 256;
 const QUERY_LIMIT_DEFAULT: i64 = 25;
@@ -64,6 +67,7 @@ pub(super) enum ExplorerSourceIdV1 {
     CodeGraph,
     Sessions,
     Knowledge,
+    Semantic,
 }
 
 impl ExplorerSourceIdV1 {
@@ -72,6 +76,7 @@ impl ExplorerSourceIdV1 {
             Self::CodeGraph => "Code graph",
             Self::Sessions => "Sessions",
             Self::Knowledge => "Knowledge",
+            Self::Semantic => "Semantic",
         }
     }
 }
@@ -107,12 +112,33 @@ pub(super) enum ExplorerSourcePhaseV1 {
     Cancelled,
 }
 
+/// What one source truthfully concluded for this run. Every member has a real
+/// producer; none is speculative:
+/// - `Partial`: the source answered with rows but its own read reported
+///   omitted records (LCM temporal reads).
+/// - `Indexing`: the provider is acquiring its model or projecting vectors
+///   (semantic runtime acquisition/indexing states).
+/// - `Stale`: the source's store exists but does not match the current
+///   generation (verified graph stale reads, LCM stale projections, semantic
+///   generation staleness).
+/// - `TimedOut`: the source's own read exceeded the admitted deadline.
+/// - `Unsupported`: this dashboard surface cannot consult the source at all
+///   (no daemon authority attached, or the provider state cannot be consumed
+///   on this surface yet).
+/// - `Absent`: the source's store does not exist for this project — a typed
+///   absence, not a failure (semantic search not activated).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ExplorerSourceOutcomeV1 {
     Pending,
     Ready,
+    Partial,
+    Indexing,
+    Stale,
+    TimedOut,
     Unavailable,
+    Unsupported,
+    Absent,
     Error,
     Cancelled,
 }
@@ -192,6 +218,69 @@ impl ExplorerSourceProgressV1 {
             ..Self::unavailable(source_id, error_code, message)
         }
     }
+
+    fn stale(
+        source_id: ExplorerSourceIdV1,
+        error_code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            outcome: ExplorerSourceOutcomeV1::Stale,
+            ..Self::unavailable(source_id, error_code, message)
+        }
+    }
+
+    fn timed_out(
+        source_id: ExplorerSourceIdV1,
+        error_code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            outcome: ExplorerSourceOutcomeV1::TimedOut,
+            ..Self::unavailable(source_id, error_code, message)
+        }
+    }
+
+    fn unsupported(
+        source_id: ExplorerSourceIdV1,
+        error_code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            outcome: ExplorerSourceOutcomeV1::Unsupported,
+            ..Self::unavailable(source_id, error_code, message)
+        }
+    }
+
+    fn indexing(
+        source_id: ExplorerSourceIdV1,
+        error_code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            outcome: ExplorerSourceOutcomeV1::Indexing,
+            ..Self::unavailable(source_id, error_code, message)
+        }
+    }
+
+    /// A typed absence: the source's store does not exist for this project.
+    /// Coverage is the complete accounting of an empty domain, so absence
+    /// claims over the run stay checkable instead of being blocked forever by
+    /// a source that holds nothing.
+    fn absent(
+        source_id: ExplorerSourceIdV1,
+        error_code: &'static str,
+        message: impl Into<String>,
+        unit: &'static str,
+    ) -> Self {
+        Self {
+            outcome: ExplorerSourceOutcomeV1::Absent,
+            completed_units: Some(0),
+            total_units: Some(0),
+            coverage: DashboardCoverageV1::complete(0, unit),
+            ..Self::unavailable(source_id, error_code, message)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -201,7 +290,7 @@ pub(super) struct ExplorerQueryRunV1 {
     request_revision: &'static str,
     plan_revision: &'static str,
     merge_revision: &'static str,
-    required_source_ids: [ExplorerSourceIdV1; 3],
+    required_source_ids: [ExplorerSourceIdV1; 4],
     ordering_policy: &'static str,
     explanation: &'static str,
     submitted_at_micros: i64,
@@ -283,7 +372,7 @@ fn initial_run(run_id: String, request: ExplorerQueryRequestV1) -> ExplorerQuery
         merge_revision: "source-local-no-merge-v1",
         required_source_ids: SOURCE_IDS,
         ordering_policy: "source_local_no_cross_source_merge",
-        explanation: "Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source's own order and coverage.",
+        explanation: "Search the code graph, active-project session store, and bounded project fact authority in parallel, and consult the semantic provider's typed state; preserve each source's own order and coverage.",
         submitted_at_micros: now_micros(),
         completed_at_micros: None,
         elapsed_micros: 0,
@@ -572,11 +661,16 @@ async fn execute_query(
         mark_cancelled(&mut current);
         return;
     }
-    let every_ready = current
-        .sources
-        .iter()
-        .all(|source| source.outcome == ExplorerSourceOutcomeV1::Ready);
-    let complete = every_ready
+    // `Absent` is a truthful terminal answer ("this store does not exist"),
+    // so it counts toward completion alongside `Ready` — its constructor
+    // carries the complete accounting of an empty domain.
+    let every_concluded = current.sources.iter().all(|source| {
+        matches!(
+            source.outcome,
+            ExplorerSourceOutcomeV1::Ready | ExplorerSourceOutcomeV1::Absent
+        )
+    });
+    let complete = every_concluded
         && current
             .sources
             .iter()
@@ -589,11 +683,14 @@ async fn execute_query(
     if complete {
         current.state = ExplorerRunStateV1::Completed;
         current.finality = ExplorerFinalityV1::Complete;
-    } else if current
-        .sources
-        .iter()
-        .any(|source| source.outcome == ExplorerSourceOutcomeV1::Ready)
-    {
+    } else if current.sources.iter().any(|source| {
+        matches!(
+            source.outcome,
+            ExplorerSourceOutcomeV1::Ready
+                | ExplorerSourceOutcomeV1::Partial
+                | ExplorerSourceOutcomeV1::Absent
+        )
+    }) {
         current.state = ExplorerRunStateV1::Partial;
         current.finality = ExplorerFinalityV1::Partial;
     } else {
@@ -615,6 +712,7 @@ async fn execute_source(
         ExplorerSourceIdV1::Knowledge => {
             knowledge::knowledge_source(&state, &request, &control, cancellation).await
         }
+        ExplorerSourceIdV1::Semantic => semantic::semantic_source(&state).await,
     }
 }
 
@@ -688,7 +786,7 @@ fn code_graph_error(error: crate::graph::CodeGraphReadError) -> ExplorerSourcePr
             "graph_authority_unavailable",
             detail,
         ),
-        CodeGraphReadError::Stale { detail } => ExplorerSourceProgressV1::unavailable(
+        CodeGraphReadError::Stale { detail } => ExplorerSourceProgressV1::stale(
             ExplorerSourceIdV1::CodeGraph,
             "graph_generation_stale",
             detail,
@@ -703,7 +801,7 @@ fn code_graph_error(error: crate::graph::CodeGraphReadError) -> ExplorerSourcePr
             source.outcome = ExplorerSourceOutcomeV1::Cancelled;
             source
         }
-        CodeGraphReadError::TimedOut => ExplorerSourceProgressV1::unavailable(
+        CodeGraphReadError::TimedOut => ExplorerSourceProgressV1::timed_out(
             ExplorerSourceIdV1::CodeGraph,
             "graph_read_timed_out",
             "the graph read timed out",
@@ -774,11 +872,14 @@ async fn session_source(
         )
         .await
     {
-        DashboardLcmReadOutcomeV1::Ready(page) => explorer_session_rows(request, page, Vec::new()),
+        DashboardLcmReadOutcomeV1::Ready(page) => {
+            explorer_session_rows(request, page, Vec::new(), false)
+        }
         DashboardLcmReadOutcomeV1::Partial { page, omitted } => explorer_session_rows(
             request,
             page,
             vec![format!("lcm_temporal_read_incomplete:{omitted}")],
+            true,
         ),
         DashboardLcmReadOutcomeV1::NotReady {
             state: DashboardLcmReadStateV1::Absent,
@@ -791,6 +892,14 @@ async fn session_source(
             json!({"query": request.query, "authority": "canonical_temporal"}),
             "messages",
             Vec::new(),
+        ),
+        DashboardLcmReadOutcomeV1::NotReady {
+            state: state @ DashboardLcmReadStateV1::Stale,
+            reason,
+        } => ExplorerSourceProgressV1::stale(
+            ExplorerSourceIdV1::Sessions,
+            explorer_lcm_error_code(state),
+            format!("canonical temporal retrieval did not produce a page: {reason}"),
         ),
         DashboardLcmReadOutcomeV1::NotReady { state, reason } => {
             ExplorerSourceProgressV1::unavailable(
@@ -1091,6 +1200,7 @@ fn explorer_session_rows(
     request: &ExplorerQueryRequestV1,
     page: DashboardLcmCanonicalPageV1,
     omission_reasons: Vec<String>,
+    read_incomplete: bool,
 ) -> ExplorerSourceProgressV1 {
     let has_more = page.has_more;
     let rows = page
@@ -1106,15 +1216,25 @@ fn explorer_session_rows(
         )
         .collect::<Result<Vec<_>, _>>();
     match rows {
-        Ok(rows) => ready_source(
-            ExplorerSourceIdV1::Sessions,
-            request,
-            rows,
-            None,
-            json!({"query": request.query, "has_more": has_more}),
-            "messages",
-            omission_reasons,
-        ),
+        Ok(rows) => {
+            let mut source = ready_source(
+                ExplorerSourceIdV1::Sessions,
+                request,
+                rows,
+                None,
+                json!({"query": request.query, "has_more": has_more}),
+                "messages",
+                omission_reasons,
+            );
+            // The temporal read itself reported omitted records: the rows are
+            // real but the answer is incomplete, which is a different outcome
+            // from a bounded page the source served completely.
+            if read_incomplete {
+                source.outcome = ExplorerSourceOutcomeV1::Partial;
+                source.error_code = Some("lcm_temporal_read_incomplete");
+            }
+            source
+        }
         Err(error) => ExplorerSourceProgressV1::error(
             ExplorerSourceIdV1::Sessions,
             "lcm_dashboard_contract_invalid",

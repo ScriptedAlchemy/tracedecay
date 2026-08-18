@@ -54,7 +54,7 @@ pub(super) fn mark_timed_out(run: &mut ExplorerQueryRunV1) {
     for source in &mut run.sources {
         if source.outcome == ExplorerSourceOutcomeV1::Pending {
             source.phase = ExplorerSourcePhaseV1::Completed;
-            source.outcome = ExplorerSourceOutcomeV1::Error;
+            source.outcome = ExplorerSourceOutcomeV1::TimedOut;
             source.error_code = Some("request_deadline_elapsed");
             source.message = Some("dashboard request deadline elapsed".to_owned());
         }
@@ -98,7 +98,7 @@ mod tests {
         assert_eq!(run.state, ExplorerRunStateV1::TimedOut);
         assert_eq!(run.finality, ExplorerFinalityV1::TimedOut);
         assert!(run.sources.iter().all(|source| {
-            source.outcome == ExplorerSourceOutcomeV1::Error
+            source.outcome == ExplorerSourceOutcomeV1::TimedOut
                 && source.error_code == Some("request_deadline_elapsed")
         }));
     }

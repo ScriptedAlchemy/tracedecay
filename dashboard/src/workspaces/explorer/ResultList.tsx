@@ -249,9 +249,9 @@ function EmptyResults({
           Some sources did not answer
         </h2>
         <p className="max-w-md text-2xs leading-relaxed text-text-muted">
-          The sources that answered returned no visible rows, but at least one source is
-          unavailable. A zero-result claim would be unsafe, so Explorer keeps this result
-          partial.
+          The sources that answered returned no visible rows, but at least one required source
+          did not conclude its read. A zero-result claim would be unsafe, so Explorer keeps this
+          result partial.
         </p>
       </div>
     );

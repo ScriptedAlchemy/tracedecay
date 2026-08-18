@@ -47,8 +47,11 @@ export function LaneReadout({
   const spec = LANE_BY_ID[read.lane];
   const Icon = LANE_ICON[read.lane];
   const loaded = laneHits(read).length;
-  const total = read.state === 'ready' ? read.reportedTotal : null;
-  const share = total != null && total > 0 ? loaded / total : null;
+  // `partial` rows are real and must be counted; its chip beside the count
+  // states the omission. Only `ready` reports a denominator worth a meter.
+  const answered = read.state === 'ready' || read.state === 'partial';
+  const total = answered ? read.reportedTotal : null;
+  const share = read.state === 'ready' && total != null && total > 0 ? loaded / total : null;
   return (
     <button
       type="button"
@@ -74,15 +77,17 @@ export function LaneReadout({
         <Icon aria-hidden size={12} className={cn('hidden shrink-0 sm:block', spec.textClass)} />
         <span className="td-legend truncate text-text-secondary">{spec.label}</span>
       </span>
-      {read.state === 'ready' ? (
+      {read.state === 'ready' || read.state === 'partial' ? (
         <>
           <span className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
             <span className="td-display text-base">{loaded.toLocaleString()}</span>
             <span className="min-w-0 text-2xs leading-tight text-text-muted">
               {searching
-                ? total != null
-                  ? `loaded of ${total.toLocaleString()} matching rows reported`
-                  : 'loaded with no source total reported'
+                ? read.state === 'partial'
+                  ? 'loaded from an incomplete read — records were omitted'
+                  : total != null
+                    ? `loaded of ${total.toLocaleString()} matching rows reported`
+                    : 'loaded with no source total reported'
                 : 'shown from the overview endpoint'}
             </span>
           </span>
@@ -95,7 +100,11 @@ export function LaneReadout({
       ) : (
         <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
           <StateChip kind={laneStateKind(read)} detail={laneStateDetail(read)} />
-          <span className="text-2xs leading-tight text-text-muted">no count reported</span>
+          <span className="text-2xs leading-tight text-text-muted">
+            {/* A typed absence reported a real fact — the store holds
+              * nothing — where every other non-answer reported no count. */}
+            {read.state === 'absent' ? 'nothing indexed to count' : 'no count reported'}
+          </span>
         </span>
       )}
       {share !== null ? (

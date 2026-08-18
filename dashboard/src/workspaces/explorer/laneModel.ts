@@ -27,13 +27,21 @@ import type {
   DashboardDomainStateV1,
 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
-import { codeHits, knowledgeHits, sessionHits, type Hit, type LaneId } from './model.ts';
+import {
+  codeHits,
+  knowledgeHits,
+  semanticHits,
+  sessionHits,
+  type Hit,
+  type LaneId,
+} from './model.ts';
 
 /** Which coordinator source answers for each lane. */
 export const LANE_SOURCE_ID: Record<LaneId, ExplorerSourceIdV1> = {
   code: 'code_graph',
   sessions: 'sessions',
   knowledge: 'knowledge',
+  semantic: 'semantic',
 };
 
 /**
@@ -45,11 +53,8 @@ export const LANE_SOURCE_ID: Record<LaneId, ExplorerSourceIdV1> = {
  * and every `switch` over `state` is `never`-checked, so a new wire outcome
  * fails the build instead of silently rendering as an error.
  *
- * Run-level `partial` is deliberately absent: `ExplorerSourceOutcomeV1` has no
- * partial member, and the coordinator's own `ExplorerRunStateV1` already
- * carries that reading for the run as a whole. A lane that is still working is
- * `pending`, and it carries the wire's `phase` so `queued` and `reading` stay
- * apart.
+ * A lane that is still working is `pending`, and it carries the wire's `phase`
+ * so `queued` and `reading` stay apart.
  */
 export type ExplorerLaneReadModel =
   /** Still working. `phase` is the source's own; `null` when the pendingness
@@ -72,6 +77,58 @@ export type ExplorerLaneReadModel =
        * dropped row shows up as a stated omission instead of shrinking the
        * result set silently. */
       readonly unreadableRows: number;
+    }
+  /** The source answered with real rows but its own read reported omitted
+   * records: what is shown is genuine and less than what exists. */
+  | {
+      readonly state: 'partial';
+      readonly lane: LaneId;
+      readonly hits: readonly Hit[];
+      readonly reportedTotal: number | null;
+      readonly unreadableRows: number;
+      readonly errorCode: string | null;
+      readonly detail: string | null;
+    }
+  /** The provider is building itself — acquiring its model or projecting its
+   * index — and will be able to answer once that work completes. */
+  | {
+      readonly state: 'indexing';
+      readonly lane: LaneId;
+      readonly errorCode: string | null;
+      readonly detail: string | null;
+      /** The provider's own progress accounting, when it reported one. */
+      readonly completedUnits: number | null;
+      readonly totalUnits: number | null;
+    }
+  /** The source's store exists but does not match the current generation. */
+  | {
+      readonly state: 'stale';
+      readonly lane: LaneId;
+      readonly errorCode: string | null;
+      readonly detail: string | null;
+    }
+  /** The source's own read exceeded the admitted deadline. */
+  | {
+      readonly state: 'timed_out';
+      readonly lane: LaneId;
+      readonly errorCode: string | null;
+      readonly detail: string | null;
+    }
+  /** This surface cannot consult the source at all — a statement about the
+   * surface, not a failure of the source. */
+  | {
+      readonly state: 'unsupported';
+      readonly lane: LaneId;
+      readonly errorCode: string | null;
+      readonly detail: string | null;
+    }
+  /** The source's store does not exist for this project: a typed absence
+   * (semantic search not activated), not a failure to answer. */
+  | {
+      readonly state: 'absent';
+      readonly lane: LaneId;
+      readonly errorCode: string | null;
+      readonly detail: string | null;
     }
   /** The source itself reported it could not serve this run. */
   | {
@@ -157,6 +214,8 @@ function hitsForLane(
       return sessionHits(rows, terms);
     case 'knowledge':
       return knowledgeHits(rows, terms);
+    case 'semantic':
+      return semanticHits(rows, terms);
     default: {
       const exhaustive: never = lane;
       return exhaustive;
@@ -218,6 +277,36 @@ export function laneFromSourceProgress(
         unreadableRows: page.rows.length - hits.length,
       };
     }
+    case 'partial': {
+      const page = source.page;
+      const hits = page === null ? [] : hitsForLane(lane, narrowPageRows(page), terms);
+      return {
+        state: 'partial',
+        lane,
+        hits,
+        reportedTotal: page?.total ?? null,
+        unreadableRows: page === null ? 0 : page.rows.length - hits.length,
+        errorCode: source.error_code,
+        detail: source.message,
+      };
+    }
+    case 'indexing':
+      return {
+        state: 'indexing',
+        lane,
+        errorCode: source.error_code,
+        detail: source.message,
+        completedUnits: source.completed_units,
+        totalUnits: source.total_units,
+      };
+    case 'stale':
+      return { state: 'stale', lane, errorCode: source.error_code, detail: source.message };
+    case 'timed_out':
+      return { state: 'timed_out', lane, errorCode: source.error_code, detail: source.message };
+    case 'unsupported':
+      return { state: 'unsupported', lane, errorCode: source.error_code, detail: source.message };
+    case 'absent':
+      return { state: 'absent', lane, errorCode: source.error_code, detail: source.message };
     case 'unavailable':
       return { state: 'unavailable', lane, errorCode: source.error_code, detail: source.message };
     case 'cancelled':
@@ -336,20 +425,29 @@ export function browseLane<T>(
   };
 }
 
-/** Rows the lane actually delivered. Empty for every state but `ready`, where
- * emptiness means the source answered with nothing. */
+/** Rows the lane actually delivered. Empty for every state but `ready` and
+ * `partial`, where emptiness means the source answered with nothing. */
 export function laneHits(read: ExplorerLaneReadModel): readonly Hit[] {
-  return read.state === 'ready' ? read.hits : [];
+  return read.state === 'ready' || read.state === 'partial' ? read.hits : [];
 }
 
-/** Whether the source answered. Only a `ready` lane may be counted. */
+/** Whether the source answered with rows it stands behind — completely
+ * (`ready`) or with stated omissions (`partial`). */
 export function laneAnswered(read: ExplorerLaneReadModel): boolean {
-  return read.state === 'ready';
+  return read.state === 'ready' || read.state === 'partial';
 }
 
 /** Whether the lane is still working, and so has not failed to answer. */
 export function lanePending(read: ExplorerLaneReadModel): boolean {
   return read.state === 'pending';
+}
+
+/** Whether the lane reached a truthful conclusion: it answered with rows it
+ * stands behind, or it is a typed absence — a store that does not exist has
+ * nothing left to say, which is different from a source that failed to say
+ * it. Only lanes that are neither concluded nor pending count as unanswered. */
+export function laneConcluded(read: ExplorerLaneReadModel): boolean {
+  return laneAnswered(read) || read.state === 'absent';
 }
 
 /**
@@ -367,6 +465,22 @@ export function laneStateKind(read: ExplorerLaneReadModel): DomainStateKind {
       return 'loading';
     case 'ready':
       return 'ready';
+    case 'partial':
+      return 'partial';
+    // Indexing is work in progress, not a refusal: the spinning chip keeps it
+    // apart from `unavailable`, and the detail names the exact stage.
+    case 'indexing':
+      return 'loading';
+    case 'stale':
+      return 'stale';
+    case 'timed_out':
+      return 'timed_out';
+    case 'unsupported':
+      return 'unsupported';
+    // A typed absence is a complete answer that nothing exists — the
+    // complete-zero chip, never the unavailable one.
+    case 'absent':
+      return 'complete_zero_findings';
     case 'unavailable':
       return 'unavailable';
     case 'offline':
@@ -421,6 +535,18 @@ export function sourceOutcomeStateKind(outcome: ExplorerSourceOutcomeV1): Domain
       return 'loading';
     case 'ready':
       return 'ready';
+    case 'partial':
+      return 'partial';
+    case 'indexing':
+      return 'loading';
+    case 'stale':
+      return 'stale';
+    case 'timed_out':
+      return 'timed_out';
+    case 'unsupported':
+      return 'unsupported';
+    case 'absent':
+      return 'complete_zero_findings';
     case 'unavailable':
       return 'unavailable';
     case 'error':
@@ -449,6 +575,20 @@ export function laneStateDetail(read: ExplorerLaneReadModel): string | undefined
       return read.phase ?? undefined;
     case 'ready':
       return undefined;
+    case 'partial':
+      return read.errorCode ?? read.detail ?? undefined;
+    case 'indexing': {
+      const stage = read.errorCode ?? read.detail ?? 'indexing';
+      // The provider's own progress accounting, when it reported one.
+      return read.completedUnits != null && read.totalUnits != null
+        ? `${stage} · ${read.completedUnits.toLocaleString()}/${read.totalUnits.toLocaleString()}`
+        : stage;
+    }
+    case 'stale':
+    case 'timed_out':
+    case 'unsupported':
+    case 'absent':
+      return read.errorCode ?? read.detail ?? undefined;
     case 'unavailable':
       return read.errorCode ?? read.detail ?? undefined;
     case 'offline':
@@ -487,7 +627,16 @@ export function laneEvidence(read: ExplorerLaneReadModel | undefined): EvidenceQ
   switch (read.state) {
     case 'ready':
       return read.reportedTotal != null ? 'measured' : 'associated';
+    // Partial rows are genuine but the source itself said records were
+    // omitted, so no reported total can be a real denominator.
+    case 'partial':
+      return read.hits.length > 0 ? 'associated' : 'unknown';
     case 'pending':
+    case 'indexing':
+    case 'stale':
+    case 'timed_out':
+    case 'unsupported':
+    case 'absent':
     case 'unavailable':
     case 'offline':
     case 'cancelled':

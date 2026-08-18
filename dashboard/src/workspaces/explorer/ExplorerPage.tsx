@@ -13,12 +13,13 @@ import { ResultList } from './ResultList.tsx';
 import { Reveal } from './Reveal.tsx';
 
 /**
- * Explorer — one query, three memories.
+ * Explorer — one query, independent memories.
  *
- * TraceDecay remembers a repository three separate ways, and the honest
+ * TraceDecay remembers a repository several separate ways, and the honest
  * consequence is that a search is a *fan-out*, not a single ranked list: the
- * code graph, the transcript store, and the fact store each answer for
- * themselves. This surface makes that structure the design. Each memory is a
+ * code graph, the transcript store, the fact store, and the semantic provider
+ * each answer for themselves (the semantic lane reports its typed provider
+ * state until retrieval is executable from this surface). This surface makes that structure the design. Each memory is a
  * lane with its own identity rail and its own live state; results stay
  * comparable through one row grammar; and because the daemon returns hits but
  * no relevance score, "why this is here" is told with things that are actually
@@ -67,7 +68,7 @@ export function ExplorerPage() {
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
             <h1 className="text-sm font-semibold tracking-tight">Explorer</h1>
             <p className="text-2xs text-text-muted">
-              one coordinator run, three source-local answers
+              one coordinator run, source-local answers only
             </p>
           </div>
           <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start">

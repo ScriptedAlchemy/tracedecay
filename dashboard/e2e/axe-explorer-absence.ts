@@ -36,7 +36,7 @@ function sourceCoverage(over: Record<string, unknown> = {}): Record<string, unkn
 }
 
 function explorerSource(
-  id: 'code_graph' | 'sessions' | 'knowledge',
+  id: 'code_graph' | 'sessions' | 'knowledge' | 'semantic',
   label: string,
   coverage: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -53,6 +53,18 @@ function explorerSource(
     error_code: null,
     message: null,
     page: { offset: 0, limit: 50, total: 0, next_offset: null, rows: [], metadata: {} },
+  };
+}
+
+/** The live semantic source: not activated, a typed absence carrying the
+ * complete accounting of an empty domain. */
+function semanticAbsentSource(): Record<string, unknown> {
+  return {
+    ...explorerSource('semantic', 'Semantic', sourceCoverage({ unit: 'indexed vectors' })),
+    outcome: 'absent',
+    error_code: 'semantic_not_activated',
+    message: 'semantic search is not activated for this project',
+    page: null,
   };
 }
 
@@ -81,7 +93,7 @@ function explorerEmptyRun(query: string, sources: unknown[]): Record<string, unk
       request_revision: 'explorer-query-request-v1',
       plan_revision: 'explorer-query-plan-v1',
       merge_revision: 'source-local-no-merge-v1',
-      required_source_ids: ['code_graph', 'sessions', 'knowledge'],
+      required_source_ids: ['code_graph', 'sessions', 'knowledge', 'semantic'],
       ordering_policy: 'source_local_no_cross_source_merge',
       explanation: 'Search each required source and preserve its own order and coverage.',
       submitted_at_micros: 1,
@@ -107,6 +119,7 @@ export const EXPLORER_SCENARIOS: readonly Scenario[] = [
           explorerSource('code_graph', 'Code graph', sourceCoverage({ unit: 'symbols' })),
           explorerSource('sessions', 'Sessions', sourceCoverage()),
           explorerSource('knowledge', 'Knowledge', sourceCoverage({ unit: 'facts' })),
+          semanticAbsentSource(),
         ]),
       },
     },
@@ -140,6 +153,7 @@ export const EXPLORER_SCENARIOS: readonly Scenario[] = [
               omission_reasons: ['every unit resolved to unknown status'],
             }),
           ),
+          semanticAbsentSource(),
         ]),
       },
     },
@@ -181,6 +195,7 @@ export const EXPLORER_SCENARIOS: readonly Scenario[] = [
           ),
           explorerSource('sessions', 'Sessions', sourceCoverage()),
           explorerSource('knowledge', 'Knowledge', sourceCoverage({ unit: 'facts' })),
+          semanticAbsentSource(),
         ]),
       },
     },

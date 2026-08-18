@@ -77,19 +77,19 @@ const FACT_ROW = {
   trust_score: 0.8,
 };
 
-function source(
-  sourceId: 'code_graph' | 'sessions' | 'knowledge',
-  rows: Record<string, unknown>[],
-  total: number | null,
-) {
+const SOURCE_LABELS = {
+  code_graph: 'Code graph',
+  sessions: 'Sessions',
+  knowledge: 'Knowledge',
+  semantic: 'Semantic',
+} as const;
+
+type SourceId = keyof typeof SOURCE_LABELS;
+
+function source(sourceId: SourceId, rows: Record<string, unknown>[], total: number | null) {
   return {
     source_id: sourceId,
-    source_label:
-      sourceId === 'code_graph'
-        ? 'Code graph'
-        : sourceId === 'sessions'
-          ? 'Sessions'
-          : 'Knowledge',
+    source_label: SOURCE_LABELS[sourceId],
     phase: 'completed',
     outcome: 'ready',
     completed_units: rows.length,
@@ -122,11 +122,59 @@ function source(
   };
 }
 
+/** The live semantic source today: not activated, a typed absence carrying
+ * the complete accounting of an empty domain. */
+function semanticAbsent() {
+  const base = source('semantic', [], 0);
+  return {
+    ...base,
+    outcome: 'absent',
+    completed_units: 0,
+    total_units: 0,
+    coverage: {
+      ...base.coverage,
+      eligible: 0,
+      examined: 0,
+      matched: 0,
+      denominator: 0,
+      unit: 'indexed vectors',
+    },
+    error_code: 'semantic_not_activated',
+    message: 'semantic search is not activated for this project',
+    page: null,
+  };
+}
+
+/** An activated semantic provider mid-projection. */
+function semanticIndexing() {
+  const base = source('semantic', [], 0);
+  return {
+    ...base,
+    outcome: 'indexing',
+    completed_units: 3,
+    total_units: 10,
+    coverage: {
+      ...base.coverage,
+      completeness: 'partial',
+      eligible: 10,
+      examined: 3,
+      matched: null,
+      denominator: 10,
+      unit: 'semantic units',
+      omission_reasons: ['semantic vector projection is in progress'],
+    },
+    error_code: 'semantic_indexing',
+    message: 'semantic vector projection is in progress',
+    page: null,
+  };
+}
+
 function plannerEnvelope(
   sources: unknown[] = [
     source('code_graph', [CODE_ROW], 1),
     source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
     source('knowledge', [FACT_ROW], null),
+    semanticAbsent(),
   ],
   state: 'partial' | 'completed' = 'partial',
   query = 'graph',
@@ -144,13 +192,13 @@ function plannerEnvelope(
     authorization: { outcome: 'authorized' },
     coverage: {
       completeness: state === 'completed' ? 'complete' : 'partial',
-      eligible: 3,
-      examined: state === 'completed' ? 3 : 2,
+      eligible: 4,
+      examined: state === 'completed' ? 4 : 3,
       matched: null,
       excluded: null,
       omitted: state === 'completed' ? 0 : 1,
       unknown: null,
-      denominator: 3,
+      denominator: 4,
       unit: 'sources',
       omission_reasons: state === 'completed' ? [] : ['knowledge coverage is unknown'],
     },
@@ -163,7 +211,7 @@ function plannerEnvelope(
       request_revision: 'explorer-query-request-v1',
       plan_revision: 'explorer-query-plan-v1',
       merge_revision: 'source-local-no-merge-v1',
-      required_source_ids: ['code_graph', 'sessions', 'knowledge'],
+      required_source_ids: ['code_graph', 'sessions', 'knowledge', 'semantic'],
       ordering_policy: 'source_local_no_cross_source_merge',
       explanation:
         'Search the code graph, active-project session store, and bounded project fact authority in parallel; preserve each source own order and coverage.',
@@ -261,7 +309,7 @@ afterEach(() => {
 
 /** A source that reached a terminal outcome without returning a page. */
 function withoutAnswer(
-  sourceId: 'code_graph' | 'sessions' | 'knowledge',
+  sourceId: SourceId,
   outcome: 'unavailable' | 'cancelled' | 'error',
   code: string,
   message: string,
@@ -285,7 +333,7 @@ function withoutAnswer(
   };
 }
 
-function unavailable(sourceId: 'code_graph' | 'sessions' | 'knowledge', code: string, message: string) {
+function unavailable(sourceId: SourceId, code: string, message: string) {
   return withoutAnswer(sourceId, 'unavailable', code, message);
 }
 
@@ -308,6 +356,7 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
             source('code_graph', [CODE_ROW], 1),
             source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
             unavailable('knowledge', 'fact_store_unavailable', 'the fact authority is not mounted'),
+            semanticAbsent(),
           ],
           'partial',
         ),
@@ -318,10 +367,10 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
     await user.keyboard('{Enter}');
     await screen.findByRole('button', { name: /graph_search/ });
 
-    // Three rows arrived, but only two of the three memories answered. The
-    // caption must not present the result set as spanning all three.
-    expect(screen.queryByText(/across three memories/)).toBeNull();
-    expect(screen.getByText(/across 2 of 3 memories/)).toBeTruthy();
+    // Three rows arrived, but only two of the four memories answered with
+    // rows. The caption must not present the result set as spanning them all.
+    expect(screen.queryByText(/across four memories/)).toBeNull();
+    expect(screen.getByText(/across 2 of 4 memories/)).toBeTruthy();
   });
 
   it('refuses a confirmed-absence claim when a source reports unknown coverage', async () => {
@@ -343,6 +392,7 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
               source('code_graph', [], 0),
               source('sessions', [], 0),
               knowledgeUnknownCoverage,
+              semanticAbsent(),
             ],
             'completed',
             'missing',
@@ -357,6 +407,7 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
                 source('code_graph', [], 0),
                 source('sessions', [], 0),
                 knowledgeUnknownCoverage,
+                semanticAbsent(),
               ],
               'completed',
               'missing',
@@ -407,7 +458,12 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
       '/api/explorer/queries': {
         status: 200,
         body: plannerEnvelope(
-          [source('code_graph', [], 0), source('sessions', [], 0), allUnitsUnknown],
+          [
+            source('code_graph', [], 0),
+            source('sessions', [], 0),
+            allUnitsUnknown,
+            semanticAbsent(),
+          ],
           'completed',
           'missing',
         ),
@@ -448,7 +504,7 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
       '/api/explorer/queries': {
         status: 200,
         body: plannerEnvelope(
-          [examinedNothing, source('sessions', [], 0), source('knowledge', [], 0)],
+          [examinedNothing, source('sessions', [], 0), source('knowledge', [], 0), semanticAbsent()],
           'completed',
           'missing',
         ),
@@ -466,13 +522,19 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
   it('still confirms absence when every source examined its full denominator', async () => {
     // The counterweight to the two refusals above: the claim must remain
     // reachable, or the fix would have replaced a false statement with no
-    // statement at all.
+    // statement at all. The typed-absent semantic source rides along, as in
+    // the live default install, and must not block the claim.
     renderExplorer({
       ...SEARCH_ROUTES,
       '/api/explorer/queries': {
         status: 200,
         body: plannerEnvelope(
-          [source('code_graph', [], 0), source('sessions', [], 0), source('knowledge', [], 0)],
+          [
+            source('code_graph', [], 0),
+            source('sessions', [], 0),
+            source('knowledge', [], 0),
+            semanticAbsent(),
+          ],
           'completed',
           'missing',
         ),
@@ -496,6 +558,7 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
             source('code_graph', [CODE_ROW], 1),
             source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
             unavailable('knowledge', 'fact_store_unavailable', 'the fact authority is not mounted'),
+            semanticAbsent(),
           ],
           'partial',
         ),
@@ -526,6 +589,7 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
               'fact_store_unavailable',
               'the fact authority is not mounted',
             ),
+            semanticAbsent(),
           ],
           'partial',
           'missing',
@@ -572,7 +636,7 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
     // chip as well as in the prose: source-level unavailability is now its own
     // chip, so a lane that merely worded the difference while drawing the same
     // indicator would still be lying to anyone reading the indicator.
-    for (const name of [/^Code graph/, /^Sessions/, /^Knowledge/]) {
+    for (const name of [/^Code graph/, /^Sessions/, /^Knowledge/, /^Semantic/]) {
       const lane = screen.getByRole('button', { name });
       expect(laneChipState(lane)).toBe('offline');
       expect(lane.textContent).toMatch(/Offline/);
@@ -598,7 +662,7 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
     expect(screen.getByRole('button', { name: /^Code graph/ }).textContent).toContain(
       'loaded of 0 matching rows reported',
     );
-    for (const name of [/^Sessions/, /^Knowledge/]) {
+    for (const name of [/^Sessions/, /^Knowledge/, /^Semantic/]) {
       const lane = screen.getByRole('button', { name });
       expect(lane.textContent).toMatch(/the run never named this source/);
       expect(lane.textContent).not.toMatch(/\b0\b/);
@@ -606,6 +670,69 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
     // The coordinator declared canonical finality while omitting two of its own
     // required sources, so the absence claim stays unearned.
     expect(screen.queryByText(/No source matched/)).toBeNull();
+  });
+
+  it('renders an indexing semantic source as work in progress, never as unavailable', async () => {
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope(
+          [
+            source('code_graph', [CODE_ROW], 1),
+            source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
+            unavailable('knowledge', 'fact_store_unavailable', 'the fact authority is not mounted'),
+            semanticIndexing(),
+          ],
+          'partial',
+        ),
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'graph');
+    await user.keyboard('{Enter}');
+    await screen.findByRole('button', { name: /graph_search/ });
+
+    // The same run carries a genuinely unavailable source and an indexing
+    // one: they must light different indicators, not merely different prose.
+    const semantic = screen.getByRole('button', { name: /^Semantic/ });
+    const knowledge = screen.getByRole('button', { name: /^Knowledge/ });
+    expect(laneChipState(semantic)).toBe('loading');
+    expect(laneChipState(knowledge)).toBe('unavailable');
+    expect(laneChipState(semantic)).not.toBe(laneChipState(knowledge));
+    // The clause names the stage and the provider's own progress accounting.
+    expect(semantic.textContent).toMatch(/semantic_indexing · 3\/10/);
+    expect(semantic.textContent).not.toMatch(/Source unavailable/);
+  });
+
+  it('blocks a complete-zero absence claim while the semantic provider is indexing', async () => {
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope(
+          [
+            source('code_graph', [], 0),
+            source('sessions', [], 0),
+            source('knowledge', [], 0),
+            semanticIndexing(),
+          ],
+          'completed',
+          'missing',
+        ),
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'missing');
+    await user.keyboard('{Enter}');
+
+    // Three sources examined their full denominators, but the semantic index
+    // is still being built: a global-absence claim is unearned until the
+    // provider can actually be consulted.
+    expect(await screen.findByText('Some sources did not answer')).toBeTruthy();
+    expect(screen.getByText(/A zero-result claim would be unsafe/)).toBeTruthy();
+    expect(screen.queryByText(/No source matched/)).toBeNull();
+    expect(screen.queryByText(/examined its full denominator/)).toBeNull();
   });
 
   it('renders a field the row omitted as absent rather than as a zero', async () => {
@@ -623,6 +750,7 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
           source('code_graph', [rowWithoutDegree], 1),
           source('sessions', [], 0),
           source('knowledge', [], 0),
+          semanticAbsent(),
         ]),
       },
     });
@@ -737,6 +865,7 @@ describe('ExplorerPage', () => {
           source('code_graph', [{ ...CODE_ROW, degree: 0 }], 1),
           source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
           source('knowledge', [FACT_ROW], null),
+          semanticAbsent(),
         ]),
       },
     });
@@ -769,7 +898,12 @@ describe('ExplorerPage', () => {
       '/api/explorer/queries': {
         status: 200,
         body: plannerEnvelope(
-          [source('code_graph', [], 0), unavailableSessions, source('knowledge', [], null)],
+          [
+            source('code_graph', [], 0),
+            unavailableSessions,
+            source('knowledge', [], null),
+            semanticAbsent(),
+          ],
           'partial',
           'missing',
         ),
@@ -805,7 +939,12 @@ describe('ExplorerPage', () => {
       '/api/explorer/queries': {
         status: 200,
         body: plannerEnvelope(
-          [source('code_graph', [], 0), unavailableSessions, source('knowledge', [], null)],
+          [
+            source('code_graph', [], 0),
+            unavailableSessions,
+            source('knowledge', [], null),
+            semanticAbsent(),
+          ],
           'partial',
           'missing',
         ),
@@ -839,6 +978,7 @@ describe('ExplorerPage', () => {
             source('code_graph', [], 0),
             source('sessions', [], 0),
             source('knowledge', [], null),
+            semanticAbsent(),
           ],
           'partial',
           'missing',

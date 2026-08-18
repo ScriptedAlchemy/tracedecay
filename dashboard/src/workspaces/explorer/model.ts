@@ -13,7 +13,7 @@
  */
 import { matchedFieldNames, matchWindow } from '../../ui/search/terms.ts';
 
-export type LaneId = 'code' | 'sessions' | 'knowledge';
+export type LaneId = 'code' | 'sessions' | 'knowledge' | 'semantic';
 
 export interface LaneSpec {
   readonly id: LaneId;
@@ -56,6 +56,16 @@ export const LANES: readonly LaneSpec[] = [
     railClass: 'bg-state-ready',
     textClass: 'text-state-ready',
     facetLabel: 'Category',
+  },
+  {
+    id: 'semantic',
+    label: 'Semantic',
+    searches:
+      'nothing yet from this surface — the coordinator reports the semantic provider\u2019s typed state per run',
+    browseLabel: 'nothing to browse; the provider\u2019s state is reported per search',
+    railClass: 'bg-state-loading',
+    textClass: 'text-state-loading',
+    facetLabel: 'Symbol kind',
   },
 ];
 
@@ -114,6 +124,26 @@ export function codeHits(
   rows: readonly Record<string, unknown>[],
   terms: readonly string[],
 ): Hit[] {
+  return symbolHits('code', 'graph endpoint rows', rows, terms);
+}
+
+/** Semantic rows share the graph-symbol grammar: if the semantic source ever
+ * serves a page from this surface it will carry the same symbol rows, ordered
+ * by the provider. Today the source only reports typed state, so this
+ * normaliser exists for the contract, not for a live payload. */
+export function semanticHits(
+  rows: readonly Record<string, unknown>[],
+  terms: readonly string[],
+): Hit[] {
+  return symbolHits('semantic', 'semantic provider rows', rows, terms);
+}
+
+function symbolHits(
+  lane: 'code' | 'semantic',
+  orderLabel: string,
+  rows: readonly Record<string, unknown>[],
+  terms: readonly string[],
+): Hit[] {
   const max = rows.reduce((m, row) => Math.max(m, num(row, 'degree') ?? 0), 0);
   return rows.flatMap((row, index) => {
     const id = str(row, 'id');
@@ -131,10 +161,10 @@ export function codeHits(
     const bodyField = str(row, 'signature') ? 'signature' : str(row, 'doc') ? 'doc' : undefined;
     const kind = str(row, 'kind');
     const hit: Hit = {
-      key: `code:${id ?? index}`,
-      lane: 'code',
+      key: `${lane}:${id ?? index}`,
+      lane,
       rank: index + 1,
-      orderLabel: 'graph endpoint rows',
+      orderLabel,
       title: name,
       titleField,
       ...(file ? { context: line == null ? file : `${file}:${line}` } : {}),

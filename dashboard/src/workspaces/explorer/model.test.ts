@@ -159,6 +159,10 @@ describe('LANES', () => {
       ['code', 'name, qualified_name, signature, and file_path'],
       ['sessions', 'message content and summary text in the active LCM store'],
       ['knowledge', 'content and tags in a bounded fact overview'],
+      [
+        'semantic',
+        'nothing yet from this surface — the coordinator reports the semantic provider’s typed state per run',
+      ],
     ]);
   });
 });

@@ -81,7 +81,7 @@ pub(super) async fn knowledge_source(
                 .deadline()
                 .is_elapsed_at(crate::application::context::application_observed_at()) =>
         {
-            return ExplorerSourceProgressV1::error(
+            return ExplorerSourceProgressV1::timed_out(
                 ExplorerSourceIdV1::Knowledge,
                 "knowledge_query_timed_out",
                 "knowledge query exceeded the admitted request deadline",
@@ -106,7 +106,7 @@ pub(super) async fn knowledge_source(
         .deadline()
         .is_elapsed_at(crate::application::context::application_observed_at())
     {
-        return ExplorerSourceProgressV1::error(
+        return ExplorerSourceProgressV1::timed_out(
             ExplorerSourceIdV1::Knowledge,
             "knowledge_query_timed_out",
             "knowledge query exceeded the admitted request deadline",

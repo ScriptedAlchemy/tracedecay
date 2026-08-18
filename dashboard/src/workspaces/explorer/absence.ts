@@ -38,8 +38,33 @@ function coverageBlocker(source: ExplorerSourceProgressV1): string | null {
   const { coverage } = source;
   const unit = coverage.unit;
 
-  if (source.outcome !== 'ready') {
-    return `${label} did not answer`;
+  switch (source.outcome) {
+    // `ready` earns absence through its coverage accounting below. `absent`
+    // is a typed statement that the store does not exist — legitimately a
+    // complete accounting of an empty domain — but it goes through the same
+    // checks, so an absence claim without complete-zero coverage still blocks.
+    case 'ready':
+    case 'absent':
+      break;
+    case 'indexing':
+      return `${label} is still building its index`;
+    case 'partial':
+      return `${label} answered with omitted records`;
+    case 'stale':
+      return `${label} answered from a stale store`;
+    case 'timed_out':
+      return `${label} timed out before answering`;
+    case 'unsupported':
+      return `${label} cannot be consulted from this surface`;
+    case 'pending':
+    case 'unavailable':
+    case 'error':
+    case 'cancelled':
+      return `${label} did not answer`;
+    default: {
+      const exhaustive: never = source.outcome;
+      return exhaustive;
+    }
   }
   if (coverage.completeness !== 'complete' || coverage.denominator === null) {
     return `${label} reports ${coverage.completeness} coverage`;

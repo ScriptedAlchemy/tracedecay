@@ -64,7 +64,7 @@ function run(over: Record<string, unknown> = {}): ExplorerQueryRunV1 {
     request_revision: 'explorer-query-request-v1',
     plan_revision: 'explorer-query-plan-v1',
     merge_revision: 'source-local-no-merge-v1',
-    required_source_ids: ['code_graph', 'sessions', 'knowledge'],
+    required_source_ids: ['code_graph', 'sessions', 'knowledge', 'semantic'],
     ordering_policy: 'source_local_no_cross_source_merge',
     explanation: 'test',
     submitted_at_micros: 1,
@@ -273,6 +273,121 @@ describe('laneFromSourceProgress', () => {
     expect(
       laneFromSourceProgress('sessions', progress({ source_id: 'code_graph' }), []),
     ).toEqual({ state: 'unanswered', lane: 'sessions' });
+  });
+
+  it('keeps an indexing semantic source apart from an unavailable one, chip and all', () => {
+    const indexing = laneFromSourceProgress(
+      'semantic',
+      progress({
+        source_id: 'semantic',
+        source_label: 'Semantic',
+        outcome: 'indexing',
+        completed_units: 3,
+        total_units: 10,
+        page: null,
+        error_code: 'semantic_indexing',
+        message: 'semantic vector projection is in progress',
+      }),
+      [],
+    );
+    const unavailable = laneFromSourceProgress(
+      'semantic',
+      progress({
+        source_id: 'semantic',
+        source_label: 'Semantic',
+        outcome: 'unavailable',
+        page: null,
+        error_code: 'semantic_runtime_unavailable',
+        message: 'no mounted runtime',
+      }),
+      [],
+    );
+
+    expect(indexing).toEqual({
+      state: 'indexing',
+      lane: 'semantic',
+      errorCode: 'semantic_indexing',
+      detail: 'semantic vector projection is in progress',
+      completedUnits: 3,
+      totalUnits: 10,
+    });
+    expect(unavailable.state).toBe('unavailable');
+    // Different chips: work in progress spins, a refusal does not.
+    expect(laneStateKind(indexing)).toBe('loading');
+    expect(laneStateKind(unavailable)).toBe('unavailable');
+    expect(laneStateKind(indexing)).not.toBe(laneStateKind(unavailable));
+    // The clause carries the stage and the provider's own progress accounting.
+    expect(laneStateDetail(indexing)).toBe('semantic_indexing · 3/10');
+  });
+
+  it('reads an unactivated semantic source as a typed absence with the complete-zero chip', () => {
+    const absent = laneFromSourceProgress(
+      'semantic',
+      progress({
+        source_id: 'semantic',
+        source_label: 'Semantic',
+        outcome: 'absent',
+        page: null,
+        error_code: 'semantic_not_activated',
+        message: 'semantic search is not activated for this project',
+      }),
+      [],
+    );
+
+    expect(absent).toEqual({
+      state: 'absent',
+      lane: 'semantic',
+      errorCode: 'semantic_not_activated',
+      detail: 'semantic search is not activated for this project',
+    });
+    expect(laneStateKind(absent)).toBe('complete_zero_findings');
+    expect(laneStateKind(absent)).not.toBe('unavailable');
+  });
+
+  it('keeps stale, timed-out and unsupported as their own conditions and chips', () => {
+    const reads = (['stale', 'timed_out', 'unsupported'] as const).map((outcome) =>
+      laneFromSourceProgress(
+        'code',
+        progress({ outcome, page: null, error_code: `${outcome}_code`, message: null }),
+        [],
+      ),
+    );
+
+    expect(reads.map((read) => read.state)).toEqual(['stale', 'timed_out', 'unsupported']);
+    expect(reads.map((read) => laneStateKind(read))).toEqual([
+      'stale',
+      'timed_out',
+      'unsupported',
+    ]);
+  });
+
+  it('counts partial rows while keeping the omission stated', () => {
+    const partial = laneFromSourceProgress(
+      'sessions',
+      progress({
+        source_id: 'sessions',
+        source_label: 'Sessions',
+        outcome: 'partial',
+        error_code: 'lcm_temporal_read_incomplete',
+        message: null,
+        page: {
+          offset: 0,
+          limit: 50,
+          total: null,
+          next_offset: null,
+          rows: [{ message_id: 'm1', content: 'partial row' }],
+          metadata: {},
+        },
+      }),
+      [],
+    );
+
+    expect(partial.state).toBe('partial');
+    expect(laneHits(partial)).toHaveLength(1);
+    expect(laneStateKind(partial)).toBe('partial');
+    // Rows are genuine but the source itself said records were omitted, so
+    // the count never presents as a measured denominator.
+    expect(laneEvidence(partial)).toBe('associated');
   });
 });
 
