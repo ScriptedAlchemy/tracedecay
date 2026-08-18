@@ -5,6 +5,36 @@ use crate::mcp::response_handles::{
 };
 use crate::tracedecay::current_timestamp;
 use serde_json::json;
+use std::ffi::OsString;
+
+/// Restores one environment variable on drop. Callers must already hold
+/// `lock_response_handle_store` (the user-data-dir test-env lock) so the
+/// mutation cannot race other tests.
+struct EnvRestore {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvRestore {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
 
 #[test]
 fn default_format_is_markdown() {
@@ -220,12 +250,15 @@ fn markdown_preview_with_handle_keeps_different_short_full_text_plain() {
 fn truncated_json_envelope_reports_store_failure() {
     let _store_guard = lock_response_handle_store();
     let dir = tempfile::TempDir::new().unwrap();
-    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
-    std::fs::write(
-        dir.path().join(".tracedecay/enrollment.json"),
-        r#"{"project_id":"../invalid","storage_mode":"profile_sharded"}"#,
-    )
-    .unwrap();
+    // Identity never lives in the working tree, so the honest failure
+    // injection is an unwritable profile root: pin discovery beneath a
+    // regular file so every durable handle-store write fails.
+    let blocker = dir.path().join("blocker");
+    std::fs::write(&blocker, b"not a directory").unwrap();
+    let _profile = EnvRestore::set(
+        crate::config::USER_DATA_DIR_ENV,
+        blocker.join(".tracedecay"),
+    );
     let long = format!(
         "{{\"items\":[{}]}}",
         (0..3_000)
