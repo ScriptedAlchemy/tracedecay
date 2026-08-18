@@ -1163,7 +1163,15 @@ where
     let response = executor
         .invoke_controlled(invocation, controls.deadline, controls.cancellation, policy)
         .await;
-    let problem = match validated_daemon_outcome(operation, &request_id, response) {
+    let outcome = validated_daemon_outcome(operation, &request_id, response);
+    let owning_layer = match &outcome {
+        Ok(crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { .. })
+        | Ok(crate::daemon_contract::DaemonInvocationOutcome::RetainedApplicationProblem {
+            ..
+        }) => ProblemOwningLayer::Application,
+        _ => ProblemOwningLayer::Runtime,
+    };
+    let problem = match outcome {
         Ok(outcome) => match outcome {
             crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
                 problem
@@ -1230,7 +1238,7 @@ where
         Err(problem) => problem,
     };
     let problem = match ApplicationProblemEnvelope::new(result_contract, request_id, problem) {
-        Ok(problem) => problem.with_owning_layer(ProblemOwningLayer::Runtime),
+        Ok(problem) => problem.with_owning_layer(owning_layer),
         Err(error) => return application_contract_error_response(error),
     };
     CanonicalInvocationResult::<T>::new(binding_id, Err(problem)).into_http_response()

@@ -76,7 +76,12 @@ fn retained_partial_effect_problem(
             "This admitted terminal belongs only to the daemon response fixture",
         )
         .expect("safe diagnostic"),
-        committed_receipt: effect_receipt(operation, request_id, scope, EffectTermination::Partial),
+        committed_receipt: Box::new(effect_receipt(
+            operation,
+            request_id,
+            scope,
+            EffectTermination::Partial,
+        )),
         retry: RetryDirective::Never,
         legal_actions: vec![LegalAction::Reconcile],
     }

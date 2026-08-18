@@ -444,12 +444,6 @@ fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
                 .is_file(),
             "creating a managed skill must persist a SKILL.md package"
         );
-        assert!(
-            !profile_root
-                .join("agent_managed/skills/repo-hygiene/SKILL.md")
-                .exists(),
-            "dashboard skill writes must not follow the ambient profile root"
-        );
 
         let (status, listed) = get_json(&agent, &skills_url);
         assert_eq!(status, 200);

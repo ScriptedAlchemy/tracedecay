@@ -1,13 +1,122 @@
+use std::collections::BTreeSet;
+use std::fmt::Display;
 use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay::dashboard;
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_domain::ProjectId;
+use tracedecay_application::{
+    CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass,
+    RequestAdmission, RequestContext, ResolvedScope,
+};
+use tracedecay_code_index::graph_projection::{
+    CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
+};
+use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
+use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, ProjectId};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_graph_db::NeverCancelled;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+use tracedecay_usecases::context::RegisteredScopeResolver;
+use tracedecay_usecases::graph::{
+    CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
+    CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
+    VerifiedCodeGraphRead,
+};
 use tracedecay_usecases::host_admission::HostAdmissionScope;
+
+#[derive(Clone)]
+struct DashboardTestCodeGraphProjectionV1 {
+    scope: ResolvedScope,
+    store: Arc<CodeGraphProjectionStore>,
+}
+
+impl CodeGraphProjectionReadPort for DashboardTestCodeGraphProjectionV1 {
+    fn open<'a>(&'a self, request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a> {
+        Box::pin(async move {
+            request
+                .context
+                .validate()
+                .map_err(|error| CodeGraphReadError::InvalidRequest {
+                    detail: error.to_string(),
+                })?;
+            if request.context.scope() != &self.scope {
+                return Err(CodeGraphReadError::Denied);
+            }
+            if request.cancellation.is_cancelled() {
+                return Err(CodeGraphReadError::Cancelled);
+            }
+            match request.context.admission_at(request.observed_at) {
+                RequestAdmission::Admitted => {
+                    VerifiedCodeGraphRead::new(self.scope.clone(), Arc::clone(&self.store))
+                }
+                RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
+                RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
+            }
+        })
+    }
+}
+
+#[derive(Clone)]
+struct DashboardTestCodeGraphAdmissionV1 {
+    scope: ResolvedScope,
+}
+
+impl CodeGraphReadAdmissionPort for DashboardTestCodeGraphAdmissionV1 {
+    fn admit<'a>(
+        &'a self,
+        request: CodeGraphReadAdmissionRequest<'a>,
+    ) -> CodeGraphReadAdmissionFuture<'a> {
+        Box::pin(async move {
+            if request.cancellation.is_cancelled() {
+                return Err(CodeGraphReadError::Cancelled);
+            }
+            if request.deadline.is_elapsed_at(request.observed_at) {
+                return Err(CodeGraphReadError::TimedOut);
+            }
+            let actor = ActorId::new("actor.dashboard-test-code-graph").map_err(|error| {
+                CodeGraphReadError::InvalidRequest {
+                    detail: error.to_string(),
+                }
+            })?;
+            let grant = CapabilityGrantSnapshot::new(
+                CapabilityGrantId::new("grant.dashboard-test-code-graph").map_err(|error| {
+                    CodeGraphReadError::InvalidRequest {
+                        detail: error.to_string(),
+                    }
+                })?,
+                1,
+                ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).map_err(|error| {
+                    CodeGraphReadError::InvalidRequest {
+                        detail: error.to_string(),
+                    }
+                })?,
+                actor.clone(),
+                request.observed_at,
+                request.deadline.expires_at,
+                self.scope.clone(),
+                BTreeSet::from([request.operation.capability_id().clone()]),
+                BTreeSet::from([request.operation.use_case_id().clone()]),
+                DisclosureClass::Evidence,
+            )
+            .map_err(|error| CodeGraphReadError::InvalidRequest {
+                detail: error.to_string(),
+            })?;
+            RequestContext::new(
+                actor,
+                self.scope.clone(),
+                grant,
+                request.request_id,
+                request.deadline,
+                request.cancellation.context(),
+            )
+            .map_err(|error| CodeGraphReadError::InvalidRequest {
+                detail: error.to_string(),
+            })
+        })
+    }
+}
 
 /// Dashboard integration authority assembled at the root composition layer.
 ///
@@ -131,7 +240,8 @@ impl DashboardTestRuntimeV1 {
     ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
         let authority = self.dashboard_test_authority()?;
         let (automation_authority, automation_writer) =
-            dashboard::dashboard_automation_authority_for_test(Arc::clone(cg), &self.profile_root)?;
+            dashboard::dashboard_automation_authority_for_test(Arc::clone(cg), &self.profile_root)
+                .await?;
         let lcm_read_authority = dashboard::dashboard_lcm_read_authority_for_test(
             cg.as_ref(),
             self.profile_database.as_ref(),
@@ -145,10 +255,13 @@ impl DashboardTestRuntimeV1 {
             dashboard::dashboard_git_correlation_read_authority_for_test(
                 self.project_database.clone(),
             );
+        let (code_graph_admission, code_graph_projection) =
+            dashboard_test_code_graph_authority(cg.as_ref(), &self.project_id)?;
         let authority = authority
             .with_automation_authority(automation_authority, automation_writer)
             .with_lcm_read_authority(lcm_read_authority)
-            .with_git_correlation_read_authority(git_correlation_read_authority);
+            .with_git_correlation_read_authority(git_correlation_read_authority)
+            .with_code_graph_authority(code_graph_admission, code_graph_projection);
         Ok(authority)
     }
 
@@ -454,6 +567,52 @@ impl DashboardTestRuntimeV1 {
             )
             .await
             .map(|receipt| receipt.summary)
+    }
+}
+
+fn dashboard_test_code_graph_authority(
+    cg: &TraceDecay,
+    project_id: &ProjectId,
+) -> Result<(
+    Arc<dyn CodeGraphReadAdmissionPort>,
+    Arc<dyn CodeGraphProjectionReadPort>,
+)> {
+    let scope = RegisteredScopeResolver::resolve(cg.project_root(), cg.project_root(), project_id)
+        .map_err(|error| dashboard_test_graph_error("resolve exact project scope", error))?;
+    let generation = CodeGenerationId::new("generation.dashboard-test-code-graph.1")
+        .map_err(|error| dashboard_test_graph_error("create generation identity", error))?;
+    let cancellation = CancellationSignal::active("cancel.dashboard-test-code-graph")
+        .map_err(|error| dashboard_test_graph_error("create cancellation authority", error))?;
+    let projection = HermeticCodeGraphProjectionStore::memory(&cancellation)
+        .map_err(|error| dashboard_test_graph_error("create projection store", error))?;
+    let symbols = GenerationSymbolIndexV1::new(generation.clone(), Vec::new())
+        .map_err(|error| dashboard_test_graph_error("create generation symbol index", error))?;
+    projection
+        .publish_indexed_with_cancellation(
+            &generation,
+            &[],
+            &[],
+            &[],
+            &symbols,
+            Arc::new(NeverCancelled),
+        )
+        .map_err(|error| dashboard_test_graph_error("publish verified generation", error))?;
+    let store = Arc::new(
+        projection
+            .verified_store(&generation)
+            .map_err(|error| dashboard_test_graph_error("open verified generation", error))?,
+    );
+    Ok((
+        Arc::new(DashboardTestCodeGraphAdmissionV1 {
+            scope: scope.clone(),
+        }),
+        Arc::new(DashboardTestCodeGraphProjectionV1 { scope, store }),
+    ))
+}
+
+fn dashboard_test_graph_error(operation: &str, error: impl Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("dashboard fixture could not {operation}: {error}"),
     }
 }
 

@@ -186,14 +186,30 @@ fn retained_admin_journey_commits_add_update_feedback_and_remove() {
         assert_eq!(final_payload["fact"]["kind"], "unavailable");
         assert_eq!(final_payload["fact"]["status"]["fact_id"], fact_id);
         assert_eq!(final_payload["fact"]["status"]["payload_access"], "deleted");
-        assert!(
-            final_payload["trust_history"]
-                .as_array()
-                .is_some_and(|history| history.iter().any(|entry| {
-                    entry["action"] == "helpful" && entry["source_label"] == "dashboard-api-test"
-                })),
-            "the tombstone read must preserve canonical feedback lineage: {final_read}"
+        let trust_history = final_payload["trust_history"]
+            .as_array()
+            .unwrap_or_else(|| panic!("tombstone read must retain trust lineage: {final_read}"));
+        let terminal_feedback = trust_history
+            .iter()
+            .find(|entry| entry["event_id"] == feedback_event_id)
+            .unwrap_or_else(|| {
+                panic!("tombstone read must retain the feedback event: {final_read}")
+            });
+        assert_eq!(
+            terminal_feedback["action"],
+            feedback_payload["feedback"]["action"]
         );
+        assert_eq!(
+            terminal_feedback["old_trust_millionths"],
+            feedback_payload["feedback"]["old_trust_millionths"]
+        );
+        assert_eq!(
+            terminal_feedback["new_trust_millionths"],
+            feedback_payload["feedback"]["new_trust_millionths"]
+        );
+        assert_eq!(terminal_feedback["details_availability"], "redacted");
+        assert!(terminal_feedback["source_label"].is_null());
+        assert!(terminal_feedback["reason"].is_null());
     });
 }
 
@@ -357,7 +373,12 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
             .unwrap_or_else(|error| panic!("record automatic applied receipt: {error}"));
 
         let quarantined_apply_id = "automatic-fact-receipt-api-quarantined";
-        let quarantined_content = "api_key=0000000000000000";
+        let sensitive_key = ["s", "k", "-test-123456"].concat();
+        let quarantined_metadata = serde_json::Value::Object(serde_json::Map::from_iter([(
+            sensitive_key,
+            serde_json::json!("credential-bearing object keys are never projected"),
+        )]));
+        let quarantined_content = "Automatic receipt API preserves quarantined terminal lineage";
         let quarantine_receipt = SanitizationReceiptV1::new(
             SanitizationReceiptRefV1::new(
                 SanitizationReceiptId::new("receipt.dashboard-api-quarantined".to_owned())
@@ -375,7 +396,7 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
                     "source_label": "dashboard-api-test",
                     "tags": [],
                     "entities": [],
-                    "metadata": {},
+                    "metadata": &quarantined_metadata,
                 }))
                 .unwrap_or_else(|error| panic!("bind sanitization payload: {error}")),
             ),
@@ -388,7 +409,7 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
             Some("dashboard-api-test".to_owned()),
             Vec::new(),
             Vec::new(),
-            serde_json::json!({}),
+            quarantined_metadata,
             quarantine_receipt,
             Some("run.dashboard-receipt-api".to_owned()),
             Confidence::new(0.9).unwrap_or_else(|error| panic!("build fact confidence: {error}")),

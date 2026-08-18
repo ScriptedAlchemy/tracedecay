@@ -7,7 +7,6 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ActorId, RetrievalGrainV1, SessionId, TemporalModeV1, canonical_sha256};
 use tracedecay_temporal_query::context::ContextBudget;
-use tracedecay_temporal_query::ports::ExecutionLimits;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::session::{SessionRetrievalScope, SessionTemporalQuery};
@@ -24,6 +23,7 @@ use tracedecay_sessions::runtime::lcm::{LcmDescribeResponse, LcmDescribeTarget};
 use crate::daemon::session_retrieval::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, SessionApplicationRetrievalPortV1,
     SessionRetrievalPageView, SessionRetrievalServiceOutcome, SessionRetrievalStoreScope,
+    admitted_execution_limits,
 };
 use tracedecay_usecases::context::ResolvedSessionIdentity;
 
@@ -722,20 +722,7 @@ fn retrieval_query(
     // The admitted application port caps each request at 100 records. Larger
     // dashboard windows advance only through its opaque cursor, preserving the
     // same immutable authorization and frozen participant manifest per page.
-    let execution_limits = ExecutionLimits {
-        candidate_limit: limit,
-        candidate_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        candidate_item_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        candidate_metadata_field_bytes: 16 * 1024,
-        record_limit: limit,
-        record_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        record_item_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        hydration_limit: limit,
-        hydration_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        hydration_payload_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
-        hydration_chunk_bytes: 16 * 1024,
-        ..ExecutionLimits::default()
-    };
+    let execution_limits = admitted_execution_limits(limit);
     let query = SessionTemporalQuery::new(
         session_id,
         None,
