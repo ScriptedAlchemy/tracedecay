@@ -48,6 +48,12 @@ impl RegisteredGlobalDbOwnerV1 {
     /// the owner becomes visible to any caller. The temporary issuance is
     /// dropped before the owner is returned, so it never becomes a hidden
     /// retirement blocker.
+    ///
+    /// Short-lived attaches have no background maintenance task, so the
+    /// authority-invariant convergence runs synchronously here: a store whose
+    /// tamper-invalidation triggers deleted the trusted audit checkpoint (or
+    /// whose guard triggers were altered) fails the attach instead of opening
+    /// on unaudited authority rows.
     pub async fn migrate_and_attach(
         database: DatabaseOwnerV1,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
@@ -57,6 +63,7 @@ impl RegisteredGlobalDbOwnerV1 {
         registered.require_admitted_registry_shape().await?;
         registered.validate_authority_schema_contract().await?;
         registered.rearm_queued_projection_retries().await?;
+        super::schema_stages::converge_attached_registered_schema(&registered.database).await?;
         drop(registered);
         Ok(Self { database })
     }

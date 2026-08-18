@@ -335,9 +335,12 @@ async fn registered_snapshot_isolated_from_later_workflow_writes() {
     let snapshot = RegisteredWorkflowIndexSnapshot::from_engine_test_snapshot(
         conn.read_snapshot().await.unwrap(),
     );
-    upsert_run(&conn, &sample_run("wf_after_snapshot", "sess-1"))
-        .await
-        .unwrap();
+    // A later start keeps the fresh-snapshot ordering assertion meaningful:
+    // with equal timestamps the query tie-breaks on `run_id DESC`, which would
+    // invert the recency order this test observes.
+    let mut later_run = sample_run("wf_after_snapshot", "sess-1");
+    later_run.started_ts = Some(1_700_000_001);
+    upsert_run(&conn, &later_run).await.unwrap();
 
     assert_eq!(
         snapshot

@@ -729,6 +729,33 @@ async fn converge_registered_schema_on(
     .await
 }
 
+/// Synchronously converges an attached existing store's authority invariants.
+///
+/// Short-lived attaches have no background maintenance task to run the audit
+/// later, so tamper evidence must fail the attach itself: projection-output
+/// tamper triggers delete the trusted audit checkpoint (arming an exhaustive
+/// re-audit here), and altered guard triggers force the exhaustive pass with
+/// its foreign-key sweep, mirroring
+/// [`ensure_registered_schema_for_admission`]. An untampered store resumes
+/// from its plausible checkpoint and pays only the bounded suffix audit.
+pub async fn converge_attached_registered_schema(
+    database: &Database,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    let transaction = database
+        .begin_bulk_write_transaction("converge attached global database authority schema")
+        .await?;
+    let force_exhaustive = !authority_invariant_triggers_intact(&transaction).await?;
+    converge_registered_schema_on(
+        &transaction,
+        RegisteredSchemaConvergence {
+            force_exhaustive,
+            is_fresh: false,
+        },
+    )
+    .await?;
+    transaction.commit().await
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkflowSchemaAdmission {
     Create,
