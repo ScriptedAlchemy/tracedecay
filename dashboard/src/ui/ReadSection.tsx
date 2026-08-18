@@ -375,9 +375,15 @@ export function CenteredState({
   const guidance = STATE_GUIDANCE[kind];
   // A dead channel on an instrument still shows its ruled field and its bezel:
   // the reader can see the surface is present and simply carrying no signal.
+  // Sized by its CONTAINER, not the viewport: this plate renders both on
+  // full-width channels and inside narrow query rails, and the wide-plate
+  // padding (p-8 outside, px-8 inside) left a ~230px rail about 90px of text
+  // column — the guidance wrapped one or two words per line. Below the @md
+  // container width the paddings drop and the card takes the rail's full
+  // width; the wide plates keep their original geometry.
   return (
-    <div className="td-graticule flex h-full min-h-48 items-center justify-center bg-surface-0 p-8">
-      <div className="relative flex max-w-md flex-col items-center gap-3 border border-edge-subtle bg-surface-1 px-8 py-6 text-center">
+    <div className="td-graticule @container flex h-full min-h-48 items-center justify-center bg-surface-0 p-3 @md:p-8">
+      <div className="relative flex w-full max-w-md flex-col items-center gap-3 border border-edge-subtle bg-surface-1 px-3 py-4 text-center @md:w-auto @md:px-8 @md:py-6">
         <Corners />
         <h1 className="text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
           {title}

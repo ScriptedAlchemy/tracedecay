@@ -10,6 +10,7 @@ type NodeReducer = (node: string, data: NodeAttributes) => NodeAttributes;
 const sigmaState = vi.hoisted(() => ({
   graph: undefined as Graph | undefined,
   nodeReducer: undefined as NodeReducer | undefined,
+  drawNodeHover: undefined as unknown,
   refreshCount: 0,
   constructCount: 0,
   killCount: 0,
@@ -75,12 +76,13 @@ vi.mock('sigma', () => ({
     constructor(
       graph: Graph,
       container: HTMLElement,
-      settings: { nodeReducer?: NodeReducer },
+      settings: { nodeReducer?: NodeReducer; defaultDrawNodeHover?: unknown },
     ) {
       this.container = container;
       this.measure();
       sigmaState.graph = graph;
       sigmaState.nodeReducer = settings.nodeReducer;
+      sigmaState.drawNodeHover = settings.defaultDrawNodeHover;
       sigmaState.constructCount += 1;
     }
 
@@ -144,6 +146,7 @@ describe('GraphCanvas', () => {
   beforeEach(() => {
     sigmaState.graph = undefined;
     sigmaState.nodeReducer = undefined;
+    sigmaState.drawNodeHover = undefined;
     sigmaState.refreshCount = 0;
     sigmaState.constructCount = 0;
     sigmaState.killCount = 0;
@@ -201,6 +204,16 @@ describe('GraphCanvas', () => {
       // whether a box exists, never on whether the engine has answered yet.
       await flushPendingWork();
       expect(sigmaState.constructCount).toBe(0);
+    });
+
+    // The default hover pass paints an opaque white shadowed disc over the
+    // hovered body — the one theme-blind drawing Sigma would do on this
+    // field. The renderer must hand it the theme drawer at construction;
+    // renderer.test.ts and nodeHover.test.ts own what that drawer paints.
+    it('replaces sigma default white hover pass with the theme drawer', async () => {
+      render(<GraphCanvas nodes={NODES} edges={[]} />);
+      await waitFor(() => expect(sigmaState.constructCount).toBe(1));
+      expect(typeof sigmaState.drawNodeHover).toBe('function');
     });
 
     it('builds one once the container is measured, without a mount retry', async () => {
