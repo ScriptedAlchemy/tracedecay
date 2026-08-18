@@ -807,6 +807,94 @@ async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
     assert_eq!(snapshot.generation(), &initial_manifest.generation);
 }
 
+/// An orphaned pending replay — journaled by a publisher that died before its
+/// verified-head CAS and never retried under the same publication key — must
+/// not block the projection forever. The relational journal is an ordered
+/// log, so a later publication of a NEWER generation completes the
+/// predecessor first and then lands its own head. This is the live wedge
+/// shape: every reconcile sealed a newer generation, appended a newer
+/// sequence, and conflicted on the orphan while sealed artifacts piled up.
+#[tokio::test]
+async fn orphaned_pending_replay_is_completed_by_the_next_generations_publication() {
+    let fixture = ContractFixture::new("complete-orphan").await;
+    let project_id = project_id("complete-orphan");
+    let (project_database, _sessions) = fixture.mount_unbound(&project_id).await;
+    let projection = projection("complete-orphan");
+    let orphan_manifest = manifest(&projection, "orphan", "1");
+
+    let identity = profile_identity::load_or_create(&fixture.root.join("profile"))
+        .expect("profile identity authority");
+    let shard_id = StoreShardIdV1::project(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let orphan_key = key("complete-orphan-orphan");
+    let publication_key = GraphPublicationKeyV1::new(
+        GraphProjectionIdentityV1 {
+            shard_id: shard_id.clone(),
+            namespace: GraphNamespaceV1::new(orphan_manifest.projection.namespace.as_str())
+                .expect("relational namespace"),
+            projection: GraphProjectionIdV1::new(orphan_manifest.projection.projection.as_str())
+                .expect("relational projection"),
+        },
+        GraphGenerationIdV1::new(orphan_manifest.generation.as_str())
+            .expect("relational generation"),
+        GraphPublicationIdempotencyKeyV1::new(orphan_key.as_str())
+            .expect("relational idempotency key"),
+    );
+    let input_digest = inline_graph_publication_input_digest(&publication_key, &orphan_manifest)
+        .expect("canonical inline publication digest");
+    let replay = orphan_manifest
+        .relational_replay(shard_id, orphan_key, input_digest, None, &|| Ok(()))
+        .expect("relational replay");
+    let cancellation_identity = RuntimeCancellationIdentityV1 {
+        cancellation_id: RuntimeCancellationIdV1::new("complete-orphan-cancellation")
+            .expect("cancellation id"),
+        generation: 1,
+    };
+    let deadline_identity = RuntimeDeadlineV1 {
+        deadline_id: RuntimeDeadlineIdV1::new("complete-orphan-deadline").expect("deadline id"),
+    };
+    let control = RuntimeRequestControlV1 {
+        requested_at: UtcMicros(1),
+        deadline: deadline_identity.clone(),
+        cancellation: cancellation_identity.clone(),
+    };
+    let probe = NeverInterruptedProbe {
+        cancellation: cancellation_identity,
+        deadline: deadline_identity,
+    };
+    let context = GraphPublicationOperationContextV1::new(&control, &probe)
+        .expect("publication operation context");
+    let mut storage = project_database
+        .graph_publication_storage()
+        .expect("graph publication storage");
+    assert!(matches!(
+        storage
+            .append_replay(&replay, &context)
+            .expect("journal the orphaned replay"),
+        GraphReplayAppendOutcomeV1::Appended(_)
+    ));
+    drop(storage);
+
+    // The successor is a different generation under a different publication
+    // key: precisely the shape every post-interruption reconcile produces.
+    let successor = manifest(&projection, "successor", "2");
+    let published = publish_through_database(
+        &project_database,
+        &successor,
+        key("complete-orphan-successor"),
+        false,
+    )
+    .expect("successor publication completes the orphan and lands its own head");
+    assert_eq!(published.generation(), &successor.generation);
+    let snapshot = snapshot_through_database(&project_database, &projection)
+        .expect("verified snapshot after the completion")
+        .expect("published verified head");
+    assert_eq!(snapshot.generation(), &successor.generation);
+}
+
 #[tokio::test]
 async fn registry_drop_cancels_retained_trait_runtime_operations() {
     let fixture = ContractFixture::new("lifecycle-cancellation").await;

@@ -11,7 +11,8 @@ use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1,
     GraphDbRegistration, GraphGenerationDependency, GraphGenerationManifest, GraphIdempotencyKey,
     GraphProjectionIdentity, GraphProjectorRevision, GraphReplayCollectionOutcome, GraphWriteBatch,
-    SealedCodeGenerationReplay, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
+    SealedCodeGenerationReplay, VerifiedGenerationBatchCommit, VerifiedGraphCommit,
+    VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey,
@@ -20,7 +21,8 @@ use tracedecay_store::{
     CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphProjectionIdV1,
     GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1,
     GraphPublicationKeyV1, GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1,
-    GraphPublicationStoreErrorV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1, ProjectId,
+    GraphPublicationStoreErrorV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
+    GraphVerifiedHeadV1, ProjectId,
     RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
     RuntimeRequestProbeV1, SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome,
@@ -56,6 +58,11 @@ const GRAPH_OPEN_DEADLINE: Duration = Duration::from_secs(30);
 const SEALED_PROJECTION_DEADLINE_FLOOR: Duration = GRAPH_OPERATION_DEADLINE;
 const SEALED_PROJECTION_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
 const SEALED_PROJECTION_DEADLINE_CEILING: Duration = Duration::from_mins(15);
+/// How many orphaned pending predecessors one publication attempt will
+/// complete before reporting Conflict. Each completion advances the verified
+/// head by one, so even a journal wedged across many interrupted boots drains
+/// across a few reconcile passes rather than blocking forever.
+const MAX_PENDING_REPLAY_COMPLETIONS_V1: usize = 8;
 
 fn sealed_projection_deadline(sealed_bytes: u64) -> Duration {
     let scaled = Duration::from_secs(sealed_bytes.div_ceil(SEALED_PROJECTION_BYTES_PER_SECOND));
@@ -360,22 +367,32 @@ impl RetainedVerifiedGraphRuntimeV1 {
             ))
             .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         };
-        let publish_probe = GraphPublicationProbeV1 {
-            request_cancellation: Arc::clone(&request_cancellation),
-            lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
-            deadline_at,
-            cancellation: publish_cancellation_identity.clone(),
-            deadline: publish_deadline_identity.clone(),
-            commit_started: AtomicBool::new(false),
+        // Minted fresh per publication rather than once for the whole flow:
+        // the probe's commit grant is one-shot, and completing a pending
+        // predecessor consumes a grant of its own before this flow's replay
+        // publishes through another.
+        let publish_journaled = |storage: &mut dyn GraphPublicationStoreV1,
+                                 key: &GraphPublicationKeyV1|
+         -> std::result::Result<VerifiedGraphCommit, GraphDbError> {
+            let publish_probe = GraphPublicationProbeV1 {
+                request_cancellation: Arc::clone(&request_cancellation),
+                lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
+                deadline_at,
+                cancellation: publish_cancellation_identity.clone(),
+                deadline: publish_deadline_identity.clone(),
+                commit_started: AtomicBool::new(false),
+            };
+            let publish_control = RuntimeRequestControlV1 {
+                requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+                deadline: publish_deadline_identity.clone(),
+                cancellation: publish_cancellation_identity.clone(),
+            };
+            let publish_context =
+                GraphPublicationOperationContextV1::new(&publish_control, &publish_probe)
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+            self.graph_registry
+                .publish_verified_with_lease(&graph, storage, &publish_context, key)
         };
-        let publish_control = RuntimeRequestControlV1 {
-            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
-            deadline: publish_deadline_identity,
-            cancellation: publish_cancellation_identity,
-        };
-        let publish_context =
-            GraphPublicationOperationContextV1::new(&publish_control, &publish_probe)
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         let input = inline_graph_publication_input_digest(&publication_key, manifest)?;
         let requested_replay = |prior| {
             manifest.relational_replay(
@@ -432,12 +449,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 // verdict (completes the pending publication, dedupes an exact
                 // replay, or reports a true conflict) — answering Conflict here
                 // would wedge the projection permanently.
-                let publication = self.graph_registry.publish_verified_with_lease(
-                    &graph,
-                    &mut storage,
-                    &publish_context,
-                    &publication_key,
-                )?;
+                let publication = publish_journaled(&mut storage, &publication_key)?;
                 return Ok(publication.snapshot);
             }
             GraphPublicationReplayLookupV1::Retired(_) => {
@@ -448,27 +460,45 @@ impl RetainedVerifiedGraphRuntimeV1 {
         let prior = storage
             .verified_head(&relational_projection, &context)
             .map_err(map_publication_error)?;
-        let replay = requested_replay(prior)?;
-        match storage
-            .append_replay(&replay, &context)
-            .map_err(map_publication_error)?
-        {
-            GraphReplayAppendOutcomeV1::Appended(_)
-            | GraphReplayAppendOutcomeV1::ExactReplay(_)
-            | GraphReplayAppendOutcomeV1::ExactVerifiedReplay { .. } => {}
-            GraphReplayAppendOutcomeV1::Conflict { .. }
-            | GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. }
-            | GraphReplayAppendOutcomeV1::VerifiedHeadConflict { .. }
-            | GraphReplayAppendOutcomeV1::PendingReplayConflict { .. } => {
-                return Err(GraphDbError::Conflict);
+        let mut replay = requested_replay(prior)?;
+        // Same ordered-journal recovery as the sealed code-generation path: a
+        // predecessor journaled by an interrupted publisher can only land
+        // through a live one, so complete it and re-append against the
+        // advanced head instead of wedging on Conflict.
+        let mut completed_predecessors = 0usize;
+        loop {
+            match storage
+                .append_replay(&replay, &context)
+                .map_err(map_publication_error)?
+            {
+                GraphReplayAppendOutcomeV1::Appended(_)
+                | GraphReplayAppendOutcomeV1::ExactReplay(_)
+                | GraphReplayAppendOutcomeV1::ExactVerifiedReplay { .. } => break,
+                GraphReplayAppendOutcomeV1::PendingReplayConflict { pending } => {
+                    if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
+                        return Err(GraphDbError::Conflict);
+                    }
+                    completed_predecessors += 1;
+                    publish_journaled(&mut storage, &pending.publication.key)?;
+                    let prior = storage
+                        .verified_head(&relational_projection, &context)
+                        .map_err(map_publication_error)?;
+                    replay = requested_replay(prior)?;
+                }
+                GraphReplayAppendOutcomeV1::VerifiedHeadConflict { actual } => {
+                    if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
+                        return Err(GraphDbError::Conflict);
+                    }
+                    completed_predecessors += 1;
+                    replay = requested_replay(actual)?;
+                }
+                GraphReplayAppendOutcomeV1::Conflict { .. }
+                | GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. } => {
+                    return Err(GraphDbError::Conflict);
+                }
             }
         }
-        let publication = self.graph_registry.publish_verified_with_lease(
-            &graph,
-            &mut storage,
-            &publish_context,
-            &replay.key,
-        )?;
+        let publication = publish_journaled(&mut storage, &replay.key)?;
         Ok(publication.snapshot)
     }
 
@@ -738,13 +768,13 @@ impl RetainedCodeGraphRuntimeV1 {
         );
         let publish = |storage: &mut dyn GraphPublicationStoreV1,
                        key: &GraphPublicationKeyV1,
-                       manifest: GraphGenerationManifest|
+                       manifest: Option<GraphGenerationManifest>|
          -> std::result::Result<_, GraphDbError> {
             let deadline_at = Instant::now() + projection_deadline;
             let cancellation_identity = RuntimeCancellationIdentityV1 {
                 cancellation_id: RuntimeCancellationIdV1::new(format!(
                     "graph-publish-commit:{}",
-                    graph_generation.as_str()
+                    key.generation.as_str()
                 ))
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
                 generation: 2,
@@ -752,7 +782,7 @@ impl RetainedCodeGraphRuntimeV1 {
             let deadline_identity = RuntimeDeadlineV1 {
                 deadline_id: RuntimeDeadlineIdV1::new(format!(
                     "graph-publish-commit-deadline:{}",
-                    graph_generation.as_str()
+                    key.generation.as_str()
                 ))
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
             };
@@ -774,23 +804,32 @@ impl RetainedCodeGraphRuntimeV1 {
             };
             let context = GraphPublicationOperationContextV1::new(&control, &probe)
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-            // The already-built projection manifest rides along so first
-            // publication does not re-read and re-project the sealed artifact
-            // through the replay manifest provider.
-            self.graph_registry.publish_verified_manifest(
-                GraphDbRegistration {
-                    authority_lease: Arc::clone(&authority_lease),
-                    cancellation: request_cancellation,
-                    lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                        &self.lifecycle_cancelled,
-                    ))),
-                    deadline: deadline_at,
-                },
-                storage,
-                &context,
-                key,
-                manifest,
-            )
+            let registration = GraphDbRegistration {
+                authority_lease: Arc::clone(&authority_lease),
+                cancellation: request_cancellation,
+                lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                    &self.lifecycle_cancelled,
+                ))),
+                deadline: deadline_at,
+            };
+            match manifest {
+                // The already-built projection manifest rides along so first
+                // publication does not re-read and re-project the sealed
+                // artifact through the replay manifest provider.
+                Some(manifest) => self.graph_registry.publish_verified_manifest(
+                    registration,
+                    storage,
+                    &context,
+                    key,
+                    manifest,
+                ),
+                // A pending predecessor journaled by an interrupted publisher
+                // carries no in-hand manifest; publication reconstructs it
+                // from the journaled canonical replay source.
+                None => self
+                    .graph_registry
+                    .publish_verified(registration, storage, &context, key),
+            }
         };
         match storage
             .replay(&publication_key, &context)
@@ -823,7 +862,7 @@ impl RetainedCodeGraphRuntimeV1 {
                         &relational_projection,
                     );
                 }
-                let publication = publish(&mut storage, &publication_key, manifest)?;
+                let publication = publish(&mut storage, &publication_key, Some(manifest))?;
                 return Ok(publication.snapshot);
             }
             GraphPublicationReplayLookupV1::Retired(_) => return Err(GraphDbError::Conflict),
@@ -860,9 +899,6 @@ impl RetainedCodeGraphRuntimeV1 {
                 None => Ok(()),
             },
         )?;
-        let prior = storage
-            .verified_head(&relational_projection, &context)
-            .map_err(map_publication_error)?;
         let input = canonical_sha256(&(
             "tracedecay.code-graph-publication-input.v1",
             &source,
@@ -871,37 +907,77 @@ impl RetainedCodeGraphRuntimeV1 {
             &manifest.watermark,
         ))
         .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let replay = manifest.relational_sealed_replay(
-            self.authority.binding().shard_id.clone(),
-            idempotency_key,
-            GraphPublicationInputDigestV1::new(input.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            prior,
-            source,
-            &|| match probe.interruption() {
-                Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-                Some(RuntimeInterruptionV1::DeadlineExceeded) => {
-                    Err(GraphDbError::DeadlineExceeded)
+        let build_replay = |prior: Option<GraphVerifiedHeadV1>| {
+            manifest.relational_sealed_replay(
+                self.authority.binding().shard_id.clone(),
+                idempotency_key.clone(),
+                GraphPublicationInputDigestV1::new(input.as_str())
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+                prior,
+                source.clone(),
+                &|| match probe.interruption() {
+                    Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                    Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                        Err(GraphDbError::DeadlineExceeded)
+                    }
+                    None => Ok(()),
+                },
+            )
+        };
+        let prior = storage
+            .verified_head(&relational_projection, &context)
+            .map_err(map_publication_error)?;
+        let mut replay = build_replay(prior)?;
+        // The relational journal is an ordered log: a replay journaled by an
+        // interrupted publisher blocks every later sequence until it lands,
+        // and a dead publisher can never land its own. Answering Conflict
+        // here wedged the projection permanently — every reconcile sealed a
+        // newer generation, appended a newer sequence, and conflicted on the
+        // orphan forever while sealed artifacts piled up on disk. So this
+        // publisher completes pending predecessors first (their sealed
+        // sources are retained by collection precisely because they are
+        // pending), then appends its own replay against the advanced head.
+        // Bounded: every pass either appends or advances the verified head by
+        // exactly one completed predecessor, and a repeated blocker surfaces
+        // as that predecessor's own typed error.
+        let mut completed_predecessors = 0usize;
+        loop {
+            match storage
+                .append_replay(&replay, &context)
+                .map_err(map_publication_error)?
+            {
+                GraphReplayAppendOutcomeV1::Appended(_)
+                | GraphReplayAppendOutcomeV1::ExactReplay(_)
+                | GraphReplayAppendOutcomeV1::ExactVerifiedReplay { .. } => break,
+                GraphReplayAppendOutcomeV1::PendingReplayConflict { pending } => {
+                    if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
+                        return Err(GraphDbError::Conflict);
+                    }
+                    completed_predecessors += 1;
+                    publish(&mut storage, &pending.publication.key, None)?;
+                    let prior = storage
+                        .verified_head(&relational_projection, &context)
+                        .map_err(map_publication_error)?;
+                    replay = build_replay(prior)?;
                 }
-                None => Ok(()),
-            },
-        )?;
-        match storage
-            .append_replay(&replay, &context)
-            .map_err(map_publication_error)?
-        {
-            GraphReplayAppendOutcomeV1::Appended(_)
-            | GraphReplayAppendOutcomeV1::ExactReplay(_)
-            | GraphReplayAppendOutcomeV1::ExactVerifiedReplay { .. } => {}
-            GraphReplayAppendOutcomeV1::Conflict { .. }
-            | GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. }
-            | GraphReplayAppendOutcomeV1::VerifiedHeadConflict { .. }
-            | GraphReplayAppendOutcomeV1::PendingReplayConflict { .. } => {
-                return Err(GraphDbError::Conflict);
+                GraphReplayAppendOutcomeV1::VerifiedHeadConflict { actual } => {
+                    // A concurrent publisher advanced the head between our
+                    // read and this append; the refreshed head is the only
+                    // thing that was wrong with the replay.
+                    if completed_predecessors >= MAX_PENDING_REPLAY_COMPLETIONS_V1 {
+                        return Err(GraphDbError::Conflict);
+                    }
+                    completed_predecessors += 1;
+                    replay = build_replay(actual)?;
+                }
+                GraphReplayAppendOutcomeV1::Conflict { .. }
+                | GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. } => {
+                    return Err(GraphDbError::Conflict);
+                }
             }
         }
         drop(replay_pool_lock);
-        let publication = publish(&mut storage, &replay.key, manifest)?;
+        let publication = publish(&mut storage, &replay.key, Some(manifest))?;
         Ok(publication.snapshot)
     }
 
