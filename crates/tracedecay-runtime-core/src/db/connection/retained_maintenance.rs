@@ -18,26 +18,28 @@ impl Database {
     }
 
     pub async fn release_connection_memory(&self) -> Result<()> {
-        self.inner
-            .conn
-            .execute_batch("PRAGMA shrink_memory")
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to release SQLite reader cache: {error}"),
-                operation: "release SQLite database memory".to_owned(),
-            })?;
-        if self.is_writable()
-            && let Some(connection) = &self.inner.write_conn
-        {
-            connection
-                .execute_batch("PRAGMA shrink_memory")
-                .await
-                .map_err(|error| TraceDecayError::Database {
-                    message: format!("failed to release SQLite writer cache: {error}"),
+        // Both connections derive from the same registry runtime handle and
+        // share one reader pool, so releasing through either covers every
+        // reader; the writable handle also reaches the writer actor.
+        let handle = if self.is_writable() {
+            self.inner
+                .write_conn
+                .as_ref()
+                .ok_or_else(|| TraceDecayError::Database {
+                    message: "writable database handle is missing its writer connection"
+                        .to_owned(),
                     operation: "release SQLite database memory".to_owned(),
-                })?;
+                })?
+        } else {
+            &self.inner.conn
+        };
+        match handle.release_connection_memory().await {
+            Ok(_) => Ok(()),
+            Err(error) => Err(TraceDecayError::Database {
+                message: format!("failed to release SQLite connection cache: {error}"),
+                operation: "release SQLite database memory".to_owned(),
+            }),
         }
-        Ok(())
     }
 
     /// Forces a complete WAL truncation through the retained writer actor.

@@ -246,6 +246,67 @@ pub trait ExactSqlWriteAuthority: Send + Sync {
     fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError>;
 }
 
+/// Outcome of a connection-local `PRAGMA shrink_memory` release.
+///
+/// This is not a write. A handle that owns live reader or writer connections
+/// reports [`Self::Released`]. A handle that genuinely has nothing to shrink
+/// reports a typed [`Self::NoOp`] reason instead of failing closed as
+/// "writer unavailable".
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemoryReleaseOutcome {
+    Released {
+        reader_connections: usize,
+        writer: bool,
+    },
+    NoOp {
+        reason: MemoryReleaseNoOpReason,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemoryReleaseNoOpReason {
+    /// The reader pool was dropped before this handle released. This is the
+    /// only lifecycle state reported as "closed"; a live pool whose worker
+    /// fails to release propagates a typed error instead.
+    ReaderPoolClosed,
+    ReaderPoolDraining,
+    /// Every live worker is inside a retained snapshot that outran the
+    /// bounded release wait. The queued commands still shrink those
+    /// connections when their snapshots end.
+    ReaderConnectionsBusy,
+    NoLiveConnections,
+}
+
+impl fmt::Display for MemoryReleaseOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Released {
+                reader_connections,
+                writer,
+            } => write!(
+                formatter,
+                "released SQLite cache on {reader_connections} reader connection(s), writer={writer}"
+            ),
+            Self::NoOp { reason } => write!(formatter, "SQLite memory release no-op: {reason}"),
+        }
+    }
+}
+
+impl fmt::Display for MemoryReleaseNoOpReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReaderPoolClosed => formatter.write_str("reader pool is closed"),
+            Self::ReaderPoolDraining => formatter.write_str("reader pool is draining"),
+            Self::ReaderConnectionsBusy => {
+                formatter.write_str("reader connections are serving retained snapshots")
+            }
+            Self::NoLiveConnections => {
+                formatter.write_str("no live reader or writer connections to release")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExactSqlError {
     AuthorityMismatch,

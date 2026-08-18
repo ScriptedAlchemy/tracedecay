@@ -69,6 +69,7 @@ type ExactSqlSnapshotFactory = dyn Fn(OperationPriorityV1, Duration) -> Result<E
 type ExactSqlHealthSnapshotFactory =
     dyn Fn(Duration) -> Result<ExactSqlReadSnapshot, ExactSqlError> + Send + Sync;
 type ReaderPoolOccupancyRead = dyn Fn() -> Option<ReaderPoolSnapshot> + Send + Sync;
+type ReaderMemoryRelease = dyn Fn() -> Result<MemoryReleaseOutcome, ExactSqlError> + Send + Sync;
 type ExactSqlSnapshotQuery =
     dyn FnMut(ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> + Send;
 type StoreSizeTelemetryRead = dyn Fn(
@@ -95,6 +96,7 @@ pub struct ExactSqlHandle {
     store_size_telemetry: Arc<StoreSizeTelemetryRead>,
     table_size_telemetry: Arc<TableSizeTelemetryRead>,
     reader_pool_occupancy: Arc<ReaderPoolOccupancyRead>,
+    release_reader_memory: Arc<ReaderMemoryRelease>,
     last_insert_rowid: Arc<AtomicI64>,
     write_authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
 }
@@ -149,6 +151,7 @@ impl ExactSqlHandle {
         let store_size_readers = readers.downgrade();
         let table_size_readers = readers.downgrade();
         let occupancy_readers = readers.downgrade();
+        let release_readers = readers.downgrade();
         Self {
             binding,
             locator,
@@ -202,6 +205,15 @@ impl ExactSqlHandle {
             reader_pool_occupancy: Arc::new(move || {
                 occupancy_readers.upgrade().map(|pool| pool.snapshot())
             }),
+            release_reader_memory: Arc::new(move || match release_readers.upgrade() {
+                Some(pool) => pool.release_connection_memory(),
+                // A dropped pool is the one genuine "closed" no-op. It maps
+                // here, at the closure that observed the Weak fail, so a live
+                // pool's worker failure can never be mistaken for it.
+                None => Ok(MemoryReleaseOutcome::NoOp {
+                    reason: MemoryReleaseNoOpReason::ReaderPoolClosed,
+                }),
+            }),
             last_insert_rowid: Arc::new(AtomicI64::new(0)),
             write_authority: None,
         }
@@ -226,6 +238,7 @@ impl ExactSqlHandle {
             store_size_telemetry: Arc::clone(&self.store_size_telemetry),
             table_size_telemetry: Arc::clone(&self.table_size_telemetry),
             reader_pool_occupancy: Arc::clone(&self.reader_pool_occupancy),
+            release_reader_memory: Arc::clone(&self.release_reader_memory),
             last_insert_rowid: Arc::clone(&self.last_insert_rowid),
             write_authority: None,
         }
@@ -339,6 +352,28 @@ impl ExactSqlHandle {
             SqlResult::BatchExecuted(result) => Ok(result),
             _ => Err(ExactSqlError::WriterUnavailable),
         }
+    }
+
+    /// Releases SQLite page cache on the connections this handle owns.
+    ///
+    /// Reader caches are released through the reader pool. A writer, when
+    /// present, is released on the writer actor. A handle that cannot release
+    /// anything reports a typed no-op instead of [`ExactSqlError::WriterUnavailable`];
+    /// a reader release that *errored* is never a no-op — it propagates so
+    /// the maintenance caller's degraded log fires.
+    pub fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome, ExactSqlError> {
+        let readers = (self.release_reader_memory)()?;
+        let writer = if self.writer.is_some() {
+            match self.dispatch_writer(SqlRequest::ExecuteBatch("PRAGMA shrink_memory".to_owned()))
+            {
+                Ok(_) => true,
+                Err(ExactSqlError::WriterUnavailable) => false,
+                Err(error) => return Err(error),
+            }
+        } else {
+            false
+        };
+        Ok(merge_memory_release(readers, writer))
     }
 
     /// Enables incremental auto-vacuum through its fixed maintenance rebuild.
@@ -705,6 +740,25 @@ fn validate_request(request: &SqlRequest) -> Result<(), ExactSqlError> {
         | SqlRequest::Execute(statement)
         | SqlRequest::Query(statement) => statement.validate(),
         SqlRequest::ExecuteBatch(sql) => validate_batch(sql),
+    }
+}
+
+/// The reader pool reports `Released` only with a non-zero connection count,
+/// so merging is exact: a released reader outcome gains the writer flag, and
+/// a reader no-op is superseded only when the writer actually released.
+fn merge_memory_release(readers: MemoryReleaseOutcome, writer: bool) -> MemoryReleaseOutcome {
+    match readers {
+        MemoryReleaseOutcome::Released {
+            reader_connections, ..
+        } => MemoryReleaseOutcome::Released {
+            reader_connections,
+            writer,
+        },
+        MemoryReleaseOutcome::NoOp { .. } if writer => MemoryReleaseOutcome::Released {
+            reader_connections: 0,
+            writer: true,
+        },
+        no_op => no_op,
     }
 }
 

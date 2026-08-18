@@ -20,7 +20,10 @@ use tracedecay_store::{
 
 use super::{ExistingReaderLocator, ReaderQueryExecutor, ReaderStartError, worker};
 use crate::CheckpointPressure;
-use crate::exact_sql::{ExactSqlError, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement};
+use crate::exact_sql::{
+    ExactSqlError, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement, MemoryReleaseNoOpReason,
+    MemoryReleaseOutcome,
+};
 
 mod lease;
 mod outcome;
@@ -468,6 +471,46 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         lease.read_table_sizes()
     }
 
+    /// Releases page cache on every live reader worker this pool owns.
+    ///
+    /// Each worker connection keeps its own SQLite cache. Dispatching
+    /// `PRAGMA shrink_memory` through the writer actor would shrink the
+    /// wrong connection (or fail when no writer is attached).
+    pub(crate) fn release_connection_memory(
+        &self,
+    ) -> Result<MemoryReleaseOutcome, ExactSqlError> {
+        let (lifecycle, clients) = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                state.lifecycle,
+                state
+                    .records
+                    .values()
+                    .map(|record| record.client.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        if lifecycle == ReaderPoolState::Draining {
+            return Ok(MemoryReleaseOutcome::NoOp {
+                reason: MemoryReleaseNoOpReason::ReaderPoolDraining,
+            });
+        }
+        if clients.is_empty() {
+            return Ok(MemoryReleaseOutcome::NoOp {
+                reason: MemoryReleaseNoOpReason::NoLiveConnections,
+            });
+        }
+        let total = clients.len();
+        aggregate_worker_memory_releases(
+            clients.iter().map(|client| client.release_memory()),
+            total,
+        )
+    }
+
     pub fn snapshot(&self) -> ReaderPoolSnapshot {
         let state = self
             .inner
@@ -844,5 +887,158 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         spawned.client.shutdown();
         let _ = spawned.join.join();
         Err(ReaderStartError::OpenedDatabaseIdentityMismatch { expected, actual })
+    }
+}
+
+/// Folds per-worker release results into one truthful pool outcome.
+///
+/// A worker fault — the pragma itself reporting a SQLite error — propagates
+/// as `Err` carrying the partial-release count, so the caller's degraded log
+/// fires instead of the failure vanishing into a "pool closed" no-op. Workers
+/// that were skipped (terminated, or busy inside a retained snapshot) are not
+/// failures: the release reports only the connections it actually shrank.
+fn aggregate_worker_memory_releases(
+    results: impl Iterator<Item = Result<worker::WorkerMemoryRelease, worker::ReaderWorkerError>>,
+    total: usize,
+) -> Result<MemoryReleaseOutcome, ExactSqlError> {
+    let mut released = 0usize;
+    let mut snapshot_busy = 0usize;
+    for result in results {
+        match result {
+            Ok(worker::WorkerMemoryRelease::Released) => released += 1,
+            Ok(worker::WorkerMemoryRelease::SnapshotBusy) => snapshot_busy += 1,
+            Ok(worker::WorkerMemoryRelease::Closed) => {}
+            Err(error) => {
+                return Err(ExactSqlError::Sqlite {
+                    operation: "release reader connection memory",
+                    code: None,
+                    extended_code: None,
+                    message: format!(
+                        "released {released} of {total} reader connections before a worker \
+                         release failed: {error}"
+                    ),
+                });
+            }
+        }
+    }
+    if released > 0 {
+        return Ok(MemoryReleaseOutcome::Released {
+            reader_connections: released,
+            writer: false,
+        });
+    }
+    if snapshot_busy > 0 {
+        return Ok(MemoryReleaseOutcome::NoOp {
+            reason: MemoryReleaseNoOpReason::ReaderConnectionsBusy,
+        });
+    }
+    Ok(MemoryReleaseOutcome::NoOp {
+        reason: MemoryReleaseNoOpReason::NoLiveConnections,
+    })
+}
+
+#[cfg(test)]
+mod memory_release_tests {
+    use tracedecay_store::StorageRuntimeErrorV1;
+
+    use super::worker::{ReaderWorkerError, WorkerMemoryRelease};
+    use super::{
+        ExactSqlError, MemoryReleaseNoOpReason, MemoryReleaseOutcome,
+        aggregate_worker_memory_releases,
+    };
+
+    fn storage_failure() -> ReaderWorkerError {
+        ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
+            operation: "release reader connection memory: disk I/O error".to_owned(),
+        })
+    }
+
+    #[test]
+    fn worker_release_failure_propagates_with_partial_count() {
+        let error = aggregate_worker_memory_releases(
+            [
+                Ok(WorkerMemoryRelease::Released),
+                Err(storage_failure()),
+                Ok(WorkerMemoryRelease::Released),
+            ]
+            .into_iter(),
+            3,
+        )
+        .expect_err("a worker storage fault must never fold into a no-op");
+        match error {
+            ExactSqlError::Sqlite {
+                operation, message, ..
+            } => {
+                assert_eq!(operation, "release reader connection memory");
+                assert!(
+                    message.contains("released 1 of 3"),
+                    "partial release must be reported truthfully, got {message}"
+                );
+                assert!(
+                    message.contains("disk I/O error"),
+                    "the underlying SQLite fault must survive, got {message}"
+                );
+            }
+            other => panic!("expected a typed SQLite error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skipped_workers_are_not_counted_as_released() {
+        let outcome = aggregate_worker_memory_releases(
+            [
+                Ok(WorkerMemoryRelease::Released),
+                Ok(WorkerMemoryRelease::Closed),
+                Ok(WorkerMemoryRelease::SnapshotBusy),
+            ]
+            .into_iter(),
+            3,
+        )
+        .expect("skips are not failures");
+        assert_eq!(
+            outcome,
+            MemoryReleaseOutcome::Released {
+                reader_connections: 1,
+                writer: false,
+            }
+        );
+    }
+
+    #[test]
+    fn all_busy_workers_report_a_busy_noop_not_no_connections() {
+        let outcome = aggregate_worker_memory_releases(
+            [
+                Ok(WorkerMemoryRelease::SnapshotBusy),
+                Ok(WorkerMemoryRelease::SnapshotBusy),
+            ]
+            .into_iter(),
+            2,
+        )
+        .expect("busy workers are a typed no-op");
+        assert_eq!(
+            outcome,
+            MemoryReleaseOutcome::NoOp {
+                reason: MemoryReleaseNoOpReason::ReaderConnectionsBusy,
+            }
+        );
+    }
+
+    #[test]
+    fn all_closed_workers_report_no_live_connections() {
+        let outcome = aggregate_worker_memory_releases(
+            [
+                Ok(WorkerMemoryRelease::Closed),
+                Ok(WorkerMemoryRelease::Closed),
+            ]
+            .into_iter(),
+            2,
+        )
+        .expect("terminated workers have nothing to release");
+        assert_eq!(
+            outcome,
+            MemoryReleaseOutcome::NoOp {
+                reason: MemoryReleaseNoOpReason::NoLiveConnections,
+            }
+        );
     }
 }

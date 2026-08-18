@@ -37,6 +37,107 @@ fn connection_local_memory_release_pragma_is_allowed() {
 }
 
 #[test]
+fn read_only_handle_releases_reader_memory_without_writer() {
+    let fixture = fixture('a', 'a');
+    let channel = ExactSqlHandle::attach_read_only(&fixture.readers);
+
+    let outcome = channel
+        .release_connection_memory()
+        .expect("read-only memory release must not require a writer");
+    assert!(
+        matches!(
+            outcome,
+            MemoryReleaseOutcome::Released {
+                reader_connections,
+                writer: false,
+            } if reader_connections > 0
+        ),
+        "read-only handle must shrink its reader pool, got {outcome:?}"
+    );
+    assert!(
+        matches!(
+            channel.execute_batch("PRAGMA shrink_memory".to_owned()),
+            Err(ExactSqlError::WriterUnavailable)
+        ),
+        "read-only execute_batch must still refuse the writer lane"
+    );
+}
+
+#[test]
+fn writable_handle_releases_readers_and_writer() {
+    let fixture = fixture('a', 'a');
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+
+    let outcome = channel
+        .release_connection_memory()
+        .expect("writable memory release");
+    assert!(
+        matches!(
+            outcome,
+            MemoryReleaseOutcome::Released {
+                reader_connections,
+                writer: true,
+            } if reader_connections > 0
+        ),
+        "writable handle must shrink readers and writer, got {outcome:?}"
+    );
+}
+
+/// A worker leased into a retained snapshot answers the release on its
+/// snapshot channel, interleaved between reads — a live snapshot must not
+/// degrade the release into a no-op or a spurious "worker closed".
+#[test]
+fn memory_release_reaches_workers_inside_retained_snapshots() {
+    let fixture = fixture('a', 'a');
+    let channel = ExactSqlHandle::attach_read_only(&fixture.readers);
+    let snapshot = channel
+        .begin_read_snapshot(Duration::from_secs(5))
+        .expect("retained read snapshot");
+
+    let outcome = channel
+        .release_connection_memory()
+        .expect("release must interleave with leased snapshot workers");
+    assert!(
+        matches!(
+            outcome,
+            MemoryReleaseOutcome::Released {
+                reader_connections,
+                writer: false,
+            } if reader_connections > 0
+        ),
+        "leased snapshot workers must still release, got {outcome:?}"
+    );
+    drop(snapshot);
+}
+
+#[test]
+fn closed_reader_pool_reports_typed_memory_release_noop() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("closed-pool.sqlite3");
+    rusqlite::Connection::open(&path).unwrap();
+    let path = path.canonicalize().unwrap();
+    let binding = binding();
+    let readers = ReaderPool::start(
+        ExistingReaderLocator::new(binding.clone(), locator(&binding, 'c'), path).unwrap(),
+        AdmissionConfigV1::default().readers,
+        NoReads,
+    )
+    .unwrap();
+    let channel = ExactSqlHandle::attach_read_only(&readers);
+    drop(readers);
+
+    let outcome = channel
+        .release_connection_memory()
+        .expect("closed-pool release is a typed no-op, not a writer fault");
+    assert_eq!(
+        outcome,
+        MemoryReleaseOutcome::NoOp {
+            reason: MemoryReleaseNoOpReason::ReaderPoolClosed,
+        }
+    );
+}
+
+#[test]
 fn exact_sql_read_policy_allows_integrity_diagnostic_arguments() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();

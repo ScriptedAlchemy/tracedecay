@@ -22,6 +22,18 @@ use super::{ExistingReaderLocator, ReaderStartError};
 
 const REPLY_POLL_QUANTUM: Duration = Duration::from_millis(5);
 
+/// How long a cache release waits for a worker that answers on its outer
+/// command channel.
+///
+/// An idle worker answers a `shrink_memory` in microseconds. The only way to
+/// outrun this bound is a `Begin` queued ahead of the release: the worker is
+/// then inside a retained snapshot and will not read the outer channel again
+/// until the snapshot ends, which is unbounded by design. Shrink is
+/// best-effort maintenance, so the release skips that worker instead of
+/// pinning the maintenance thread for the snapshot's lifetime; the queued
+/// command still shrinks the connection when the worker returns to its loop.
+const MEMORY_RELEASE_REPLY_BOUND: Duration = Duration::from_millis(100);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoreSizeTelemetrySample {
     pub page_size_bytes: u32,
@@ -64,6 +76,24 @@ impl ReaderQueryExecutor for ExactSqlOnlyReaderV1 {
     }
 }
 
+/// Outcome of one worker's best-effort cache release.
+///
+/// Only a real per-connection fault (the pragma reporting a SQLite error) is
+/// an `Err`. A worker that cannot be reached right now — terminated, or busy
+/// inside a retained snapshot — has nothing this release can act on, and
+/// reporting it as a failure would mask genuine storage errors behind
+/// lifecycle noise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkerMemoryRelease {
+    Released,
+    /// The worker is serving a retained snapshot that outran
+    /// [`MEMORY_RELEASE_REPLY_BOUND`]; the queued command still shrinks the
+    /// connection when the snapshot ends.
+    SnapshotBusy,
+    /// The worker thread has terminated; its connection and cache are gone.
+    Closed,
+}
+
 #[derive(Debug)]
 pub enum ReaderWorkerError {
     WorkerClosed,
@@ -100,6 +130,9 @@ enum WorkerCommand {
     Begin {
         reply: SyncSender<Result<(), ReaderWorkerError>>,
     },
+    ReleaseMemory {
+        reply: SyncSender<Result<(), ReaderWorkerError>>,
+    },
     Shutdown,
 }
 
@@ -122,6 +155,9 @@ enum SnapshotCommand {
         reply: SyncSender<Result<Vec<TableSizeTelemetrySample>, ReaderWorkerError>>,
     },
     End {
+        reply: SyncSender<Result<(), ReaderWorkerError>>,
+    },
+    ReleaseMemory {
         reply: SyncSender<Result<(), ReaderWorkerError>>,
     },
     Shutdown,
@@ -233,6 +269,42 @@ impl WorkerClient {
         receive
             .recv()
             .map_err(|_| ReaderWorkerError::WorkerClosed)?
+    }
+
+    /// Releases this worker's own SQLite page cache.
+    ///
+    /// `PRAGMA shrink_memory` is connection-local. A leased worker is already
+    /// inside its snapshot loop, so the command has to travel that channel;
+    /// an idle worker is waiting on the outer command channel.
+    pub fn release_memory(&self) -> Result<WorkerMemoryRelease, ReaderWorkerError> {
+        if let Ok(sender) = self.snapshot_sender() {
+            let (reply, receive) = mpsc::sync_channel(1);
+            if sender
+                .send(SnapshotCommand::ReleaseMemory { reply })
+                .is_ok()
+                && let Ok(result) = receive.recv()
+            {
+                return result.map(|()| WorkerMemoryRelease::Released);
+            }
+            // The reply disconnecting does not mean the worker closed: `End`
+            // returns from the snapshot loop without draining, dropping the
+            // reply senders of queued commands, while the worker itself is
+            // back on its outer command channel. Fall through and retry
+            // there instead of reporting a live worker as closed.
+        }
+        let (reply, receive) = mpsc::sync_channel(1);
+        if self
+            .sender
+            .send(WorkerCommand::ReleaseMemory { reply })
+            .is_err()
+        {
+            return Ok(WorkerMemoryRelease::Closed);
+        }
+        match receive.recv_timeout(MEMORY_RELEASE_REPLY_BOUND) {
+            Ok(result) => result.map(|()| WorkerMemoryRelease::Released),
+            Err(RecvTimeoutError::Timeout) => Ok(WorkerMemoryRelease::SnapshotBusy),
+            Err(RecvTimeoutError::Disconnected) => Ok(WorkerMemoryRelease::Closed),
+        }
     }
 
     pub fn begin_end(&self) -> Result<Receiver<Result<(), ReaderWorkerError>>, ReaderWorkerError> {
@@ -360,6 +432,9 @@ fn run<E: ReaderQueryExecutor>(
     while let Ok(command) = receiver.recv() {
         match command {
             WorkerCommand::Shutdown => break,
+            WorkerCommand::ReleaseMemory { reply } => {
+                let _ = reply.send(shrink_connection_memory(&connection));
+            }
             WorkerCommand::Begin { reply } => {
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -481,6 +556,9 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 });
                 let _ = reply.send(result);
             }
+            SnapshotCommand::ReleaseMemory { reply } => {
+                let _ = reply.send(shrink_connection_memory(&*transaction));
+            }
             SnapshotCommand::End { reply } => {
                 let result = transaction.rollback().map_err(|error| {
                     ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
@@ -494,6 +572,16 @@ fn run_snapshot<E: ReaderQueryExecutor>(
         }
     }
     false
+}
+
+fn shrink_connection_memory(connection: &Connection) -> Result<(), ReaderWorkerError> {
+    connection
+        .execute_batch("PRAGMA shrink_memory")
+        .map_err(|error| {
+            ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
+                operation: format!("release reader connection memory: {error}"),
+            })
+        })
 }
 
 fn interruption(probe: &dyn RuntimeRequestProbeV1) -> Option<UnavailableReasonV1> {

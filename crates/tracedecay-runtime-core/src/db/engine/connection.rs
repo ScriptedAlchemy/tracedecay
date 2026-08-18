@@ -4,7 +4,7 @@ use tracedecay_store::{OperationPriorityV1, StoreRuntimeBindingV1};
 
 use tracedecay_rusqlite_runtime::exact_sql::{
     ExactSqlBatchResult, ExactSqlExecuteResult, ExactSqlHandle, ExactSqlReadSnapshot, ExactSqlRows,
-    ExactSqlStatement, ExactSqlTransaction as RuntimeTransaction,
+    ExactSqlStatement, ExactSqlTransaction as RuntimeTransaction, MemoryReleaseOutcome,
 };
 pub use tracedecay_rusqlite_runtime::reader::{ReaderPoolSnapshot, ReaderPoolState};
 
@@ -23,6 +23,7 @@ pub(super) trait Runtime: Send + Sync {
     ) -> Result<ExactSqlRows>;
     fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows>;
     fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult>;
+    fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome>;
     fn repair_incremental_auto_vacuum(&self) -> Result<()>;
     #[cfg(any(test, feature = "test-helpers"))]
     fn validate(&self, statement: ExactSqlStatement) -> Result<()>;
@@ -57,6 +58,10 @@ impl Runtime for ExactSqlHandle {
 
     fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult> {
         self.execute_batch(sql).map_err(Into::into)
+    }
+
+    fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome> {
+        self.release_connection_memory().map_err(Into::into)
     }
 
     fn repair_incremental_auto_vacuum(&self) -> Result<()> {
@@ -254,6 +259,13 @@ impl Connection {
             .await
             .map_err(join_error)?
             .map(|_| ())
+    }
+
+    pub async fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome> {
+        let runtime = Arc::clone(&self.runtime);
+        tokio::task::spawn_blocking(move || runtime.release_connection_memory())
+            .await
+            .map_err(join_error)?
     }
 
     pub async fn repair_incremental_auto_vacuum(&self) -> Result<()> {
