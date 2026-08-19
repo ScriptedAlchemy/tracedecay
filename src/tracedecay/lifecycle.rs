@@ -182,16 +182,35 @@ impl TraceDecay {
         }
 
         let mut selected = storage::resolve_persisted_layout(project_root, &profile_root)?;
+        let mut selected_via_exact_registry_alias = false;
         let git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
             .then(|| crate::worktree::git_common_dir(project_root))
             .flatten();
+        let alias_matches_live_git_identity = |registered_git_common_dir: Option<&str>| {
+            registered_git_common_dir
+                .zip(git_common_dir.as_deref())
+                .is_some_and(|(registered, live)| {
+                    crate::global_db::GlobalDb::canonical_project_key(Path::new(registered))
+                        == crate::global_db::GlobalDb::canonical_project_key(live)
+                })
+        };
         if selected.is_none()
             && let Some(global_db) = open_options.open_global_db().await
         {
-            if let Some(resolution) = global_db
-                .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
-                .await
-            {
+            let resolution = match global_db.resolve_project_store_by_alias(project_root).await {
+                Some(resolution) => {
+                    selected_via_exact_registry_alias = alias_matches_live_git_identity(
+                        resolution.project.git_common_dir.as_deref(),
+                    );
+                    Some(resolution)
+                }
+                None => {
+                    global_db
+                        .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
+                        .await
+                }
+            };
+            if let Some(resolution) = resolution {
                 selected = Some(storage::profile_sharded_layout(
                     project_root,
                     &profile_root,
@@ -210,13 +229,33 @@ impl TraceDecay {
         // stay behind the rare paths that actually compare stores. Resolving a
         // layout is on every open, including fail-closed clients that must not
         // touch the store at all.
-        let (candidates, selected_is_sole_exact_root) =
+        let (
+            candidates,
+            selected_manifest_matches_exact_root,
+            candidates_match_exact_root,
+        ) =
             storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
+        if selected.is_some()
+            && !candidates.is_empty()
+            && !selected_manifest_matches_exact_root
+            && !candidates_match_exact_root
+            && !selected_via_exact_registry_alias
+            && let Some(global_db) = open_options.open_global_db().await
+            && let Some(resolution) = global_db.resolve_project_store_by_alias(project_root).await
+        {
+            selected_via_exact_registry_alias = selected
+                .as_ref()
+                .and_then(|layout| layout.identity.project_id.as_deref())
+                == Some(resolution.project.project_id.as_str())
+                && alias_matches_live_git_identity(resolution.project.git_common_dir.as_deref());
+        }
         Self::choose_identity_layout(
             project_root,
             selected,
             candidates,
-            selected_is_sole_exact_root,
+            selected_manifest_matches_exact_root,
+            selected_via_exact_registry_alias,
+            candidates_match_exact_root,
             allow_repair,
         )
         .await?
@@ -230,17 +269,24 @@ impl TraceDecay {
         project_root: &Path,
         selected: Option<StoreLayout>,
         candidates: Vec<StoreLayout>,
-        selected_is_sole_exact_root: bool,
+        selected_manifest_matches_exact_root: bool,
+        selected_via_exact_registry_alias: bool,
+        candidates_match_exact_root: bool,
         allow_repair: bool,
     ) -> Result<Option<StoreLayout>> {
-        // With no competing candidate the selected layout wins regardless, so
-        // skip the inventory rather than opening the store to confirm it.
-        if selected_is_sole_exact_root
+        // A populated store remains authoritative when its own manifest names
+        // this exact root or the registry selected it through this exact path
+        // alias. Shared Git identity alone does not grant this precedence.
+        // This resolver uses bounded presence probes only; the subsequent
+        // serving open performs full integrity validation and fails closed.
+        // Legacy duplicates stay untouched, while an empty or unreadable
+        // selected store still reaches the fail-closed diagnostics.
+        if (selected_manifest_matches_exact_root
+            || (selected_via_exact_registry_alias && !candidates_match_exact_root))
             && !candidates.is_empty()
             && let Some(selected) = selected.as_ref()
         {
-            let selected_inventory = store_identity_inventory(selected).await;
-            if selected_inventory.is_healthy() && !selected_inventory.is_pristine() {
+            if store_identity_has_bounded_population_evidence(selected).await {
                 return Ok(Some(selected.clone()));
             }
         }
@@ -298,6 +344,14 @@ impl TraceDecay {
                     "safe empty-store repair is available during a writable open",
                 ));
             }
+            if !store_identity_integrity_is_healthy(&candidate).await {
+                return Err(identity_cutover_conflict(
+                    project_root,
+                    &selected_inventory,
+                    &candidate_inventory,
+                    "candidate failed full integrity validation; no repair was attempted",
+                ));
+            }
             let candidate_id = candidate.identity.project_id.as_deref().ok_or_else(|| {
                 TraceDecayError::Config {
                     message: "legacy candidate has no project id".to_string(),
@@ -309,6 +363,14 @@ impl TraceDecay {
         }
         if candidate_inventory.is_pristine() && selected_inventory.is_healthy() {
             if allow_repair {
+                if !store_identity_integrity_is_healthy(&selected).await {
+                    return Err(identity_cutover_conflict(
+                        project_root,
+                        &selected_inventory,
+                        &candidate_inventory,
+                        "selected store failed full integrity validation; no repair was attempted",
+                    ));
+                }
                 let selected_id = selected.identity.project_id.as_deref().ok_or_else(|| {
                     TraceDecayError::Config {
                         message: "selected store has no project id".to_string(),
@@ -392,8 +454,9 @@ impl TraceDecay {
 
         // If the dirty sentinel exists, a previous sync/index was interrupted.
         // Check integrity and rebuild if necessary.
+        let active_graph_is_root = db_path == store_layout.graph_db_path;
         let crashed = has_dirty_sentinel_at(&active_graph_layout.dirty_path)
-            || has_dirty_sentinel_at(&store_layout.dirty_path);
+            || (active_graph_is_root && has_dirty_sentinel_at(&store_layout.dirty_path));
         if crashed {
             eprintln!(
                 "[tracedecay] previous operation was interrupted — checking database integrity…"
@@ -402,9 +465,9 @@ impl TraceDecay {
 
         // A dirty marker can also describe a sync that is still active in a
         // peer process. Recovery must own both graph-local and legacy locks so
-        // it cannot race that writer or clear its sentinel. Preflight through
-        // the read-only connection before Database::open applies writable
-        // pragmas or migrations to a potentially damaged recovery set.
+        // it cannot race that writer or clear its sentinel. Database::open
+        // performs the single read-only integrity validation before applying
+        // writable pragmas or migrations to a potentially damaged recovery set.
         let mut recovery_lock = if crashed {
             Some(try_acquire_graph_sync_locks(
                 &active_graph_layout.sync_lock_path,
@@ -414,50 +477,26 @@ impl TraceDecay {
             None
         };
         if crashed {
-            let authority = DatabaseAuthority::for_runtime(&db_path, "crash verification")?;
-            let verification = match Database::open_read_only(&db_path, &authority).await {
-                Ok((db, _)) => db,
-                Err(error) => {
-                    drop(recovery_lock);
-                    return Self::recover_corrupt_branch_or_fail(
-                        project_root,
-                        open_options,
-                        &store_layout,
-                        &db_path,
-                        error,
-                        repair_corrupt_branch,
-                    )
-                    .await;
-                }
+            let invalid_recovery_set = match std::fs::metadata(&db_path) {
+                Ok(metadata) if metadata.len() > 0 => None,
+                Ok(_) => Some(
+                    "dirty database is zero-length; refusing writable initialization".to_string(),
+                ),
+                Err(error) => Some(format!(
+                    "failed to inspect dirty database before writable open: {error}"
+                )),
             };
-            let integrity = verification.quick_check().await;
-            verification.close();
-            match integrity {
-                Ok(true) => {}
-                Ok(false) => {
-                    drop(recovery_lock);
-                    return Self::recover_corrupt_branch_or_fail(
-                        project_root,
-                        open_options,
-                        &store_layout,
-                        &db_path,
-                        "read-only SQLite quick_check did not return ok",
-                        repair_corrupt_branch,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    drop(recovery_lock);
-                    return Self::recover_corrupt_branch_or_fail(
-                        project_root,
-                        open_options,
-                        &store_layout,
-                        &db_path,
-                        error,
-                        repair_corrupt_branch,
-                    )
-                    .await;
-                }
+            if let Some(detail) = invalid_recovery_set {
+                drop(recovery_lock);
+                return Self::recover_corrupt_branch_or_fail(
+                    project_root,
+                    open_options,
+                    &store_layout,
+                    &db_path,
+                    detail,
+                    repair_corrupt_branch,
+                )
+                .await;
             }
         }
 
@@ -465,7 +504,11 @@ impl TraceDecay {
         // process may still hold the current DB/WAL/SHM inodes, and deleting
         // them here would split readers and writers across different stores.
         let authority = DatabaseAuthority::for_runtime(&db_path, "open project store")?;
-        let open_result = Database::open(&db_path, &authority).await;
+        let open_result = if crashed {
+            Database::open_revalidating_cached(&db_path, &authority).await
+        } else {
+            Database::open(&db_path, &authority).await
+        };
         let (db, migrated) = match open_result {
             Ok(pair) => pair,
             Err(e) if Database::is_corruption_error(&e) || crashed => {
@@ -486,42 +529,13 @@ impl TraceDecay {
             == Some(FULL_REINDEX_REQUIRED_VALUE);
         let needs_reindex = migrated || reindex_pending;
 
-        // If the sentinel was set but the database opened successfully, run a
-        // quick integrity check.
-        if crashed {
-            match db.quick_check().await {
-                Ok(true) => {
-                    if !needs_reindex {
-                        clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
-                        clear_dirty_sentinel_at(&store_layout.dirty_path);
-                    }
-                }
-                Ok(false) => {
-                    db.close();
-                    drop(recovery_lock);
-                    return Self::recover_corrupt_branch_or_fail(
-                        project_root,
-                        open_options,
-                        &store_layout,
-                        &db_path,
-                        "SQLite quick_check did not return ok",
-                        repair_corrupt_branch,
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    db.close();
-                    drop(recovery_lock);
-                    return Self::recover_corrupt_branch_or_fail(
-                        project_root,
-                        open_options,
-                        &store_layout,
-                        &db_path,
-                        e,
-                        repair_corrupt_branch,
-                    )
-                    .await;
-                }
+        // Database::open validated the exact WAL-aware recovery set while both
+        // locks were held. Reindexing owns sentinel cleanup when migration
+        // requires it.
+        if crashed && !needs_reindex {
+            clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
+            if active_graph_is_root {
+                clear_dirty_sentinel_at(&store_layout.dirty_path);
             }
         }
 
@@ -1322,6 +1336,7 @@ struct StoreIdentityInventory {
     project_id: String,
     data_root: PathBuf,
     graph_health: &'static str,
+    auxiliary_health: &'static str,
     nodes: u64,
     files: u64,
     facts: u64,
@@ -1336,7 +1351,7 @@ struct StoreIdentityInventory {
 
 impl StoreIdentityInventory {
     fn is_healthy(&self) -> bool {
-        self.graph_health == "healthy"
+        self.graph_health == "healthy" && self.auxiliary_health == "healthy"
     }
 
     fn is_pristine(&self) -> bool {
@@ -1358,10 +1373,11 @@ impl std::fmt::Display for StoreIdentityInventory {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "project_id={} path='{}' graph_health={} nodes={} files={} facts={} sessions={} messages={} lcm={} branches={} automation_files={} payload_files={} response_files={}",
+            "project_id={} path='{}' graph_health={} auxiliary_health={} count_mode=presence_only nodes={} files={} facts={} sessions={} messages={} lcm={} branches={} automation_files={} payload_files={} response_files={}",
             self.project_id,
             self.data_root.display(),
             self.graph_health,
+            self.auxiliary_health,
             self.nodes,
             self.files,
             self.facts,
@@ -1379,39 +1395,75 @@ impl std::fmt::Display for StoreIdentityInventory {
 async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventory {
     let authority = DatabaseAuthority::for_runtime(&layout.graph_db_path, "store inventory");
     let open_result = match authority {
-        Ok(authority) => Database::open_read_only(&layout.graph_db_path, &authority).await,
+        Ok(authority) => {
+            Database::open_read_only_for_presence_probe(&layout.graph_db_path, &authority).await
+        }
         Err(error) => Err(error),
     };
     let (graph_health, nodes, files, facts) = match open_result {
-        Ok((db, _)) => {
-            if let Ok(stats) = db.get_stats().await {
-                let facts = count_rows(db.conn(), "memory_facts").await;
-                db.close();
-                ("healthy", stats.node_count, stats.file_count, facts)
-            } else {
-                db.close();
-                ("corrupt", 0, 0, 0)
+        Ok(db) => {
+            let presence = (
+                table_presence(db.conn(), "nodes").await,
+                table_presence(db.conn(), "files").await,
+                table_presence(db.conn(), "memory_facts").await,
+            );
+            db.close();
+            match presence {
+                (Ok(nodes), Ok(files), Ok(facts)) => (
+                    "healthy",
+                    u64::from(nodes),
+                    u64::from(files),
+                    u64::from(facts),
+                ),
+                _ => ("corrupt", 0, 0, 0),
             }
         }
         Err(_) if layout.graph_db_path.exists() => ("corrupt", 0, 0, 0),
         Err(_) => ("missing", 0, 0, 0),
     };
 
-    let (sessions, messages, lcm_rows) = if let Some(db) =
-        crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await
-    {
-        let conn = db.dashboard_connection();
-        let counts = (
-            count_rows(&conn, "sessions").await,
-            count_rows(&conn, "session_messages").await,
-            count_rows(&conn, "lcm_raw_messages").await
-                + count_rows(&conn, "lcm_summary_nodes").await,
-        );
-        db.close();
-        counts
-    } else {
-        (0, 0, 0)
-    };
+    let session_presence: Result<(u64, u64, u64)> =
+        match crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await {
+            Some(db) => {
+                let conn = db.dashboard_connection();
+                let presence = async {
+                    let sessions = table_presence(&conn, "sessions").await?;
+                    let messages = table_presence(&conn, "session_messages").await?;
+                    let raw_lcm = table_presence(&conn, "lcm_raw_messages").await?;
+                    let summary_lcm = table_presence(&conn, "lcm_summary_nodes").await?;
+                    Ok((
+                        u64::from(sessions),
+                        u64::from(messages),
+                        u64::from(raw_lcm || summary_lcm),
+                    ))
+                }
+                .await;
+                db.close();
+                presence
+            }
+            None if layout.sessions_db_path.exists() => Err(TraceDecayError::Config {
+                message: "store session inventory is unreadable".to_string(),
+            }),
+            None => Ok((0, 0, 0)),
+        };
+
+    let branch_presence = branch_inventory(&layout.data_root);
+    let tree_presence: std::io::Result<(u64, u64, u64)> = (|| {
+        Ok((
+            u64::from(tree_has_files(&layout.dashboard_root)?),
+            u64::from(tree_has_files(&layout.lcm_payload_root)?),
+            u64::from(tree_has_files(&layout.response_handle_root)?),
+        ))
+    })();
+    let auxiliary_health =
+        if session_presence.is_ok() && branch_presence.is_ok() && tree_presence.is_ok() {
+            "healthy"
+        } else {
+            "unreadable"
+        };
+    let (sessions, messages, lcm_rows) = session_presence.unwrap_or((0, 0, 0));
+    let branches = branch_presence.unwrap_or(0);
+    let (automation_files, payload_files, response_files) = tree_presence.unwrap_or((0, 0, 0));
 
     StoreIdentityInventory {
         project_id: layout
@@ -1421,49 +1473,156 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
             .unwrap_or_else(|| "unknown".to_string()),
         data_root: layout.data_root.clone(),
         graph_health,
+        auxiliary_health,
         nodes,
         files,
         facts,
         sessions,
         messages,
         lcm_rows,
-        branches: branch_meta::load_branch_meta(&layout.data_root)
-            .map_or(0, |meta| meta.branches.len()),
-        automation_files: count_tree_files(&layout.dashboard_root),
-        payload_files: count_tree_files(&layout.lcm_payload_root),
-        response_files: count_tree_files(&layout.response_handle_root),
+        branches,
+        automation_files,
+        payload_files,
+        response_files,
     }
 }
 
-async fn count_rows(connection: &libsql::Connection, table: &str) -> u64 {
-    let Ok(mut rows) = connection
-        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
-        .await
+async fn store_identity_integrity_is_healthy(layout: &StoreLayout) -> bool {
+    let active_branch = branch::current_branch(&layout.project_root);
+    let (serving_graph_db_path, _, _) = TraceDecay::resolve_db_for_branch(
+        &layout.project_root,
+        &layout.data_root,
+        active_branch.as_deref(),
+    );
+    let Ok(authority) = DatabaseAuthority::for_runtime(&serving_graph_db_path, "store repair")
     else {
-        return 0;
+        return false;
     };
-    rows.next()
-        .await
-        .ok()
-        .flatten()
-        .and_then(|row| row.get::<i64>(0).ok())
-        .and_then(|count| u64::try_from(count).ok())
-        .unwrap_or(0)
+    let Ok((db, _)) = Database::open_read_only(&serving_graph_db_path, &authority).await else {
+        return false;
+    };
+    db.close();
+    true
 }
 
-fn count_tree_files(root: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return 0;
+/// Check the common exact-root case without counting every row in large
+/// session tables. Exact counts are needed only when constructing an
+/// ambiguity/cutover diagnostic; this predicate only needs to distinguish a
+/// healthy populated store from an empty or unhealthy one.
+async fn store_identity_has_bounded_population_evidence(layout: &StoreLayout) -> bool {
+    let active_branch = branch::current_branch(&layout.project_root);
+    let (serving_graph_db_path, _, _) = TraceDecay::resolve_db_for_branch(
+        &layout.project_root,
+        &layout.data_root,
+        active_branch.as_deref(),
+    );
+    let authority = DatabaseAuthority::for_runtime(&serving_graph_db_path, "store inventory");
+    let Ok(db) = (match authority {
+        Ok(authority) => {
+            Database::open_read_only_for_presence_probe(&serving_graph_db_path, &authority).await
+        }
+        Err(error) => Err(error),
+    }) else {
+        return false;
     };
-    entries
-        .flatten()
-        .map(|entry| entry.path())
-        .map(|path| match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_file() => 1,
-            Ok(metadata) if metadata.is_dir() => count_tree_files(&path),
-            _ => 0,
-        })
-        .sum()
+    let graph_presence = (
+        table_presence(db.conn(), "nodes").await,
+        table_presence(db.conn(), "files").await,
+        table_presence(db.conn(), "memory_facts").await,
+    );
+    db.close();
+    let graph_is_populated = match graph_presence {
+        (Ok(nodes), Ok(files), Ok(facts)) => nodes || files || facts,
+        _ => return false,
+    };
+
+    let sessions_are_populated =
+        match crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await {
+            Some(db) => {
+                let conn = db.dashboard_connection();
+                let session_presence = (
+                    table_presence(&conn, "sessions").await,
+                    table_presence(&conn, "session_messages").await,
+                    table_presence(&conn, "lcm_raw_messages").await,
+                    table_presence(&conn, "lcm_summary_nodes").await,
+                );
+                db.close();
+                match session_presence {
+                    (Ok(sessions), Ok(messages), Ok(raw_lcm), Ok(summary_lcm)) => {
+                        sessions || messages || raw_lcm || summary_lcm
+                    }
+                    _ => return false,
+                }
+            }
+            None if layout.sessions_db_path.exists() => return false,
+            None => false,
+        };
+
+    let branches_are_populated = match branch_inventory(&layout.data_root) {
+        Ok(branches) => branches > 1,
+        Err(()) => return false,
+    };
+    let tree_presence = (
+        tree_has_files(&layout.dashboard_root),
+        tree_has_files(&layout.lcm_payload_root),
+        tree_has_files(&layout.response_handle_root),
+    );
+    let (automation_files, payload_files, response_files) = match tree_presence {
+        (Ok(automation), Ok(payloads), Ok(responses)) => (automation, payloads, responses),
+        _ => return false,
+    };
+
+    graph_is_populated
+        || sessions_are_populated
+        || branches_are_populated
+        || automation_files
+        || payload_files
+        || response_files
+}
+
+async fn table_presence(connection: &libsql::Connection, table: &str) -> Result<bool> {
+    let mut rows = connection
+        .query(&format!("SELECT 1 FROM {table} LIMIT 1"), ())
+        .await?;
+    Ok(rows.next().await?.is_some())
+}
+
+fn branch_inventory(data_root: &Path) -> std::result::Result<usize, ()> {
+    let path = data_root.join(storage::BRANCH_META_FILENAME);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(_) => Err(()),
+        Ok(metadata) if metadata.file_type().is_file() => branch_meta::load_branch_meta(data_root)
+            .map(|meta| meta.branches.len())
+            .ok_or(()),
+        Ok(_) => Err(()),
+    }
+}
+
+fn tree_has_files(root: &Path) -> std::io::Result<bool> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_file() => return Ok(true),
+                Ok(metadata) if metadata.is_dir() => pending.push(path),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn identity_cutover_conflict(

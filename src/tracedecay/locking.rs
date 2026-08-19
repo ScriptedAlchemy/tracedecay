@@ -169,7 +169,9 @@ impl super::TraceDecay {
     ) -> Result<ActiveSyncLease> {
         let epoch = next_epoch();
         let mut paths = vec![self.active_graph_layout.dirty_path.clone()];
-        if self.active_graph_layout.dirty_path != self.store_layout.dirty_path {
+        if self.db_path() == self.store_layout.graph_db_path
+            && self.active_graph_layout.dirty_path != self.store_layout.dirty_path
+        {
             paths.push(self.store_layout.dirty_path.clone());
         }
         for path in &paths {

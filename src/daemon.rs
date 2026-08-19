@@ -2571,7 +2571,7 @@ impl DaemonEngine {
         self.git_watcher.shutdown().await;
         if let Some(handle) = self.pr_autotrack_task.lock().await.take() {
             handle.abort();
-            let _ = handle.await;
+            let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, handle).await;
         }
     }
 

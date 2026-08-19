@@ -1316,9 +1316,69 @@ impl CorrelationIndexHealth {
     }
 }
 
-/// Reads the correlation index health for a project store. Cheap: two counts
-/// plus a metadata lookup. Never runs DDL, so a store predating the schema
-/// reports `tables_present = false` with zero counts rather than erroring.
+/// Bounded row-family presence for the session↔git correlation index.
+///
+/// Unlike [`CorrelationIndexHealth`], this deliberately does not count rows or
+/// scan for the newest write. Query paths only need to distinguish an empty
+/// index from a populated index that had no match, so probing the first row of
+/// each family keeps that decision constant-time on large session stores.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CorrelationIndexPresence {
+    pub tables_present: bool,
+    pub spans_present: bool,
+    pub commits_present: bool,
+}
+
+impl CorrelationIndexPresence {
+    /// Whether the index lacks the row family needed by this reference kind.
+    pub const fn is_empty_for(&self, git_ref: &GitRefFilter) -> bool {
+        match git_ref {
+            GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => !self.spans_present,
+            GitRefFilter::Commit(_) => !self.commits_present,
+        }
+    }
+}
+
+/// Reads only whether each correlation row family has at least one row.
+/// `EXISTS` stops after the first match and avoids the full-table `COUNT(*)`
+/// paid by diagnostics-oriented [`correlation_index_health`].
+pub async fn correlation_index_presence(
+    conn: &Connection,
+) -> Result<CorrelationIndexPresence, GitCorrelationError> {
+    if !correlation_tables_present(conn).await? {
+        return Ok(CorrelationIndexPresence {
+            tables_present: false,
+            spans_present: false,
+            commits_present: false,
+        });
+    }
+    let mut rows = conn
+        .query(
+            "SELECT EXISTS(SELECT 1 FROM session_git_spans LIMIT 1),
+                    EXISTS(SELECT 1 FROM commit_sessions LIMIT 1)",
+            (),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(CorrelationIndexPresence {
+            tables_present: true,
+            spans_present: false,
+            commits_present: false,
+        });
+    };
+    Ok(CorrelationIndexPresence {
+        tables_present: true,
+        spans_present: row.get::<i64>(0)? != 0,
+        commits_present: row.get::<i64>(1)? != 0,
+    })
+}
+
+/// Reads exact correlation index health for a project store. The two exact
+/// counts and newest-write aggregate scan their row families, so latency grows
+/// with large stores; query-time routing should use
+/// [`correlation_index_presence`] instead. Never runs DDL, so a store predating
+/// the schema reports `tables_present = false` with zero counts rather than
+/// erroring.
 pub async fn correlation_index_health(
     conn: &Connection,
 ) -> Result<CorrelationIndexHealth, GitCorrelationError> {

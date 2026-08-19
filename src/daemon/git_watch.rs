@@ -377,13 +377,18 @@ impl GitWatcher {
 
     /// Stops every watcher-owned task and joins it before database shutdown.
     pub async fn shutdown(&self) {
+        self.shutdown_with_deadline(super::DAEMON_TASK_ABORT_DEADLINE)
+            .await;
+    }
+
+    async fn shutdown_with_deadline(&self, deadline: Duration) {
         if !self.inner.enabled || self.inner.shutting_down.swap(true, Ordering::AcqRel) {
             return;
         }
 
+        let mut handles = Vec::new();
         if let Some(handle) = self.inner.backstop_task.lock().await.take() {
-            handle.abort();
-            let _ = handle.await;
+            handles.push(handle);
         }
 
         let states: Vec<Arc<WatchState>> = {
@@ -392,10 +397,18 @@ impl GitWatcher {
         };
         for state in states {
             if let Some(handle) = state.task.lock().await.take() {
-                handle.abort();
-                let _ = handle.await;
+                handles.push(handle);
             }
         }
+        for handle in &handles {
+            handle.abort();
+        }
+        let _ = tokio::time::timeout(deadline, async {
+            for handle in handles {
+                let _ = handle.await;
+            }
+        })
+        .await;
     }
 
     /// A doctor-facing snapshot of every registered project's watch health.

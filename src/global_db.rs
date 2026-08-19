@@ -4275,6 +4275,17 @@ impl GlobalDb {
         crate::sessions::git_correlation::correlation_index_health(&self.conn).await
     }
 
+    /// Reports bounded row-family presence for query-time empty-index checks.
+    /// See [`crate::sessions::git_correlation::correlation_index_presence`].
+    pub async fn git_correlation_index_presence(
+        &self,
+    ) -> Result<
+        crate::sessions::git_correlation::CorrelationIndexPresence,
+        crate::sessions::git_correlation::GitCorrelationError,
+    > {
+        crate::sessions::git_correlation::correlation_index_presence(&self.conn).await
+    }
+
     /// Reads one `git_correlation_meta` integer value (e.g. the auto-backfill
     /// watermark). Used by the incremental backfill to resume where it left off.
     pub async fn git_correlation_meta_get(
