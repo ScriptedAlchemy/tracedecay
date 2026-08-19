@@ -67,7 +67,11 @@ fn workflow_context(
 const MOUNTED_OPERATION: &str = "operation.work.start_attempt";
 
 fn definition(version: u64) -> WorkflowDefinition {
-    definition_for_project(version, id("project.workflow.coordination"), MOUNTED_OPERATION)
+    definition_for_project(
+        version,
+        id("project.workflow.coordination"),
+        MOUNTED_OPERATION,
+    )
 }
 
 fn definition_with_operation(version: u64, operation: &str) -> WorkflowDefinition {

@@ -56,7 +56,10 @@ impl Display for WorkflowCatalogAdmissionError {
                 "workflow definition pins catalog {pinned} but the live executable catalog is {current}"
             ),
             Self::CatalogUnavailable(error) => {
-                write!(formatter, "workflow executable catalog unavailable: {error}")
+                write!(
+                    formatter,
+                    "workflow executable catalog unavailable: {error}"
+                )
             }
         }
     }

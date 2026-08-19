@@ -376,10 +376,9 @@ mod tests {
         let registry = tracedecay_application::workflow_executable_binding_registry()
             .expect("canonical Workflow executable registry");
         for operation in WorkflowOperation::ALL {
-            let operation_id = tracedecay_tool_catalog::OperationId::new(
-                operation.operation_id_str().to_owned(),
-            )
-            .expect("catalog operation id");
+            let operation_id =
+                tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned())
+                    .expect("catalog operation id");
             let binding = registry
                 .get(&operation_id)
                 .and_then(|availability| availability.binding())

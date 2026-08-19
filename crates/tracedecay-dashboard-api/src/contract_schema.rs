@@ -26,8 +26,8 @@ use tracedecay_application::{
     WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProposalComparisonRequestV1,
     WorkProposalComparisonV1, WorkRetryAttemptOutcomeV1, WorkRunControlReadingV1,
     WorkRunControlRequestV1, WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
-    WorkflowDefinitionActivateRequest, WorkflowDefinitionDisposition,
-    WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionActivateRequest, WorkflowDefinitionDisposition, WorkflowDefinitionGetRequest,
+    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
     WorkflowDefinitionRejectRequest, WorkflowDefinitionRetireRequest, WorkflowRunGetRequest,
 };
 use tracedecay_domain::{
