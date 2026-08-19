@@ -11,6 +11,7 @@
 //! the aggregate is first admitted under is read out of the attempt's own
 //! pinned execution snapshot rather than supplied by a caller.
 
+mod common;
 mod work_registered_store;
 
 use std::collections::BTreeSet;
@@ -35,6 +36,7 @@ use tracedecay_domain::{
 };
 use tracedecay_rusqlite_runtime::workflow::install_workflow_schema;
 
+use common::fixture_abs_root;
 use work_registered_store::RegisteredWorkStore;
 
 const ADMITTED_DEADLINE: UtcMicros = UtcMicros(1_000_000);
@@ -130,7 +132,7 @@ fn attempt_for(task_id: TaskId, run_id: RunId, attempt_id: &str) -> WorkAttemptV
         id::<ProjectId>("project.run-control.storage"),
         id::<RepositoryId>("repository.run-control.storage"),
         id::<WorktreeId>("worktree.run-control.storage"),
-        "/tmp/run-control-storage".to_owned(),
+        fixture_abs_root("/tmp/run-control-storage"),
         Some(id::<RefId>("refs/heads/run-control-storage")),
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         "Execute the admitted provider step.".to_owned(),
@@ -204,7 +206,7 @@ fn attempt_with_admission(
         id::<ProjectId>("project.run-control.storage"),
         id::<RepositoryId>("repository.run-control.storage"),
         id::<WorktreeId>("worktree.run-control.storage"),
-        "/tmp/run-control-storage".to_owned(),
+        fixture_abs_root("/tmp/run-control-storage"),
         Some(id::<RefId>("refs/heads/run-control-storage")),
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         "Execute the admitted provider step.".to_owned(),
