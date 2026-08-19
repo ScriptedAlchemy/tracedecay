@@ -438,9 +438,16 @@ where
                     if cancellation.is_cancelled() {
                         return Err(ObservationApplicationError::Cancelled);
                     }
-                    let projection_status = stored
-                        .ok_or(ObservationApplicationError::PersistedObservationUnavailable)?
-                        .projection_status();
+                    // The persist above already committed, so the row is
+                    // durable even when this immediate read-back misses (a
+                    // reader snapshot can trail the commit under a busy WAL).
+                    // Report the projection status persist just wrote instead
+                    // of failing a capture whose write landed — a failure here
+                    // becomes an admission refusal upstream and would write
+                    // conflicting coverage over the committed cursor advance.
+                    let projection_status = stored.map_or(ObservationProjectionStatus::Queued, |stored| {
+                        stored.projection_status()
+                    });
                     Ok(CaptureObservationOutcome::Persisted {
                         outcome: Box::new(outcome),
                         projection_status,

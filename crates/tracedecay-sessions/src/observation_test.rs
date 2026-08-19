@@ -26,6 +26,9 @@ struct FakeStore {
     cancel_on_replay: Mutex<Option<ObservationCancellation>>,
     cancel_on_advance: Mutex<Option<ObservationCancellation>>,
     cursor_advances: Mutex<Vec<ObservationCursorAdvance>>,
+    /// One read-your-writes miss: the next point read reports the committed
+    /// row as absent, the way a trailing reader snapshot does under load.
+    read_none_once: Mutex<bool>,
 }
 
 impl ObservationStore for FakeStore {
@@ -119,6 +122,9 @@ impl ObservationStore for FakeStore {
         &self,
         observation_id: &CanonicalObservationIdV1,
     ) -> ObservationStoreResult<Option<StoredObservation>> {
+        if std::mem::take(&mut *self.read_none_once.lock().unwrap()) {
+            return Ok(None);
+        }
         let observation = self
             .observations
             .lock()
@@ -444,6 +450,33 @@ fn request_accepts_only_bounded_parser_evidence_for_the_identity_range() {
         ),
         Err(CaptureClaudeObservationRequestError::SourceRangeMismatch)
     ));
+}
+
+#[tokio::test]
+async fn committed_capture_with_missed_read_back_stays_persisted_as_queued() {
+    let application = application();
+    *application.store.read_none_once.lock().unwrap() = true;
+
+    let outcome = application
+        .capture_claude_observation(request(&json!({
+            "type": "user",
+            "message": { "role": "user", "content": "read-your-writes miss" }
+        })))
+        .await
+        .expect("a committed persist must not fail on a missed read-back");
+
+    match outcome {
+        CaptureObservationOutcome::Persisted {
+            outcome,
+            projection_status,
+            ..
+        } => {
+            assert!(matches!(*outcome, ObservationPersistOutcome::Committed(_)));
+            assert_eq!(projection_status, ObservationProjectionStatus::Queued);
+        }
+        other => panic!("capture must stay persisted, got {other:?}"),
+    }
+    assert_eq!(application.store.observations.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
