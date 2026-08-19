@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -411,7 +412,6 @@ async fn hook_analytics_append_after_plan_preserves_bytes_without_invalidating_c
     let options = fixture.options();
 
     let planned = plan(&options).await.unwrap();
-    use std::io::Write;
     fs::OpenOptions::new()
         .append(true)
         .open(&telemetry_path)
