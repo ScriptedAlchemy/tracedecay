@@ -16,8 +16,8 @@ use tracedecay_store::{
 };
 
 use crate::{
-    CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, OnlineBackupReceipt,
-    PersistentWriter, RuntimeWriteAuthority, WriterStartError, WriterState,
+    CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, MaintenanceCheckpointRequest,
+    OnlineBackupReceipt, PersistentWriter, RuntimeWriteAuthority, WriterStartError, WriterState,
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     exact_sql::{ExactSqlError, ExactSqlHandle},
     reader::{
@@ -497,6 +497,59 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
+    /// Close admission and move the retained writer to `Draining` so an
+    /// exclusive maintenance checkpoint can run. Unlike [`Self::drain`], the
+    /// writer is neither taken nor joined: its checkpoint handle stays live
+    /// for [`Self::run_maintenance_checkpoint`]. Idempotent while draining.
+    pub fn begin_maintenance_drain(&self) -> Result<(), RepositoryDispatchError> {
+        let mut state = self.lock_state();
+        Self::begin_maintenance_drain_locked(&mut state)
+    }
+
+    fn begin_maintenance_drain_locked(
+        state: &mut RepositoryRuntimePhysicalState,
+    ) -> Result<(), RepositoryDispatchError> {
+        if state.closed {
+            return Err(RepositoryDispatchError::Closed);
+        }
+        let Some(writer) = state.writer.as_ref() else {
+            return Err(RepositoryDispatchError::Closed);
+        };
+        writer.begin_drain();
+        if let Some(readers) = &state.readers {
+            readers.begin_drain();
+        }
+        state.admission_open = false;
+        Ok(())
+    }
+
+    /// Run an exclusive WAL RESTART/TRUNCATE checkpoint through the retained
+    /// writer. Maintenance runs after admission has closed, so this does not
+    /// require `admission_open`; a still-`Ready` writer is moved to
+    /// `Draining` first. PASSIVE checkpoints stay on [`Self::run_checkpoint`].
+    pub async fn run_maintenance_checkpoint(
+        &self,
+        request: MaintenanceCheckpointRequest,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<CheckpointOutcome, RepositoryDispatchError> {
+        let checkpoint = {
+            let mut state = self.lock_state();
+            Self::begin_maintenance_drain_locked(&mut state)?;
+            state
+                .writer
+                .as_ref()
+                .ok_or(RepositoryDispatchError::Closed)?
+                .checkpoint_handle()
+        };
+        let ticket = checkpoint
+            .trigger_maintenance_authorized(request, authority)
+            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
+        ticket
+            .wait()
+            .await
+            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+    }
+
     pub async fn snapshot_to(
         &self,
         destination: PathBuf,
@@ -780,9 +833,25 @@ mod tests {
     use tracedecay_domain::LocatorDigest;
     use tracedecay_store::{AdmissionConfigV1, StoreIncarnationV1};
 
-    use crate::exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlValue};
+    use crate::{
+        CheckpointBlockers, CheckpointKind, MaintenanceCheckpointMode, RuntimeWriteAuthorityError,
+        RuntimeWriteAuthorityStage,
+        exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlValue},
+        maintenance::{ExclusiveMaintenancePermit, MaintenanceOwnerId},
+    };
 
     use super::*;
+
+    struct UnrestrictedAuthority;
+
+    impl RuntimeWriteAuthority for UnrestrictedAuthority {
+        fn verify(
+            &self,
+            _stage: RuntimeWriteAuthorityStage,
+        ) -> Result<(), RuntimeWriteAuthorityError> {
+            Ok(())
+        }
+    }
 
     fn binding() -> StoreRuntimeBindingV1 {
         serde_json::from_value(serde_json::json!({
@@ -1009,6 +1078,237 @@ mod tests {
                 ))
                 .unwrap_err(),
             ExactSqlError::WriterUnavailable
+        );
+
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+    }
+
+    fn attach_wal_database(directory: &TempDir) -> RepositoryRuntimePhysicalAttachment {
+        let path = directory.path().join("maintenance.sqlite3");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        drop(connection);
+        let path = path.canonicalize().unwrap();
+        let binding = binding();
+        RepositoryPhysicalAttachmentFactory
+            .attach(
+                binding.clone(),
+                locator(&binding),
+                path,
+                AdmissionConfigV1::default(),
+            )
+            .unwrap()
+    }
+
+    fn maintenance_request(
+        attachment: &RepositoryRuntimePhysicalAttachment,
+        mode: MaintenanceCheckpointMode,
+    ) -> MaintenanceCheckpointRequest {
+        let permit = ExclusiveMaintenancePermit::issue(
+            MaintenanceOwnerId::new(1).unwrap(),
+            attachment.binding(),
+        );
+        MaintenanceCheckpointRequest::new(mode, permit, CheckpointBlockers::default())
+    }
+
+    #[test]
+    fn maintenance_port_reports_closed_without_a_writer_or_after_close() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("reader-only.sqlite3");
+        create_identity_database(&path, "reader-only");
+        let path = path.canonicalize().unwrap();
+        let binding = binding();
+        let read_only = RepositoryPhysicalAttachmentFactory
+            .attach_read_only(
+                binding.clone(),
+                locator(&binding),
+                path,
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        assert!(matches!(
+            read_only.begin_maintenance_drain(),
+            Err(RepositoryDispatchError::Closed)
+        ));
+        let request = maintenance_request(&read_only, MaintenanceCheckpointMode::Truncate);
+        let error = runtime
+            .block_on(
+                read_only.run_maintenance_checkpoint(request, Arc::new(UnrestrictedAuthority)),
+            )
+            .unwrap_err();
+        assert!(matches!(error, RepositoryDispatchError::Closed));
+        read_only.drain().unwrap();
+        read_only.close_and_join().unwrap();
+
+        let writable = attach_wal_database(&directory);
+        writable.drain().unwrap();
+        writable.close_and_join().unwrap();
+        assert!(matches!(
+            writable.begin_maintenance_drain(),
+            Err(RepositoryDispatchError::Closed)
+        ));
+        let request = maintenance_request(&writable, MaintenanceCheckpointMode::Truncate);
+        let error = runtime
+            .block_on(writable.run_maintenance_checkpoint(request, Arc::new(UnrestrictedAuthority)))
+            .unwrap_err();
+        assert!(matches!(error, RepositoryDispatchError::Closed));
+    }
+
+    #[test]
+    fn maintenance_drain_keeps_writer_attached_and_closes_admission() {
+        let directory = TempDir::new().unwrap();
+        let attachment = attach_wal_database(&directory);
+        let handle = attachment.exact_sql_handle().unwrap();
+        handle
+            .execute_batch("CREATE TABLE maintenance_probe (value INTEGER NOT NULL)".to_owned())
+            .unwrap();
+
+        attachment.begin_maintenance_drain().unwrap();
+        attachment.begin_maintenance_drain().unwrap();
+        {
+            let state = attachment.lock_state();
+            assert!(!state.admission_open);
+            assert!(!state.closed);
+            let writer = state.writer.as_ref().expect("writer stays attached");
+            assert_eq!(writer.state(), WriterState::Draining);
+            assert!(state.readers.is_some());
+        }
+        assert!(attachment.snapshot().writer_present);
+        let admission_error = match attachment.exact_sql_handle() {
+            Err(error) => error,
+            Ok(_) => panic!("maintenance drain must close exact-SQL admission"),
+        };
+        assert_eq!(admission_error, ExactSqlError::WriterUnavailable);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let outcome = runtime
+            .block_on(attachment.run_maintenance_checkpoint(
+                maintenance_request(&attachment, MaintenanceCheckpointMode::Restart),
+                Arc::new(UnrestrictedAuthority),
+            ))
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            CheckpointOutcome::Complete {
+                kind: CheckpointKind::Restart,
+                ..
+            }
+        ));
+
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+        {
+            let state = attachment.lock_state();
+            assert!(state.closed);
+            assert!(state.writer.is_none());
+            assert!(state.readers.is_none());
+        }
+    }
+
+    #[test]
+    fn maintenance_truncate_is_typed_pending_while_pinned_then_reclaims_wal() {
+        let directory = TempDir::new().unwrap();
+        let attachment = attach_wal_database(&directory);
+        let handle = attachment.exact_sql_handle().unwrap();
+        handle
+            .execute_batch("CREATE TABLE maintenance_probe (value INTEGER NOT NULL)".to_owned())
+            .unwrap();
+
+        // Pin an independent read snapshot at the current WAL mark, then
+        // append frames the checkpoint cannot backfill while it lives.
+        let (database_path, wal_path) = {
+            let state = attachment.lock_state();
+            (
+                state.database_path.clone(),
+                PathBuf::from(format!("{}-wal", state.database_path.display())),
+            )
+        };
+        let mut pinned = rusqlite::Connection::open(&database_path).unwrap();
+        let pinned_snapshot = pinned.transaction().unwrap();
+        let pinned_rows: i64 = pinned_snapshot
+            .query_row("SELECT COUNT(*) FROM maintenance_probe", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(pinned_rows, 0);
+        for value in 0..8_i64 {
+            handle
+                .execute(statement(
+                    "INSERT INTO maintenance_probe (value) VALUES (?)",
+                    vec![ExactSqlValue::Integer(value)],
+                ))
+                .unwrap();
+        }
+        let pinned_wal_bytes = fs::metadata(&wal_path).unwrap().len();
+        assert!(
+            pinned_wal_bytes > 0,
+            "maintenance truncate must start with committed frames pending in WAL"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let outcome = runtime
+            .block_on(attachment.run_maintenance_checkpoint(
+                maintenance_request(&attachment, MaintenanceCheckpointMode::Truncate),
+                Arc::new(UnrestrictedAuthority),
+            ))
+            .unwrap();
+        let report = match outcome {
+            CheckpointOutcome::Pending {
+                kind: CheckpointKind::Truncate,
+                report,
+                ..
+            } => report,
+            other => panic!("a pinned WAL truncate must be typed Pending, got {other:?}"),
+        };
+        assert!(
+            report.busy,
+            "a truncate blocked by a pinned reader must report busy"
+        );
+        assert!(
+            report.checkpointed_frames < report.log_frames,
+            "pinned frames must stay unbackfilled: {} of {}",
+            report.checkpointed_frames,
+            report.log_frames
+        );
+        assert_eq!(
+            fs::metadata(&wal_path).unwrap().len(),
+            pinned_wal_bytes,
+            "a busy truncate must not report reclaim the WAL file disproves"
+        );
+
+        drop(pinned_snapshot);
+        drop(pinned);
+        let outcome = runtime
+            .block_on(attachment.run_maintenance_checkpoint(
+                maintenance_request(&attachment, MaintenanceCheckpointMode::Truncate),
+                Arc::new(UnrestrictedAuthority),
+            ))
+            .unwrap();
+        let report = match outcome {
+            CheckpointOutcome::Complete {
+                kind: CheckpointKind::Truncate,
+                report,
+                ..
+            } => report,
+            other => panic!("a released WAL truncate must complete, got {other:?}"),
+        };
+        assert!(!report.busy);
+        assert_eq!(report.checkpointed_frames, report.log_frames);
+        assert_eq!(
+            fs::metadata(&wal_path).unwrap().len(),
+            0,
+            "an exclusive TRUNCATE checkpoint must leave a zero-length WAL"
         );
 
         attachment.drain().unwrap();
