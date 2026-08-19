@@ -47,13 +47,17 @@ where
         let Some(port) = self.native_integration.port.clone() else {
             return;
         };
-        for projection in port.poll_status(MAX_NATIVE_INTEGRATION_STATUS_PER_POLL) {
+        let mut emitted = 0_usize;
+        for projection in port.poll_status(MAX_TRACKED_NATIVE_INTEGRATION_TRANSACTIONS) {
             let identity = (
                 projection.repository_id.clone(),
                 projection.transaction_id.clone(),
             );
             if self.native_integration.notified.get(&identity) == Some(&projection) {
                 continue;
+            }
+            if emitted == MAX_NATIVE_INTEGRATION_STATUS_PER_POLL {
+                break;
             }
             let Ok(params) = serde_json::to_value(&projection) else {
                 continue;
@@ -69,6 +73,7 @@ where
             self.native_integration
                 .notified
                 .insert(identity, projection);
+            emitted = emitted.saturating_add(1);
             if self.native_integration.notified.len() > MAX_TRACKED_NATIVE_INTEGRATION_TRANSACTIONS
                 && let Some(oldest) = self
                     .native_integration
@@ -97,7 +102,8 @@ mod tests {
 
     use super::super::tests::{initialize, session};
     use crate::native_integration::{
-        NativeIntegrationStatusPort, TRACEDECAY_NATIVE_INTEGRATION_STATUS_METHOD,
+        MAX_NATIVE_INTEGRATION_STATUS_PER_POLL, NativeIntegrationStatusPort,
+        TRACEDECAY_NATIVE_INTEGRATION_STATUS_METHOD,
     };
 
     struct ScriptedStatusPort {
@@ -252,6 +258,38 @@ mod tests {
         assert!(
             native_integration_notifications(session.drain_outbound()).is_empty(),
             "unchanged statuses with colliding transaction ids must stay deduped"
+        );
+    }
+
+    #[test]
+    fn retained_statuses_beyond_one_flush_are_eventually_notified() {
+        let statuses = (0..=MAX_NATIVE_INTEGRATION_STATUS_PER_POLL)
+            .map(|index| {
+                projection_for(
+                    "repository.lsp.notify",
+                    &format!("transaction.lsp.notify.{index}"),
+                    NativeIntegrationPhaseV1::Prepared,
+                    1,
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        let port = ScriptedStatusPort::holding(statuses[0].clone());
+        port.replace_many(statuses);
+        let mut session =
+            session().with_native_integration_status_port(Arc::clone(&port) as Arc<_>);
+
+        initialize(&mut session);
+        assert_eq!(
+            native_integration_notifications(session.drain_outbound()).len(),
+            MAX_NATIVE_INTEGRATION_STATUS_PER_POLL
+        );
+
+        session.flush_due(2);
+        assert_eq!(
+            native_integration_notifications(session.drain_outbound()).len(),
+            1,
+            "the next flush must advance beyond the first bounded notification page"
         );
     }
 }

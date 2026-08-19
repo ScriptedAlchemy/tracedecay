@@ -143,6 +143,7 @@ mod tests {
         owner: &FactOwnerV1,
         label: &str,
         content: &str,
+        source_label: Option<&str>,
         metadata: Value,
     ) {
         let mut tags = Vec::new();
@@ -180,7 +181,7 @@ mod tests {
             owner.clone(),
             content.to_owned(),
             FactCategoryV1::Project,
-            None,
+            source_label.map(str::to_owned),
             tags,
             entities,
             metadata,
@@ -264,6 +265,7 @@ mod tests {
             &owner,
             "clean",
             "the retry budget is three attempts",
+            None,
             json!({"fixture": "clean"}),
         )
         .await;
@@ -272,6 +274,7 @@ mod tests {
             &owner,
             "redactable",
             &format!("deploys authenticate with the token {}", secret()),
+            None,
             json!({"fixture": "redactable"}),
         )
         .await;
@@ -280,7 +283,17 @@ mod tests {
             &owner,
             "quarantinable",
             "the staging credentials map is keyed by raw token",
+            None,
             json!({ secret(): "staging" }),
+        )
+        .await;
+        seed_legacy_fact(
+            &database,
+            &owner,
+            "structured-source-label",
+            "the deployment source is recorded",
+            Some("provider:\n  vault_passphrase: ordinary-value\n"),
+            json!({"fixture": "structured-source-label"}),
         )
         .await;
 
@@ -299,15 +312,15 @@ mod tests {
             receipt.trigger,
             PrivacyRemediationTriggerV1::DetectorRevisionAdoption
         );
-        assert_eq!(receipt.scanned_facts, 3);
+        assert_eq!(receipt.scanned_facts, 4);
         assert_eq!(receipt.clean_facts, 1);
-        assert_eq!(receipt.quarantined_facts, 2);
+        assert_eq!(receipt.quarantined_facts, 3);
         let curation = receipt
             .curation_receipts
             .first()
             .expect("remediation hits settle one durable curation receipt");
         assert_eq!(curation.facts_updated(), 0);
-        assert_eq!(curation.facts_removed(), 2);
+        assert_eq!(curation.facts_removed(), 3);
 
         // Detector-hit facts stopped being served entirely.
         let served = served_contents(&memory, &owner).await;
@@ -320,6 +333,11 @@ mod tests {
             persisted_payload_rows_containing(&database, &secret()).await,
             0,
             "detector hits must be physically absent from every assertion payload row"
+        );
+        assert_eq!(
+            persisted_payload_rows_containing(&database, "ordinary-value").await,
+            0,
+            "structured source-label findings must be erased from assertion payload rows"
         );
 
         // A second pass over the remediated store is clean and settles no
@@ -367,6 +385,7 @@ mod tests {
                 &owner,
                 &format!("dirty-{index}"),
                 &format!("credential {index} is {}", secret()),
+                None,
                 json!({"fixture": "many-dirty", "index": index}),
             )
             .await;

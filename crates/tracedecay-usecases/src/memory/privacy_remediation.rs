@@ -24,7 +24,7 @@ use super::MemoryApplication;
 use super::context::MemoryOperationContext;
 use super::curation::{ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation};
 use super::error::{MemoryApplicationError, MemoryMutationError};
-use super::sanitize::fact_payload_wire;
+use super::sanitize::{fact_payload_wire, sanitize_optional_memory_text};
 
 /// Why an at-rest rescan ran. Recorded on the receipt so operators can see
 /// which journey produced it; daemon store adoption is currently the only
@@ -159,13 +159,20 @@ fn remediation_confidence() -> Result<Confidence, MemoryApplicationError> {
 fn rescan_fact(
     fact: &ProjectMemoryFactV1,
 ) -> Result<FactRescanDispositionV1, MemoryApplicationError> {
+    let Some(source_label) = sanitize_optional_memory_text(fact.source_label().map(str::to_owned))
+    else {
+        return Ok(FactRescanDispositionV1::Quarantine);
+    };
+    if source_label.as_deref() != fact.source_label() {
+        return Ok(FactRescanDispositionV1::Quarantine);
+    }
     let wire = fact_payload_wire(
         fact.content(),
         fact.category(),
         fact.tags(),
         fact.entities(),
         fact.metadata(),
-        fact.source_label(),
+        source_label.as_deref(),
     );
     let sanitized = sanitize_memory_fact_payload(wire.clone()).map_err(|_| {
         MemoryApplicationError::InvalidInput {
