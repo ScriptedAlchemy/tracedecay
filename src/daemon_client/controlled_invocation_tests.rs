@@ -447,8 +447,11 @@ async fn remote_effect_without_authoritative_settlement_returns_reset_required()
     });
     let deadline = deadline_after(Duration::from_secs(10));
 
+    // The unsettled server never answers, so the client keeps reading for the
+    // full authoritative response grace before typing the indeterminate
+    // effect; the join bound must outlive that grace, not the shutdown bound.
     let response = tokio::time::timeout(
-        crate::daemon::DAEMON_TASK_ABORT_DEADLINE + Duration::from_secs(1),
+        crate::daemon::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
         client.invoke_controlled(
             invocation_request(REQUEST_ID, deadline.clone()),
             deadline,
@@ -479,8 +482,10 @@ async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     });
     let deadline = deadline_after(Duration::from_secs(10));
 
+    // Same bound reasoning as above: the indeterminate terminal is typed only
+    // after the full authoritative response grace elapses unanswered.
     let response = tokio::time::timeout(
-        crate::daemon::DAEMON_TASK_ABORT_DEADLINE + Duration::from_secs(1),
+        crate::daemon::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
         client.invoke_controlled(
             invocation_request(REQUEST_ID, deadline.clone()),
             deadline,

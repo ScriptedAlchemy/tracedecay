@@ -55,8 +55,20 @@ impl DaemonInvocationClient {
                         Err(DaemonInvocationError::Cancelled { stage })
                     }
                     InvocationCancellationPolicy::AuthoritativeEffect => {
+                        // An authoritative effect settles itself: its own
+                        // budget bounds it, and when that budget expires after
+                        // the commit point it reports `PartialEffect` with a
+                        // committed receipt. Waiting only
+                        // `DAEMON_TASK_ABORT_DEADLINE` — two seconds, a
+                        // *shutdown* bound — replaced that answer with a
+                        // fabricated `ResetRequired` whenever settlement took
+                        // a moment longer, exactly as the in-process executor
+                        // once did (`settle_in_process_invocation`). Keep
+                        // reading over the same response grace the daemon's
+                        // own clients use so the effect's real terminal is
+                        // the one reported.
                         match tokio::time::timeout(
-                            crate::daemon::DAEMON_TASK_ABORT_DEADLINE,
+                            crate::daemon::DAEMON_TOOL_RESPONSE_GRACE,
                             &mut invocation,
                         )
                         .await
