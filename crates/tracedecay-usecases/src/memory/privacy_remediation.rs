@@ -10,9 +10,7 @@
 //! scanner binary or touches the network, and no unsanitized payload is ever
 //! persisted back.
 
-use serde::Deserialize;
-use serde_json::{Value, json};
-use tracedecay_domain::{Confidence, FactCategoryV1, UtcMicros};
+use tracedecay_domain::Confidence;
 use tracedecay_runtime_core::privacy::{
     MEMORY_FACT_SANITIZER_VERSION_V1, MemoryFactSanitizationV1, sanitize_memory_fact_payload,
 };
@@ -26,15 +24,15 @@ use super::MemoryApplication;
 use super::context::MemoryOperationContext;
 use super::curation::{ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation};
 use super::error::{MemoryApplicationError, MemoryMutationError};
+use super::sanitize::{SanitizedFactPayloadWire, fact_payload_wire};
 
-/// Why an at-rest rescan ran. Recorded on the receipt so operators can
-/// distinguish daemon-adopted maintenance from an explicit request.
+/// Why an at-rest rescan ran. Recorded on the receipt so operators can see
+/// which journey produced it; daemon store adoption is currently the only
+/// production trigger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivacyRemediationTriggerV1 {
     /// The daemon adopted the store under the current detector revision.
     DetectorRevisionAdoption,
-    /// An operator or Doctor explicitly requested a rescan.
-    OperatorRequest,
 }
 
 /// Truthful outcome of one at-rest rescan. `curation_receipt` is present
@@ -49,24 +47,10 @@ pub struct ProjectMemoryPrivacyRemediationReceiptV1 {
     pub redacted_facts: u64,
     pub quarantined_facts: u64,
     pub curation_receipt: Option<ProjectMemoryFactCurationReceiptV1>,
-    pub started_at: UtcMicros,
-    pub finished_at: UtcMicros,
 }
 
 /// One page of currently served facts per authority read.
 const RESCAN_PAGE_LIMIT: usize = 64;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SanitizedFactPayloadWire {
-    content: String,
-    category: FactCategoryV1,
-    tags: Vec<String>,
-    entities: Vec<String>,
-    metadata: Value,
-    #[serde(default)]
-    source_label: Option<String>,
-}
 
 enum FactRescanDispositionV1 {
     Clean,
@@ -83,11 +67,10 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     pub async fn privacy_remediation_rescan(
         &self,
         trigger: PrivacyRemediationTriggerV1,
-        started_at: UtcMicros,
-        finished_at: impl Fn() -> UtcMicros,
         read_control: &FactReadControl,
         write_control: &FactWriteControl,
     ) -> Result<ProjectMemoryPrivacyRemediationReceiptV1, MemoryApplicationError> {
+        let confidence = remediation_confidence()?;
         let mut scanned_facts = 0_u64;
         let mut clean_facts = 0_u64;
         let mut operations = Vec::new();
@@ -102,9 +85,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 after_fact_id.take(),
                 RESCAN_PAGE_LIMIT,
             )?;
-            let page = self
-                .list_project_memory_facts(query, read_control)
-                .await?;
+            let page = self.list_project_memory_facts(query, read_control).await?;
             for projection in page.facts() {
                 let ProjectMemoryFactProjectionV1::Available(fact) = projection else {
                     // A withheld projection serves no payload, so there is
@@ -126,7 +107,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                             target: target.clone(),
                             patch,
                             evidence_facts: vec![target],
-                            confidence: remediation_confidence()?,
+                            confidence,
                             reason: "at-rest privacy rescan redacted detector findings".to_owned(),
                         });
                     }
@@ -135,7 +116,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                         operations.push(ProjectMemoryCurationOperation::Remove {
                             target: target.clone(),
                             evidence_facts: vec![target],
-                            confidence: remediation_confidence()?,
+                            confidence,
                             reason: "at-rest privacy rescan quarantined this fact".to_owned(),
                         });
                     }
@@ -149,19 +130,10 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         let curation_receipt = if operations.is_empty() {
             None
         } else {
-            let context = MemoryOperationContext::generated(
-                &self.owner,
-                "privacy_remediation_rescan",
-                None,
-            )?;
+            let context =
+                MemoryOperationContext::generated(&self.owner, "privacy_remediation_rescan", None)?;
             let receipt = self
-                .apply_project_memory_curation(
-                    operations,
-                    remediation_confidence()?,
-                    context,
-                    None,
-                    write_control,
-                )
+                .apply_project_memory_curation(operations, confidence, context, None, write_control)
                 .await
                 .map_err(|error| match error {
                     MemoryMutationError::Application(error) => error,
@@ -177,8 +149,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             redacted_facts,
             quarantined_facts,
             curation_receipt,
-            started_at,
-            finished_at: finished_at(),
         })
     }
 }
@@ -192,22 +162,17 @@ fn remediation_confidence() -> Result<Confidence, MemoryApplicationError> {
 /// Re-evaluates one served fact's canonical payload wire under the current
 /// detector. The wire mirrors the ingest sanitizer exactly, so an unchanged
 /// durable answer proves the persisted row already satisfies the revision.
-fn rescan_fact(fact: &ProjectMemoryFactV1) -> Result<FactRescanDispositionV1, MemoryApplicationError> {
-    let mut wire = json!({
-        "content": fact.content(),
-        "category": fact.category(),
-        "tags": fact.tags(),
-        "entities": fact.entities(),
-        "metadata": fact.metadata(),
-    });
-    if let Some(source_label) = fact.source_label()
-        && let Value::Object(object) = &mut wire
-    {
-        object.insert(
-            "source_label".to_owned(),
-            Value::String(source_label.to_owned()),
-        );
-    }
+fn rescan_fact(
+    fact: &ProjectMemoryFactV1,
+) -> Result<FactRescanDispositionV1, MemoryApplicationError> {
+    let wire = fact_payload_wire(
+        fact.content(),
+        fact.category(),
+        fact.tags(),
+        fact.entities(),
+        fact.metadata(),
+        fact.source_label(),
+    );
     let sanitized = sanitize_memory_fact_payload(wire.clone()).map_err(|_| {
         MemoryApplicationError::InvalidInput {
             invariant: "at-rest privacy rescan detector evaluation",

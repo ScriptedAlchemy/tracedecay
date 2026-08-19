@@ -11,13 +11,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_domain::UtcMicros;
 use tracedecay_store::{FactReadControl, FactWriteControl};
 use tracedecay_usecases::memory::{
     PrivacyRemediationTriggerV1, ProjectMemoryPrivacyRemediationReceiptV1,
 };
 
-use crate::daemon_client::invocation_now_micros;
 use crate::errors::Result;
 use crate::tracedecay::TraceDecay;
 
@@ -25,12 +23,7 @@ use crate::tracedecay::TraceDecay;
 pub(crate) fn spawn_project_memory_privacy_remediation(graph: Arc<TraceDecay>) {
     tokio::spawn(async move {
         let project = graph.project_root().display().to_string();
-        match run_project_memory_privacy_remediation(
-            &graph,
-            PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
-        )
-        .await
-        {
+        match run_project_memory_privacy_remediation(&graph).await {
             Ok(receipt) => {
                 tracing::info!(
                     event = "project_memory_privacy_remediation",
@@ -53,18 +46,13 @@ pub(crate) fn spawn_project_memory_privacy_remediation(graph: Arc<TraceDecay>) {
     });
 }
 
-/// Runs one at-rest rescan over the project's persisted memory facts.
-pub(crate) async fn run_project_memory_privacy_remediation(
+async fn run_project_memory_privacy_remediation(
     graph: &TraceDecay,
-    trigger: PrivacyRemediationTriggerV1,
 ) -> Result<ProjectMemoryPrivacyRemediationReceiptV1> {
     let memory = graph.project_memory_application().await?;
-    let started_at = UtcMicros(invocation_now_micros().0);
     memory
         .privacy_remediation_rescan(
-            trigger,
-            started_at,
-            || UtcMicros(invocation_now_micros().0),
+            PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
             &remediation_read_control(),
             &remediation_write_control(),
         )
@@ -295,16 +283,17 @@ mod tests {
             .expect("owner-bound memory application");
         let receipt = memory
             .privacy_remediation_rescan(
-                PrivacyRemediationTriggerV1::OperatorRequest,
-                tracedecay_domain::UtcMicros(1),
-                || tracedecay_domain::UtcMicros(2),
+                PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
                 &remediation_read_control(),
                 &remediation_write_control(),
             )
             .await
             .expect("at-rest privacy rescan");
 
-        assert_eq!(receipt.trigger, PrivacyRemediationTriggerV1::OperatorRequest);
+        assert_eq!(
+            receipt.trigger,
+            PrivacyRemediationTriggerV1::DetectorRevisionAdoption
+        );
         assert_eq!(receipt.scanned_facts, 3);
         assert_eq!(receipt.clean_facts, 1);
         assert_eq!(receipt.redacted_facts, 1);
@@ -336,8 +325,6 @@ mod tests {
         let second = memory
             .privacy_remediation_rescan(
                 PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
-                tracedecay_domain::UtcMicros(3),
-                || tracedecay_domain::UtcMicros(4),
                 &remediation_read_control(),
                 &remediation_write_control(),
             )
