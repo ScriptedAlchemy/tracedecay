@@ -26,8 +26,7 @@ impl Database {
                 .write_conn
                 .as_ref()
                 .ok_or_else(|| TraceDecayError::Database {
-                    message: "writable database handle is missing its writer connection"
-                        .to_owned(),
+                    message: "writable database handle is missing its writer connection".to_owned(),
                     operation: "release SQLite database memory".to_owned(),
                 })?
         } else {

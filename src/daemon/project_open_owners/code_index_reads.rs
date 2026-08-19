@@ -39,7 +39,11 @@ impl tracedecay_usecases::graph::CodeGraphProjectionReadPort
             // equality (reference + scope digest) denied the route's own
             // checkout after every ordinary `git switch`. A genuinely
             // different project, repository, or worktree stays denied.
-            if !request.context.scope().identifies_same_checkout(&self.scope) {
+            if !request
+                .context
+                .scope()
+                .identifies_same_checkout(&self.scope)
+            {
                 return Err(CodeGraphReadError::Denied);
             }
             if request.cancellation.is_cancelled() {
