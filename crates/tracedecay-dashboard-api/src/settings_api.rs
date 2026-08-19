@@ -30,8 +30,8 @@ use crate::application::configuration::{
 };
 use crate::application::settings_control::{
     ProjectSettingsPatchV1, ProjectSettingsPreviewErrorV1, SyncSettingsPatchV1,
-    TelemetrySettingsPatchV1, context_scout_settings_are_enabled,
-    effective_context_scout_settings, preview_project_settings,
+    TelemetrySettingsPatchV1, context_scout_settings_are_enabled, effective_context_scout_settings,
+    preview_project_settings,
 };
 use crate::config::TraceDecayConfig;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};

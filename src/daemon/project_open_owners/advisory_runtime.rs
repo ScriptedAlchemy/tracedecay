@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
 use tracedecay_application::feedback::{
     FeedbackRuntimeStatePort, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
     GITHUB_REVIEW_INGEST_USE_CASE_ID_V1, GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
@@ -13,13 +14,14 @@ use tracedecay_application::{
     ApplicationProblem, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, RequestContext, SafeDiagnostic, now_micros,
 };
-use sha2::{Digest, Sha256};
 use tracedecay_domain::GitHeadStateV1;
 use tracedecay_domain::feedback::{
     CiFailureParserIdentityV1, FeedbackScopeV1, FeedbackTriggerV1, GitHubPullRequestIdV1,
     GitHubReviewReadOperationV1,
 };
-use tracedecay_domain::{CommitId, HostKindV1, ManifestDigest, ProviderId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    CommitId, HostKindV1, ManifestDigest, ProviderId, UtcMicros, canonical_sha256,
+};
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_hooks::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
@@ -188,7 +190,12 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-stop-gate"))?;
         }
         let observed_at = invocation.request.input.observed_at;
-        let configuration_digest = invocation.request.input.request.configuration_digest.clone();
+        let configuration_digest = invocation
+            .request
+            .input
+            .request
+            .configuration_digest
+            .clone();
         let ci = match self.ci_discovery_config.as_ref() {
             Some(config) => {
                 discover_production_ci_failure_request_v1(
@@ -550,7 +557,12 @@ async fn run_production_hook_cycle(
     // The Scout tail re-pins the current Plan 20 configuration: a revision
     // that landed while the advisory half ran must not produce guidance
     // under the superseded control state.
-    let Ok(pinned_configuration) = producer.graph.configuration_runtime().client().current().await
+    let Ok(pinned_configuration) = producer
+        .graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
     else {
         return;
     };
@@ -987,17 +999,20 @@ async fn register_production_advisory_owner(
     lsp_input: FeedbackCycleLspInput,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
 ) -> Result<()> {
-    let scout_configuration = ContextScoutConfigurationPinV1::from_current(&state.scout_configuration)
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "project-open Context Scout configuration is unavailable".to_owned(),
-        })?;
-    let scout_owner = state
-        .graph
-        .context_scout_owner()
-        .cloned()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "project-open Context Scout owner is unavailable".to_owned(),
-        })?;
+    let scout_configuration = ContextScoutConfigurationPinV1::from_current(
+        &state.scout_configuration,
+    )
+    .ok_or_else(|| TraceDecayError::Config {
+        message: "project-open Context Scout configuration is unavailable".to_owned(),
+    })?;
+    let scout_owner =
+        state
+            .graph
+            .context_scout_owner()
+            .cloned()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "project-open Context Scout owner is unavailable".to_owned(),
+            })?;
     let configuration = state
         .graph
         .configuration_runtime()
@@ -1123,14 +1138,15 @@ async fn register_production_advisory_owner(
         indexed_files: state.indexed_files.clone(),
     });
     let work_cycle = Arc::clone(&advisory_cycle);
-    let work = move |request: HookOrchestrationRequestV1,
-                     work_cancellation: tracedecay_runtime_core::cancellation::CancellationToken| {
-        let cycle = Arc::clone(&work_cycle);
-        let producer = Arc::clone(&producer);
-        async move {
-            run_production_hook_cycle(cycle, producer, request, work_cancellation).await;
-        }
-    };
+    let work =
+        move |request: HookOrchestrationRequestV1,
+              work_cancellation: tracedecay_runtime_core::cancellation::CancellationToken| {
+            let cycle = Arc::clone(&work_cycle);
+            let producer = Arc::clone(&producer);
+            async move {
+                run_production_hook_cycle(cycle, producer, request, work_cancellation).await;
+            }
+        };
     let orchestrator =
         BoundedHookOrchestratorV1::new(1, work).ok_or_else(|| TraceDecayError::Config {
             message: "project-open hook orchestration capacity is invalid".to_owned(),

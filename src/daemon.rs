@@ -369,8 +369,8 @@ pub(crate) use service::invocation::{
     DaemonFeedbackRuntimeRegistrationError, DaemonInvocationService, DaemonLspOwnerRegistrar,
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
     DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
-    DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1,
-    admit_registered_hook_orchestration, daemon_operation_event_authority,
+    DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1, admit_registered_hook_orchestration,
+    daemon_operation_event_authority,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,

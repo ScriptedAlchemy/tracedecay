@@ -2,8 +2,8 @@ use std::sync::Mutex as StdMutex;
 
 use crate::daemon::context_scout_lifecycle::AuthorityRegistrationV1;
 use serde_json::json;
-use tracedecay_usecases::host_admission::HostAdmissionScope;
 use tracedecay_domain::{ObservationSourceRangeV1, ProjectId, ProviderId, SessionId, UtcMicros};
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use super::super::envelope::hook_v2_native_session_id;
 use super::super::test_support::*;

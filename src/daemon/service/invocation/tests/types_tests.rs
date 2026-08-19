@@ -158,7 +158,9 @@ async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
         }
     })
     .unwrap();
-    assert!(register_hook_orchestration_runtime([3; 16], [5; 16], &runtime));
+    assert!(register_hook_orchestration_runtime(
+        [3; 16], [5; 16], &runtime
+    ));
 
     assert_eq!(
         admit_registered_hook_orchestration(

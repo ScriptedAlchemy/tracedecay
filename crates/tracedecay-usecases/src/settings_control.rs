@@ -50,7 +50,9 @@ pub struct ProjectSettingsPatchV1 {
 /// The effective Plan 20 Context Scout value in one configuration snapshot.
 /// The registry always resolves this key; a snapshot predating the key reads
 /// as the canonical stock state, which is disabled.
-pub fn effective_context_scout_settings(snapshot: &ConfigurationSnapshotV1) -> ContextScoutSettingsV1 {
+pub fn effective_context_scout_settings(
+    snapshot: &ConfigurationSnapshotV1,
+) -> ContextScoutSettingsV1 {
     SettingKey::new(CONTEXT_SCOUT_SETTINGS_SETTING_KEY)
         .ok()
         .and_then(|key| match snapshot.effective_values.get(&key) {
@@ -164,9 +166,9 @@ pub fn preview_project_settings(
                     .auto_track_pr_poll_secs
                     .is_none_or(|value| value == current.config.sync.auto_track_pr_poll_secs)
         })
-        && patch
-            .context_scout
-            .is_none_or(|value| value == context_scout_settings_are_enabled(&current_context_scout));
+        && patch.context_scout.is_none_or(|value| {
+            value == context_scout_settings_are_enabled(&current_context_scout)
+        });
     let mut mutations = Vec::new();
     push(
         &mut mutations,
@@ -342,5 +344,83 @@ mod tests {
         };
         assert_eq!(mutations.len(), 2);
         assert_eq!(current.config.max_file_size, 1_048_576);
+    }
+
+    #[test]
+    fn context_scout_flag_toggles_only_the_state_of_the_effective_value() {
+        let project_id = ProjectId::new("project.settings.scout").unwrap();
+        let revision = ConfigurationRevisionId::new("configuration.revision.scout").unwrap();
+        let snapshot = ConfigurationSnapshotV1::new(
+            BTreeMap::new(),
+            BTreeMap::<SettingKey, Vec<ConfigurationCandidateV1>>::new(),
+        )
+        .unwrap();
+        let current = PinnedRuntimeConfiguration {
+            target: crate::config::RuntimeConfigurationTarget {
+                project_id: project_id.clone(),
+                project_root: PathBuf::from("/project"),
+            },
+            revision_id: revision.clone(),
+            snapshot,
+            config: crate::config::TraceDecayConfig::default(),
+        };
+        // A snapshot without the key renders the canonical stock state: off.
+        let current_settings = effective_context_scout_settings(&current.snapshot);
+        assert_eq!(current_settings, ContextScoutSettingsV1::disabled());
+        assert!(!context_scout_settings_are_enabled(&current_settings));
+
+        // Re-submitting the current state plans no mutation.
+        let unchanged = preview_project_settings(
+            &project_id,
+            &current,
+            ProjectSettingsPatchV1 {
+                expected_revision_id: revision.as_str().to_owned(),
+                context_scout: Some(false),
+                ..ProjectSettingsPatchV1::default()
+            },
+        )
+        .unwrap();
+        assert!(!unchanged.changed);
+
+        let preview = preview_project_settings(
+            &project_id,
+            &current,
+            ProjectSettingsPatchV1 {
+                expected_revision_id: revision.as_str().to_owned(),
+                context_scout: Some(true),
+                ..ProjectSettingsPatchV1::default()
+            },
+        )
+        .unwrap();
+        assert!(preview.changed);
+        let DirectConfigurationMutation::Batch { mutations } = preview.mutation else {
+            panic!("project settings must be atomic")
+        };
+        let [DirectConfigurationMutation::Set { key, value, .. }] = mutations.as_slice() else {
+            panic!("the flag must plan exactly one typed Set")
+        };
+        assert_eq!(key.as_str(), CONTEXT_SCOUT_SETTINGS_SETTING_KEY);
+        let ConfigurationValueV1::ContextScoutSettings(settings) = value.as_ref() else {
+            panic!("the flag must write the typed Context Scout value")
+        };
+        assert_eq!(settings.state, ContextScoutConfigurationStateV1::Active);
+        // Only the state toggles; mode, limits, and model fields are kept.
+        assert_eq!(
+            (
+                settings.mode,
+                settings.limits,
+                settings.model_path,
+                settings.model_id.as_deref(),
+                settings.model_timeout_secs,
+            ),
+            (
+                ContextScoutSettingsV1::disabled().mode,
+                ContextScoutSettingsV1::disabled().limits,
+                None,
+                None,
+                None,
+            )
+        );
+        settings.validate().expect("planned value stays canonical");
     }
 }

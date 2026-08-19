@@ -14,12 +14,12 @@ use tracedecay_application::{
     EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
     TemporalState,
 };
+use tracedecay_domain::configuration::ConfigurationValueV1;
 use tracedecay_domain::feedback::FeedbackContentIdentityV1;
 use tracedecay_domain::{
     CodeGenerationId, ComponentVersion, ManifestDigest, ProjectId, RefId, RetrievalAnchorId,
     TemporalModeV1,
 };
-use tracedecay_domain::configuration::ConfigurationValueV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 fn typed_id<T>(value: &str) -> T
@@ -396,18 +396,27 @@ async fn stock_disabled_configuration_produces_nothing() {
         tracedecay_domain::configuration::CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     )
     .expect("Scout setting key");
-    let revision = tracedecay_domain::configuration::ConfigurationRevisionId::new(
-        "revision.scout.disabled",
-    )
-    .expect("configuration revision");
+    let revision =
+        tracedecay_domain::configuration::ConfigurationRevisionId::new("revision.scout.disabled")
+            .expect("configuration revision");
     let snapshot = tracedecay_domain::configuration::ConfigurationSnapshotV1::new(
         BTreeMap::from([(
-            setting_key,
+            setting_key.clone(),
             ConfigurationValueV1::ContextScoutSettings(
                 tracedecay_domain::configuration::ContextScoutSettingsV1::disabled(),
             ),
         )]),
-        BTreeMap::new(),
+        BTreeMap::from([(
+            setting_key,
+            vec![tracedecay_domain::configuration::ConfigurationCandidateV1 {
+                layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                    project_id: ProjectId::new("project.scout.disabled").expect("project id"),
+                },
+                revision_id: revision.clone(),
+                disposition: tracedecay_domain::configuration::CandidateDispositionV1::Winning,
+                safe_reason: None,
+            }],
+        )]),
     )
     .expect("configuration snapshot");
     let pin = ContextScoutConfigurationPinV1::from_current(

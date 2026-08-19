@@ -196,9 +196,15 @@ pub(crate) async fn lookup_registered_context_scout_lifecycle(
 ) -> Option<ContextScoutLifecycleAddressV1> {
     let (profile_id, project_id, worktree_id, sessions) =
         resolve_authority(hook_project_id, hook_worktree_id)?;
-    lookup_context_scout_lifecycle(&profile_id, &project_id, &worktree_id, session_id, &sessions)
-        .await
-        .into_address()
+    lookup_context_scout_lifecycle(
+        &profile_id,
+        &project_id,
+        &worktree_id,
+        session_id,
+        &sessions,
+    )
+    .await
+    .into_address()
 }
 
 /// Re-resolves the native session behind a protected Hook V2 locator.
@@ -257,10 +263,16 @@ pub(crate) async fn lookup_registered_context_scout_native_session(
         }
         resolved?
     };
-    lookup_context_scout_lifecycle(&profile_id, &project_id, &worktree_id, &session_id, &sessions)
-        .await
-        .is_resolved()
-        .then_some(session_id)
+    lookup_context_scout_lifecycle(
+        &profile_id,
+        &project_id,
+        &worktree_id,
+        &session_id,
+        &sessions,
+    )
+    .await
+    .is_resolved()
+    .then_some(session_id)
 }
 
 /// Why an exact lifecycle lookup resolved nothing.

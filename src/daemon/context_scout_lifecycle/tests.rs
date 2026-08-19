@@ -5,9 +5,9 @@ use tracedecay_domain::{
     CanonicalObservationRelationsV1, ComponentVersion, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-    SanitizerDispositionV1, SensitivityV1, UtcMicros,
+    PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    UtcMicros,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationStore, ObservationWrite,
