@@ -126,6 +126,14 @@ export const STORY_SURFACES: readonly StorySurface[] = [
       'The canonical task graph for the active project, over nine mounted routes.',
     wired: true,
   },
+  {
+    id: 'workflows',
+    path: '/workflows',
+    label: 'Workflows',
+    description:
+      'Registered workflow definitions, lifecycle control, and run projections.',
+    wired: true,
+  },
 ] as const;
 
 export type StorySurfaceId = (typeof STORY_SURFACES)[number]['id'];

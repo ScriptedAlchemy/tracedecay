@@ -2128,7 +2128,16 @@ fn remote_status_parses_json_flag() {
 
 #[test]
 fn remote_protocol_actions_require_endpoint_credential_and_request_file() {
-    for action in ["enroll", "replay", "backup", "restore", "failover"] {
+    for action in [
+        "enroll",
+        "capture",
+        "query",
+        "transfer-frame",
+        "replay",
+        "backup",
+        "restore",
+        "failover",
+    ] {
         let error = match Cli::try_parse_from(["tracedecay", "remote", action]) {
             Ok(_) => panic!("{action} must require authority flags"),
             Err(error) => error,
@@ -2195,6 +2204,43 @@ fn remote_replay_parses_request_file_and_optional_trust_root() {
     assert_eq!(authority.timeout_secs, 45);
     assert_eq!(authority.request_file, std::path::Path::new("-"));
     assert!(authority.json);
+}
+
+#[test]
+fn remote_capture_query_and_transfer_frame_parse_authority_flags() {
+    for (action, expected) in [
+        ("capture", "capture"),
+        ("query", "query"),
+        ("transfer-frame", "transfer_frame"),
+    ] {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "remote",
+            action,
+            "--endpoint",
+            "https://node.example/remote/",
+            "--credential-file",
+            "cred.bin",
+            "--request-file",
+            "request.json",
+            "--json",
+        ])
+        .unwrap_or_else(|error| panic!("remote {action} should parse: {error}"));
+
+        let Some(Commands::Remote { action: parsed }) = cli.command else {
+            panic!("unexpected remote {action} command");
+        };
+        let authority = match (&parsed, expected) {
+            (RemoteAction::Capture { authority }, "capture")
+            | (RemoteAction::Query { authority }, "query")
+            | (RemoteAction::TransferFrame { authority }, "transfer_frame") => authority,
+            _ => panic!("remote {action} parsed into the wrong action"),
+        };
+        assert_eq!(authority.endpoint, "https://node.example/remote/");
+        assert_eq!(authority.credential_file, std::path::Path::new("cred.bin"));
+        assert_eq!(authority.request_file, std::path::Path::new("request.json"));
+        assert!(authority.json);
+    }
 }
 
 #[test]

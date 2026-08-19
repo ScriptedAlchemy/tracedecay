@@ -161,14 +161,53 @@ fn is_readonly_database_error(err: &TraceDecayError) -> bool {
 pub(super) async fn write_project_open_error(
     transport: &mut impl McpTransport,
     request_line: &str,
+    connection_scope: &str,
     error: &TraceDecayError,
 ) -> Result<()> {
-    let id = serde_json::from_str::<JsonRpcRequest>(request_line)
-        .ok()
-        .and_then(|request| request.id)
-        .unwrap_or(serde_json::Value::Null);
-    let response = project_open_error_response(id, error);
+    let request = serde_json::from_str::<JsonRpcRequest>(request_line).ok();
+    let response = request
+        .as_ref()
+        .and_then(|request| tool_call_open_refusal_response(request, connection_scope, error))
+        .unwrap_or_else(|| {
+            let id = request
+                .and_then(|request| request.id)
+                .unwrap_or(serde_json::Value::Null);
+            project_open_error_response(id, error)
+        });
     write_json_rpc_response(transport, &response).await
+}
+
+/// A `tools/call` refused at project open answers on the MCP tool surface
+/// when the refusal is the reset-required terminal, matching the canonical
+/// problem envelope CLI and HTTP callers receive for the same operation.
+/// Non-application tools and every other open failure keep the raw shape.
+fn tool_call_open_refusal_response(
+    request: &JsonRpcRequest,
+    connection_scope: &str,
+    error: &TraceDecayError,
+) -> Option<JsonRpcResponse> {
+    if !matches!(classify_mcp_method(&request.method), McpMethod::ToolsCall) {
+        return None;
+    }
+    let TraceDecayError::ResetRequired { authority, reason } = error else {
+        return None;
+    };
+    let id = request.id.clone()?;
+    let tool_name = request.params.as_ref()?.get("name")?.as_str()?;
+    let request_id = crate::request_identity::mcp_connection_request_id(&id, connection_scope)?;
+    let envelope = crate::application_surface::mcp_project_open_reset_refusal(
+        tool_name, request_id, authority, reason,
+    )?;
+    let text = serde_json::to_string(&envelope).ok()?;
+    let problem = serde_json::to_value(envelope.problem.as_ref()).ok()?;
+    Some(JsonRpcResponse::success(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "isError": true,
+            "problem": problem,
+        }),
+    ))
 }
 
 pub(super) fn project_open_error_response(
@@ -236,6 +275,89 @@ pub(super) fn project_open_error_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_required_tools_call_answers_with_the_canonical_problem_envelope() {
+        let request: JsonRpcRequest = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": "tracedecay_storage_status", "arguments": {} },
+        }))
+        .expect("canonical tools/call request");
+        let error = TraceDecayError::reset_required("project store", "schema v26 is incompatible");
+
+        let response = tool_call_open_refusal_response(&request, "connection.test", &error)
+            .expect("an application tools/call refusal must answer on the tool surface");
+
+        assert!(response.error.is_none(), "the refusal is a tool result");
+        let result = response.result.expect("tool result payload");
+        assert_eq!(result["isError"], serde_json::json!(true));
+        assert_eq!(result["problem"]["kind"], "reset_required");
+        assert_eq!(
+            result["problem"]["legal_actions"],
+            serde_json::json!(["reset"])
+        );
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("rendered envelope text");
+        let envelope: serde_json::Value =
+            serde_json::from_str(text).expect("machine-readable envelope");
+        assert_eq!(envelope["problem"]["kind"], "reset_required");
+        assert_eq!(
+            envelope["problem"]["legal_actions"],
+            serde_json::json!(["reset"])
+        );
+        assert!(
+            envelope["problem"]["diagnostic"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("schema v26 is incompatible")),
+            "the refusal must carry the store's own reason: {envelope}"
+        );
+    }
+
+    #[test]
+    fn non_application_tools_and_other_failures_keep_the_raw_refusal_shape() {
+        let reset = TraceDecayError::reset_required("project store", "incompatible shape");
+        let unknown_tool: JsonRpcRequest = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": "tracedecay_not_an_application_tool", "arguments": {} },
+        }))
+        .expect("tools/call request");
+        assert!(
+            tool_call_open_refusal_response(&unknown_tool, "connection.test", &reset).is_none(),
+            "a tool without a mounted application binding keeps the raw refusal"
+        );
+
+        let initialize: JsonRpcRequest = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {},
+        }))
+        .expect("initialize request");
+        assert!(
+            tool_call_open_refusal_response(&initialize, "connection.test", &reset).is_none(),
+            "protocol bootstrap requests keep the raw refusal"
+        );
+
+        let storage_status: JsonRpcRequest = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": "tracedecay_storage_status", "arguments": {} },
+        }))
+        .expect("tools/call request");
+        let config = TraceDecayError::Config {
+            message: "unrelated open failure".to_owned(),
+        };
+        assert!(
+            tool_call_open_refusal_response(&storage_status, "connection.test", &config).is_none(),
+            "non-terminal open failures keep the raw refusal"
+        );
+    }
 
     #[test]
     fn reset_required_project_open_is_serialized_as_a_non_retryable_typed_failure() {

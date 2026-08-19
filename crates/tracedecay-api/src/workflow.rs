@@ -122,6 +122,21 @@ impl WorkflowOperation {
             .find(|operation| operation.operation_key() == key)
     }
 
+    /// Whether the operation reads without producing a durable effect.
+    /// Parity with the catalog's effect class is pinned by
+    /// `read_only_operations_mirror_the_catalog_effect_class`.
+    pub const fn is_read_only(self) -> bool {
+        matches!(
+            self,
+            Self::ValidateDefinition
+                | Self::GetDefinition
+                | Self::ListDefinitions
+                | Self::DefinitionHistory
+                | Self::DiffDefinition
+                | Self::GetRun
+        )
+    }
+
     pub fn from_cli_name(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|operation| {
             operation.operation_key() == name || operation.route_segment() == name
@@ -352,6 +367,27 @@ mod tests {
                 operation
                     .operation_id_str()
                     .starts_with("operation.workflow.")
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_operations_mirror_the_catalog_effect_class() {
+        let registry = tracedecay_application::workflow_executable_binding_registry()
+            .expect("canonical Workflow executable registry");
+        for operation in WorkflowOperation::ALL {
+            let operation_id =
+                tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned())
+                    .expect("catalog operation id");
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .expect("every mounted Workflow operation has an executable binding");
+            assert_eq!(
+                operation.is_read_only(),
+                binding.effect() == tracedecay_tool_catalog::EffectClass::Read,
+                "{} read-only declaration must mirror the catalog effect class",
+                operation.operation_key()
             );
         }
     }
