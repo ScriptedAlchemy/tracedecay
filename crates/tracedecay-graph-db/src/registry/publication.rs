@@ -496,9 +496,11 @@ impl GraphDbRegistry {
             .map_err(|error| GraphDbError::Corrupt {
                 message: format!("historical graph publication evidence is invalid: {error}"),
             })?;
-            if current
-                .as_ref()
-                .is_some_and(|head| head == &historical_head || head.sequence > replay.sequence)
+            let is_current_head = current.as_ref() == Some(&historical_head);
+            if is_current_head
+                || current
+                    .as_ref()
+                    .is_some_and(|head| head.sequence > replay.sequence)
             {
                 let mut visiting = BTreeSet::new();
                 let dependencies = self.load_dependencies(
@@ -542,7 +544,16 @@ impl GraphDbRegistry {
                     &mut visiting,
                 )?;
                 let lease = generation_lease(&manifest, historical_head.clone(), dependencies);
-                database.remember_verified_generation(&lease)?;
+                if is_current_head {
+                    // The durable CAS already advanced the head to this exact
+                    // publication (an earlier publish crashed after its
+                    // linearization point). Retrying it must seat the head for
+                    // reads, not file its own publication as history and leave
+                    // the projection without an installed verified head.
+                    database.install_verified_generation(Arc::clone(&lease))?;
+                } else {
+                    database.remember_verified_generation(&lease)?;
+                }
                 let mut closure = BTreeMap::new();
                 collect_closure(&lease, &mut closure)?;
                 return Ok(VerifiedGraphCommit {

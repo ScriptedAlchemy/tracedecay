@@ -1019,6 +1019,158 @@ fn restart_reverification_installs_once_and_steady_reads_need_no_authority() {
     drop(historical);
 }
 
+/// A publisher that crashed after the verified-head CAS retries the same
+/// first publication on restart: the head has already moved to its own
+/// journaled publication, and the retry must seat that publication instead
+/// of answering `Conflict` forever (observed live as `retained_seat_failed`
+/// looping on `code graph database conflict`).
+#[test]
+fn first_publish_retry_seats_its_own_publication_already_at_the_head() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("own-head", "work");
+    let g1 = manifest(identity.clone(), "g1", "g1", vec![], vec![]);
+    let record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'a',
+    );
+    let first = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            None,
+        )
+        .unwrap();
+    let first_head = first.head.clone();
+    drop(first);
+
+    // Restart: the completed CAS is durable, the in-process installation is
+    // gone, and the retry arrives with the same journaled expected prior.
+    assert!(registered.close().unwrap());
+    registered.mount().unwrap();
+    let retried = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            None,
+        )
+        .expect("a first publication already at the verified head must seat");
+    assert_eq!(retried.head, first_head);
+    assert_eq!(
+        registered
+            .registry
+            .verified_snapshot(
+                registration(registered.binding.clone(), temp.path()),
+                &identity,
+            )
+            .unwrap()
+            .generation(),
+        &GraphGenerationId::new("g1").unwrap()
+    );
+}
+
+/// A journaled publication superseded by the producer's own later
+/// publication must still seat as historical evidence on retry instead of
+/// looping `Conflict`: the retained-seat pass replays the older journaled
+/// generation while reconcile has already advanced the head past it.
+#[test]
+fn superseded_journaled_publication_seats_historically_on_retry() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("superseded", "work");
+    let g1 = manifest(identity.clone(), "g1", "g1", vec![], vec![]);
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'a',
+    );
+    let g1_commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let g1_head = g1_commit.head.clone();
+    drop(g1_commit);
+    let g2 = manifest(identity.clone(), "g2", "g2", vec![], vec![]);
+    let g2_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        "publish:g2",
+        Some(g1_head.clone()),
+        'b',
+    );
+    registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g2_record.publication.key,
+            None,
+        )
+        .unwrap();
+
+    // Restart, then retry the superseded publication: its expected prior
+    // (`None`) no longer matches the advanced head, but the journaled replay
+    // is this producer's own history and must seat, not conflict.
+    assert!(registered.close().unwrap());
+    registered.mount().unwrap();
+    let historical = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .expect("a superseded journaled publication must seat historically");
+    assert_eq!(historical.head, g1_head);
+    assert_eq!(
+        historical.snapshot.generation(),
+        &GraphGenerationId::new("g1").unwrap()
+    );
+    // The historical seat must not displace the advanced verified head.
+    assert_eq!(
+        registered
+            .registry
+            .recover_verified_snapshot(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &g2_record.publication.key.projection,
+            )
+            .unwrap()
+            .generation(),
+        &GraphGenerationId::new("g2").unwrap()
+    );
+}
+
 #[test]
 fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
     let temp = TempDir::new().unwrap();
