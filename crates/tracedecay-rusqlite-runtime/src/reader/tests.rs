@@ -861,6 +861,19 @@ fn cancellation_bounds_query_return_even_when_the_executor_is_still_running() {
         }
         cancellation.store(1, Ordering::SeqCst);
     });
+    // Watchdog: if cancellation regresses, `execute` blocks on the parked
+    // executor until the harness kills the test. Releasing the gate after a
+    // generous bound turns that hang into the clean assertion failures below.
+    let watchdog_release = Arc::clone(&executor.release);
+    let watchdog = std::thread::spawn(move || {
+        for _ in 0..300 {
+            if watchdog_release.load(Ordering::SeqCst) != 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        watchdog_release.store(1, Ordering::SeqCst);
+    });
 
     let outcome = snapshot.execute(read, &probe).unwrap();
     assert_eq!(
@@ -884,6 +897,7 @@ fn cancellation_bounds_query_return_even_when_the_executor_is_still_running() {
         "snapshot and lease teardown must not wait for the abandoned executor"
     );
     executor.release.store(1, Ordering::SeqCst);
+    watchdog.join().unwrap();
 }
 
 #[test]
