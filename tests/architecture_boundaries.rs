@@ -493,7 +493,10 @@ struct CargoSourceLayout {
 }
 
 fn cargo_source_layout(repository: &Path) -> Result<CargoSourceLayout, String> {
-    let output = Command::new("cargo")
+    // env!("CARGO") pins the exact cargo that built this test: a bare PATH
+    // lookup goes through the rustup shim, which can start a toolchain
+    // re-sync mid-test on hosted runners and fail the metadata call.
+    let output = Command::new(env!("CARGO"))
         .current_dir(repository)
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .output()
@@ -1002,7 +1005,10 @@ struct ArchitectureDependency {
 #[test]
 fn workspace_architecture_contract() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let output = Command::new("cargo")
+    // env!("CARGO") pins the exact cargo that built this test: a bare PATH
+    // lookup goes through the rustup shim, which can start a toolchain
+    // re-sync mid-test on hosted runners and fail the metadata call.
+    let output = Command::new(env!("CARGO"))
         .current_dir(repository)
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .output()
