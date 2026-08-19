@@ -4166,12 +4166,9 @@ fn http_adapter_problem(
 /// was refused because the store requires an explicit reset.
 ///
 /// The refusal settles before any project server exists, so the MCP boundary
-/// cannot route the call to its handler. The caller still named one exact
-/// application operation, and the truthful answer for that operation is the
-/// reset-required terminal under its own mounted MCP result contract — not a
-/// generic JSON-RPC internal error that hides the `reset` legal action.
-/// Returns `None` when the tool is not a mounted application operation; the
-/// caller then keeps the raw project-open refusal shape.
+/// cannot route the call to its handler; the truthful answer for the named
+/// operation is the reset-required terminal under its own mounted MCP result
+/// contract. Returns `None` for tools without a mounted application binding.
 pub(crate) fn mcp_project_open_reset_refusal(
     tool_name: &str,
     request_id: RequestId,

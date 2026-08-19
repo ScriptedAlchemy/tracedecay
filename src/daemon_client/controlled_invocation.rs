@@ -55,22 +55,15 @@ impl DaemonInvocationClient {
                         Err(DaemonInvocationError::Cancelled { stage })
                     }
                     InvocationCancellationPolicy::AuthoritativeEffect => {
-                        // An authoritative effect settles itself: its own
-                        // budget bounds it, and when that budget expires after
-                        // the commit point it reports `PartialEffect` with a
-                        // committed receipt. Waiting only
-                        // `DAEMON_TASK_ABORT_DEADLINE` — two seconds, a
-                        // *shutdown* bound — replaced that answer with a
-                        // fabricated `ResetRequired` whenever settlement took
-                        // a moment longer, exactly as the in-process executor
-                        // once did (`settle_in_process_invocation`). Keep
-                        // reading over the same response grace the daemon's
-                        // own clients use so the effect's real terminal is
-                        // the one reported. A transport failure after the
-                        // cancel attempt is the same indeterminate state as
-                        // an unanswered grace: the effect may have committed,
-                        // so `Unavailable` (which invites a retry) would be
-                        // untruthful.
+                        // An authoritative effect settles itself; keep reading
+                        // over the same response grace the daemon's own
+                        // clients use so its real terminal (e.g. a
+                        // `PartialEffect` with a committed receipt) is the
+                        // one reported, exactly as `settle_in_process_invocation`
+                        // does. A transport failure after the cancel attempt
+                        // is the same indeterminate state as an unanswered
+                        // grace: the effect may have committed, so a
+                        // retry-inviting `Unavailable` would be untruthful.
                         match tokio::time::timeout(
                             crate::daemon::DAEMON_TOOL_RESPONSE_GRACE,
                             &mut invocation,

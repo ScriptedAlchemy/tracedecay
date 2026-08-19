@@ -213,9 +213,8 @@ async fn reset_then_reconnect_client(
             .expect("read cancellation request")
             .expect("cancellation request");
 
-        // The client's response-grace read polls daemon liveness by opening a
-        // probe connection and dropping it without a handshake; the real
-        // daemon's accept loop tolerates those, so this fixture must too.
+        // The response-grace read polls liveness with handshake-less probe
+        // connections; skip them like the real daemon's accept loop does.
         let (mut second_lines, mut second_writer) = loop {
             let second_stream = listener.accept().await.expect("accept second invocation");
             let (second_reader, second_writer) = second_stream.into_split();
@@ -451,9 +450,8 @@ async fn remote_effect_without_authoritative_settlement_returns_reset_required()
     });
     let deadline = deadline_after(Duration::from_secs(10));
 
-    // The unsettled server never answers, so the client keeps reading for the
-    // full authoritative response grace before typing the indeterminate
-    // effect; the join bound must outlive that grace, not the shutdown bound.
+    // The unsettled server never answers, so the join bound must outlive the
+    // full authoritative response grace.
     let response = tokio::time::timeout(
         crate::daemon::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
         client.invoke_controlled(
@@ -486,8 +484,6 @@ async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     });
     let deadline = deadline_after(Duration::from_secs(10));
 
-    // Same bound reasoning as above: the indeterminate terminal is typed only
-    // after the full authoritative response grace elapses unanswered.
     let response = tokio::time::timeout(
         crate::daemon::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
         client.invoke_controlled(
