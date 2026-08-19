@@ -44,7 +44,7 @@ destructive_metadata=()
 while IFS=$'\t' read -r status path _; do
   [[ -n ${status:-} ]] || continue
   case "$path" in
-    .release-please-manifest.json | CHANGELOG.md | Cargo.lock | Cargo.toml | server.json | version.txt)
+    .release-please-manifest-beta.json | .release-please-manifest.json | CHANGELOG.md | Cargo.lock | Cargo.toml | server.json | version.txt)
       if [[ $status != M ]]; then
         destructive_metadata+=("$status $path")
       fi
