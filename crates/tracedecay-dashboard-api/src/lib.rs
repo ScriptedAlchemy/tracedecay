@@ -80,10 +80,12 @@ mod delivery_api;
 pub use delivery_api::{DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1};
 mod doctor_findings_api;
 mod events_api;
-mod remote_status_api;
 mod events_delivery;
 mod explorer_api;
-pub use explorer_api::{ExplorerSemanticReadFuture, ExplorerSemanticReadV1, ExplorerSemanticReader};
+mod remote_status_api;
+pub use explorer_api::{
+    ExplorerSemanticReadFuture, ExplorerSemanticReadV1, ExplorerSemanticReader,
+};
 pub mod feedback_api;
 mod graph_api;
 mod graph_service;

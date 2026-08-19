@@ -237,15 +237,8 @@ where
 {
     let mut reports = Vec::with_capacity(RetentionTable::GLOBAL_TABLES.len());
     for table in RetentionTable::GLOBAL_TABLES {
-        reports.push(
-            prune_table(
-                conn,
-                table,
-                retention_window_days(config, table),
-                now_secs,
-            )
-            .await?,
-        );
+        reports
+            .push(prune_table(conn, table, retention_window_days(config, table), now_secs).await?);
     }
     Ok(reports)
 }

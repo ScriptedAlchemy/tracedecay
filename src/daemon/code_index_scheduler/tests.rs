@@ -2912,7 +2912,10 @@ async fn moved_reference_label_still_serves_the_exact_worktree_as_current() {
     })
     .await
     .expect("graph reads and the census survive a moved reference label");
-    assert_eq!(decoded.generation.manifest().generation_id, fresh_generation);
+    assert_eq!(
+        decoded.generation.manifest().generation_id,
+        fresh_generation
+    );
 
     registry.shutdown().await;
 }

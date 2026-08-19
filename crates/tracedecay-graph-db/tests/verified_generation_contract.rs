@@ -469,8 +469,10 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
         generation: CodeGenerationId::new("code-generation.sealed-supplied").unwrap(),
         sealed_state_digest: SealedGraphStateDigest::try_from(format!("sha256:{}", "7".repeat(64)))
             .unwrap(),
-        projector_revision: GraphProjectorRevision::try_from("projector.sealed-supplied".to_owned())
-            .unwrap(),
+        projector_revision: GraphProjectorRevision::try_from(
+            "projector.sealed-supplied".to_owned(),
+        )
+        .unwrap(),
     };
     // The journal row is exactly what the code-index publisher appends: the
     // sealed replay source rides in the payload while the identity digests

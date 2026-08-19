@@ -14,8 +14,8 @@ use tracedecay_domain::feedback::{
     FeedbackObservationKindV1, FeedbackSavedEvaluationV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    ManifestDigest, RejectedArgumentErrorClassV1, RejectedArgumentNameV1, RejectedArgumentSurfaceV1,
-    UtcMicros, canonical_sha256,
+    ManifestDigest, RejectedArgumentErrorClassV1, RejectedArgumentNameV1,
+    RejectedArgumentSurfaceV1, UtcMicros, canonical_sha256,
 };
 
 use crate::request_identity::{
@@ -960,17 +960,15 @@ impl FeedbackObservationReadModelV1 {
             event_counts,
             rejected_argument_groups: rejected_argument_counts
                 .into_iter()
-                .map(
-                    |((surface, operation, argument, error_class), count)| {
-                        FeedbackRejectedArgumentGroupV1 {
-                            surface,
-                            operation,
-                            argument,
-                            error_class,
-                            count,
-                        }
-                    },
-                )
+                .map(|((surface, operation, argument, error_class), count)| {
+                    FeedbackRejectedArgumentGroupV1 {
+                        surface,
+                        operation,
+                        argument,
+                        error_class,
+                        count,
+                    }
+                })
                 .collect(),
             coverage,
             watermark,

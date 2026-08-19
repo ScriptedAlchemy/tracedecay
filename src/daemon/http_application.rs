@@ -404,8 +404,9 @@ async fn remote_operational_status(
         Ok(remote) => remote
             .as_ref()
             .and_then(|remote| remote.runtime.as_ref())
-            .map(|runtime| runtime.remote_operational_status())
-            .unwrap_or(RemoteOperationalStatusReadV1::Unavailable),
+            .map_or(RemoteOperationalStatusReadV1::Unavailable, |runtime| {
+                runtime.remote_operational_status()
+            }),
         Err(_) => RemoteOperationalStatusReadV1::Unavailable,
     };
     Json(status).into_response()
