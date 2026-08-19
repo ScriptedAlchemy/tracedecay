@@ -2,8 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::runtime::Handle;
+use tracedecay_application::NativeIntegrationStatusProjectionV1;
 use tracedecay_lsp::{
     AdmittedRoot, AnalyzerCancellationAdapter, AnalyzerCancellationPort, AuthorizedLspWorkspace,
     CanonicalContextProjectionAuthority, CanonicalDiagnosticSnapshotAuthority,
@@ -14,8 +16,8 @@ use tracedecay_lsp::{
     DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, FeedbackCycleAdapter, FeedbackCyclePort,
     FeedbackCycleRequest, FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayCapabilities,
     LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
-    OverlaySnapshot, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
-    SemanticResponse, UpstreamCapabilities, WorkspaceDiagnosticSnapshotOutcome,
+    NativeIntegrationStatusPort, OverlaySnapshot, SemanticProviderOutcome, SemanticProviderPort,
+    SemanticRequest, SemanticResponse, UpstreamCapabilities, WorkspaceDiagnosticSnapshotOutcome,
 };
 
 use super::runtime_adapters::runtime_spawner;
@@ -54,6 +56,7 @@ pub struct DaemonLspSessionFactory {
     diagnostics: Arc<dyn CanonicalDiagnosticSnapshotAuthority>,
     cancellation: Arc<dyn LspAnalyzerCancellationAuthority>,
     context: Arc<dyn CanonicalContextProjectionAuthority>,
+    native_integration_status: Option<Arc<dyn NativeIntegrationStatusPort>>,
     gateway_capabilities: GatewayCapabilities,
     upstream_capabilities: UpstreamCapabilities,
     upstream_capability_initializer: Arc<dyn UpstreamCapabilityInitializationAuthority>,
@@ -82,12 +85,25 @@ impl DaemonLspSessionFactory {
             diagnostics,
             cancellation,
             context,
+            native_integration_status: None,
             gateway_capabilities,
             upstream_capability_initializer: Arc::new(StaticUpstreamCapabilities {
                 capabilities: upstream_capabilities.clone(),
             }),
             upstream_capabilities,
         }
+    }
+
+    /// Mounts the daemon-owned native-integration status read. Sessions opened
+    /// from this factory forward observed transaction statuses to their client
+    /// as read-only notifications.
+    #[must_use]
+    pub fn with_native_integration_status_port(
+        mut self,
+        port: Arc<dyn NativeIntegrationStatusPort>,
+    ) -> Self {
+        self.native_integration_status = Some(port);
+        self
     }
 
     /// Replaces the static test capability source with the production
@@ -142,7 +158,7 @@ impl DaemonLspSessionFactory {
     }
 
     pub fn open_session(&self, root: AdmittedRoot) -> DaemonLspRuntimeSession {
-        self.provider_bundle().into_session(root)
+        self.attach_native_integration_status(self.provider_bundle().into_session(root))
     }
 
     pub async fn open_workspace_session(
@@ -150,9 +166,20 @@ impl DaemonLspSessionFactory {
         workspace: AuthorizedLspWorkspace,
     ) -> std::result::Result<DaemonLspRuntimeSession, LspRuntimeFailure> {
         let upstream_capabilities = self.initialize_upstream_capabilities().await?;
-        Ok(self
-            .provider_bundle_with_upstream_capabilities(upstream_capabilities)
-            .into_workspace_session(workspace))
+        Ok(self.attach_native_integration_status(
+            self.provider_bundle_with_upstream_capabilities(upstream_capabilities)
+                .into_workspace_session(workspace),
+        ))
+    }
+
+    fn attach_native_integration_status(
+        &self,
+        session: DaemonLspRuntimeSession,
+    ) -> DaemonLspRuntimeSession {
+        match self.native_integration_status.as_ref() {
+            Some(port) => session.with_native_integration_status_port(Arc::clone(port)),
+            None => session,
+        }
     }
 
     pub async fn open_federated_workspace_session(
@@ -184,6 +211,7 @@ impl DaemonLspSessionFactory {
         let mut diagnostics = BTreeMap::new();
         let mut cancellation = BTreeMap::new();
         let mut context = BTreeMap::new();
+        let mut native_integration_status = Vec::new();
         let mut gateway_capabilities: Option<GatewayCapabilities> = None;
         let mut upstream_capabilities: Option<UpstreamCapabilities> = None;
         for (root, factory, factory_upstream_capabilities) in factories {
@@ -216,6 +244,9 @@ impl DaemonLspSessionFactory {
                     factory.context.clone(),
                 )) as Arc<dyn ContextProjectionPort + Send + Sync>,
             );
+            if let Some(port) = factory.native_integration_status.as_ref() {
+                native_integration_status.push(Arc::clone(port));
+            }
             let current_gateway_capabilities = factory.current_gateway_capabilities();
             if let Some(capabilities) = gateway_capabilities.as_mut() {
                 capabilities.supports_publish_diagnostics &=
@@ -260,7 +291,123 @@ impl DaemonLspSessionFactory {
             gateway_capabilities?,
             upstream_capabilities?,
         );
-        Some(bundle.into_workspace_session(workspace))
+        let session = bundle.into_workspace_session(workspace);
+        if native_integration_status.is_empty() {
+            return Some(session);
+        }
+        Some(session.with_native_integration_status_port(Arc::new(
+            FederatedNativeIntegrationStatus {
+                roots: native_integration_status,
+                next_root: AtomicUsize::new(0),
+            },
+        )))
+    }
+}
+
+/// Merges the participating roots' status reads under one poll bound. Each
+/// projection already names its exact repository and transaction identity, so
+/// merging discloses nothing a single-root session would not see.
+struct FederatedNativeIntegrationStatus {
+    roots: Vec<Arc<dyn NativeIntegrationStatusPort>>,
+    next_root: AtomicUsize,
+}
+
+impl NativeIntegrationStatusPort for FederatedNativeIntegrationStatus {
+    fn poll_status(&self, maximum: usize) -> Vec<NativeIntegrationStatusProjectionV1> {
+        if maximum == 0 || self.roots.is_empty() {
+            return Vec::new();
+        }
+        let mut root_statuses = self
+            .roots
+            .iter()
+            .map(|root| root.poll_status(maximum).into_iter())
+            .collect::<Vec<_>>();
+        let root_count = root_statuses.len();
+        let first_root = self.next_root.fetch_add(1, Ordering::Relaxed) % root_count;
+        let mut merged = Vec::with_capacity(maximum);
+        loop {
+            let mut progressed = false;
+            for offset in 0..root_count {
+                let root_index = (first_root + offset) % root_count;
+                if let Some(status) = root_statuses[root_index].next() {
+                    merged.push(status);
+                    progressed = true;
+                    if merged.len() == maximum {
+                        return merged;
+                    }
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        merged
+    }
+}
+
+#[cfg(test)]
+mod native_integration_status_tests {
+    use std::sync::Arc;
+
+    use tracedecay_application::NativeIntegrationStatusProjectionV1;
+    use tracedecay_domain::{
+        ManifestDigest, NativeIntegrationPhaseV1, NativeIntegrationPreviewId,
+        NativeIntegrationTransactionId, RefId, RepositoryId, UtcMicros,
+    };
+    use tracedecay_lsp::NativeIntegrationStatusPort;
+
+    use super::FederatedNativeIntegrationStatus;
+
+    struct StaticStatuses(Vec<NativeIntegrationStatusProjectionV1>);
+
+    impl NativeIntegrationStatusPort for StaticStatuses {
+        fn poll_status(&self, maximum: usize) -> Vec<NativeIntegrationStatusProjectionV1> {
+            self.0.iter().take(maximum).cloned().collect()
+        }
+    }
+
+    fn status(
+        repository: &str,
+        transaction: &str,
+        updated_at: i64,
+    ) -> NativeIntegrationStatusProjectionV1 {
+        NativeIntegrationStatusProjectionV1 {
+            transaction_id: NativeIntegrationTransactionId::new(transaction).expect("transaction"),
+            preview_id: NativeIntegrationPreviewId::new(format!("preview.{transaction}"))
+                .expect("preview"),
+            preview_digest: ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("digest"),
+            repository_id: RepositoryId::new(repository).expect("repository"),
+            destination_ref: RefId::new("refs/heads/main").expect("ref"),
+            phase: NativeIntegrationPhaseV1::Prepared,
+            phase_revision: 1,
+            cancellation_requested: false,
+            terminal_outcome: None,
+            updated_at: UtcMicros(updated_at),
+        }
+    }
+
+    #[test]
+    fn bounded_federated_poll_represents_each_root_before_reusing_one_root() {
+        let first: Arc<dyn NativeIntegrationStatusPort> = Arc::new(StaticStatuses(vec![
+            status("repository.first", "transaction.first-a", 3),
+            status("repository.first", "transaction.first-b", 2),
+        ]));
+        let second: Arc<dyn NativeIntegrationStatusPort> = Arc::new(StaticStatuses(vec![status(
+            "repository.second",
+            "transaction.second",
+            1,
+        )]));
+        let federated = FederatedNativeIntegrationStatus {
+            roots: vec![first, second],
+            next_root: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let statuses = federated.poll_status(2);
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].repository_id.as_str(), "repository.first");
+        assert_eq!(statuses[1].repository_id.as_str(), "repository.second");
     }
 }
 

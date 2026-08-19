@@ -79,6 +79,7 @@ mod context_controller;
 mod diagnostics_controller;
 mod dynamic_diagnostics_controller;
 mod lifecycle_controller;
+mod native_integration_controller;
 mod outbound_controller;
 mod semantic_controller;
 mod workspace_diagnostics_controller;
@@ -89,6 +90,7 @@ use context_controller::bind_context_document_digest;
 use diagnostics_controller::DiagnosticsController;
 use dynamic_diagnostics_controller::DynamicDiagnosticsController;
 use lifecycle_controller::LifecycleController;
+use native_integration_controller::NativeIntegrationController;
 pub use outbound_controller::DaemonLspProtocolTransport;
 use outbound_controller::OutboundController;
 #[cfg(test)]
@@ -126,6 +128,7 @@ where
     diagnostics: DiagnosticsController<D>,
     dynamic_diagnostics: DynamicDiagnosticsController,
     context: ContextController,
+    native_integration: NativeIntegrationController,
     semantic: SemanticController,
     catalog: Result<LspCatalogAdmission, LspCatalogAdmissionError>,
     pending_workspace_mutation: Option<WorkspaceFolderMutation>,
@@ -216,6 +219,7 @@ where
         self.poll_context_expansions();
         self.poll_semantic_requests();
         self.flush_context_changes();
+        self.flush_native_integration_status();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
             closed: matches!(
@@ -316,6 +320,7 @@ where
         self.poll_context_expansions();
         self.poll_semantic_requests();
         self.flush_context_changes();
+        self.flush_native_integration_status();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
             closed: matches!(
