@@ -30,7 +30,8 @@ use crate::application::configuration::{
 };
 use crate::application::settings_control::{
     ProjectSettingsPatchV1, ProjectSettingsPreviewErrorV1, SyncSettingsPatchV1,
-    TelemetrySettingsPatchV1, preview_project_settings,
+    TelemetrySettingsPatchV1, context_scout_settings_are_enabled,
+    effective_context_scout_settings, preview_project_settings,
 };
 use crate::config::TraceDecayConfig;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
@@ -94,25 +95,32 @@ struct ProjectEditableSettingsV1 {
     git_ignore: bool,
     telemetry: TelemetrySettingsV1,
     sync: SyncSettingsV1,
+    /// Rendered from the effective Plan 20 `context_scout.settings.v1` value;
+    /// the dashboard holds no Scout state of its own.
+    context_scout: bool,
 }
 
-impl From<&TraceDecayConfig> for ProjectEditableSettingsV1 {
-    fn from(config: &TraceDecayConfig) -> Self {
-        Self {
-            include: config.include.clone(),
-            exclude: config.exclude.clone(),
-            max_file_size: config.max_file_size,
-            extract_docstrings: config.extract_docstrings,
-            track_call_sites: config.track_call_sites,
-            git_ignore: config.git_ignore,
-            telemetry: TelemetrySettingsV1 {
-                timings: config.telemetry.timings,
-            },
-            sync: SyncSettingsV1 {
-                auto_track_pr_branches: config.sync.auto_track_pr_branches,
-                auto_track_pr_poll_secs: config.sync.auto_track_pr_poll_secs,
-            },
-        }
+fn project_editable_settings(
+    configuration: &crate::config::PinnedRuntimeConfiguration,
+) -> ProjectEditableSettingsV1 {
+    let config: &TraceDecayConfig = &configuration.config;
+    ProjectEditableSettingsV1 {
+        include: config.include.clone(),
+        exclude: config.exclude.clone(),
+        max_file_size: config.max_file_size,
+        extract_docstrings: config.extract_docstrings,
+        track_call_sites: config.track_call_sites,
+        git_ignore: config.git_ignore,
+        telemetry: TelemetrySettingsV1 {
+            timings: config.telemetry.timings,
+        },
+        sync: SyncSettingsV1 {
+            auto_track_pr_branches: config.sync.auto_track_pr_branches,
+            auto_track_pr_poll_secs: config.sync.auto_track_pr_poll_secs,
+        },
+        context_scout: context_scout_settings_are_enabled(&effective_context_scout_settings(
+            &configuration.snapshot,
+        )),
     }
 }
 
@@ -274,6 +282,7 @@ pub async fn patch_project_settings(
                 auto_track_pr_branches: sync.auto_track_pr_branches,
                 auto_track_pr_poll_secs: sync.auto_track_pr_poll_secs,
             }),
+            context_scout: patch.context_scout,
         },
     )
     .map_err(project_preview_error)?;
@@ -407,7 +416,7 @@ async fn settings_envelope(
                 .as_str()
                 .to_owned(),
             configuration_revision_id: project_configuration.revision_id.as_str().to_owned(),
-            config: ProjectEditableSettingsV1::from(&project_configuration.config),
+            config: project_editable_settings(&project_configuration),
             tracedecay_dir_gitignored: crate::config::is_in_gitignore(&state.project_root),
             pr_autotrack: pr_autotrack_payload(state),
         },
