@@ -2,11 +2,12 @@
 //!
 //! Project-open spawns one bounded background rescan per adopted project
 //! store after fail-closed admission has finished; it never blocks admission
-//! or retrieval. The rescan re-runs the current in-process detector over
-//! persisted project-memory facts, redacts what the detector can make safe,
-//! quarantines what it cannot, and settles every mutation through the
-//! canonical curation authority so a durable curation receipt records what
-//! changed. No scanner binary runs and no unsanitized payload is persisted.
+//! or retrieval. The rescan re-runs the current in-process detector over the
+//! persisted stores it owns — project-memory facts, then the LCM raw-message
+//! store — redacts what the detector can make safe, quarantines what it
+//! cannot, and settles every mutation through each store's canonical
+//! authority so durable receipts record what changed. No scanner binary runs
+//! and no unsanitized payload is persisted.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,10 +18,14 @@ use tracedecay_usecases::memory::{
 };
 
 use crate::errors::Result;
+use crate::global_db::{LcmPrivacyRescanOutcomeV1, RegisteredGlobalDbLeaseV1};
 use crate::tracedecay::TraceDecay;
 
 /// Spawns the bounded background rescan for one adopted project store.
-pub(crate) fn spawn_project_memory_privacy_remediation(graph: Arc<TraceDecay>) {
+pub(crate) fn spawn_at_rest_privacy_remediation(
+    graph: Arc<TraceDecay>,
+    session_db: RegisteredGlobalDbLeaseV1,
+) {
     tokio::spawn(async move {
         let project = graph.project_root().display().to_string();
         match run_project_memory_privacy_remediation(&graph).await {
@@ -38,6 +43,28 @@ pub(crate) fn spawn_project_memory_privacy_remediation(graph: Arc<TraceDecay>) {
             Err(error) => {
                 tracing::warn!(
                     event = "project_memory_privacy_remediation_failed",
+                    project = %project,
+                    %error,
+                );
+            }
+        }
+        match session_db.lcm_privacy_rescan_raw_messages().await {
+            Ok(LcmPrivacyRescanOutcomeV1::AlreadyCurrent) => {}
+            Ok(LcmPrivacyRescanOutcomeV1::Completed(receipt)) => {
+                tracing::info!(
+                    event = "lcm_privacy_remediation",
+                    project = %project,
+                    detector_revision = %receipt.detector_revision,
+                    scanned_rows = receipt.scanned_rows,
+                    clean_rows = receipt.clean_rows,
+                    remediated_rows = receipt.remediated_rows,
+                    protected_rows = receipt.protected_rows,
+                    unavailable_payload_rows = receipt.unavailable_payload_rows,
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "lcm_privacy_remediation_failed",
                     project = %project,
                     %error,
                 );
