@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const BARRIER_DIR_ENV: &str = "TRACEDECAY_TEST_FACT_COMMIT_BARRIER_DIR";
-const RELEASE_TIMEOUT: Duration = Duration::from_secs(120);
+const RELEASE_TIMEOUT: Duration = Duration::from_mins(2);
 const RELEASE_POLL: Duration = Duration::from_millis(10);
 
 /// Parks after a durable fact commit when the harness armed the barrier.
