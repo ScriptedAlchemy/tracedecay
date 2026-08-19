@@ -181,15 +181,17 @@ impl CodeIndexGenerationScopeV1 {
 
     /// Whether two scopes name the same physical checkout.
     ///
-    /// Repository and worktree are identity: a generation sealed under either
-    /// of them differing belongs to another checkout and may never be adopted.
-    /// `reference` is not identity — it is the label HEAD happens to carry, and
-    /// it moves under a fixed worktree on every ordinary commit, branch switch,
-    /// or rebase. Treating it as identity made the active generation of the
-    /// branch you just left "incompatible", so the first reconcile after any
-    /// branch switch failed outright and the worktree stopped indexing until
-    /// the store was rebuilt. The reference the generation was sealed under is
-    /// still carried on its own snapshot, so attribution stays generation-bound.
+    /// Repository and worktree are checkout identity: a generation sealed
+    /// under either of them differing belongs to another checkout and may
+    /// never be adopted or served for this one. `reference` is deliberately
+    /// excluded — it is the branch label HEAD happens to carry, and it moves
+    /// under a fixed worktree on every ordinary commit, branch switch, or
+    /// rebase — so serving gates that need only checkout identity keep
+    /// admitting the checkout's own generations across a label move. Slot
+    /// dispatch is stricter: [`CodeIndexProductionOwnerV1::active_generation`]
+    /// demands the complete scope, label included, because branch and worktree
+    /// generations stay independently active inside one shared repository
+    /// store.
     #[must_use]
     pub fn identifies_same_checkout(&self, other: &Self) -> bool {
         self.repository == other.repository && self.worktree == other.worktree
@@ -202,6 +204,24 @@ impl CodeIndexGenerationScopeV1 {
             .and_then(|()| self.worktree.as_ref().map_or(Ok(()), WorktreeId::validate))
             .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))
     }
+}
+
+/// Renders one scope for slot-dispatch refusals. An absent reference or
+/// worktree is a truthful non-git/unbound component, spelled out so operators
+/// can tell a misclassified checkout from a mispartitioned store.
+fn describe_scope(scope: &CodeIndexGenerationScopeV1) -> String {
+    format!(
+        "repository {}, reference {}, worktree {}",
+        scope.repository.as_str(),
+        scope
+            .reference
+            .as_ref()
+            .map_or("(none)", |reference| reference.as_str()),
+        scope
+            .worktree
+            .as_ref()
+            .map_or("(none)", |worktree| worktree.as_str()),
+    )
 }
 
 /// The only persistence seam for this production owner. Implementations retain
@@ -422,6 +442,17 @@ impl CodeIndexPublishedGenerationV1 {
 
     pub fn snapshot(&self) -> &SanitizedCodeSnapshotV1 {
         &self.snapshot
+    }
+
+    /// The exact generation scope this generation was sealed under:
+    /// repository, sealed branch label, and worktree.
+    ///
+    /// This — never a filesystem path and never the generation id — is the
+    /// key that partitions active-generation slots and code shards, so a
+    /// sealed generation can only ever be dispatched onto the scope whose
+    /// snapshot sealed it.
+    pub fn sealed_scope(&self) -> CodeIndexGenerationScopeV1 {
+        CodeIndexGenerationScopeV1::for_snapshot(&self.snapshot)
     }
 
     pub fn chunks(&self) -> &GenerationChunkManifestV1 {
@@ -978,6 +1009,17 @@ where
 
     /// Load the currently active immutable generation. A restart therefore
     /// resumes from the publication authority rather than mutable worker state.
+    ///
+    /// Dispatch is full-scope exact: the loaded generation must have been
+    /// sealed under the requested repository, reference, and worktree. A
+    /// publication authority that answers a scope with a generation sealed
+    /// for any other scope has broken its slot partition — or the caller's
+    /// checkout identity resolution regressed, e.g. a repository misclassified
+    /// as not-a-git-path. Both are the terminal
+    /// [`CodeIndexPublicationStoreErrorV1::CorruptionResetRequired`] state:
+    /// the foreign generation is never adopted, never config-checked, and the
+    /// refusal is a reset journey, not a transient error to retry on a
+    /// cadence.
     pub fn active_generation(
         &self,
         scope: &CodeIndexGenerationScopeV1,
@@ -990,10 +1032,18 @@ where
         }
         let active = self.publication.load_active(scope)?;
         if let Some(active) = &active {
+            let sealed_scope = active.sealed_scope();
+            if sealed_scope != *scope {
+                return Err(CodeIndexProductionErrorV1::Publication(
+                    CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(format!(
+                        "the active-generation slot for {} returned a generation sealed for {}",
+                        describe_scope(scope),
+                        describe_scope(&sealed_scope),
+                    )),
+                ));
+            }
             active.validate()?;
             if active.manifest.project_id != self.config.project_id
-                || !CodeIndexGenerationScopeV1::for_snapshot(&active.snapshot)
-                    .identifies_same_checkout(scope)
                 || active.manifest.sanitizer_revision != self.config.sanitizer_revision
                 || active.manifest.chunker_revision != self.config.chunker_revision
                 || active.manifest.privacy_domain != self.config.privacy_domain
