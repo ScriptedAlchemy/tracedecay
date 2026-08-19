@@ -229,56 +229,50 @@ impl TraceDecay {
         // stay behind the rare paths that actually compare stores. Resolving a
         // layout is on every open, including fail-closed clients that must not
         // touch the store at all.
-        let (candidates, selected_manifest_matches_exact_root, candidates_match_exact_root) =
+        let (candidates, mut evidence) =
             storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
+        evidence.selected_via_exact_registry_alias = selected_via_exact_registry_alias;
         if selected.is_some()
             && !candidates.is_empty()
-            && !selected_manifest_matches_exact_root
-            && !candidates_match_exact_root
-            && !selected_via_exact_registry_alias
+            && !evidence.selected_manifest_names_exact_root
+            && !evidence.candidates_name_exact_root
+            && !evidence.selected_via_exact_registry_alias
             && let Some(global_db) = open_options.open_global_db().await
             && let Some(resolution) = global_db.resolve_project_store_by_alias(project_root).await
         {
-            selected_via_exact_registry_alias = selected
+            evidence.selected_via_exact_registry_alias = selected
                 .as_ref()
                 .and_then(|layout| layout.identity.project_id.as_deref())
                 == Some(resolution.project.project_id.as_str())
                 && alias_matches_live_git_identity(resolution.project.git_common_dir.as_deref());
         }
-        Self::choose_identity_layout(
-            project_root,
-            selected,
-            candidates,
-            selected_manifest_matches_exact_root,
-            selected_via_exact_registry_alias,
-            candidates_match_exact_root,
-            allow_repair,
-        )
-        .await?
-        .map_or_else(
-            || storage::default_profile_sharded_layout(project_root, &profile_root),
-            Ok,
-        )
+        Self::choose_identity_layout(project_root, selected, candidates, evidence, allow_repair)
+            .await?
+            .map_or_else(
+                || storage::default_profile_sharded_layout(project_root, &profile_root),
+                Ok,
+            )
     }
 
     async fn choose_identity_layout(
         project_root: &Path,
         selected: Option<StoreLayout>,
         candidates: Vec<StoreLayout>,
-        selected_manifest_matches_exact_root: bool,
-        selected_via_exact_registry_alias: bool,
-        candidates_match_exact_root: bool,
+        evidence: storage::StoreSelectionEvidence,
         allow_repair: bool,
     ) -> Result<Option<StoreLayout>> {
         // A populated store remains authoritative when its own manifest names
         // this exact root or the registry selected it through this exact path
-        // alias. Shared Git identity alone does not grant this precedence.
+        // alias. Shared Git identity alone does not grant this precedence,
+        // and a candidate whose manifest also names this exact root voids it:
+        // that split identity must surface as a cutover conflict below.
         // This resolver uses bounded presence probes only; the subsequent
         // serving open performs full integrity validation and fails closed.
         // Legacy duplicates stay untouched, while an empty or unreadable
         // selected store still reaches the fail-closed diagnostics.
-        if (selected_manifest_matches_exact_root
-            || (selected_via_exact_registry_alias && !candidates_match_exact_root))
+        if (evidence.selected_manifest_names_exact_root
+            || evidence.selected_via_exact_registry_alias)
+            && !evidence.candidates_name_exact_root
             && !candidates.is_empty()
             && let Some(selected) = selected.as_ref()
         {
@@ -1563,9 +1557,8 @@ async fn store_identity_has_bounded_population_evidence(layout: &StoreLayout) ->
         tree_has_files(&layout.lcm_payload_root),
         tree_has_files(&layout.response_handle_root),
     );
-    let (automation_files, payload_files, response_files) = match tree_presence {
-        (Ok(automation), Ok(payloads), Ok(responses)) => (automation, payloads, responses),
-        _ => return false,
+    let (Ok(automation_files), Ok(payload_files), Ok(response_files)) = tree_presence else {
+        return false;
     };
 
     graph_is_populated
@@ -1587,11 +1580,10 @@ fn branch_inventory(data_root: &Path) -> std::result::Result<usize, ()> {
     let path = data_root.join(storage::BRANCH_META_FILENAME);
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(_) => Err(()),
         Ok(metadata) if metadata.file_type().is_file() => branch_meta::load_branch_meta(data_root)
             .map(|meta| meta.branches.len())
             .ok_or(()),
-        Ok(_) => Err(()),
+        _ => Err(()),
     }
 }
 

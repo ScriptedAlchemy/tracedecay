@@ -18,6 +18,6 @@ pub use tracedecay_runtime_core::storage::{
     write_store_manifest_to_path,
 };
 pub(crate) use tracedecay_runtime_core::storage::{
-    acquire_sidecar_lock_blocking, matching_legacy_profile_layouts, resolve_persisted_layout,
-    retire_identity_cutover_manifest, try_acquire_sidecar_lock,
+    StoreSelectionEvidence, acquire_sidecar_lock_blocking, matching_legacy_profile_layouts,
+    resolve_persisted_layout, retire_identity_cutover_manifest, try_acquire_sidecar_lock,
 };
