@@ -585,7 +585,9 @@ mod tests {
             .seed_session_activity("s-acted", Some("tracedecay_context"))
             .await;
         fixture.seed_hint("s-ignored", "h-ignored").await;
-        fixture.seed_session_activity("s-ignored", Some("Read")).await;
+        fixture
+            .seed_session_activity("s-ignored", Some("Read"))
+            .await;
         fixture.seed_hint("s-open", "h-open").await;
         fixture.seed_session_activity("s-open", None).await;
 

@@ -73,8 +73,11 @@ impl CodeIndexObservabilityV1 {
             budget,
             None,
         );
-        let summary =
-            emit_retrieval_pipeline(self.producer.as_ref(), self.producer.identity(), observation);
+        let summary = emit_retrieval_pipeline(
+            self.producer.as_ref(),
+            self.producer.identity(),
+            observation,
+        );
         if summary.dropped > 0 || summary.invalid > 0 {
             tracing::debug!(
                 event = "code_index_observability",
@@ -144,8 +147,7 @@ mod tests {
 
     #[test]
     fn a_publication_projects_as_a_published_lifecycle_observation() {
-        let observation =
-            reconcile_index_observation(&published(), 900, QueueDepthBucketV1::Zero);
+        let observation = reconcile_index_observation(&published(), 900, QueueDepthBucketV1::Zero);
         assert_eq!(observation.kind, IndexObservationKindV1::Publication);
         assert_eq!(observation.outcome, IndexOutcomeV1::Published);
         assert_eq!(observation.duration_micros, Some(900));

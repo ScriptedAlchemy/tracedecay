@@ -84,17 +84,21 @@ pub fn record_work_conflict_observation(
     if identity.authorized_scope_ref != scope_ref {
         return unavailable(WorkConflictObservationUnavailableV1::OwnerEvidenceInvalid);
     }
-    let (envelope, event_kind) =
-        match work_conflict_envelope(identity, scope_ref, surface_operation, result, owner_preview)
-        {
-            Ok(Some(built)) => built,
-            Ok(None) => {
-                return unavailable(WorkConflictObservationUnavailableV1::NotAdjudicated);
-            }
-            Err(_) => {
-                return unavailable(WorkConflictObservationUnavailableV1::OwnerEvidenceInvalid);
-            }
-        };
+    let (envelope, event_kind) = match work_conflict_envelope(
+        identity,
+        scope_ref,
+        surface_operation,
+        result,
+        owner_preview,
+    ) {
+        Ok(Some(built)) => built,
+        Ok(None) => {
+            return unavailable(WorkConflictObservationUnavailableV1::NotAdjudicated);
+        }
+        Err(_) => {
+            return unavailable(WorkConflictObservationUnavailableV1::OwnerEvidenceInvalid);
+        }
+    };
     match producer.try_emit_owner_fact(envelope) {
         Ok(ObservabilityEmissionOutcomeV1::Enqueued) => {
             WorkConflictObservationResultV1::Enqueued { event_kind }
@@ -625,8 +629,7 @@ mod tests {
         assert_eq!(prediction_payload.score_kind, ConflictScoreKindV1::Rule);
         assert_eq!(prediction_payload.eligible_relation_count, 1);
         assert_eq!(
-            prediction_payload.expires_at_micros,
-            preview.expires_at.0,
+            prediction_payload.expires_at_micros, preview.expires_at.0,
             "prediction expiry is the preview's own expiry"
         );
         assert_eq!(outcome_payload.kind, ConflictKindV1::Mechanical);
@@ -804,8 +807,14 @@ mod tests {
         );
         // A receipt without its durable preview cannot name a prediction.
         assert!(
-            work_conflict_envelope(&identity, "project.scope", OUTCOME_OPERATION, &receipt, None)
-                .is_err()
+            work_conflict_envelope(
+                &identity,
+                "project.scope",
+                OUTCOME_OPERATION,
+                &receipt,
+                None
+            )
+            .is_err()
         );
         // A preview that does not match the receipt identity is foreign
         // evidence, not a linkable prediction.

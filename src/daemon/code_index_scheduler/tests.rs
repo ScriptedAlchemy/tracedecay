@@ -7765,19 +7765,19 @@ async fn installed_observability_lane_records_index_and_retrieval_observations()
     registry.shutdown().await;
     producer.shutdown().await.expect("flush producer");
 
-    let port = tracedecay_usecases::observability::RegisteredObservabilityPortV1::new(
-        database.as_ref(),
-    );
-    let observability_query = |event_kinds: Vec<String>| tracedecay_application::ObservabilityQueryV1 {
-        authorized_scope_ref: scope.project_id.as_str().to_owned(),
-        event_kinds,
-        horizon: tracedecay_application::ObservabilityHorizonV1 {
-            since_micros: 0,
-            until_micros: i64::MAX,
-        },
-        after_watermark: None,
-        limit: 256,
-    };
+    let port =
+        tracedecay_usecases::observability::RegisteredObservabilityPortV1::new(database.as_ref());
+    let observability_query =
+        |event_kinds: Vec<String>| tracedecay_application::ObservabilityQueryV1 {
+            authorized_scope_ref: scope.project_id.as_str().to_owned(),
+            event_kinds,
+            horizon: tracedecay_application::ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: i64::MAX,
+            },
+            after_watermark: None,
+            limit: 256,
+        };
     let index_page = tracedecay_application::ObservabilityQueryPort::query(
         &port,
         observability_query(vec!["index.measurement.observed.v1".to_owned()]),

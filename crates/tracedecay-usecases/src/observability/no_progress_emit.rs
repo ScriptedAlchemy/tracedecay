@@ -39,8 +39,7 @@ pub fn record_no_progress_observation(
         return WorkOwnerObservationResultV1::Unavailable;
     };
     let scope = producer.identity().authorized_scope_ref.as_str();
-    let envelope = match no_progress_observation_envelope(producer.identity(), scope, observation)
-    {
+    let envelope = match no_progress_observation_envelope(producer.identity(), scope, observation) {
         Ok(envelope) => envelope,
         Err(_) => return WorkOwnerObservationResultV1::Unavailable,
     };
@@ -157,11 +156,10 @@ mod tests {
 
     #[tokio::test]
     async fn wall_exhausted_attempt_persists_the_no_progress_terminal_fact() {
-        let harness =
-            tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
-                "no-progress-emit",
-            )
-            .await;
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "no-progress-emit",
+        )
+        .await;
         let producer = BoundedObservabilityProducerV1::start(
             harness.registered.clone(),
             producer_identity(),

@@ -61,15 +61,14 @@ pub(in crate::daemon) fn adoption_eligibility_census()
         let Some(family) = adoption_family(capability.capability_id().as_str()) else {
             continue;
         };
-        let observation =
-            families
-                .entry(family)
-                .or_insert_with(|| AdoptionEligibilityObservedV1 {
-                    capability: family.to_owned(),
-                    eligible: 0,
-                    enabled: 0,
-                    available: 0,
-                });
+        let observation = families
+            .entry(family)
+            .or_insert_with(|| AdoptionEligibilityObservedV1 {
+                capability: family.to_owned(),
+                eligible: 0,
+                enabled: 0,
+                available: 0,
+            });
         observation.eligible = observation.eligible.saturating_add(1);
         if capability.profile_eligibility().contains(&default_profile) {
             observation.enabled = observation.enabled.saturating_add(1);
@@ -200,7 +199,14 @@ mod tests {
         assert!(by_family["retrieval"].available > 0);
         // Families this catalog authority does not compose must be absent
         // instead of claiming a Known-zero eligible population.
-        for family in ["automation", "work", "workflow", "hooks", "mcp", "dashboard"] {
+        for family in [
+            "automation",
+            "work",
+            "workflow",
+            "hooks",
+            "mcp",
+            "dashboard",
+        ] {
             assert!(
                 !by_family.contains_key(family),
                 "{family} has no composed catalog capability and must not be emitted"

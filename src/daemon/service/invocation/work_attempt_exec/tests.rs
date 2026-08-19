@@ -43,17 +43,16 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId,
-    EffectReconciliationOutcomeV1, ManifestDigest, NoProgressEscalationV1,
-    ObservabilityPayloadV1, ObservabilityTerminalResultV1, OperationActivationOutcomeV1,
-    OperationStageV1, ProjectId, ProposalId, ProviderId, RefId, RepositoryId, RunId, SessionId,
-    TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1,
-    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCancellationStateV1, WorkEffectStateV1,
-    WorkEgressPolicy, WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLimits,
-    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1,
-    WorkFilesystemPolicy, WorkGraphVersionV1, WorkLeaseFenceV1, WorkLeaseId,
-    WorkProductEventSequenceV1, WorkProductSourceWatermarkV1, WorkProviderRouteId,
-    WorkProviderRouteV1, WorkRecoveryStateV1, WorkSandboxPolicy, WorkflowOperationRef,
-    WorkflowStageClassV1, WorktreeId, canonical_sha256,
+    EffectReconciliationOutcomeV1, ManifestDigest, NoProgressEscalationV1, ObservabilityPayloadV1,
+    ObservabilityTerminalResultV1, OperationActivationOutcomeV1, OperationStageV1, ProjectId,
+    ProposalId, ProviderId, RefId, RepositoryId, RunId, SessionId, TaskId, UtcMicros,
+    WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1,
+    WorkAttemptV1, WorkAuthority, WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy,
+    WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
+    WorkGraphVersionV1, WorkLeaseFenceV1, WorkLeaseId, WorkProductEventSequenceV1,
+    WorkProductSourceWatermarkV1, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
+    WorkSandboxPolicy, WorkflowOperationRef, WorkflowStageClassV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::observability::{
@@ -1316,8 +1315,7 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
     );
     assert_eq!(observed.workflow_stage, WorkflowStageClassV1::Execute);
     assert!(
-        observed.configured_timeout_micros > 0
-            && observed.configured_timeout_micros <= 2_000_000,
+        observed.configured_timeout_micros > 0 && observed.configured_timeout_micros <= 2_000_000,
         "the armed budget is the truthful remaining envelope budget, got {}",
         observed.configured_timeout_micros
     );
