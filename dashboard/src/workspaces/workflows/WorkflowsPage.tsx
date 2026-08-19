@@ -75,7 +75,11 @@ export function WorkflowsPage() {
           />
 
           {selectedDefinition === null ? null : (
-            <DefinitionDetail definition={selectedDefinition} />
+            // Keyed by the selected identity so the lifecycle controls —
+            // revision draft and the last transition's result — reset when
+            // the operator switches definitions instead of carrying one
+            // definition's state under another's heading.
+            <DefinitionDetail key={selected} definition={selectedDefinition} />
           )}
 
           <RunPanel />

@@ -186,6 +186,46 @@ describe('the Workflows page over mounted routes', () => {
     });
   });
 
+  it('resets the lifecycle controls when the operator switches definitions', async () => {
+    const second = { ...definition(2), definition_id: 'workflow.nightly-sweep' };
+    serve((url) => {
+      if (url.includes('/application/workflow/list-definitions')) {
+        return { status: 200, body: envelope([definition(), second]) };
+      }
+      if (url.includes('/application/workflow/activate-definition')) {
+        return {
+          status: 200,
+          body: envelope({
+            definition_id: 'workflow.release-train',
+            definition_version: 1,
+            state: 'active',
+            revision: 3,
+            transitioned_at: 10,
+          }),
+        };
+      }
+      return { status: 503, body: { kind: 'problem', value: { problem: {} } } };
+    });
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: /workflow\.release-train/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'activate' }));
+    expect(await screen.findByText(/disposition active · revision 3/)).toBeTruthy();
+
+    // Switching to another definition must not carry the first definition's
+    // transition result or revision draft under the new heading.
+    const draft = screen.getByLabelText('Expected revision');
+    await userEvent.clear(draft);
+    await userEvent.type(draft, '7');
+    await userEvent.click(await screen.findByRole('button', { name: /workflow\.nightly-sweep/ }));
+
+    expect(
+      await screen.findByRole('region', { name: 'Definition workflow.nightly-sweep · version 2' }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/disposition active · revision 3/)).toBeNull();
+    expect((screen.getByLabelText('Expected revision') as HTMLInputElement).value).toBe('1');
+  });
+
   it('renders a lifecycle conflict verbatim rather than pretending the transition landed', async () => {
     serve((url) => {
       if (url.includes('/application/workflow/list-definitions')) {
