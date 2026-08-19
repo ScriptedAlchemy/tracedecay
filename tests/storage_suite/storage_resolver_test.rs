@@ -12,7 +12,8 @@ use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::config::{
     discover_project_root, get_config_path, load_config, save_config_to_path,
 };
-use tracedecay::global_db::GlobalDb;
+use tracedecay::db::{Database, DatabaseAuthority};
+use tracedecay::global_db::{GlobalDb, StoreInstanceUpsert};
 use tracedecay::mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
@@ -1054,6 +1055,156 @@ async fn empty_cutover_store_is_atomically_replaced_by_healthy_legacy_store() {
 }
 
 #[tokio::test]
+async fn unreadable_cutover_sessions_block_identity_repair() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn guarded_cutover() {}\n").unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    init_repo_with_commit(&project);
+
+    let old = TraceDecay::init(&project).await.unwrap();
+    old.add_fact(fact_request("healthy guarded legacy fact"))
+        .await
+        .unwrap();
+    let original_root = old.store_layout().data_root.clone();
+    old.checkpoint().await.unwrap();
+    old.close();
+    fs::remove_file(repository_identity_path(&project).unwrap()).unwrap();
+    remove_sqlite_family(&profile_root.join("global.db"));
+
+    let legacy_project_id = "proj_guarded_legacy";
+    let legacy_root = profile_root.join(format!("projects/{legacy_project_id}"));
+    relocate_store_as_legacy(&original_root, &legacy_root, &project, legacy_project_id);
+
+    let cutover = default_profile_sharded_layout(&project, &profile_root).unwrap();
+    let cutover_project_id = cutover.identity.project_id.clone().unwrap();
+    initialize_empty_profile_layout(&cutover).await;
+    let authority =
+        DatabaseAuthority::acquire_test(&cutover.graph_db_path, "populated cutover").unwrap();
+    let (graph, _) = Database::open(&cutover.graph_db_path, &authority)
+        .await
+        .unwrap();
+    graph
+        .conn()
+        .execute(
+            "INSERT INTO memory_facts (content, category) VALUES ('populated cutover graph', 'test')",
+            (),
+        )
+        .await
+        .unwrap();
+    graph.checkpoint().await.unwrap();
+    graph.close();
+    remove_sqlite_family(&cutover.sessions_db_path);
+    fs::create_dir_all(&cutover.sessions_db_path).unwrap();
+    write_repository_identity_marker(&project, &cutover_project_id).unwrap();
+
+    let error = match TraceDecay::open(&project).await {
+        Ok(graph) => {
+            graph.close();
+            panic!("unreadable auxiliary state must block identity repair");
+        }
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("identity cutover conflict"), "{message}");
+    assert!(message.contains("auxiliary_health=unreadable"), "{message}");
+    assert!(message.contains("no files changed"), "{message}");
+    assert_eq!(
+        read_repository_identity_marker(&project)
+            .unwrap()
+            .unwrap()
+            .project_id,
+        cutover_project_id
+    );
+    assert!(cutover.data_root.join(STORE_MANIFEST_FILENAME).is_file());
+}
+
+#[tokio::test]
+async fn unreadable_cutover_artifact_tree_blocks_exact_root_fast_path() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn guarded_artifacts() {}\n",
+    )
+    .unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    init_repo_with_commit(&project);
+
+    let old = TraceDecay::init(&project).await.unwrap();
+    old.add_fact(fact_request("healthy artifact legacy fact"))
+        .await
+        .unwrap();
+    let original_root = old.store_layout().data_root.clone();
+    old.checkpoint().await.unwrap();
+    old.close();
+    fs::remove_file(repository_identity_path(&project).unwrap()).unwrap();
+    remove_sqlite_family(&profile_root.join("global.db"));
+
+    let legacy_project_id = "proj_guarded_artifact_legacy";
+    let legacy_root = profile_root.join(format!("projects/{legacy_project_id}"));
+    relocate_store_as_legacy(&original_root, &legacy_root, &project, legacy_project_id);
+
+    let cutover = default_profile_sharded_layout(&project, &profile_root).unwrap();
+    let cutover_project_id = cutover.identity.project_id.clone().unwrap();
+    initialize_empty_profile_layout(&cutover).await;
+    let sessions = GlobalDb::open_at(&cutover.sessions_db_path).await.unwrap();
+    assert!(
+        sessions
+            .upsert_session(&SessionRecord {
+                provider: "codex".to_string(),
+                session_id: "populated-artifact-cutover".to_string(),
+                project_key: cutover_project_id.clone(),
+                project_path: project.to_string_lossy().to_string(),
+                title: Some("populated artifact cutover".to_string()),
+                started_at: Some(1_800_000_020),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
+    );
+    sessions.checkpoint().await;
+    sessions.close();
+    fs::write(&cutover.dashboard_root, b"not a directory").unwrap();
+    fs::create_dir_all(&cutover.lcm_payload_root).unwrap();
+    fs::write(cutover.lcm_payload_root.join("payload.json"), b"{}").unwrap();
+    write_repository_identity_marker(&project, &cutover_project_id).unwrap();
+
+    let error = match TraceDecay::open(&project).await {
+        Ok(graph) => {
+            graph.close();
+            panic!("unreadable artifact state must block exact-root selection");
+        }
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("identity cutover conflict"), "{message}");
+    assert!(message.contains("auxiliary_health=unreadable"), "{message}");
+    assert!(message.contains("no files changed"), "{message}");
+    assert_eq!(
+        read_repository_identity_marker(&project)
+            .unwrap()
+            .unwrap()
+            .project_id,
+        cutover_project_id
+    );
+    assert!(cutover.data_root.join(STORE_MANIFEST_FILENAME).is_file());
+}
+
+#[tokio::test]
 async fn empty_cutover_store_adopts_healthy_legacy_linked_worktree_store() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
@@ -1111,6 +1262,85 @@ async fn empty_cutover_store_adopts_healthy_legacy_linked_worktree_store() {
 }
 
 #[tokio::test]
+async fn empty_cutover_store_rejects_candidate_with_corrupt_serving_branch() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let linked = dir.path().join("repo-linked");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn guarded_branch() {}\n").unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    init_repo_with_commit(&project);
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/corrupt-legacy-branch",
+            linked.to_str().unwrap(),
+        ],
+    );
+
+    let old = TraceDecay::init(&project).await.unwrap();
+    old.add_fact(fact_request("healthy root with corrupt serving branch"))
+        .await
+        .unwrap();
+    let original_root = old.store_layout().data_root.clone();
+    let branch = TraceDecay::open(&linked).await.unwrap();
+    let branch_relative_path = branch
+        .db_path()
+        .strip_prefix(&original_root)
+        .unwrap()
+        .to_path_buf();
+    branch.checkpoint().await.unwrap();
+    branch.close();
+    old.checkpoint().await.unwrap();
+    old.close();
+
+    fs::remove_file(repository_identity_path(&linked).unwrap()).unwrap();
+    remove_sqlite_family(&profile_root.join("global.db"));
+
+    let legacy_project_id = "proj_corrupt_serving_branch_legacy";
+    let legacy_root = profile_root.join(format!("projects/{legacy_project_id}"));
+    relocate_store_as_legacy(&original_root, &legacy_root, &linked, legacy_project_id);
+    let legacy_branch_db = legacy_root.join(branch_relative_path);
+    let mut corrupted = fs::read(&legacy_branch_db).unwrap();
+    corrupted[..16].copy_from_slice(b"not-a-sqlite-db!");
+    fs::write(&legacy_branch_db, &corrupted).unwrap();
+
+    let cutover = default_profile_sharded_layout(&linked, &profile_root).unwrap();
+    let cutover_project_id = cutover.identity.project_id.clone().unwrap();
+    initialize_empty_profile_layout(&cutover).await;
+    write_repository_identity_marker(&linked, &cutover_project_id).unwrap();
+
+    let error = match TraceDecay::open(&linked).await {
+        Ok(graph) => {
+            graph.close();
+            panic!("identity repair must validate the serving branch before mutation");
+        }
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("identity cutover conflict"), "{message}");
+    assert!(
+        message.contains("candidate failed full integrity validation"),
+        "{message}"
+    );
+    assert_eq!(
+        read_repository_identity_marker(&linked)
+            .unwrap()
+            .unwrap()
+            .project_id,
+        cutover_project_id
+    );
+    assert!(cutover.data_root.join(STORE_MANIFEST_FILENAME).is_file());
+    assert!(legacy_root.join(STORE_MANIFEST_FILENAME).is_file());
+}
+
+#[tokio::test]
 async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
@@ -1124,6 +1354,9 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
 
     let old = TraceDecay::init(&project).await.unwrap();
     old.add_fact(fact_request("legacy split identity fact"))
+        .await
+        .unwrap();
+    old.add_fact(fact_request("second legacy split identity fact"))
         .await
         .unwrap();
     let original_root = old.store_layout().data_root.clone();
@@ -1160,6 +1393,25 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
             })
             .await
     );
+    assert!(
+        sessions
+            .upsert_session(&SessionRecord {
+                provider: "codex".to_string(),
+                session_id: "second-cutover-session".to_string(),
+                project_key: cutover_project_id.clone(),
+                project_path: project.to_string_lossy().to_string(),
+                title: Some("second cutover session".to_string()),
+                started_at: Some(1_800_000_011),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
+    );
     sessions.checkpoint().await;
     sessions.close();
     write_repository_identity_marker(&project, &cutover_project_id).unwrap();
@@ -1172,6 +1424,7 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
     assert!(message.contains(&cutover_project_id), "{message}");
     assert!(message.contains(legacy_project_id), "{message}");
     assert!(message.contains("graph_health=corrupt"), "{message}");
+    assert!(message.contains("count_mode=presence_only"), "{message}");
     assert!(message.contains("sessions=1"), "{message}");
     assert!(message.contains("facts=1"), "{message}");
     assert!(message.contains("no files changed"), "{message}");
@@ -1395,6 +1648,82 @@ async fn linked_worktree_exact_manifest_overrides_healthy_shared_identity_store(
 }
 
 #[tokio::test]
+async fn registered_healthy_exact_branch_ignores_duplicate_exact_manifests() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn registered_root() {}\n").unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    init_repo_with_commit(&project);
+
+    let selected = TraceDecay::init(&project).await.unwrap();
+    selected.index_all().await.unwrap();
+    let selected_project_id = selected.store_layout().identity.project_id.clone().unwrap();
+    let selected_data_root = selected.store_layout().data_root.clone();
+    selected.close();
+
+    git(
+        &project,
+        &["checkout", "-b", "feature/selected-exact-branch"],
+    );
+    let selected_branch = TraceDecay::open(&project)
+        .await
+        .expect("the selected store must create a healthy current-branch graph");
+    selected_branch.close();
+    remove_sqlite_family(&selected_data_root.join("tracedecay.db"));
+    fs::write(
+        selected_data_root.join("tracedecay.db"),
+        b"root graph is unavailable; current branch graph remains healthy",
+    )
+    .unwrap();
+
+    for project_id in ["proj_duplicate_exact_one", "proj_duplicate_exact_two"] {
+        let data_root = profile_root.join(format!("projects/{project_id}"));
+        fs::create_dir_all(&data_root).unwrap();
+        fs::write(data_root.join("tracedecay.db"), project_id).unwrap();
+        fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
+        branch_meta::save_branch_meta(&data_root, &BranchMeta::new_for_dir(&data_root, "main"))
+            .unwrap();
+        write_store_manifest_to_path(
+            &data_root.join(STORE_MANIFEST_FILENAME),
+            &StoreManifest {
+                schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+                project_id: Some(project_id.to_string()),
+                store_kind: StoreKind::CodeProject,
+                storage_mode: StorageMode::ProfileSharded,
+                project_root: project.clone(),
+                data_root,
+                graph_db_relpath: "tracedecay.db".into(),
+                sessions_db_relpath: "sessions.db".into(),
+                branch_meta_relpath: "branch-meta.json".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    let layout = TraceDecay::resolve_store_layout_for_identity(&project)
+        .await
+        .expect("a healthy selected exact-branch shard must outrank duplicate legacy manifests");
+
+    assert_eq!(
+        layout.identity.project_id.as_deref(),
+        Some(selected_project_id.as_str())
+    );
+    assert_path_eq(&layout.data_root, &selected_data_root);
+    for project_id in ["proj_duplicate_exact_one", "proj_duplicate_exact_two"] {
+        assert_eq!(
+            fs::read_to_string(profile_root.join(format!("projects/{project_id}/tracedecay.db")))
+                .unwrap(),
+            project_id,
+            "duplicate stores must remain untouched as recoverable history"
+        );
+    }
+}
+
+#[tokio::test]
 async fn registered_exact_root_ignores_sibling_worktree_manifests() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
@@ -1476,6 +1805,284 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
         Some(main_project_id.as_str())
     );
     assert_path_eq(&layout.data_root, &main_data_root);
+}
+
+#[tokio::test]
+async fn linked_worktree_exact_registry_alias_ignores_duplicate_shared_legacy_manifests() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let worktree = dir.path().join("repo-wt");
+    let unregistered_worktree = dir.path().join("repo-wt-unregistered");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    let global_db_path = profile_root.join("global.db");
+    let _home_guard = HomeGuard::set(&home);
+
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn canonical() {}\n").unwrap();
+    init_repo_with_commit(&project);
+
+    let canonical = TraceDecay::init(&project).await.unwrap();
+    canonical.index_all().await.unwrap();
+    let canonical_project_id = canonical
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .unwrap();
+    let canonical_data_root = canonical.store_layout().data_root.clone();
+    canonical.close();
+
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/exact-registry-alias",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let linked = TraceDecay::open(&worktree).await.unwrap();
+    linked.close();
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/shared-git-fallback",
+            unregistered_worktree.to_str().unwrap(),
+        ],
+    );
+
+    let global_db = GlobalDb::open().await.unwrap();
+    let registered = global_db
+        .resolve_project_store_by_alias(&worktree)
+        .await
+        .expect("opening the linked worktree must register its exact path alias");
+    assert_eq!(registered.project.project_id, canonical_project_id);
+
+    let mut legacy_roots = Vec::new();
+    for project_id in ["proj_shared_legacy_one", "proj_shared_legacy_two"] {
+        let candidate_source = dir.path().join(format!("{project_id}-source"));
+        fs::create_dir_all(candidate_source.join("src")).unwrap();
+        fs::write(
+            candidate_source.join("src/lib.rs"),
+            format!("pub fn {}() {{}}\n", project_id),
+        )
+        .unwrap();
+        init_repo_with_commit(&candidate_source);
+
+        let candidate = TraceDecay::init(&candidate_source).await.unwrap();
+        candidate.index_all().await.unwrap();
+        let candidate_root = candidate.store_layout().data_root.clone();
+        candidate.close();
+
+        let candidate_git_common_dir = tracedecay::worktree::git_common_dir(&candidate_source)
+            .expect("candidate must have its own Git identity");
+        global_db
+            .upsert_code_project(
+                project_id,
+                &candidate_source,
+                Some(&candidate_git_common_dir),
+                None,
+                Some("main"),
+            )
+            .await
+            .unwrap();
+
+        let legacy_root = profile_root.join(format!("projects/{project_id}"));
+        relocate_store_as_legacy(&candidate_root, &legacy_root, &project, project_id);
+        global_db
+            .upsert_store_instance(StoreInstanceUpsert {
+                store_id: format!("store_{project_id}"),
+                project_id: project_id.to_string(),
+                store_kind: "code_project".to_string(),
+                storage_mode: "profile_sharded".to_string(),
+                store_relpath: format!("projects/{project_id}"),
+                manifest_relpath: Some(format!(
+                    "projects/{project_id}/{STORE_MANIFEST_FILENAME}"
+                )),
+                last_verified_at: None,
+                last_write_at: None,
+            })
+            .await
+            .unwrap();
+        fs::write(legacy_root.join("untouched-sentinel"), project_id).unwrap();
+        legacy_roots.push((
+            project_id,
+            legacy_root.clone(),
+            fs::read(legacy_root.join(STORE_MANIFEST_FILENAME)).unwrap(),
+        ));
+    }
+
+    let marker_selected = TraceDecay::resolve_store_layout_for_identity_with_options(
+        &worktree,
+        &TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(global_db_path.clone()),
+        },
+    )
+    .await
+    .expect("the exact linked-worktree alias must authorize its repository-marker selection");
+    assert_eq!(
+        marker_selected.identity.project_id.as_deref(),
+        Some(canonical_project_id.as_str())
+    );
+    assert_path_eq(&marker_selected.data_root, &canonical_data_root);
+    for (project_id, legacy_root, manifest_before) in &legacy_roots {
+        assert_eq!(
+            fs::read_to_string(legacy_root.join("untouched-sentinel")).unwrap(),
+            *project_id,
+            "marker resolution must leave legacy stores untouched"
+        );
+        assert_eq!(
+            fs::read(legacy_root.join(STORE_MANIFEST_FILENAME)).unwrap(),
+            *manifest_before,
+            "marker resolution must not rewrite legacy manifests"
+        );
+    }
+
+    fs::remove_file(repository_identity_path(&worktree).unwrap()).unwrap();
+    let fallback_error = TraceDecay::resolve_store_layout_for_identity_with_options(
+        &unregistered_worktree,
+        &TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(global_db_path.clone()),
+        },
+    )
+    .await
+    .expect_err("generic Git-common-dir fallback must remain fail-closed");
+    assert!(
+        fallback_error
+            .to_string()
+            .contains("ambiguous legacy profile stores")
+    );
+
+    global_db
+        .upsert_project_alias(&unregistered_worktree, "proj_shared_legacy_one")
+        .await
+        .unwrap();
+    let stale_alias = global_db
+        .resolve_project_store_by_alias(&unregistered_worktree)
+        .await
+        .expect("the reused path must resolve through its stale exact alias");
+    assert_eq!(stale_alias.project.project_id, "proj_shared_legacy_one");
+    TraceDecay::resolve_store_layout_for_identity_with_options(
+        &unregistered_worktree,
+        &TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(global_db_path.clone()),
+        },
+    )
+    .await
+    .expect_err("an exact alias from a different Git identity must remain fail-closed");
+    global_db
+        .upsert_project_alias(&unregistered_worktree, &canonical_project_id)
+        .await
+        .unwrap();
+
+    let layout = TraceDecay::resolve_store_layout_for_identity_with_options(
+        &worktree,
+        &TraceDecayOpenOptions {
+            profile_root: Some(profile_root),
+            global_db_path: Some(global_db_path),
+        },
+    )
+    .await
+    .expect("the exact linked-worktree alias must keep the canonical selected store authoritative");
+
+    assert_eq!(
+        layout.identity.project_id.as_deref(),
+        Some(canonical_project_id.as_str())
+    );
+    assert_path_eq(&layout.data_root, &canonical_data_root);
+    for (project_id, legacy_root, manifest_before) in legacy_roots {
+        assert_eq!(
+            fs::read_to_string(legacy_root.join("untouched-sentinel")).unwrap(),
+            project_id,
+            "legacy stores must remain untouched as recoverable history"
+        );
+        assert_eq!(
+            fs::read(legacy_root.join(STORE_MANIFEST_FILENAME)).unwrap(),
+            manifest_before,
+            "legacy manifests must not be rewritten"
+        );
+    }
+}
+
+#[tokio::test]
+async fn linked_worktree_exact_manifest_overrides_canonical_exact_registry_alias() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let worktree = dir.path().join("repo-wt");
+    let candidate_source = dir.path().join("candidate-source");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    let global_db_path = profile_root.join("global.db");
+    let _home_guard = HomeGuard::set(&home);
+
+    for root in [&project, &candidate_source] {
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn indexed() {}\n").unwrap();
+        init_repo_with_commit(root);
+    }
+
+    let canonical = TraceDecay::init(&project).await.unwrap();
+    canonical.index_all().await.unwrap();
+    let canonical_project_id = canonical.store_layout().identity.project_id.clone().unwrap();
+    canonical.close();
+
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/exact-manifest-over-alias",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let linked = TraceDecay::open(&worktree).await.unwrap();
+    linked.close();
+    let global_db = GlobalDb::open().await.unwrap();
+    assert_eq!(
+        global_db
+            .resolve_project_store_by_alias(&worktree)
+            .await
+            .unwrap()
+            .project
+            .project_id,
+        canonical_project_id
+    );
+
+    let candidate = TraceDecay::init(&candidate_source).await.unwrap();
+    candidate.index_all().await.unwrap();
+    let candidate_root = candidate.store_layout().data_root.clone();
+    candidate.close();
+    let exact_project_id = "proj_linked_exact_over_registry_alias";
+    let exact_root = profile_root.join(format!("projects/{exact_project_id}"));
+    relocate_store_as_legacy(&candidate_root, &exact_root, &worktree, exact_project_id);
+
+    fs::remove_file(repository_identity_path(&worktree).unwrap()).unwrap();
+    let layout = TraceDecay::resolve_store_layout_for_identity_with_options(
+        &worktree,
+        &TraceDecayOpenOptions {
+            profile_root: Some(profile_root),
+            global_db_path: Some(global_db_path),
+        },
+    )
+    .await
+    .expect("the exact-root candidate must override the canonical exact registry alias");
+
+    assert_eq!(
+        layout.identity.project_id.as_deref(),
+        Some(exact_project_id)
+    );
+    assert_path_eq(&layout.data_root, &exact_root);
 }
 
 #[tokio::test]

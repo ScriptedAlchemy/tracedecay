@@ -114,6 +114,7 @@ fn rejected_tool_project_selector_present(tool_name: &str, args: &Value) -> bool
 }
 
 async fn selected_registered_project_reader(
+    active_cg: &TraceDecay,
     tool_name: &str,
     args: &Value,
     global_db: Option<&GlobalDb>,
@@ -132,6 +133,9 @@ async fn selected_registered_project_reader(
     else {
         return Ok(None);
     };
+    if selector_targets_active_project(active_cg, args, &context.project.project_id) {
+        return Ok(None);
+    }
 
     let global_db_path = global_db
         .map(|db| db.db_path().to_path_buf())
@@ -167,6 +171,36 @@ async fn selected_registered_project_reader(
     Err(last_error.unwrap_or_else(|| TraceDecayError::Config {
         message: "registered project could not be opened".to_string(),
     }))
+}
+
+fn selector_targets_active_project(
+    active_cg: &TraceDecay,
+    args: &Value,
+    selected_project_id: &str,
+) -> bool {
+    if active_cg.store_layout().identity.project_id.as_deref() != Some(selected_project_id) {
+        return false;
+    }
+    let selector = args.get("project_selector").and_then(Value::as_object);
+    let selector_path = selector
+        .and_then(|selector| {
+            selector
+                .get("path")
+                .or_else(|| selector.get("project_path"))
+        })
+        .or_else(|| args.get("project_path"))
+        .or_else(|| args.get("project_root"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    let Some(selector_path) = selector_path else {
+        return true;
+    };
+    if !GlobalDb::is_explicit_project_path_selector(selector_path) {
+        return true;
+    }
+    GlobalDb::canonical_project_key(Path::new(selector_path))
+        == GlobalDb::canonical_project_key(active_cg.project_root())
 }
 
 fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
@@ -371,6 +405,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
     }
     let selected_cg = selected_registered_project_reader(
+        cg,
         tool_name,
         &args,
         options.global_db,
@@ -809,6 +844,48 @@ mod tests {
                 "{tool_name} should not be routed by the pure graph-reader selector policy"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn graph_reader_selector_reuses_the_active_project() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().unwrap();
+        let _env = SelectorEnv::new(dir.path());
+        let active_project = dir.path().join("active");
+        fs::create_dir_all(active_project.join("src")).unwrap();
+        fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
+
+        let active = TraceDecay::init(&active_project).await.unwrap();
+        let registry = GlobalDb::open().await.unwrap();
+        let selected = selected_registered_project_reader(
+            &active,
+            "tracedecay_search",
+            &json!({"project_path": active_project.to_string_lossy()}),
+            Some(&registry),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            selected.is_none(),
+            "a selector resolving to the active project must reuse its already-open graph"
+        );
+        let active_project_id = active
+            .store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .unwrap();
+        assert!(
+            !selector_targets_active_project(
+                &active,
+                &json!({"project_path": dir.path().join("sibling-worktree")}),
+                active_project_id,
+            ),
+            "a different explicit worktree path must retain branch-specific dispatch"
+        );
+        active.close();
     }
 
     #[tokio::test]

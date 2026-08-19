@@ -567,6 +567,12 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
     .await;
     assert_eq!(no_match["count"], 0, "{no_match}");
     assert_eq!(no_match["index_empty"], false, "{no_match}");
+    assert_eq!(no_match["index"]["spans_present"], true, "{no_match}");
+    assert_eq!(no_match["index"]["span_count"], Value::Null, "{no_match}");
+    assert_eq!(
+        no_match["index"]["count_mode"], "presence_only",
+        "{no_match}"
+    );
     assert!(
         no_match["message"]
             .as_str()

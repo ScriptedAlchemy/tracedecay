@@ -401,6 +401,46 @@ async fn synthesized_branch_metadata_change_invalidates_confirmation_token() {
 }
 
 #[tokio::test]
+async fn hook_analytics_append_after_plan_preserves_bytes_without_invalidating_confirmation() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+    let telemetry_path = source.data_root.join("hook_analytics.jsonl");
+    let before = b"{\"event\":\"before-plan\"}\n";
+    let appended = b"{\"event\":\"after-plan\"}\n";
+    fs::write(&telemetry_path, before).unwrap();
+    let options = fixture.options();
+
+    let planned = plan(&options).await.unwrap();
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&telemetry_path)
+        .unwrap()
+        .write_all(appended)
+        .unwrap();
+    let expected = [before.as_slice(), appended.as_slice()].concat();
+
+    let applied = apply(&options, &planned.confirmation_token).await.unwrap();
+
+    assert_eq!(applied.confirmation_token, planned.confirmation_token);
+    assert_eq!(
+        fs::read(applied.destination_data_root.join("hook_analytics.jsonl")).unwrap(),
+        expected
+    );
+    assert_eq!(
+        fs::read(
+            applied
+                .backup_root
+                .join(&fixture.source_id)
+                .join("hook_analytics.jsonl")
+        )
+        .unwrap(),
+        expected
+    );
+    assert_eq!(fs::read(telemetry_path).unwrap(), expected);
+}
+
+#[tokio::test]
 async fn corrupt_branch_metadata_fails_closed_without_mutation() {
     for content in [
         b"{\"default_branch\":".as_slice(),

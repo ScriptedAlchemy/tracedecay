@@ -2150,7 +2150,7 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
     // means nothing was ever recorded, which is a valid empty result (the
     // tool never ghost-creates an empty sessions.db).
     let db_path = cg.store_layout().sessions_db_path.clone();
-    let (results, index_health, observed_fallback) = if db_path.is_file() {
+    let (results, index_presence, observed_fallback) = if db_path.is_file() {
         let Some(db) = GlobalDb::open_read_only_at(&db_path).await else {
             return Ok(tool_json(
                 Some(cg.project_root()),
@@ -2163,10 +2163,11 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
                 }),
             ));
         };
-        // Read the correlation-index health from the same open so an empty
-        // index (never populated) can be reported distinctly from a populated
-        // index that simply had no rows matching this git ref.
-        let health = db.git_correlation_index_health().await.ok();
+        // Query paths need only distinguish an empty row family from a
+        // populated index with no match. Exact counts scan the entire
+        // correlation tables on large stores, so use the bounded presence
+        // probe here and leave exact health to diagnostics.
+        let presence = db.git_correlation_index_presence().await.ok();
         let results = db
             .git_sessions_for_with_relation(&query, relation)
             .await
@@ -2188,7 +2189,7 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
         } else {
             None
         };
-        (results, health, observed_fallback)
+        (results, presence, observed_fallback)
     } else {
         // No store file at all: the correlation index was never created.
         (Vec::new(), None, None)
@@ -2198,9 +2199,9 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
     // absent, or the row family for this ref kind is empty (spans for
     // branch/worktree, commit rows for commit). That must not read as a genuine
     // "no sessions matched" result.
-    let index_empty = index_health
+    let index_empty = index_presence
         .as_ref()
-        .is_none_or(|health| health.is_empty_for(&query.git_ref));
+        .is_none_or(|presence| presence.is_empty_for(&query.git_ref));
     let mut payload = json!({
         "status": "ok",
         "git_ref": query.git_ref.kind(),
@@ -2212,14 +2213,27 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
         "results": results,
         "index_empty": index_empty,
     });
-    if let Some(health) = &index_health {
-        payload["index"] = json!({
-            "tables_present": health.tables_present,
-            "span_count": health.span_count,
-            "commit_count": health.commit_count,
-            "last_span_write": health.last_span_write,
-            "backfill_watermark": health.backfill_watermark,
+    if let Some(presence) = &index_presence {
+        let mut index = json!({
+            "tables_present": presence.tables_present,
+            "spans_present": presence.spans_present,
+            "commits_present": presence.commits_present,
+            "span_count": Value::Null,
+            "commit_count": Value::Null,
+            "last_span_write": Value::Null,
+            "backfill_watermark": Value::Null,
+            "count_mode": "presence_only",
         });
+        // Preserve the exact-zero signal for consumers without inventing a
+        // count when the family is populated. Exact counts remain available
+        // through diagnostics, where their full scan is explicit.
+        if !presence.spans_present {
+            index["span_count"] = json!(0);
+        }
+        if !presence.commits_present {
+            index["commit_count"] = json!(0);
+        }
+        payload["index"] = index;
     }
     // When nothing matched, say *why*: an empty index self-heals via startup
     // auto-backfill (or a manual `tracedecay sessions git-backfill`), whereas a

@@ -447,7 +447,7 @@ pub fn matching_legacy_profile_layouts(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
-) -> Result<(Vec<StoreLayout>, bool)> {
+) -> Result<(Vec<StoreLayout>, bool, bool)> {
     matching_legacy_profile_layouts_with_git_identity_resolver(
         project_root,
         profile_root,
@@ -463,14 +463,14 @@ fn matching_legacy_profile_layouts_with_git_identity_resolver<D, G>(
     excluded_project_id: Option<&str>,
     mut is_detached_linked_worktree: D,
     mut git_identity: G,
-) -> Result<(Vec<StoreLayout>, bool)>
+) -> Result<(Vec<StoreLayout>, bool, bool)>
 where
     D: FnMut(&Path) -> bool,
     G: FnMut(&Path) -> crate::worktree::GitRepoIdentityOutcome,
 {
     let projects_root = profile_root.join("projects");
     let Ok(entries) = fs::read_dir(&projects_root) else {
-        return Ok((Vec::new(), false));
+        return Ok((Vec::new(), false, false));
     };
     let mut manifest_paths = entries
         .flatten()
@@ -503,8 +503,7 @@ where
     // manifest overrides the selected identity. Otherwise the shared-Git
     // recovery path still runs, and the caller decides whether a selected
     // identity naming this exact checkout outranks what it finds.
-    let selected_is_sole_exact_root =
-        selected_manifest_matches_exact_root && exact_manifests.is_empty();
+    let candidates_match_exact_root = !exact_manifests.is_empty();
     let matching_manifests = if exact_manifests.is_empty() {
         let project_git_common_dir = (!is_detached_linked_worktree(project_root))
             .then(|| match git_identity(project_root) {
@@ -590,7 +589,11 @@ where
         }
         layouts.push(layout);
     }
-    Ok((layouts, selected_is_sole_exact_root))
+    Ok((
+        layouts,
+        selected_manifest_matches_exact_root,
+        candidates_match_exact_root,
+    ))
 }
 
 pub fn retire_identity_cutover_manifest(layout: &StoreLayout) -> Result<PathBuf> {
@@ -1352,7 +1355,7 @@ mod tests {
         )
         .unwrap();
 
-        let (layouts, _) = matching_legacy_profile_layouts_with_git_identity_resolver(
+        let (layouts, _, _) = matching_legacy_profile_layouts_with_git_identity_resolver(
             &project_root,
             &profile_root,
             None,
@@ -1362,7 +1365,7 @@ mod tests {
         .unwrap();
         assert!(layouts.is_empty(), "a timed-out current root cannot match");
 
-        let (layouts, _) = matching_legacy_profile_layouts_with_git_identity_resolver(
+        let (layouts, _, _) = matching_legacy_profile_layouts_with_git_identity_resolver(
             &project_root,
             &profile_root,
             None,
@@ -1419,7 +1422,7 @@ mod tests {
         write_manifest(&profile_root, "proj_unrelated", &unrelated_root);
 
         let resolver_calls = RefCell::new(Vec::new());
-        let (layouts, selected_is_sole_exact_root) =
+        let (layouts, selected_manifest_matches_exact_root, candidates_match_exact_root) =
             matching_legacy_profile_layouts_with_git_identity_resolver(
                 &project_root,
                 &profile_root,
@@ -1441,14 +1444,15 @@ mod tests {
             layouts[0].identity.project_id.as_deref(),
             Some("proj_exact")
         );
-        assert!(!selected_is_sole_exact_root);
+        assert!(!selected_manifest_matches_exact_root);
+        assert!(candidates_match_exact_root);
         assert!(
             resolver_calls.borrow().is_empty(),
             "exact-root selection must not invoke shared-Git discovery"
         );
 
         resolver_calls.borrow_mut().clear();
-        let (layouts, selected_is_sole_exact_root) =
+        let (layouts, selected_manifest_matches_exact_root, candidates_match_exact_root) =
             matching_legacy_profile_layouts_with_git_identity_resolver(
                 &project_root,
                 &profile_root,
@@ -1471,9 +1475,10 @@ mod tests {
             Some("proj_unrelated")
         );
         assert!(
-            selected_is_sole_exact_root,
+            selected_manifest_matches_exact_root,
             "the caller decides whether the selected exact root outranks recovery"
         );
+        assert!(!candidates_match_exact_root);
         assert_eq!(
             resolver_calls.borrow().as_slice(),
             [project_root, unrelated_root],
@@ -1550,7 +1555,7 @@ mod tests {
         write_manifest(&profile_root, "proj_historical", &historical_root);
 
         let resolver_calls = RefCell::new(Vec::new());
-        let (layouts, selected_is_sole_exact_root) =
+        let (layouts, selected_manifest_matches_exact_root, candidates_match_exact_root) =
             matching_legacy_profile_layouts_with_git_identity_resolver(
                 &worktree_root,
                 &profile_root,
@@ -1569,7 +1574,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(layouts.len(), 1);
-        assert!(!selected_is_sole_exact_root);
+        assert!(!selected_manifest_matches_exact_root);
+        assert!(!candidates_match_exact_root);
         assert_eq!(
             resolver_calls.borrow().as_slice(),
             [worktree_root, historical_root],

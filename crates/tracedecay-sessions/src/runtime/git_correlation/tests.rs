@@ -1281,6 +1281,45 @@ async fn correlation_index_health_reports_empty_then_populated() {
 }
 
 #[tokio::test]
+async fn correlation_index_presence_reports_row_families_without_counts() {
+    let conn = test_conn().await;
+
+    let empty = correlation_index_presence(&conn).await.unwrap();
+    assert!(empty.tables_present);
+    assert!(!empty.spans_present);
+    assert!(!empty.commits_present);
+    assert!(empty.is_empty_for(&GitRefFilter::Worktree("/repo".to_string())));
+
+    record_span_observation(&conn, &observation("s1", Some("main"), "/repo", 1_000), 600)
+        .await
+        .unwrap();
+    let populated = correlation_index_presence(&conn).await.unwrap();
+    assert!(populated.spans_present);
+    assert!(!populated.commits_present);
+    assert!(!populated.is_empty_for(&GitRefFilter::Branch("main".to_string())));
+    assert!(populated.is_empty_for(&GitRefFilter::Commit("abcdef12".to_string())));
+
+    let commit = CommitSessionRecord {
+        commit_sha: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
+        provider: "claude".to_string(),
+        session_id: "s1".to_string(),
+        branch: Some("main".to_string()),
+        worktree: Some("/repo".to_string()),
+        committed_at: 1_100,
+        span_overlap_kind: SpanOverlapKind::Direct,
+        span_id: None,
+        relation: CommitRelation::Produced,
+        evidence: CommitEvidence::ToolResult,
+        confidence: 100,
+        evidence_message_id: Some("m1".to_string()),
+    };
+    assert!(upsert_commit_session(&conn, &commit).await.unwrap());
+    let with_commit = correlation_index_presence(&conn).await.unwrap();
+    assert!(with_commit.commits_present);
+    assert!(!with_commit.is_empty_for(&GitRefFilter::Commit("abcdef12".to_string())));
+}
+
+#[tokio::test]
 async fn correlation_index_health_without_tables_is_empty() {
     // A store predating the correlation schema (no DDL run) must report an
     // absent, empty index rather than erroring on missing tables.
@@ -1292,4 +1331,9 @@ async fn correlation_index_health_without_tables_is_empty() {
     assert_eq!(health.span_count, 0);
     assert_eq!(health.commit_count, 0);
     assert_eq!(health.backfill_watermark, None);
+
+    let presence = correlation_index_presence(&conn).await.unwrap();
+    assert!(!presence.tables_present);
+    assert!(!presence.spans_present);
+    assert!(!presence.commits_present);
 }

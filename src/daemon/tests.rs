@@ -890,6 +890,35 @@ async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn daemon_scheduler_shutdown_is_bounded_while_writer_gate_is_busy() {
+    let engine = DaemonEngine::default();
+    let administration = engine.store_administration.clone();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        administration
+            .with_writer(|| async move {
+                entered_tx.send(()).expect("announce writer gate");
+                release_rx.await.expect("release writer gate");
+            })
+            .await;
+    });
+    entered_rx.await.expect("writer gate acquired");
+
+    engine.lifecycle.begin_draining();
+    tokio::time::timeout(
+        tokio::time::Duration::from_millis(250),
+        engine.shutdown_automation_schedulers_with_deadline(tokio::time::Duration::from_millis(25)),
+    )
+    .await
+    .expect("scheduler shutdown must not wait indefinitely for writer administration");
+
+    release_tx.send(()).expect("release writer gate");
+    blocker.await.expect("writer gate blocker task");
+}
+
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);

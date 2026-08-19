@@ -13,8 +13,8 @@ use crate::support;
 
 use std::io::{Seek, Write};
 use tempfile::TempDir;
-use tracedecay::db::Database;
 use tracedecay::db::migrations::{FULL_REINDEX_REQUIRED_KEY, FULL_REINDEX_REQUIRED_VALUE};
+use tracedecay::db::{Database, DatabaseAuthority};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, try_acquire_sync_lock_at};
 use tracedecay::types::*;
 
@@ -561,6 +561,105 @@ async fn dirty_open_checks_integrity_before_writable_migration()
         "integrity failure must be detected before writable migration"
     );
     assert!(layout.dirty_path.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn dirty_reopen_revalidates_reused_writable_connection()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let live = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = live.store_layout().clone();
+    let nodes: Vec<Node> = (0..100)
+        .map(|index| {
+            sample_node(
+                &format!("cached-dirty-{index}"),
+                &format!("cached_dirty_function_with_long_name_{index}"),
+            )
+        })
+        .collect();
+    live.db().insert_nodes(&nodes).await?;
+    live.checkpoint().await?;
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&layout.graph_db_path)?;
+    let offset = std::cmp::min(file.metadata()?.len() / 2, 8192);
+    file.seek(std::io::SeekFrom::Start(offset))?;
+    file.write_all(&[0xFF; 256])?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
+    let validation_authority =
+        DatabaseAuthority::acquire_test(&layout.graph_db_path, "cached dirty fixture")?;
+    assert!(
+        Database::open_read_only(&layout.graph_db_path, &validation_authority)
+            .await
+            .is_err(),
+        "fixture corruption must fail independent read-only validation"
+    );
+
+    let result = TraceDecay::open_with_options(&project_root, open_options).await;
+    assert!(
+        result.is_err(),
+        "dirty reopen must revalidate a reused writable connection"
+    );
+    assert!(
+        layout.dirty_path.exists(),
+        "failed cached-connection recovery must preserve the dirty marker"
+    );
+    live.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn dirty_open_rejects_zero_length_database_before_writable_initialization()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.close();
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&layout.graph_db_path)?;
+    let marker = b"pid=99999\nversion=test";
+    std::fs::write(&layout.dirty_path, marker)?;
+
+    let error = match TraceDecay::open_with_options(&project_root, open_options).await {
+        Ok(_) => panic!("a dirty zero-length database must require explicit recovery"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("database recovery required"),
+        "truncated stores must use the existing recovery-required path: {error}"
+    );
+    assert_eq!(
+        std::fs::metadata(&layout.graph_db_path)?.len(),
+        0,
+        "recovery detection must not initialize or migrate the truncated database"
+    );
+    assert_eq!(
+        std::fs::read(&layout.dirty_path)?,
+        marker,
+        "recovery evidence must remain until explicit repair"
+    );
     Ok(())
 }
 
