@@ -1,7 +1,11 @@
 use std::sync::Mutex as StdMutex;
 
-use tracedecay_domain::UtcMicros;
+use crate::daemon::context_scout_lifecycle::AuthorityRegistrationV1;
+use serde_json::json;
+use tracedecay_domain::{ObservationSourceRangeV1, ProjectId, ProviderId, SessionId, UtcMicros};
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
+use super::super::envelope::hook_v2_native_session_id;
 use super::super::test_support::*;
 use super::*;
 
@@ -100,4 +104,107 @@ fn hook_v2_scout_prepare_accepts_no_caller_candidates() {
     assert_eq!(response["reason"], "orchestration_unavailable");
     assert!(!response.to_string().contains("candidate"));
     assert!(!response.to_string().contains("control"));
+}
+
+#[test]
+fn hook_v2_native_session_requires_exact_protected_locator() {
+    let session_id = "native-session-1";
+    let mut envelope = hook_v2_envelope_for_test();
+    envelope.protected_session_id = crate::hooks::protected_native_session_id(session_id);
+    assert_eq!(
+        hook_v2_native_session_id(&json!({ "native_session_id": session_id }), &envelope)
+            .as_ref()
+            .map(SessionId::as_str),
+        Some(session_id)
+    );
+
+    envelope.protected_session_id = [9; 32];
+    assert!(
+        hook_v2_native_session_id(&json!({ "native_session_id": session_id }), &envelope).is_none()
+    );
+}
+
+#[tokio::test]
+async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project_id = ProjectId::new("project.native-hook-scout").unwrap();
+    let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+        temporary.path().join("profile"),
+        temporary.path().join("project"),
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let sessions = runtime
+        .registered_database_arc(HostAdmissionScope::Project)
+        .unwrap();
+    let worktree_id = tracedecay_domain::WorktreeId::new("worktree.native-hook-scout").unwrap();
+    let hook_project_id = [71; 16];
+    let hook_worktree_id = [72; 16];
+    assert_eq!(
+        crate::daemon::context_scout_lifecycle::register_context_scout_lifecycle_authority(
+            hook_project_id,
+            hook_worktree_id,
+            project_id,
+            worktree_id,
+            &sessions,
+        ),
+        AuthorityRegistrationV1::Registered
+    );
+
+    for (provider, session, first_call, latest_call) in [
+        (
+            "kimi",
+            "session.kimi.native",
+            "call.kimi.first",
+            "call.kimi.latest",
+        ),
+        (
+            "opencode",
+            "session.opencode.native",
+            "call.opencode.first",
+            "call.opencode.latest",
+        ),
+    ] {
+        for (order, call) in [first_call, latest_call].into_iter().enumerate() {
+            let identity =
+                crate::hooks::NativeContextScoutLifecycleV1::new(session, call, [1; 16]).unwrap();
+            let range = ObservationSourceRangeV1::new(
+                u64::try_from(order).unwrap() + 1,
+                u64::try_from(order).unwrap() + 2,
+            )
+            .unwrap();
+            assert!(
+                admit_native_context_scout_lifecycle(
+                    &sessions,
+                    ProviderId::new(provider).unwrap(),
+                    &identity,
+                    range,
+                )
+                .await
+            );
+            assert!(
+                admit_native_context_scout_lifecycle(
+                    &sessions,
+                    ProviderId::new(provider).unwrap(),
+                    &identity,
+                    range,
+                )
+                .await
+            );
+        }
+        let lifecycle =
+            crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
+                hook_project_id,
+                hook_worktree_id,
+                &SessionId::new(session.to_owned()).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(lifecycle.provider_id.as_str(), provider);
+        assert_eq!(lifecycle.thread_id.as_str(), session);
+        assert_eq!(lifecycle.agent_id.as_str(), session);
+        assert_eq!(lifecycle.turn_id.as_str(), latest_call);
+        assert_eq!(lifecycle.logical_message_id.as_str(), latest_call);
+    }
 }

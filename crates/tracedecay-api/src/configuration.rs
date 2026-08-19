@@ -42,6 +42,8 @@ pub struct ProjectSettingsPatch {
     pub telemetry: Option<TelemetrySettingsPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncSettingsPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_scout: Option<bool>,
 }
 
 /// Nested synchronization settings patch.

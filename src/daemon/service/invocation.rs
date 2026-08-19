@@ -13,12 +13,12 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tracedecay_application::feedback::{
     FeedbackReadPort, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
 };
@@ -80,7 +80,8 @@ use super::project_runtime::{
     ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1,
 };
 use crate::agents::context_scout_ports::{
-    AdmittedContextScoutHookV1, ProjectContextScoutAddressRegistryV1,
+    AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
+    ProjectContextScoutAddressRegistryV1,
 };
 use crate::application_surface::{
     ContextScoutSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
@@ -238,7 +239,10 @@ pub(crate) use primitive::{
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
 };
 pub(crate) use types::{
-    DaemonLspInvocationOwner, HookOrchestrationAdmissionV1, admit_hook_orchestration,
+    BoundedHookOrchestratorV1, DaemonLspInvocationOwner, HookOrchestrationAdmissionV1,
+    HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
+    admit_registered_hook_orchestration, register_hook_orchestration_runtime,
+    unregister_hook_orchestration_runtime,
 };
 // `pub(super)` on these shapes, in their original flat-file home, meant
 // "visible to `daemon::service`" (their home's actual parent); nesting them

@@ -128,6 +128,7 @@ export interface ProjectSettingsValues {
   readonly extract_docstrings: boolean;
   readonly track_call_sites: boolean;
   readonly git_ignore: boolean;
+  readonly context_scout: boolean;
   readonly telemetry_timings: boolean;
   readonly auto_track_pr_branches: boolean;
   readonly auto_track_pr_poll_secs: string;
@@ -168,6 +169,7 @@ export interface ProjectSettingsChangeSet {
   extract_docstrings?: boolean;
   track_call_sites?: boolean;
   git_ignore?: boolean;
+  context_scout?: boolean;
   telemetry?: { timings?: boolean };
   sync?: {
     auto_track_pr_branches?: boolean;
@@ -384,6 +386,7 @@ export function buildSettingsEditor(payload: SettingsPayloadV1): SettingsEditor 
       extract_docstrings: config.extract_docstrings,
       track_call_sites: config.track_call_sites,
       git_ignore: config.git_ignore,
+      context_scout: config.context_scout,
       telemetry_timings: config.telemetry.timings,
       auto_track_pr_branches: config.sync.auto_track_pr_branches,
       auto_track_pr_poll_secs: pollSecs,
@@ -446,7 +449,12 @@ export function planProjectChangeAgainst(
   if (maxFileSize !== Number(current.project.max_file_size)) {
     patch.max_file_size = maxFileSize;
   }
-  for (const field of ['extract_docstrings', 'track_call_sites', 'git_ignore'] as const) {
+  for (const field of [
+    'extract_docstrings',
+    'track_call_sites',
+    'git_ignore',
+    'context_scout',
+  ] as const) {
     if (values[field] !== current.project[field]) patch[field] = values[field];
   }
   if (values.telemetry_timings !== current.project.telemetry_timings) {
