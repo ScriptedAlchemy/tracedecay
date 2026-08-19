@@ -1,4 +1,5 @@
 import type {
+  ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
   WorkAttemptListV1,
 } from '../../contracts/index.ts';
@@ -9,7 +10,12 @@ import { WorkBoard, useSelectedTask } from './WorkBoard.tsx';
 import { WorkCommands, WorkCreate } from './WorkCommands.tsx';
 import { WorkEvidencePanel } from './WorkEvidencePanel.tsx';
 import { WorkTaskActivity } from './WorkTaskActivity.tsx';
-import { useWorkAttempts, useWorkGraphViews, useWorkTopology } from './workViewsQueries.ts';
+import {
+  useWorkAttempts,
+  useWorkGraphViews,
+  useWorkTopology,
+  useWorkTopologyMetrics,
+} from './workViewsQueries.ts';
 import { workAttemptReading, type WorkAttemptReading } from './workAttemptModel.ts';
 import { workGraphReading, type WorkGraphReading } from './workGraphModel.ts';
 import { WorkCausalView } from './views/WorkCausalView.tsx';
@@ -87,6 +93,7 @@ function WorkProjectionView({
   attempts,
   attemptList,
   topology,
+  topologyMetrics,
   graph,
   selected,
   onSelect,
@@ -99,6 +106,9 @@ function WorkProjectionView({
    * reading deliberately does not restate. */
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
   topology: WorkResult<ExecutionTopologyViewV1> | undefined;
+  /** The bounded accounting read behind the topology lens's integration and
+   * stack cards. */
+  topologyMetrics: WorkResult<ExecutionTopologyMetricsV1> | undefined;
   graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
@@ -139,6 +149,7 @@ function WorkProjectionView({
           snapshot={snapshot}
           attemptList={attemptList}
           topology={topology}
+          metrics={topologyMetrics}
           graph={graph}
           selected={selected}
           onSelect={onSelect}
@@ -160,6 +171,9 @@ export function WorkPage() {
   // not on every visit to the page.
   const attempts = useWorkAttempts(projection === 'timeline' || projection === 'topology');
   const topology = useWorkTopology(projection === 'topology');
+  // The bounded accounting read behind the topology lens's integration and
+  // stack cards; issued only when that lens is the camera.
+  const topologyMetrics = useWorkTopologyMetrics(projection === 'topology');
   const attemptReading = workAttemptReading(attempts.data);
   // The graph hook bootstraps against profile ownership, then re-reads against
   // the exact repository scope returned in the daemon's response envelope.
@@ -252,6 +266,7 @@ export function WorkPage() {
                 attempts={attemptReading}
                 attemptList={attempts.data}
                 topology={topology.data}
+                topologyMetrics={topologyMetrics.data}
                 graph={graphReading}
                 selected={selected}
                 onSelect={setSelected}
