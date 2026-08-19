@@ -14,9 +14,10 @@ use tracedecay_lsp::{
     DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, FeedbackCycleAdapter, FeedbackCyclePort,
     FeedbackCycleRequest, FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayCapabilities,
     LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
-    OverlaySnapshot, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
-    SemanticResponse, UpstreamCapabilities, WorkspaceDiagnosticSnapshotOutcome,
+    NativeIntegrationStatusPort, OverlaySnapshot, SemanticProviderOutcome, SemanticProviderPort,
+    SemanticRequest, SemanticResponse, UpstreamCapabilities, WorkspaceDiagnosticSnapshotOutcome,
 };
+use tracedecay_application::NativeIntegrationStatusProjectionV1;
 
 use super::runtime_adapters::runtime_spawner;
 
@@ -54,6 +55,7 @@ pub struct DaemonLspSessionFactory {
     diagnostics: Arc<dyn CanonicalDiagnosticSnapshotAuthority>,
     cancellation: Arc<dyn LspAnalyzerCancellationAuthority>,
     context: Arc<dyn CanonicalContextProjectionAuthority>,
+    native_integration_status: Option<Arc<dyn NativeIntegrationStatusPort>>,
     gateway_capabilities: GatewayCapabilities,
     upstream_capabilities: UpstreamCapabilities,
     upstream_capability_initializer: Arc<dyn UpstreamCapabilityInitializationAuthority>,
@@ -82,12 +84,25 @@ impl DaemonLspSessionFactory {
             diagnostics,
             cancellation,
             context,
+            native_integration_status: None,
             gateway_capabilities,
             upstream_capability_initializer: Arc::new(StaticUpstreamCapabilities {
                 capabilities: upstream_capabilities.clone(),
             }),
             upstream_capabilities,
         }
+    }
+
+    /// Mounts the daemon-owned native-integration status read. Sessions opened
+    /// from this factory forward observed transaction statuses to their client
+    /// as read-only notifications.
+    #[must_use]
+    pub fn with_native_integration_status_port(
+        mut self,
+        port: Arc<dyn NativeIntegrationStatusPort>,
+    ) -> Self {
+        self.native_integration_status = Some(port);
+        self
     }
 
     /// Replaces the static test capability source with the production
@@ -142,7 +157,7 @@ impl DaemonLspSessionFactory {
     }
 
     pub fn open_session(&self, root: AdmittedRoot) -> DaemonLspRuntimeSession {
-        self.provider_bundle().into_session(root)
+        self.attach_native_integration_status(self.provider_bundle().into_session(root))
     }
 
     pub async fn open_workspace_session(
@@ -150,9 +165,20 @@ impl DaemonLspSessionFactory {
         workspace: AuthorizedLspWorkspace,
     ) -> std::result::Result<DaemonLspRuntimeSession, LspRuntimeFailure> {
         let upstream_capabilities = self.initialize_upstream_capabilities().await?;
-        Ok(self
-            .provider_bundle_with_upstream_capabilities(upstream_capabilities)
-            .into_workspace_session(workspace))
+        Ok(self.attach_native_integration_status(
+            self.provider_bundle_with_upstream_capabilities(upstream_capabilities)
+                .into_workspace_session(workspace),
+        ))
+    }
+
+    fn attach_native_integration_status(
+        &self,
+        session: DaemonLspRuntimeSession,
+    ) -> DaemonLspRuntimeSession {
+        match self.native_integration_status.as_ref() {
+            Some(port) => session.with_native_integration_status_port(Arc::clone(port)),
+            None => session,
+        }
     }
 
     pub async fn open_federated_workspace_session(
@@ -184,6 +210,7 @@ impl DaemonLspSessionFactory {
         let mut diagnostics = BTreeMap::new();
         let mut cancellation = BTreeMap::new();
         let mut context = BTreeMap::new();
+        let mut native_integration_status = Vec::new();
         let mut gateway_capabilities: Option<GatewayCapabilities> = None;
         let mut upstream_capabilities: Option<UpstreamCapabilities> = None;
         for (root, factory, factory_upstream_capabilities) in factories {
@@ -216,6 +243,9 @@ impl DaemonLspSessionFactory {
                     factory.context.clone(),
                 )) as Arc<dyn ContextProjectionPort + Send + Sync>,
             );
+            if let Some(port) = factory.native_integration_status.as_ref() {
+                native_integration_status.push(Arc::clone(port));
+            }
             let current_gateway_capabilities = factory.current_gateway_capabilities();
             if let Some(capabilities) = gateway_capabilities.as_mut() {
                 capabilities.supports_publish_diagnostics &=
@@ -260,7 +290,38 @@ impl DaemonLspSessionFactory {
             gateway_capabilities?,
             upstream_capabilities?,
         );
-        Some(bundle.into_workspace_session(workspace))
+        let session = bundle.into_workspace_session(workspace);
+        if native_integration_status.is_empty() {
+            return Some(session);
+        }
+        Some(
+            session.with_native_integration_status_port(Arc::new(
+                FederatedNativeIntegrationStatus {
+                    roots: native_integration_status,
+                },
+            )),
+        )
+    }
+}
+
+/// Merges the participating roots' status reads under one poll bound. Each
+/// projection already names its exact repository and transaction identity, so
+/// merging discloses nothing a single-root session would not see.
+struct FederatedNativeIntegrationStatus {
+    roots: Vec<Arc<dyn NativeIntegrationStatusPort>>,
+}
+
+impl NativeIntegrationStatusPort for FederatedNativeIntegrationStatus {
+    fn poll_status(&self, maximum: usize) -> Vec<NativeIntegrationStatusProjectionV1> {
+        let mut merged = Vec::new();
+        for root in &self.roots {
+            let remaining = maximum.saturating_sub(merged.len());
+            if remaining == 0 {
+                break;
+            }
+            merged.extend(root.poll_status(remaining).into_iter().take(remaining));
+        }
+        merged
     }
 }
 

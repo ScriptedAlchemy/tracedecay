@@ -10,12 +10,12 @@ use serde_json::Value;
 use serde_json::json;
 use tracedecay_application::{
     ApplicationContractError, ApplicationOutcome, ApplicationProblemEnvelope, AuthorizedScopeSet,
-    RequestId,
+    NativeIntegrationSurfaceResultV1, RequestId,
 };
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
-use tracedecay_domain::{ProjectId, ScopeSetId};
+use tracedecay_domain::{NativeIntegrationTransactionId, ProjectId, ScopeSetId};
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 use crate::DashboardHttpRequestControlV1;
@@ -79,17 +79,17 @@ pub type DashboardScopeSetReadFuture<'a> = Pin<
         dyn Future<
                 Output = std::result::Result<
                     Option<AuthorizedScopeSet>,
-                    DashboardScopeSetReadUnavailableV1,
+                    DashboardDaemonReadUnavailableV1,
                 >,
             > + Send
             + 'a,
     >,
 >;
 
-/// The daemon transport could not answer a persisted scope-set read. The
-/// detail is a safe diagnostic, never store paths or payload content.
+/// The daemon transport could not answer a dashboard read. The detail is a
+/// safe diagnostic, never store paths or payload content.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DashboardScopeSetReadUnavailableV1 {
+pub struct DashboardDaemonReadUnavailableV1 {
     pub detail: String,
 }
 
@@ -120,7 +120,30 @@ pub trait DashboardApplicationRuntime: Send + Sync {
         control: DashboardHttpRequestControlV1,
         scope_set_id: ScopeSetId,
     ) -> DashboardScopeSetReadFuture<'a>;
+
+    /// Reads one native-integration transaction status through the daemon
+    /// transport, answering the same application result the CLI and MCP
+    /// surfaces project. Read-only: the dashboard can observe a transaction
+    /// but never preflight, approve, apply, or cancel one, apply edits, or
+    /// mutate Git through this path.
+    fn native_integration_status<'a>(
+        &'a self,
+        control: DashboardHttpRequestControlV1,
+        transaction_id: NativeIntegrationTransactionId,
+    ) -> DashboardNativeIntegrationStatusFuture<'a>;
 }
+
+pub type DashboardNativeIntegrationStatusFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<
+                    NativeIntegrationSurfaceResultV1,
+                    DashboardDaemonReadUnavailableV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
 
 #[cfg(test)]
 mod tests {

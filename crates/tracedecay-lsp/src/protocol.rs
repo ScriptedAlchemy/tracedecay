@@ -79,6 +79,7 @@ mod context_controller;
 mod diagnostics_controller;
 mod dynamic_diagnostics_controller;
 mod lifecycle_controller;
+mod native_integration_controller;
 mod outbound_controller;
 mod semantic_controller;
 mod workspace_diagnostics_controller;
@@ -93,6 +94,7 @@ pub use outbound_controller::DaemonLspProtocolTransport;
 use outbound_controller::OutboundController;
 #[cfg(test)]
 use outbound_controller::QueuedFrame;
+use native_integration_controller::NativeIntegrationController;
 use semantic_controller::SemanticController;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -126,6 +128,7 @@ where
     diagnostics: DiagnosticsController<D>,
     dynamic_diagnostics: DynamicDiagnosticsController,
     context: ContextController,
+    native_integration: NativeIntegrationController,
     semantic: SemanticController,
     catalog: Result<LspCatalogAdmission, LspCatalogAdmissionError>,
     pending_workspace_mutation: Option<WorkspaceFolderMutation>,
@@ -216,6 +219,7 @@ where
         self.poll_context_expansions();
         self.poll_semantic_requests();
         self.flush_context_changes();
+        self.flush_native_integration_status();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
             closed: matches!(
@@ -316,6 +320,7 @@ where
         self.poll_context_expansions();
         self.poll_semantic_requests();
         self.flush_context_changes();
+        self.flush_native_integration_status();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
             closed: matches!(

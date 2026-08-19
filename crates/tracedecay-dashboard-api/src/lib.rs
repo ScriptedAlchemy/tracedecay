@@ -21,8 +21,8 @@ pub mod tracedecay;
 // the dashboard-facing project runtime trait.
 pub use application_surface::{
     DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
-    DashboardConfigurationApplyFuture, DashboardScopeSetReadFuture,
-    DashboardScopeSetReadUnavailableV1,
+    DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
+    DashboardNativeIntegrationStatusFuture, DashboardScopeSetReadFuture,
 };
 pub use tracedecay::DashboardProjectRuntime;
 
@@ -106,6 +106,7 @@ mod memory_analysis;
 mod memory_api;
 mod memory_service;
 mod multi_root_api;
+mod native_integration_api;
 pub mod project_graph;
 pub mod project_registry;
 mod projects;
@@ -1277,6 +1278,7 @@ fn router_with_active_application(
         .route("/api/remote/{*tail}", any(active_api_gateway))
         .route("/api/feedback/status", any(active_api_gateway))
         .route("/api/multi-root/{*tail}", any(active_api_gateway))
+        .route("/api/native-integration/{*tail}", any(active_api_gateway))
         .route("/api/events", any(active_api_gateway))
         .route("/api/events/delivery-ack", any(active_api_gateway))
         .with_state(runtime)
@@ -1307,6 +1309,10 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/multi-root/collection",
             get(multi_root_api::resolve_collection),
+        )
+        .route(
+            "/api/native-integration/status",
+            get(native_integration_api::status),
         )
         .route("/api/feedback/status", get(feedback_api::status))
         // Holographic memory plugin API (mirrors holographic_plus plugin_api.py)
@@ -2244,12 +2250,23 @@ mod authority_tests {
 
     /// Serves exactly one persisted named collection, mirroring the daemon
     /// scope-set read: an exact-id hit answers the frozen scope set, anything
-    /// else is a truthful absent read.
+    /// else is a truthful absent read. Optionally answers one scripted
+    /// native-integration status result.
     struct SingleCollectionRuntime {
         scope_set: tracedecay_application::AuthorizedScopeSet,
+        native_integration_status:
+            Option<tracedecay_application::NativeIntegrationSurfaceResultV1>,
     }
 
     impl SingleCollectionRuntime {
+        fn with_native_integration_status(
+            mut self,
+            result: tracedecay_application::NativeIntegrationSurfaceResultV1,
+        ) -> Self {
+            self.native_integration_status = Some(result);
+            self
+        }
+
         fn persisted(collection: &str) -> Self {
             use std::collections::BTreeSet;
 
@@ -2305,7 +2322,10 @@ mod authority_tests {
                 tracedecay_domain::UtcMicros(10),
             )
             .expect("authorized scope set");
-            Self { scope_set }
+            Self {
+                scope_set,
+                native_integration_status: None,
+            }
         }
     }
 
@@ -2345,6 +2365,20 @@ mod authority_tests {
             let read = (self.scope_set.scope_set_id() == &scope_set_id)
                 .then(|| self.scope_set.clone());
             Box::pin(async move { Ok(read) })
+        }
+
+        fn native_integration_status(
+            &self,
+            _control: DashboardHttpRequestControlV1,
+            _transaction_id: tracedecay_domain::NativeIntegrationTransactionId,
+        ) -> application_surface::DashboardNativeIntegrationStatusFuture<'_> {
+            let result = self.native_integration_status.clone();
+            Box::pin(async move {
+                result.ok_or(application_surface::DashboardDaemonReadUnavailableV1 {
+                    detail: "the single-collection test runtime scripts no native-integration status"
+                        .to_owned(),
+                })
+            })
         }
     }
 
@@ -2413,6 +2447,88 @@ mod authority_tests {
             reason,
             "multi-root collection scope-set.dashboard-missing names no persisted scope set for this project"
         );
+    }
+
+    async fn json_response_body(response: axum::response::Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("response body");
+        (status, serde_json::from_slice(&body).expect("json body"))
+    }
+
+    #[tokio::test]
+    async fn dashboard_serves_the_native_integration_status_application_result() {
+        let fixture = DashboardStateFixture::open("project.dashboard-native-status").await;
+        let mut state = fixture.state;
+        let projection = tracedecay_application::NativeIntegrationStatusProjectionV1 {
+            transaction_id: tracedecay_domain::NativeIntegrationTransactionId::new(
+                "transaction.dashboard.native",
+            )
+            .expect("transaction"),
+            preview_id: tracedecay_domain::NativeIntegrationPreviewId::new(
+                "preview.dashboard.native",
+            )
+            .expect("preview"),
+            preview_digest: tracedecay_domain::ManifestDigest::new(format!(
+                "sha256:{}",
+                "d".repeat(64)
+            ))
+            .expect("digest"),
+            repository_id: tracedecay_domain::RepositoryId::new("repository.dashboard.native")
+                .expect("repository"),
+            destination_ref: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
+            phase: tracedecay_domain::NativeIntegrationPhaseV1::Terminal,
+            phase_revision: 4,
+            cancellation_requested: false,
+            terminal_outcome: Some(tracedecay_domain::NativeIntegrationTerminalOutcomeV1::Committed),
+            updated_at: tracedecay_domain::UtcMicros(9),
+        };
+        state.application_invocation_executor = Some(Arc::new(
+            SingleCollectionRuntime::persisted("scope-set.dashboard-native")
+                .with_native_integration_status(
+                    tracedecay_application::NativeIntegrationSurfaceResultV1::Status(
+                        projection.clone(),
+                    ),
+                ),
+        ));
+
+        let response = native_integration_api::status(
+            State(state),
+            Some(Extension(dashboard_lcm_test_control())),
+            axum::extract::Query(native_integration_api::NativeIntegrationStatusQueryV1 {
+                transaction_id: "transaction.dashboard.native".to_owned(),
+            }),
+        )
+        .await;
+        let (status, body) = json_response_body(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["outcome"], "status");
+        assert_eq!(body["transaction_id"], "transaction.dashboard.native");
+        assert_eq!(body["phase"], "terminal");
+        assert_eq!(body["terminal_outcome"], "committed");
+        assert_eq!(body["phase_revision"], projection.phase_revision);
+    }
+
+    #[tokio::test]
+    async fn standalone_dashboard_reports_native_integration_authority_unmounted() {
+        let fixture =
+            DashboardStateFixture::open("project.dashboard-native-status-standalone").await;
+
+        let response = native_integration_api::status(
+            State(fixture.state),
+            Some(Extension(dashboard_lcm_test_control())),
+            axum::extract::Query(native_integration_api::NativeIntegrationStatusQueryV1 {
+                transaction_id: "transaction.dashboard.native".to_owned(),
+            }),
+        )
+        .await;
+        let (status, body) = json_response_body(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["outcome"], "unavailable");
+        assert_eq!(body["reason"], "authority_unmounted");
     }
 
     #[tokio::test]
