@@ -22,6 +22,7 @@ use super::config::{
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     canonical_record_started_at_seconds, latest_record_by_canonical_completion,
+    latest_record_by_canonical_completion_key,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::ports::session_store::AutomationSessionStore;
@@ -432,6 +433,26 @@ fn schedule_decision_for_trigger(
                     .is_some_and(|last_activity| last_activity > started_at)
             });
 
+    // Budget exhaustion and failure cooldown are independent typed states.
+    // Evaluate the live budget anchor first so an older failed run whose
+    // ordinary cooldown has elapsed cannot bypass a still-active evidence
+    // backoff window.
+    if task_consumes_session_evidence(task)
+        && let Some(exceeded) = live_session_evidence_budget_exhaustion(records, task)?
+    {
+        let backoff = task_config
+            .session_evidence_budget_backoff_secs
+            .map_or_else(
+                SessionEvidenceBudgetBackoff::default,
+                SessionEvidenceBudgetBackoff::new,
+            );
+        if let SessionEvidenceBudgetGate::Suppressed { .. } = backoff.gate(exceeded, now_secs) {
+            return Ok(AutomationScheduleDecision::skipped(
+                "scheduler_cooldown_active",
+            ));
+        }
+    }
+
     if let Some((record, completed_at)) = latest_non_skipped_record(
         records,
         task,
@@ -498,30 +519,6 @@ fn schedule_decision_for_trigger(
         }
     }
 
-    // A budget-exhausted retrieval is a correct terminal skip for the run
-    // that observed it, but the exhaustion stands until the evidence or its
-    // budgets change: skips do not consume the interval clock, so without a
-    // gate the task would re-run the exhausted retrieval on every tick.
-    // Hold the task in the typed backoff window anchored on the last real
-    // exhausted attempt instead. The window is task-configurable
-    // (`session_evidence_budget_backoff_secs`); unset uses the typed
-    // contract's one-hour default.
-    if task_consumes_session_evidence(task)
-        && let Some(exceeded) = live_session_evidence_budget_exhaustion(records, task)?
-    {
-        let backoff = task_config
-            .session_evidence_budget_backoff_secs
-            .map_or_else(
-                SessionEvidenceBudgetBackoff::default,
-                SessionEvidenceBudgetBackoff::new,
-            );
-        if let SessionEvidenceBudgetGate::Suppressed { .. } = backoff.gate(exceeded, now_secs) {
-            return Ok(AutomationScheduleDecision::skipped(
-                "scheduler_cooldown_active",
-            ));
-        }
-    }
-
     Ok(AutomationScheduleDecision::due())
 }
 
@@ -536,8 +533,8 @@ fn live_session_evidence_budget_exhaustion(
     records: &[AutomationRunLedgerRecord],
     task: AgentTaskKind,
 ) -> Result<Option<SessionEvidenceBudgetExceeded>> {
-    let Some((_, exhausted_at)) =
-        latest_record_by_canonical_completion(records.iter().filter(|record| {
+    let Some((_, exhausted_key)) =
+        latest_record_by_canonical_completion_key(records.iter().filter(|record| {
             record.task == task
                 && record.status == AutomationRunStatus::Skipped
                 && record.error.as_deref() == Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
@@ -545,18 +542,18 @@ fn live_session_evidence_budget_exhaustion(
     else {
         return Ok(None);
     };
-    let effectful = latest_record_by_canonical_completion(records.iter().filter(|record| {
+    let effectful = latest_record_by_canonical_completion_key(records.iter().filter(|record| {
         record.task == task
             && matches!(
                 record.status,
                 AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
             )
     }))?;
-    if effectful.is_some_and(|(_, effectful_at)| effectful_at >= exhausted_at) {
+    if effectful.is_some_and(|(_, effectful_key)| effectful_key >= exhausted_key) {
         return Ok(None);
     }
     Ok(Some(SessionEvidenceBudgetExceeded {
-        observed_at_secs: exhausted_at,
+        observed_at_secs: exhausted_key.0,
     }))
 }
 
@@ -1471,6 +1468,69 @@ mod tests {
                 2_130,
             )
             .is_due()
+        );
+    }
+
+    #[test]
+    fn older_failure_cooldown_cannot_bypass_a_live_budget_backoff() {
+        let mut config = session_evidence_config();
+        config.tasks.session_reflector.cooldown_secs = Some(60);
+        let records = vec![
+            scheduler_ledger_record(
+                "run-failed",
+                AgentTaskKind::SessionReflector,
+                AutomationRunStatus::Failed,
+                Some("provider unavailable"),
+                1_900,
+            ),
+            budget_exhausted_skip(
+                "run-exhausted",
+                AgentTaskKind::SessionReflector,
+                2_000,
+            ),
+        ];
+
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &records,
+                SessionActivity::at(2_500),
+                2_100,
+            )
+            .skip_reason(),
+            Some("scheduler_cooldown_active")
+        );
+    }
+
+    #[test]
+    fn earlier_effectful_run_in_the_same_second_does_not_clear_exhaustion() {
+        let config = session_evidence_config();
+        let mut exhausted = budget_exhausted_skip(
+            "run-exhausted",
+            AgentTaskKind::SessionReflector,
+            2_000,
+        );
+        exhausted.completed_at_micros = Some(2_000_900_000);
+        let mut earlier_success = scheduler_ledger_record(
+            "run-success",
+            AgentTaskKind::SessionReflector,
+            AutomationRunStatus::Succeeded,
+            None,
+            2_000,
+        );
+        earlier_success.completed_at_micros = Some(2_000_100_000);
+
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &[exhausted, earlier_success],
+                SessionActivity::at(2_500),
+                2_060,
+            )
+            .skip_reason(),
+            Some("scheduler_cooldown_active")
         );
     }
 
