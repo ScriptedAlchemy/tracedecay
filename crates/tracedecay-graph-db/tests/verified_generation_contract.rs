@@ -1173,3 +1173,56 @@ fn labeled_byte_record_entities_reach_a_verified_head() {
         &GraphGenerationId::new(&generation).unwrap()
     );
 }
+
+/// A registration may spell the database file through a symlinked ancestor
+/// (macOS reaches `/var` and `/tmp` through `/private/...`). The registry
+/// collapses every spelling to the file's one canonical name — while still
+/// refusing a store directory that is itself a symlink — so an operation
+/// whose lease carries the aliased spelling must publish rather than be
+/// refused as a foreign database.
+#[cfg(unix)]
+#[test]
+fn registration_spelled_through_symlinked_ancestor_publishes() {
+    let temp = TempDir::new().unwrap();
+    let real = temp.path().join("real");
+    std::fs::create_dir_all(real.join("store")).unwrap();
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let aliased_store = alias.join("store");
+    let registered = RegisteredGraph::new_mounted(&aliased_store).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("alias", "work");
+    let g1 = manifest(identity.clone(), "g1", "g1", vec![], vec![]);
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'e',
+    );
+    let commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), &aliased_store),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    assert_eq!(commit.head.key, g1_record.publication.key);
+    assert_eq!(
+        registered
+            .registry
+            .verified_snapshot(
+                registration(registered.binding.clone(), &aliased_store),
+                &identity,
+            )
+            .unwrap()
+            .generation(),
+        &GraphGenerationId::new("g1").unwrap()
+    );
+}
