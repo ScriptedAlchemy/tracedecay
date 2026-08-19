@@ -575,11 +575,21 @@ mod tests {
         );
     }
 
+    /// Platform-absolute fixture path: locator validation requires
+    /// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+    fn fixture_abs_path(posix: &str) -> std::path::PathBuf {
+        if cfg!(windows) {
+            std::path::PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+        } else {
+            std::path::PathBuf::from(posix)
+        }
+    }
+
     #[test]
     fn canonical_locator_digest_binds_the_exact_absolute_path() {
-        let first = canonical_store_locator_digest(Path::new("/stores/a/graph-store"))
+        let first = canonical_store_locator_digest(&fixture_abs_path("/stores/a/graph-store"))
             .expect("absolute locator");
-        let second = canonical_store_locator_digest(Path::new("/stores/b/graph-store"))
+        let second = canonical_store_locator_digest(&fixture_abs_path("/stores/b/graph-store"))
             .expect("absolute locator");
 
         assert_ne!(first, second);
@@ -588,13 +598,16 @@ mod tests {
 
     #[test]
     fn graph_locator_is_an_ordinary_database_file_and_shard_specific() {
-        let root = Path::new("/stores/project-a");
+        let root = fixture_abs_path("/stores/project-a");
         assert_eq!(
-            graph_store_locator_path(root, &root.join("sessions.db"))
+            graph_store_locator_path(&root, &root.join("sessions.db"))
                 .expect("canonical graph locator"),
             root.join("sessions.grafeo")
         );
-        assert!(graph_store_locator_path(root, Path::new("/stores/project-b/project.db")).is_err());
+        assert!(
+            graph_store_locator_path(&root, &fixture_abs_path("/stores/project-b/project.db"))
+                .is_err()
+        );
     }
 
     #[test]

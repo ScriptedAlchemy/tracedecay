@@ -42,6 +42,16 @@ use tracedecay_domain::{
 
 use work_registered_store::RegisteredWorkStore;
 
+/// Platform-absolute fixture root: the work contracts require
+/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+fn fixture_abs_root(posix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{}", posix.replace('/', "\\"))
+    } else {
+        posix.to_owned()
+    }
+}
+
 fn id<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -750,7 +760,7 @@ fn attempt_with_effect(
         id::<ProjectId>("project.attempt.storage"),
         id::<RepositoryId>("repository.attempt.storage"),
         id::<WorktreeId>("worktree.attempt.storage"),
-        "/tmp/attempt-storage".to_owned(),
+        fixture_abs_root("/tmp/attempt-storage"),
         Some(id::<RefId>("refs/heads/attempt-storage")),
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         "Execute the admitted provider step.".to_owned(),

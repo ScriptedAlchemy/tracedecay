@@ -235,7 +235,7 @@ fn start_command(
         attempt_id: id(attempt),
         operation: id::<WorkflowOperationRef>("operation.attempt.execute-provider"),
         execution_snapshot: execution_snapshot(topology),
-        worktree_root: "/tmp/topology-fixture".to_owned(),
+        worktree_root: common::fixture_abs_root("/tmp/topology-fixture"),
         reference: Some(id::<RefId>("refs/heads/topology-fixture")),
         commit: id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         instructions: "Execute the admitted provider step.".to_owned(),
@@ -312,7 +312,7 @@ fn view_joins_placement_lanes_to_the_page_and_carries_the_policy_dimensions() {
                 run_id: id("run.task.topology.a"),
                 target: WorkPlacementTargetV1::new(
                     WorkPlacementKindV1::LinkedWorktree,
-                    Some("/workspace/topology-lane-a".to_owned()),
+                    Some(common::fixture_abs_root("/workspace/topology-lane-a")),
                     false,
                     true,
                 )

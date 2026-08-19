@@ -558,6 +558,16 @@ mod tests {
         )
     }
 
+    /// Platform-absolute fixture root: target roots require
+    /// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+    fn fixture_abs_root(posix: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{}", posix.replace('/', "\\"))
+        } else {
+            posix.to_owned()
+        }
+    }
+
     fn clean_observation() -> WorkPlacementObservationV1 {
         WorkPlacementObservationV1 {
             dirty_tracked_paths: 0,
@@ -573,7 +583,7 @@ mod tests {
     fn linked() -> WorkPlacementTargetV1 {
         WorkPlacementTargetV1::new(
             WorkPlacementKindV1::LinkedWorktree,
-            Some("/workspace/linked".to_owned()),
+            Some(fixture_abs_root("/workspace/linked")),
             false,
             true,
         )
@@ -590,7 +600,7 @@ mod tests {
         assert_eq!(
             WorkPlacementTargetV1::new(
                 WorkPlacementKindV1::NoManagedPlacement,
-                Some("/workspace".to_owned()),
+                Some(fixture_abs_root("/workspace")),
                 false,
                 false,
             )

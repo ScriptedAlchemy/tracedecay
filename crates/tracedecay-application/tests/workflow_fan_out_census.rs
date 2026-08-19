@@ -29,6 +29,16 @@ use tracedecay_domain::{
     WorkflowRunProjection, WorkflowStep, WorkflowStepId, WorktreeId,
 };
 
+/// Platform-absolute fixture root: the work contracts require
+/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+fn fixture_abs_root(posix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{}", posix.replace('/', "\\"))
+    } else {
+        posix.to_owned()
+    }
+}
+
 fn id<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -449,7 +459,7 @@ fn work_attempt_with_progress(
         id::<ProjectId>("project.workflow.census"),
         id::<RepositoryId>("repository.workflow.census"),
         id::<WorktreeId>("worktree.workflow.census"),
-        "/tmp/workflow-census".to_owned(),
+        fixture_abs_root("/tmp/workflow-census"),
         None,
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         child.instructions.clone(),

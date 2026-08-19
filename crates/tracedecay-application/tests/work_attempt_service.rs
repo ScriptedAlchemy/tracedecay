@@ -7,7 +7,7 @@ mod common;
 use std::collections::BTreeSet;
 use std::ops::Deref;
 
-use common::{id, work_attempt_context, work_digest};
+use common::{fixture_abs_root, id, work_attempt_context, work_digest};
 
 use tracedecay_application::{
     ApplicationProblem, ApplicationProblemKind, CancelWorkAttemptCommand,
@@ -134,7 +134,7 @@ fn start_command(task: &str, attempt: &str) -> StartWorkAttemptCommand {
         attempt_id: id(attempt),
         operation: id::<WorkflowOperationRef>("operation.attempt.execute-provider"),
         execution_snapshot: execution_snapshot(),
-        worktree_root: "/tmp/attempt-fixture".to_owned(),
+        worktree_root: fixture_abs_root("/tmp/attempt-fixture"),
         reference: Some(id::<RefId>("refs/heads/attempt-fixture")),
         commit: id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         instructions: "Execute the admitted provider step.".to_owned(),

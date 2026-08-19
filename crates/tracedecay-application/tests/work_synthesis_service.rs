@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU16;
 
 use common::{
-    WorkProductAttemptStore, work_authority, work_product_binding, work_product_revisions,
+    WorkProductAttemptStore, fixture_abs_root, work_authority, work_product_binding,
+    work_product_revisions,
 };
 
 use tracedecay_application::{
@@ -200,7 +201,7 @@ fn start_command_with_topology(
         attempt_id: id(attempt),
         operation: id::<WorkflowOperationRef>("operation.attempt.execute-provider"),
         execution_snapshot: execution_snapshot_with_topology(topology),
-        worktree_root: "/tmp/synthesis-fixture".to_owned(),
+        worktree_root: fixture_abs_root("/tmp/synthesis-fixture"),
         reference: Some(id::<RefId>("refs/heads/synthesis-fixture")),
         commit: id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         instructions: "Synthesize the fan-out sibling evidence.".to_owned(),
@@ -235,7 +236,7 @@ fn leased_attempt(identity: WorkAttemptIdentityV1) -> WorkAttemptV1 {
         id::<ProjectId>("project.synthesis.sources"),
         id::<RepositoryId>("repository.synthesis.fixture"),
         id::<WorktreeId>("worktree.synthesis.fixture"),
-        "/tmp/synthesis-fixture".to_owned(),
+        fixture_abs_root("/tmp/synthesis-fixture"),
         Some(id::<RefId>("refs/heads/synthesis-fixture")),
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         "Execute the admitted provider step.".to_owned(),

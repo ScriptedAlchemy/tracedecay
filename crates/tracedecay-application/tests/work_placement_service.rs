@@ -27,7 +27,15 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-const ROOT: &str = "/workspace/linked-placement";
+/// Platform-absolute fixture root: the placement contracts require
+/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+fn fixture_root() -> String {
+    if cfg!(windows) {
+        "C:\\workspace\\linked-placement".to_owned()
+    } else {
+        "/workspace/linked-placement".to_owned()
+    }
+}
 
 fn id<T>(value: &str) -> T
 where
@@ -89,7 +97,7 @@ fn authority_of(context: &RequestContext) -> WorkAuthority {
 fn linked() -> WorkPlacementTargetV1 {
     WorkPlacementTargetV1::new(
         WorkPlacementKindV1::LinkedWorktree,
-        Some(ROOT.to_owned()),
+        Some(fixture_root()),
         false,
         true,
     )

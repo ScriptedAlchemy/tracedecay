@@ -28,6 +28,16 @@ fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
 }
 
+/// Platform-absolute fixture root: registered roots require
+/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+fn fixture_abs_root(posix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{}", posix.replace('/', "\\"))
+    } else {
+        posix.to_owned()
+    }
+}
+
 fn context(worktree: &str, suffix: &str) -> RequestContext {
     context_at("project.fixture", "repository.fixture", worktree, suffix)
 }
@@ -140,7 +150,7 @@ fn authorized_scope_set_preserves_registered_root_locator() {
         context.scope().project_id.clone(),
         UserProfileId::new("profile.fixture").unwrap(),
         "store.fixture".to_owned(),
-        "/workspace/main".to_owned(),
+        fixture_abs_root("/workspace/main"),
     )
     .unwrap();
     let set = AuthorizedScopeSetAuthority::authorize_registered(
@@ -159,17 +169,19 @@ fn authorized_scope_set_preserves_registered_root_locator() {
 
 #[test]
 fn scope_set_cas_selects_exact_registered_roots() {
+    let linked_root = fixture_abs_root("/workspace/linked");
+    let main_root = fixture_abs_root("/workspace/main");
     let request: MultiRootScopeSetCasRequestV1 = serde_json::from_value(json!({
         "scope_set_id": "scope-set.exact-roots",
         "expected_revision": null,
         "roots": [
             {
                 "project_id": "project.same",
-                "root": "/workspace/linked"
+                "root": linked_root
             },
             {
                 "project_id": "project.same",
-                "root": "/workspace/main"
+                "root": main_root
             }
         ]
     }))
@@ -177,7 +189,7 @@ fn scope_set_cas_selects_exact_registered_roots() {
     request.validate().expect("canonical exact root order");
 
     let encoded = serde_json::to_value(request).expect("serialize selector");
-    assert_eq!(encoded["roots"][0]["root"], "/workspace/linked");
-    assert_eq!(encoded["roots"][1]["root"], "/workspace/main");
+    assert_eq!(encoded["roots"][0]["root"], linked_root.as_str());
+    assert_eq!(encoded["roots"][1]["root"], main_root.as_str());
     assert!(encoded.get("project_ids").is_none());
 }

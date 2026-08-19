@@ -135,6 +135,16 @@ fn registered_locator(binding: &StoreRuntimeBindingV1) -> VerifiedStoreLocatorV1
     )
 }
 
+/// Platform-absolute fixture root: registered roots require
+/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+fn fixture_abs_root(posix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{}", posix.replace('/', "\\"))
+    } else {
+        posix.to_owned()
+    }
+}
+
 fn id<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -202,7 +212,7 @@ fn scope_set_for_id_actor(revision: u64, scope_set_id: &str, actor: &str) -> Aut
                 project_id,
                 UserProfileId::new("profile.fixture").unwrap(),
                 "store.fixture".to_owned(),
-                format!("/workspace/{}", worktree_id.as_str()),
+                fixture_abs_root(&format!("/workspace/{}", worktree_id.as_str())),
             )
             .unwrap(),
         )
@@ -277,7 +287,7 @@ fn scope_set_cas_rejects_stale_revision_and_survives_restart() {
             .unwrap()
             .canonical_root
             .as_path(),
-        std::path::Path::new("/workspace/worktree.main")
+        std::path::PathBuf::from(fixture_abs_root("/workspace/worktree.main"))
     );
 }
 

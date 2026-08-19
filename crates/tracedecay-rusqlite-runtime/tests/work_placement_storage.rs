@@ -24,7 +24,18 @@ use tracedecay_domain::{
 
 use work_registered_store::RegisteredWorkStore;
 
-const ROOT: &str = "/workspace/placement-storage";
+/// Platform-absolute fixture root: placement target roots require
+/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+fn fixture_abs_root(posix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{}", posix.replace('/', "\\"))
+    } else {
+        posix.to_owned()
+    }
+}
+
+static ROOT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| fixture_abs_root("/workspace/placement-storage"));
 
 fn id<T>(value: &str) -> T
 where
@@ -66,18 +77,22 @@ fn authority_in_worktree_a_targeting_root_b_blocks_cleanup_of_b_across_lineage()
         "worktree.placement.other-actor",
         'a',
     );
-    let old_root = "/workspace/placement-target-b";
-    let other_root = "/workspace/placement-other-actor";
+    let old_root = fixture_abs_root("/workspace/placement-target-b");
+    let other_root = fixture_abs_root("/workspace/placement-other-actor");
     store
         .storage()
-        .publish_placement(&old_policy, None, &admitted("run.old-policy", old_root))
+        .publish_placement(&old_policy, None, &admitted("run.old-policy", &old_root))
         .unwrap();
     store
         .storage()
-        .publish_placement(&other_actor, None, &admitted("run.other-actor", other_root))
+        .publish_placement(
+            &other_actor,
+            None,
+            &admitted("run.other-actor", &other_root),
+        )
         .unwrap();
 
-    for (authority, root) in [(&old_policy, old_root), (&other_actor, other_root)] {
+    for (authority, root) in [(&old_policy, &old_root), (&other_actor, &other_root)] {
         assert!(
             store
                 .storage()
@@ -96,7 +111,7 @@ fn authority_in_worktree_a_targeting_root_b_blocks_cleanup_of_b_across_lineage()
             .has_target_holder_in_exact_repository_root(
                 old_policy.project_id(),
                 old_policy.repository_id(),
-                "/workspace/placement-unrelated",
+                &fixture_abs_root("/workspace/placement-unrelated"),
             )
             .unwrap()
     );
@@ -145,7 +160,7 @@ fn an_unplaced_run_has_no_row_and_no_holder() {
         None
     );
     assert_eq!(
-        store.storage().target_holder(&authority, ROOT).unwrap(),
+        store.storage().target_holder(&authority, &ROOT).unwrap(),
         None
     );
 }
@@ -154,7 +169,7 @@ fn an_unplaced_run_has_no_row_and_no_holder() {
 fn the_first_admission_inserts_and_a_racing_first_admission_conflicts() {
     let store = RegisteredWorkStore::start("placement-first");
     let authority = authority("actor.placement.first");
-    let placement = admitted("run.a", ROOT);
+    let placement = admitted("run.a", &ROOT);
     store
         .storage()
         .publish_placement(&authority, None, &placement)
@@ -167,7 +182,7 @@ fn the_first_admission_inserts_and_a_racing_first_admission_conflicts() {
         Some(placement.clone())
     );
     assert_eq!(
-        store.storage().target_holder(&authority, ROOT).unwrap(),
+        store.storage().target_holder(&authority, &ROOT).unwrap(),
         Some(identity("run.a"))
     );
     assert_eq!(
@@ -185,7 +200,7 @@ fn the_database_refuses_a_second_holder_of_the_same_managed_root() {
     let authority = authority("actor.placement.exclusive");
     store
         .storage()
-        .publish_placement(&authority, None, &admitted("run.a", ROOT))
+        .publish_placement(&authority, None, &admitted("run.a", &ROOT))
         .unwrap();
 
     // A different run naming the same root is refused by the exclusivity index
@@ -193,7 +208,7 @@ fn the_database_refuses_a_second_holder_of_the_same_managed_root() {
     assert_eq!(
         store
             .storage()
-            .publish_placement(&authority, None, &admitted("run.b", ROOT))
+            .publish_placement(&authority, None, &admitted("run.b", &ROOT))
             .expect_err("a held root is exclusive"),
         WorkPlacementStorageError::AuthorityConflict
     );
@@ -205,7 +220,10 @@ fn the_database_refuses_a_second_holder_of_the_same_managed_root() {
         .publish_placement(
             &authority,
             None,
-            &admitted("run.c", "/workspace/placement-storage-other"),
+            &admitted(
+                "run.c",
+                &fixture_abs_root("/workspace/placement-storage-other"),
+            ),
         )
         .unwrap();
     assert_eq!(store.count("work_placements_v1"), 2);
@@ -215,7 +233,7 @@ fn the_database_refuses_a_second_holder_of_the_same_managed_root() {
 fn a_released_placement_frees_its_root_and_a_quarantined_one_does_not() {
     let store = RegisteredWorkStore::start("placement-release");
     let authority = authority("actor.placement.release");
-    let placement = admitted("run.a", ROOT);
+    let placement = admitted("run.a", &ROOT);
     store
         .storage()
         .publish_placement(&authority, None, &placement)
@@ -237,13 +255,13 @@ fn a_released_placement_frees_its_root_and_a_quarantined_one_does_not() {
         .unwrap();
     // Quarantine retains the bytes, so the root is still held.
     assert_eq!(
-        store.storage().target_holder(&authority, ROOT).unwrap(),
+        store.storage().target_holder(&authority, &ROOT).unwrap(),
         Some(identity("run.a"))
     );
     assert_eq!(
         store
             .storage()
-            .publish_placement(&authority, None, &admitted("run.b", ROOT))
+            .publish_placement(&authority, None, &admitted("run.b", &ROOT))
             .expect_err("a quarantined root is still held"),
         WorkPlacementStorageError::AuthorityConflict
     );
@@ -257,13 +275,13 @@ fn a_released_placement_frees_its_root_and_a_quarantined_one_does_not() {
         .unwrap();
     assert_eq!(released.state(), WorkPlacementStateV1::Released);
     assert_eq!(
-        store.storage().target_holder(&authority, ROOT).unwrap(),
+        store.storage().target_holder(&authority, &ROOT).unwrap(),
         None
     );
     // Only now can another run take it.
     store
         .storage()
-        .publish_placement(&authority, None, &admitted("run.b", ROOT))
+        .publish_placement(&authority, None, &admitted("run.b", &ROOT))
         .unwrap();
 }
 
@@ -272,7 +290,7 @@ fn a_stale_version_conflicts_and_rows_survive_a_restart_per_authority() {
     let store = RegisteredWorkStore::start("placement-isolation");
     let mine = authority("actor.placement.mine");
     let peer = authority("actor.placement.peer");
-    let placement = admitted("run.a", ROOT);
+    let placement = admitted("run.a", &ROOT);
     store
         .storage()
         .publish_placement(&mine, None, &placement)
@@ -287,10 +305,10 @@ fn a_stale_version_conflicts_and_rows_survive_a_restart_per_authority() {
     );
 
     // Another actor holds nothing here, and the same root is free for it.
-    assert_eq!(store.storage().target_holder(&peer, ROOT).unwrap(), None);
+    assert_eq!(store.storage().target_holder(&peer, &ROOT).unwrap(), None);
     store
         .storage()
-        .publish_placement(&peer, None, &admitted("run.a", ROOT))
+        .publish_placement(&peer, None, &admitted("run.a", &ROOT))
         .unwrap();
 
     let restarted = store.restart("placement-isolation");

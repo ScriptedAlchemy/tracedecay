@@ -19,6 +19,16 @@ use tracedecay_domain::{
     WorkflowOperationRef, WorktreeId, safe_work_topology_policy_v1,
 };
 
+/// Platform-absolute fixture root: the work contracts require
+/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+fn fixture_abs_root(posix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{}", posix.replace('/', "\\"))
+    } else {
+        posix.to_owned()
+    }
+}
+
 fn id<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -119,7 +129,7 @@ fn execution(
         id::<ProjectId>("project.work.runtime"),
         id::<RepositoryId>("repository.work.runtime"),
         id::<WorktreeId>("worktree.work.runtime"),
-        "/tmp/work-runtime".to_owned(),
+        fixture_abs_root("/tmp/work-runtime"),
         Some(id::<RefId>("refs/heads/work-runtime")),
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         "Execute the admitted provider step.".to_owned(),
