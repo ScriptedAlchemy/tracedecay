@@ -3,7 +3,15 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Generated TraceDecay API contracts with a strict lifecycle client.",
+  "author": "ScriptedAlchemy",
   "license": "MIT",
+  "homepage": "https://github.com/ScriptedAlchemy/tracedecay/tree/master/sdks/typescript#readme",
+  "keywords": [
+    "ai-agents",
+    "code-intelligence",
+    "mcp",
+    "typescript"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ScriptedAlchemy/tracedecay.git",
