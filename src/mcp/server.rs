@@ -2393,6 +2393,9 @@ impl McpServer {
             // above and can never reach this match with a response due.
             McpMethod::InitializedAck | McpMethod::HookEvent => None,
             McpMethod::ToolsList => Some(self.handle_tools_list(id).await),
+            // Boxed because the V2 domain contracts push this future past the
+            // large-future lint threshold; the other arms stay small enough
+            // to hold inline in the dispatch future.
             McpMethod::ToolsCall => Some(
                 Box::pin(self.handle_tools_call(
                     id,
