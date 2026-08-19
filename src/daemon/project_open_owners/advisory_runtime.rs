@@ -103,6 +103,8 @@ mod model;
 pub(crate) use model::ProjectOpenDependentOwnerState;
 use model::advisory_monotonic_deadline;
 #[cfg(test)]
+mod current_input_tests;
+#[cfg(test)]
 mod scout_journey_tests;
 #[cfg(test)]
 mod tests;
@@ -191,10 +193,15 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         deadline: MonotonicDeadline,
         agent_stop_gate: bool,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
-        let indexed_files = current_indexed_files(&self.producer)
-            .await
-            .ok_or_else(|| LspRuntimeFailure::new("feedback-cycle-current-census"))?;
-        let lsp_input = current_feedback_lsp_input(&self.producer, &indexed_files).await?;
+        let inputs = &self.producer.cycle_inputs;
+        let indexed_files = current_indexed_files(
+            &inputs.code_index_schedulers,
+            &inputs.project_root,
+            &inputs.scope,
+        )
+        .await
+        .ok_or_else(|| LspRuntimeFailure::new("feedback-cycle-current-census"))?;
+        let lsp_input = current_feedback_lsp_input(inputs, &indexed_files).await?;
         self.run_cycle_with_lsp_input(lsp_input, request, deadline, agent_stop_gate)
             .await
     }
@@ -510,15 +517,13 @@ async fn install_project_open_context_scout_configuration(
         })
 }
 
-/// Producer inputs retained for the bounded hook cycle: the durable Scout
-/// owner and address registry, the committed-publication read port, and the
-/// exact current-generation authority that maps saved-edit hooks back to
-/// indexed documents.
-struct ProjectOpenScoutProducerV1 {
+/// Cycle inputs resolved fresh for every producer-path cycle: the current
+/// configuration revision through the graph's configuration runtime and the
+/// current sealed code-index generation through the scheduler registry.
+/// Nothing here pins project-open state, so a settings PATCH or a later
+/// sealed generation is picked up by the next cycle without a reopen.
+struct ProjectOpenCycleInputsV1 {
     graph: Arc<crate::tracedecay::TraceDecay>,
-    scout_owner: Arc<ProjectContextScoutOwnerV1>,
-    scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
-    feedback_runtime: Arc<FeedbackRuntime>,
     project_root: std::path::PathBuf,
     scope: tracedecay_application::ResolvedScope,
     code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
@@ -528,14 +533,27 @@ struct ProjectOpenScoutProducerV1 {
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
 }
 
+/// Producer inputs retained for the bounded hook cycle: the fresh cycle
+/// inputs plus the durable Scout owner, address registry, and the
+/// committed-publication read port for the Scout tail.
+struct ProjectOpenScoutProducerV1 {
+    cycle_inputs: Arc<ProjectOpenCycleInputsV1>,
+    scout_owner: Arc<ProjectContextScoutOwnerV1>,
+    scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
+    feedback_runtime: Arc<FeedbackRuntime>,
+}
+
 /// Sorted logical paths from the current sealed code-index generation,
 /// resolved per cycle. The one-time project-open census is never retained, so
 /// files sealed by later generations map saved-edit hooks and mount providers
 /// without a project reopen. `None` is the typed no-sealed-generation state.
-async fn current_indexed_files(producer: &ProjectOpenScoutProducerV1) -> Option<Vec<String>> {
-    let generation = producer
-        .code_index_schedulers
-        .latest_complete_ready_decoded_for_root_scope(&producer.project_root, &producer.scope)
+async fn current_indexed_files(
+    code_index_schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    scope: &tracedecay_application::ResolvedScope,
+) -> Option<Vec<String>> {
+    let generation = code_index_schedulers
+        .latest_complete_ready_decoded_for_root_scope(project_root, scope)
         .await?;
     let mut indexed_files = generation
         .generation()
@@ -549,10 +567,10 @@ async fn current_indexed_files(producer: &ProjectOpenScoutProducerV1) -> Option<
 }
 
 async fn current_feedback_lsp_input(
-    producer: &ProjectOpenScoutProducerV1,
+    inputs: &ProjectOpenCycleInputsV1,
     indexed_files: &[String],
 ) -> std::result::Result<FeedbackCycleLspInput, LspRuntimeFailure> {
-    let pinned_configuration = producer
+    let pinned_configuration = inputs
         .graph
         .configuration_runtime()
         .client()
@@ -575,33 +593,33 @@ async fn current_feedback_lsp_input(
     .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-policy"))?;
     let runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync> =
         Arc::new(ProductionFeedbackRuntimeStateV1::new(
-            Arc::clone(&producer.code_graph),
+            Arc::clone(&inputs.code_graph),
             configuration_digest,
             policy_digest,
         ));
     let authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort> =
         Arc::new(ProjectOpenFeedbackCycleAuthorizationV1 {
-            project_root: producer.project_root.clone(),
-            scope: producer.scope.clone(),
-            configuration: Arc::clone(producer.graph.configuration_runtime()),
+            project_root: inputs.project_root.clone(),
+            scope: inputs.scope.clone(),
+            configuration: Arc::clone(inputs.graph.configuration_runtime()),
         });
-    let mounted_providers = producer
+    let mounted_providers = inputs
         .diagnostic_broker
         .lock()
         .await
         .mounted_providers_for_files(indexed_files);
     resolve_production_feedback_cycle_parts(ProductionFeedbackCycleOpenV1 {
-        project_root: producer.project_root.clone(),
-        scope: producer.scope.clone(),
+        project_root: inputs.project_root.clone(),
+        scope: inputs.scope.clone(),
         access_configuration: current_configuration,
-        requester: producer.requester.clone(),
+        requester: inputs.requester.clone(),
         authorization,
-        code_graph: Arc::clone(&producer.code_graph),
-        project_runtime_db: producer.session_db.clone(),
+        code_graph: Arc::clone(&inputs.code_graph),
+        project_runtime_db: inputs.session_db.clone(),
         runtime_state,
-        document_identity: Arc::new(producer.code_index_schedulers.clone()),
-        code_index_identity: Arc::new(producer.code_index_schedulers.clone()),
-        test_attribution: Arc::new(producer.code_index_schedulers.clone()),
+        document_identity: Arc::new(inputs.code_index_schedulers.clone()),
+        code_index_identity: Arc::new(inputs.code_index_schedulers.clone()),
+        test_attribution: Arc::new(inputs.code_index_schedulers.clone()),
         mounted_providers,
     })
     .await
@@ -624,7 +642,14 @@ async fn run_production_hook_cycle(
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
     let producer = Arc::clone(&cycle.producer);
-    let Some(indexed_files) = current_indexed_files(&producer).await else {
+    let inputs = Arc::clone(&producer.cycle_inputs);
+    let Some(indexed_files) = current_indexed_files(
+        &inputs.code_index_schedulers,
+        &inputs.project_root,
+        &inputs.scope,
+    )
+    .await
+    else {
         observe_hook_feedback_cycle_terminal(
             &cycle.registration.host_delivery.source_observations,
             &request,
@@ -633,14 +658,14 @@ async fn run_production_hook_cycle(
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let Some(document_uri) = hook_feedback_document_uri_or_observe(
-        &producer.project_root,
+        &inputs.project_root,
         &indexed_files,
         &request,
         &cycle.registration.host_delivery.source_observations,
     ) else {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
-    let Ok(lsp_input) = current_feedback_lsp_input(&producer, &indexed_files).await else {
+    let Ok(lsp_input) = current_feedback_lsp_input(&inputs, &indexed_files).await else {
         observe_hook_feedback_cycle_terminal(
             &cycle.registration.host_delivery.source_observations,
             &request,
@@ -684,7 +709,7 @@ async fn run_production_hook_cycle(
     // The Scout tail re-pins the current Plan 20 configuration: a revision
     // that landed while the advisory half ran must not produce guidance
     // under the superseded control state.
-    let Ok(pinned_configuration) = producer
+    let Ok(pinned_configuration) = inputs
         .graph
         .configuration_runtime()
         .client()
@@ -802,7 +827,7 @@ async fn run_production_hook_cycle(
         )
         .await;
     match outcome {
-        Ok(ContextScoutRuntimeOutcomeV1::Enqueued { .. }) => producer
+        Ok(ContextScoutRuntimeOutcomeV1::Enqueued { .. }) => inputs
             .graph
             .mount_current_context_scout_claim_authority(
                 Arc::clone(&producer.scout_registry),
@@ -1245,17 +1270,19 @@ async fn register_production_advisory_owner(
             message: format!("project-open advisory runtime construction failed: {error}"),
         })?;
     let producer = Arc::new(ProjectOpenScoutProducerV1 {
-        graph: Arc::clone(&state.graph),
+        cycle_inputs: Arc::new(ProjectOpenCycleInputsV1 {
+            graph: Arc::clone(&state.graph),
+            project_root: project_root.to_path_buf(),
+            scope: state.scope.clone(),
+            code_index_schedulers: invocation.code_index_schedulers.clone(),
+            session_db: state.session_db.clone(),
+            code_graph: Arc::clone(&state.code_graph),
+            requester: state.requester.clone(),
+            diagnostic_broker: Arc::clone(&state.diagnostic_broker),
+        }),
         scout_owner,
         scout_registry,
         feedback_runtime: feedback_cycle.feedback_runtime(),
-        project_root: project_root.to_path_buf(),
-        scope: state.scope.clone(),
-        code_index_schedulers: invocation.code_index_schedulers.clone(),
-        session_db: state.session_db.clone(),
-        code_graph: Arc::clone(&state.code_graph),
-        requester: state.requester.clone(),
-        diagnostic_broker: Arc::clone(&state.diagnostic_broker),
     });
     let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
         registration: Arc::clone(&registration),
