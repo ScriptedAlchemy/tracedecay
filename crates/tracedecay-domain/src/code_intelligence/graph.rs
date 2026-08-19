@@ -649,12 +649,7 @@ pub fn generate_node_id(file_path: &str, kind: &NodeKind, name: &str, line: u32)
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
-    let mut hex_str = String::with_capacity(hash.len() * 2);
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-    for byte in hash {
-        hex_str.push(HEX_DIGITS[usize::from(byte >> 4)] as char);
-        hex_str.push(HEX_DIGITS[usize::from(byte & 0x0f)] as char);
-    }
+    let hex_str = crate::canonical_text::encode_lowercase_hex(&hash);
     format!("{}:{}", kind.as_str(), &hex_str[..32])
 }
 
