@@ -6,16 +6,18 @@ use super::super::envelope::{
     project_memory_record_operation_receipt_tx,
 };
 use super::super::primitives::{
-    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, project_memory_category_label,
-    project_memory_event_time, project_memory_now, row_exists, storage_error, storage_message,
+    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, from_json, project_memory_category_label,
+    project_memory_event_time, project_memory_now, row_exists, row_string, storage_error,
+    storage_message,
 };
 use super::super::projection::load_project_memory_projection_tx;
 use super::add::{ProjectMemoryAddClassification, classify_project_memory_add_tx};
 use super::{
     active_fact_count_tx, commit_batch_tx, find_project_memory_fact_by_content_digest_tx,
-    initial_batch, load_current_fact_tx, load_current_projection, payload_metadata,
-    sanitize_payload, verified_payload,
+    initial_batch, load_current_fact_tx, load_current_projection, payload_material,
+    payload_metadata, sanitize_payload, verified_payload,
 };
+use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use crate::db::tombstone_fact_derivatives_tx;
@@ -657,6 +659,13 @@ pub(in crate::store::memory) async fn update_project_memory_fact_tx(
         now,
     )?;
     let (canonical_receipt, replayed) = commit_batch_tx(transaction, &batch).await?;
+    purge_detector_flagged_superseded_payloads_tx(
+        transaction,
+        &OwnerKey::new(request.target().owner())?,
+        &fact_id,
+        canonical_receipt.active_assertion_id(),
+    )
+    .await?;
     let fact = load_project_memory_projection_tx(transaction, request.target().owner(), &fact_id)
         .await?
         .ok_or_else(|| {
@@ -684,6 +693,93 @@ pub(in crate::store::memory) async fn update_project_memory_fact_tx(
         canonical_receipt,
         replayed,
     )
+}
+
+/// Erases superseded assertion payload rows the current detector would refuse
+/// or rewrite, in the same transaction as the correction that supersedes them.
+///
+/// At-rest privacy remediation settles redactions through the ordinary update
+/// path, so a projection-only correction would leave the original plaintext
+/// readable in `memory_v2_assertion_payloads` (and its FTS backing) even
+/// though the served fact is sanitized. Re-evaluating each superseded row
+/// under the one canonical sanitizer keeps clean history available to as-of
+/// reads while flagged rows are securely deleted; the FTS delete trigger
+/// removes the index copy in the same statement.
+async fn purge_detector_flagged_superseded_payloads_tx(
+    transaction: &Transaction<'_>,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    active_assertion_id: Option<&FactAssertionId>,
+) -> FactStoreResult<()> {
+    let mut rows = transaction
+        .query(
+            "SELECT assertion_id, payload_json FROM memory_v2_assertion_payloads
+             WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+               AND assertion_id != ?4",
+            params![
+                fact_id.as_str(),
+                owner.kind,
+                owner.project_id.as_str(),
+                active_assertion_id.map_or("", FactAssertionId::as_str),
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    let mut flagged = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
+    {
+        let assertion_id = row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?;
+        let payload = from_json::<FactPayloadV1>(
+            &row_string(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?,
+            PROJECT_MEMORY_WRITE_OPERATION,
+        )?;
+        let metadata = payload_metadata(payload.metadata());
+        let wire = payload_material(
+            payload.content(),
+            payload.category(),
+            payload.tags(),
+            payload.entities(),
+            &metadata,
+            payload.source_label(),
+        );
+        let sanitized = sanitize_memory_fact_payload(wire.clone())
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+        let clean = matches!(
+            sanitized,
+            MemoryFactSanitizationV1::Durable { payload, .. } if payload == wire
+        );
+        if !clean {
+            flagged.push(assertion_id);
+        }
+    }
+    drop(rows);
+    if flagged.is_empty() {
+        return Ok(());
+    }
+    transaction
+        .execute_batch("PRAGMA secure_delete = ON;")
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    for assertion_id in flagged {
+        transaction
+            .execute(
+                "DELETE FROM memory_v2_assertion_payloads
+                 WHERE assertion_id = ?1 AND fact_id = ?2
+                   AND owner_kind = ?3 AND project_id = ?4",
+                params![
+                    assertion_id,
+                    fact_id.as_str(),
+                    owner.kind,
+                    owner.project_id.as_str(),
+                ],
+            )
+            .await
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    }
+    Ok(())
 }
 
 async fn project_memory_replay_remove_tx(

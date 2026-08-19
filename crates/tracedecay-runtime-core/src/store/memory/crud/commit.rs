@@ -612,6 +612,26 @@ async fn assertion_exists(
     .await
 }
 
+async fn assertion_is_superseded(
+    transaction: &Transaction<'_>,
+    owner: &OwnerKey,
+    assertion: &FactAssertionV1,
+) -> FactStoreResult<bool> {
+    row_exists(
+        transaction,
+        "SELECT 1 FROM memory_v2_assertion_supersession
+         WHERE superseded_assertion_id = ?1 AND fact_id = ?2
+           AND owner_kind = ?3 AND project_id = ?4",
+        params![
+            assertion.assertion_id().as_str(),
+            assertion.fact_id().as_str(),
+            owner.kind,
+            owner.project_id.as_str(),
+        ],
+    )
+    .await
+}
+
 async fn assertion_matches(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -711,7 +731,13 @@ async fn assertion_matches(
                 == to_json(assertion.payload(), "serialize assertion payload")?
                 && row_string(&row, 1, QUERY_OPERATION)? == assertion.payload().content()
         }
-        None => payload_is_purged_projection(transaction, owner, assertion.fact_id()).await?,
+        // A missing payload row is consistent with the immutable record when
+        // the fact reached a terminal access state, or when the assertion was
+        // superseded and its detector-flagged payload was purged at rest.
+        None => {
+            payload_is_purged_projection(transaction, owner, assertion.fact_id()).await?
+                || assertion_is_superseded(transaction, owner, assertion).await?
+        }
     };
     if !payload_matches {
         return Ok(false);

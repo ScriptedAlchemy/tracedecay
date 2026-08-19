@@ -415,7 +415,7 @@ pub(in crate::store::memory) fn verified_payload(
     payload_from_parts(payload, category, receipt)
 }
 
-fn payload_material(
+pub(in crate::store::memory) fn payload_material(
     content: &str,
     category: FactCategoryV1,
     tags: &[String],
