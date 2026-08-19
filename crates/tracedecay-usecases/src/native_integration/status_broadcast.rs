@@ -54,7 +54,7 @@ impl NativeIntegrationStatusBroadcastV1 {
             return Vec::new();
         };
         let mut recent = statuses.values().cloned().collect::<Vec<_>>();
-        recent.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        recent.sort_by_key(|status| std::cmp::Reverse(status.updated_at));
         recent.truncate(maximum);
         recent
     }
