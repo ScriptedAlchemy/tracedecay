@@ -555,6 +555,13 @@ where
             input.cursor.as_ref(),
         )
         .await?;
+    // Canonical Plan 26 retrieval-pipeline observation, projected from the
+    // composition this query actually ran. Emission is non-blocking through
+    // the bounded producer; an uninstalled lane records nothing rather than
+    // inventing a measurement.
+    if let Some(observability) = schedulers.index_observability_for_scope(scope).await {
+        observability.record_retrieval_composition(&authorized, &request.budget);
+    }
     Ok(ExecutedQuerySearchV1 {
         generation,
         authorized,
