@@ -544,7 +544,9 @@ impl RegisteredGlobalDb {
 
     /// Truncates the drained WAL file through the runtime's exclusive
     /// maintenance facade.
-    pub(crate) async fn truncate_database_wal(&self) -> tracedecay_runtime_core::errors::Result<()> {
+    pub(crate) async fn truncate_database_wal(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         self.database.truncate_wal_for_offline_maintenance().await
     }
 

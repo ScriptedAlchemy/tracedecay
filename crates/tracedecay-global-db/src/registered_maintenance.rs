@@ -10,11 +10,13 @@ use crate::RegisteredGlobalDb;
 ///
 /// SQLite's passive checkpoint lane backfills WAL frames into the main
 /// database but never shrinks the `-wal` file, so a store that once ballooned
-/// keeps its high-water file size forever. A healthy registered WAL cycles
-/// well below this bound between checkpoints; a file at or above it is
-/// high-water debris worth reclaiming. Below it the warm WAL is left alone so
-/// routine checkpoints never churn the file.
-pub const REGISTERED_WAL_RECLAIM_TRIGGER_BYTES: u64 = 4 * 1024 * 1024;
+/// keeps its high-water file size forever. This bound matches the retained
+/// writer's own soft checkpoint budget: below it the runtime deliberately
+/// tolerates the warm WAL (a fresh schema install alone leaves several
+/// mebibytes), so truncation there would only churn the file. A file at or
+/// above it survived checkpoint pressure and is high-water debris worth
+/// reclaiming.
+pub const REGISTERED_WAL_RECLAIM_TRIGGER_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Measured outcome of one registered WAL checkpoint/compaction pass
 /// (Plan 38 §6).
@@ -63,18 +65,22 @@ impl RegisteredGlobalDb {
         let wal_path = registered_wal_path(self.db_path());
         let wal_bytes_before = wal_file_bytes(&wal_path)?;
         self.checkpoint_database().await?;
-        let reclaim = if wal_bytes_before < REGISTERED_WAL_RECLAIM_TRIGGER_BYTES {
-            RegisteredWalReclaimV1::BelowTrigger {
+        // A successful checkpoint proves the writable scope, so the role read
+        // cannot race a mode downgrade.
+        let reclaim = match wal_reclaim_plan(wal_bytes_before, self.write_authority_role()?) {
+            WalReclaimPlan::BelowTrigger => RegisteredWalReclaimV1::BelowTrigger {
                 trigger_bytes: REGISTERED_WAL_RECLAIM_TRIGGER_BYTES,
+            },
+            WalReclaimPlan::Truncate => {
+                self.truncate_database_wal().await?;
+                RegisteredWalReclaimV1::Truncated {
+                    trigger_bytes: REGISTERED_WAL_RECLAIM_TRIGGER_BYTES,
+                }
             }
-        } else if self.write_authority_role()? == DatabaseAuthorityRole::Maintenance {
-            self.truncate_database_wal().await?;
-            RegisteredWalReclaimV1::Truncated {
-                trigger_bytes: REGISTERED_WAL_RECLAIM_TRIGGER_BYTES,
-            }
-        } else {
-            RegisteredWalReclaimV1::RequiresExclusiveMaintenance {
-                trigger_bytes: REGISTERED_WAL_RECLAIM_TRIGGER_BYTES,
+            WalReclaimPlan::RequiresExclusiveMaintenance => {
+                RegisteredWalReclaimV1::RequiresExclusiveMaintenance {
+                    trigger_bytes: REGISTERED_WAL_RECLAIM_TRIGGER_BYTES,
+                }
             }
         };
         let wal_bytes_after = wal_file_bytes(&wal_path)?;
@@ -108,6 +114,25 @@ impl RegisteredGlobalDb {
     // the composition root.
 }
 
+/// How one pass disposes of the WAL file, decided purely from the measured
+/// size and the client's write-authority role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WalReclaimPlan {
+    BelowTrigger,
+    Truncate,
+    RequiresExclusiveMaintenance,
+}
+
+const fn wal_reclaim_plan(wal_bytes_before: u64, role: DatabaseAuthorityRole) -> WalReclaimPlan {
+    if wal_bytes_before < REGISTERED_WAL_RECLAIM_TRIGGER_BYTES {
+        WalReclaimPlan::BelowTrigger
+    } else if matches!(role, DatabaseAuthorityRole::Maintenance) {
+        WalReclaimPlan::Truncate
+    } else {
+        WalReclaimPlan::RequiresExclusiveMaintenance
+    }
+}
+
 /// The SQLite WAL sidecar for a database path: the full database file name
 /// with `-wal` appended.
 fn registered_wal_path(database_path: &Path) -> PathBuf {
@@ -130,5 +155,42 @@ fn wal_file_bytes(wal_path: &Path) -> Result<u64, TraceDecayError> {
             ),
             operation: "measure registered WAL file".to_owned(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{REGISTERED_WAL_RECLAIM_TRIGGER_BYTES, WalReclaimPlan, wal_reclaim_plan};
+    use tracedecay_runtime_core::db::DatabaseAuthorityRole;
+
+    #[test]
+    fn wal_below_trigger_is_left_alone_for_every_role() {
+        for role in [
+            DatabaseAuthorityRole::Daemon,
+            DatabaseAuthorityRole::Maintenance,
+            DatabaseAuthorityRole::Test,
+        ] {
+            assert_eq!(
+                wal_reclaim_plan(REGISTERED_WAL_RECLAIM_TRIGGER_BYTES - 1, role),
+                WalReclaimPlan::BelowTrigger
+            );
+        }
+    }
+
+    #[test]
+    fn triggered_wal_truncates_only_under_exclusive_maintenance() {
+        assert_eq!(
+            wal_reclaim_plan(
+                REGISTERED_WAL_RECLAIM_TRIGGER_BYTES,
+                DatabaseAuthorityRole::Maintenance
+            ),
+            WalReclaimPlan::Truncate
+        );
+        for role in [DatabaseAuthorityRole::Daemon, DatabaseAuthorityRole::Test] {
+            assert_eq!(
+                wal_reclaim_plan(REGISTERED_WAL_RECLAIM_TRIGGER_BYTES, role),
+                WalReclaimPlan::RequiresExclusiveMaintenance
+            );
+        }
     }
 }
