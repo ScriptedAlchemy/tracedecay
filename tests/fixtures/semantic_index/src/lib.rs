@@ -1,9 +1,5 @@
-//! Demo storefront used by the isolated semantic embed/index fixture check.
-//!
-//! The symbols here are deliberately distinctive so exact, lexical, graph,
-//! and (when a verified model is present) semantic retrieval each have an
-//! unambiguous target. This tree is copied into a throwaway checkout before
-//! indexing; it is never indexed in place.
+//! Demo storefront indexed by the isolated semantic embed/index fixture
+//! check; its distinctive symbols give every retrieval lane a clear target.
 
 pub mod inventory;
 pub mod pricing;
