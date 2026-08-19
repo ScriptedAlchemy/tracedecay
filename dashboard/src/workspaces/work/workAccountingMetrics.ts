@@ -94,11 +94,20 @@ function coverageSentence(coverage: MetricCoverageV1): string {
   return `${coverage.state} coverage · ${coverage.observed} observed · ${coverage.completed} completed`;
 }
 
-/** The seven facets, decoded from one metric envelope's own coverage. */
+const ANCHORS_ABSENCE: WorkChannel<never> = {
+  available: false,
+  state: 'redacted',
+  detail:
+    'the metrics read publishes registered observation cursors, not task/run/attempt identities; drill-down resolves them only through the authorized local observability boundary',
+};
+
+/** The seven facets, decoded from one metric envelope's own coverage. The
+ * descriptor revision is passed as a channel because not every reading carries
+ * one: a card must state that absence rather than invent a revision. */
 function metricsProvenance(
   model: ExecutionTopologyMetricsV1,
   coverage: MetricCoverageV1,
-  descriptorRevision: string,
+  descriptorRevision: WorkAccountingProvenance['descriptorRevision'],
   population: string,
 ): WorkAccountingProvenance {
   return {
@@ -131,16 +140,31 @@ function metricsProvenance(
     },
     intervalCoverage: { available: true, value: coverageSentence(coverage) },
     horizon: { available: true, value: horizonSentence(model) },
-    descriptorRevision: {
-      available: true,
-      value: { kind: 'metric_descriptor', value: descriptorRevision },
-    },
-    anchors: {
-      available: false,
-      state: 'redacted',
-      detail:
-        'the metrics read publishes registered observation cursors, not task/run/attempt identities; drill-down resolves them only through the authorized local observability boundary',
-    },
+    descriptorRevision,
+    anchors: ANCHORS_ABSENCE,
+  };
+}
+
+/**
+ * The facets for a model that answered but whose every cell is a typed
+ * absence (support-floor suppression wipes the suppressed cell's own coverage
+ * envelope, so its counts are not measurements to print). Each measured facet
+ * carries the projector's own reason; the horizon and descriptor revision are
+ * model-level facts suppression does not touch, so they stay real.
+ */
+function unreadableCellProvenance(
+  model: ExecutionTopologyMetricsV1,
+  reason: WorkChannel<never>,
+  descriptorRevision: WorkAccountingProvenance['descriptorRevision'],
+): WorkAccountingProvenance {
+  return {
+    support: reason,
+    eligible: reason,
+    censoring: reason,
+    intervalCoverage: reason,
+    horizon: { available: true, value: horizonSentence(model) },
+    descriptorRevision,
+    anchors: ANCHORS_ABSENCE,
   };
 }
 
@@ -159,21 +183,18 @@ export function integrationOutcomesCard(
 ): WorkAccountingCard {
   const dimension: WorkAccountingDimension = 'integration_outcomes';
   const model = modelOf(metrics);
-  const absence = (measure: string) =>
-    model === null
-      ? metricsAbsence(metrics, measure)
-      : ({
-          available: false,
-          state: 'unknown',
-          detail: `the projection carried no ${measure}`,
-        } as const);
 
   const cells =
     model?.measurements.filter(
       (measurement) => measurement.value.metric === MERGE_ATTEMPTS_METRIC,
     ) ?? [];
   const dimensionalCells = cells.filter((measurement) => measurement.dimensions.length > 0);
-  const coverage = cells[0]?.value.coverage;
+  // A cell whose value the projector suppressed (support floor, coverage
+  // floor, no eligible evidence) is a typed absence, and its own coverage
+  // envelope was wiped along with the value. Only a readable cell may lend
+  // the card its headline and coverage authority.
+  const readableCells = dimensionalCells.filter((measurement) => measurement.value.value != null);
+  const authority = readableCells[0];
 
   const rows: WorkAccountingRow[] = dimensionalCells.map((measurement) => {
     const label = measurement.dimensions
@@ -199,38 +220,79 @@ export function integrationOutcomesCard(
     };
   });
 
-  const reading: WorkChannel<string> =
-    model === null || coverage === undefined
-      ? absence('integration-outcome cells')
-      : dimensionalCells.length === 0
-        ? (() => {
-            const empty = cells[0];
-            return empty === undefined
-              ? absence('integration-outcome cells')
-              : cellAbsence(empty);
-          })()
-        : {
-            available: true,
-            value: `${coverage.observed} observed native integrations across ${dimensionalCells.length} kind/outcome ${dimensionalCells.length === 1 ? 'cell' : 'cells'} — counts are the projector's own cells, never summed here`,
-          };
+  // The exact descriptor revision every merge cell is stamped with —
+  // suppression wipes a cell's value and coverage but never its revision, so
+  // this stays real whenever any cell exists at all.
+  const descriptorRevision: WorkAccountingProvenance['descriptorRevision'] =
+    cells[0] === undefined
+      ? {
+          available: false,
+          state: 'unknown',
+          detail: 'the projection carried no merge-attempt cell to read a descriptor revision from',
+        }
+      : {
+          available: true,
+          value: { kind: 'metric_descriptor', value: cells[0].value.descriptor_revision },
+        };
 
+  if (model === null) {
+    return {
+      dimension,
+      title: accountingDimensionTitle(dimension),
+      mandate: INTEGRATION_MANDATE,
+      reading: metricsAbsence(metrics, 'integration-outcome cells'),
+      rows,
+      matrices: null,
+      contradictions: [],
+      provenance: absentMetricsProvenance(metrics, 'observed native integrations'),
+    };
+  }
+
+  if (authority === undefined) {
+    // Every cell is a typed absence (or none exists). The headline is the
+    // projector's own reason, never an available reading over zero readable
+    // cells.
+    const reason: WorkChannel<never> =
+      dimensionalCells[0] !== undefined
+        ? cellAbsence(dimensionalCells[0])
+        : cells[0] !== undefined
+          ? cellAbsence(cells[0])
+          : {
+              available: false,
+              state: 'unknown',
+              detail: 'the projection carried no integration-outcome cells',
+            };
+    return {
+      dimension,
+      title: accountingDimensionTitle(dimension),
+      mandate: INTEGRATION_MANDATE,
+      reading: reason,
+      rows,
+      matrices: null,
+      contradictions: [],
+      provenance: unreadableCellProvenance(model, reason, descriptorRevision),
+    };
+  }
+
+  const coverage = authority.value.coverage;
+  const suppressed = dimensionalCells.length - readableCells.length;
   return {
     dimension,
     title: accountingDimensionTitle(dimension),
     mandate: INTEGRATION_MANDATE,
-    reading,
+    reading: {
+      available: true,
+      value: `${coverage.observed} observed native integrations across ${readableCells.length} readable kind/outcome ${readableCells.length === 1 ? 'cell' : 'cells'}${suppressed > 0 ? ` · ${suppressed} ${suppressed === 1 ? 'cell stays a' : 'cells stay'} typed ${suppressed === 1 ? 'absence' : 'absences'}` : ''} — counts are the projector's own cells, never summed here`,
+    },
     rows,
     matrices: null,
     contradictions: [],
-    provenance:
-      model === null || coverage === undefined
-        ? absentMetricsProvenance(metrics, 'observed native integrations')
-        : metricsProvenance(
-            model,
-            coverage,
-            cells[0]?.value.descriptor_revision ?? 'execution-topology-metrics.v1',
-            'observed native integrations',
-          ),
+    provenance: metricsProvenance(
+      model,
+      coverage,
+      descriptorRevision,
+      'observed native integrations',
+    ),
   };
 }
 
@@ -288,7 +350,15 @@ export function githubStackCapabilityCard(
         : metricsProvenance(
             model,
             model.github_stack_capability.coverage,
-            'execution-topology-metrics.v1',
+            {
+              // The capability reading is a typed operational state on the
+              // model envelope, not a descriptor cell; it carries no metric
+              // descriptor revision and this card does not invent one.
+              available: false,
+              state: 'unknown',
+              detail:
+                'the GitHub stack capability reading is a model-level typed state and carries no metric descriptor revision',
+            },
             'capability observations',
           ),
   };
