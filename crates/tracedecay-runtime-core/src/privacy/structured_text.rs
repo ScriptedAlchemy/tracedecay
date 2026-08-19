@@ -36,9 +36,9 @@ use super::detect::{
 use super::detector_kernel::{CredentialPattern, NormalizedSensitiveKey, SensitiveKeyPolicy};
 use super::length_prefixed_sha256_hex;
 use super::structured::{
-    ParsedStructuredTextV1, StructuredSanitizationLimits, StructuredTextFieldV1,
-    StructuredTextFormatV1, StructuredTextParseFailureV1, parse_structured_text,
-    sanitize_structured_payload, validate_structured_text_limits,
+    ParsedStructuredTextV1, StructuredSanitizationError, StructuredSanitizationLimits,
+    StructuredTextFieldV1, StructuredTextFormatV1, StructuredTextParseFailureV1,
+    parse_structured_text, sanitize_structured_payload, validate_structured_text_limits,
 };
 
 pub const CODE_SOURCE_SANITIZER_VERSION_V1: &str = "privacy.code-source.v1";
@@ -773,9 +773,9 @@ fn detect_lcm_payload(raw: &str) -> Result<(String, Vec<SanitizationFindingV1>),
         )
         .map_err(|_| DetectionError::Receipt)?;
         let sanitized = sanitize_structured_payload(raw.as_bytes(), limits)
-            .map_err(|_| DetectionError::Receipt)?;
+            .map_err(detection_error_from_structured_sanitization)?;
         if !sanitized.was_structurally_parsed() {
-            return Err(DetectionError::Receipt);
+            return Err(DetectionError::StructuredQuarantine);
         }
         let text =
             serde_json::to_string(sanitized.payload()).map_err(|_| DetectionError::Receipt)?;
@@ -784,9 +784,24 @@ fn detect_lcm_payload(raw: &str) -> Result<(String, Vec<SanitizationFindingV1>),
 
     let detected = sanitize_structured_text(raw)?;
     if !detected.quarantine_findings().is_empty() {
-        return Err(DetectionError::Receipt);
+        return Err(DetectionError::StructuredQuarantine);
     }
     Ok(detected.into_parts())
+}
+
+fn detection_error_from_structured_sanitization(
+    error: StructuredSanitizationError,
+) -> DetectionError {
+    match error {
+        StructuredSanitizationError::RawBytesExceeded
+        | StructuredSanitizationError::ExpandedBytesExceeded
+        | StructuredSanitizationError::NestingDepthExceeded
+        | StructuredSanitizationError::ItemCountExceeded => DetectionError::ScanLimitExceeded,
+        StructuredSanitizationError::UnsafeJsonStructure
+        | StructuredSanitizationError::InvalidEncoding => DetectionError::StructuredQuarantine,
+        StructuredSanitizationError::InvalidLimits
+        | StructuredSanitizationError::SanitizerUnavailable => DetectionError::Receipt,
+    }
 }
 
 fn issue_text_receipt(
