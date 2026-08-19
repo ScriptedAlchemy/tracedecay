@@ -503,15 +503,23 @@ fn schedule_decision_for_trigger(
     // budgets change: skips do not consume the interval clock, so without a
     // gate the task would re-run the exhausted retrieval on every tick.
     // Hold the task in the typed backoff window anchored on the last real
-    // exhausted attempt instead.
+    // exhausted attempt instead. The window is task-configurable
+    // (`session_evidence_budget_backoff_secs`); unset uses the typed
+    // contract's one-hour default.
     if task_consumes_session_evidence(task)
         && let Some(exceeded) = live_session_evidence_budget_exhaustion(records, task)?
-        && let SessionEvidenceBudgetGate::Suppressed { .. } =
-            SessionEvidenceBudgetBackoff::default().gate(exceeded, now_secs)
     {
-        return Ok(AutomationScheduleDecision::skipped(
-            "scheduler_cooldown_active",
-        ));
+        let backoff = task_config
+            .session_evidence_budget_backoff_secs
+            .map_or_else(
+                SessionEvidenceBudgetBackoff::default,
+                SessionEvidenceBudgetBackoff::new,
+            );
+        if let SessionEvidenceBudgetGate::Suppressed { .. } = backoff.gate(exceeded, now_secs) {
+            return Ok(AutomationScheduleDecision::skipped(
+                "scheduler_cooldown_active",
+            ));
+        }
     }
 
     Ok(AutomationScheduleDecision::due())
@@ -592,6 +600,7 @@ const USER_JOB_TASK_CONFIG: AutomationTaskConfig = AutomationTaskConfig {
     cooldown_secs: None,
     min_idle_secs: None,
     stale_lock_secs: None,
+    session_evidence_budget_backoff_secs: None,
 };
 
 fn task_config(config: &AutomationConfig, task: AgentTaskKind) -> Option<&AutomationTaskConfig> {
@@ -1375,6 +1384,44 @@ mod tests {
                 .is_due()
             );
         }
+    }
+
+    #[test]
+    fn configured_budget_backoff_window_overrides_the_one_hour_default() {
+        let mut config = session_evidence_config();
+        config
+            .tasks
+            .session_reflector
+            .session_evidence_budget_backoff_secs = Some(120);
+        let records = vec![budget_exhausted_skip(
+            "run-exhausted",
+            AgentTaskKind::SessionReflector,
+            2_000,
+        )];
+
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &records,
+                SessionActivity::at(2_500),
+                2_119,
+            )
+            .skip_reason(),
+            Some("scheduler_cooldown_active"),
+            "the configured 120s window must still suppress its final second"
+        );
+        assert!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &records,
+                SessionActivity::at(2_500),
+                2_120,
+            )
+            .is_due(),
+            "the configured 120s window must end well before the 3600s default"
+        );
     }
 
     #[test]
