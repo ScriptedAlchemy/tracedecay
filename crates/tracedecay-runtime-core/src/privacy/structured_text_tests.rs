@@ -347,7 +347,7 @@ fn lcm_json_duplicate_keys_are_rejected_before_value_materialization() {
 
     assert!(matches!(
         sanitize_lcm_payload_text(&raw),
-        Err(DetectionError::Receipt)
+        Err(DetectionError::StructuredQuarantine)
     ));
 }
 

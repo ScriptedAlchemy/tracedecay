@@ -253,15 +253,18 @@ impl SnapshotSet {
             let available = fs2::available_space(&scratch.path)?;
             preparation_control.checkpoint()?;
             if copied_bytes > available {
-                return Err(io::Error::other(format!(
-                    "insufficient scratch space for SQLite read snapshots: required {copied_bytes} bytes, available {available} bytes at '{}'",
-                    scratch.path.display()
-                )));
+                return Err(insufficient_scratch_space(
+                    copied_bytes,
+                    available,
+                    &scratch.path,
+                ));
             }
             Ok((scratch, prepared, copied_bytes))
         })
         .await
-        .map_err(|error| io::Error::other(format!("snapshot preparation task failed: {error}")))??;
+        .map_err(|error| {
+            io::Error::other(format!("snapshot preparation task failed: {error}"))
+        })??;
         let mut databases = BTreeMap::new();
         for snapshot in prepared {
             let source = snapshot.source.clone();
@@ -753,6 +756,16 @@ fn changed_during_snapshot(source: &Path) -> io::Error {
     ))
 }
 
+fn insufficient_scratch_space(copied_bytes: u64, available: u64, scratch_path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::StorageFull,
+        format!(
+            "insufficient scratch space for SQLite read snapshots: required {copied_bytes} bytes, available {available} bytes at '{}'",
+            scratch_path.display()
+        ),
+    )
+}
+
 fn create_scratch_directory(
     root: &Path,
     expected_uid: Option<u32>,
@@ -1076,6 +1089,17 @@ mod cancellation_tests;
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn insufficient_scratch_space_is_storage_full_not_other() {
+        let error = insufficient_scratch_space(1024, 8, Path::new("/tmp/scratch"));
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        let message = error.to_string();
+        assert!(
+            message.contains("required 1024 bytes") && message.contains("available 8 bytes"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn checkpointed_inspection_is_purpose_bound_and_refuses_live_wal() {
