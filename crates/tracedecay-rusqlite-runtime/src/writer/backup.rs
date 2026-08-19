@@ -625,6 +625,9 @@ mod tests {
         filesystem.abandon_destination(staged, connection);
     }
 
+    /// On Unix an external rename can displace the staging file while it is
+    /// pinned, so verification must catch the identity swap.
+    #[cfg(unix)]
     #[test]
     fn private_destination_replacement_is_detected_and_not_deleted() {
         let root = tempfile::tempdir().unwrap();
@@ -646,6 +649,33 @@ mod tests {
         completed.abandon();
         assert_eq!(fs::read(staging_path).unwrap(), b"replacement");
         assert!(displaced.exists());
+    }
+
+    /// On Windows the staging pin's share mode denies the displacement
+    /// outright, so external replacement cannot occur while the destination
+    /// is pinned; verification sees the undisturbed file.
+    #[cfg(windows)]
+    #[test]
+    fn private_destination_replacement_is_blocked_while_pinned() {
+        let root = tempfile::tempdir().unwrap();
+        let final_path = root.path().join("backup.sqlite3");
+        let mut filesystem = StagedBackupDestination::new(final_path);
+        let (staged, connection) = filesystem.create_new_private_destination().unwrap();
+        let completed = filesystem
+            .close_and_sync_destination(staged, connection)
+            .unwrap();
+        let staging_path = completed.path.clone();
+        let displaced = root.path().join("displaced.sqlite3");
+
+        let blocked = fs::rename(&completed.path, &displaced).unwrap_err();
+        assert!(
+            matches!(blocked.raw_os_error(), Some(5 | 32)),
+            "pinned staging displacement must be blocked: {blocked}"
+        );
+
+        verify_sqlite(&completed).unwrap();
+        completed.abandon();
+        assert!(!staging_path.exists());
     }
 
     #[test]
