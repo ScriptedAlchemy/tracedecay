@@ -1,0 +1,19 @@
+[package]
+name = "tracedecay-hooks"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Bounded Hook V2 and Context Scout contracts for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+fs2 = "0.4"
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }

@@ -1,0 +1,612 @@
+//! Thin HTTP/SSE adapter contracts over `tracedecay-application`.
+//!
+//! The executable owns `CanonicalInvocation`; this crate receives the resolved
+//! binding and its application result after dispatch, then encodes that result
+//! for HTTP. It owns no store, query, policy, or LSP tunnel authority.
+//!
+//! [`read_model`] is the normative dashboard presentation envelope and the
+//! generation source for the frontend's wire contracts; [`doctor`] owns the
+//! read-only Doctor/health route descriptors and their DTO mapping. Both
+//! translate admitted application contracts and evaluate nothing themselves.
+//!
+#![forbid(unsafe_code)]
+
+pub mod assets;
+pub mod configuration;
+pub mod doctor;
+pub mod feedback;
+pub mod handoff;
+mod http;
+pub mod multi_root;
+pub mod read_model;
+pub mod remote;
+mod retained;
+mod sse;
+pub mod work;
+pub mod workflow;
+
+use serde::Serialize;
+use thiserror::Error;
+use tracedecay_application::{
+    ApplicationEnvelope, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
+    OperationTermination, RequestId, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
+    StreamTermination,
+};
+use tracedecay_tool_catalog::BindingId;
+
+pub use assets::{
+    DashboardAssetSource, StaticDashboardAsset, StaticDashboardAssets, static_dashboard_router,
+};
+pub use handoff::{
+    HandoffApplicationOwner, HandoffHttpRequest, HandoffInvocationFuture, HandoffOperation,
+    handoff_application_router, handoff_invalid_request_response,
+};
+pub use http::{
+    HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOperation,
+    HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1,
+    adapter_problem_response, application_problem_response, application_router,
+    configuration_application_router, feedback_application_router, http_route_documents,
+};
+pub use multi_root::{
+    MultiRootApplicationOwner, MultiRootHttpOperation, MultiRootHttpRequest,
+    MultiRootInvocationFuture, multi_root_application_router,
+};
+pub use retained::{
+    RetainedApplicationOwner, RetainedHttpRequest, RetainedInvocationFuture,
+    retained_application_route_path, retained_application_router,
+    retained_invalid_request_response, retained_operation_id, retained_route_path,
+};
+pub use sse::sse_response;
+pub use work::{
+    WorkApplicationOwner, WorkHttpRequest, WorkInvocationFuture, WorkOperation,
+    work_application_router, work_dashboard_router, work_invalid_request_response,
+};
+pub use workflow::{
+    WorkflowApplicationOwner, WorkflowHttpRequest, WorkflowInvocationFuture, WorkflowOperation,
+    workflow_application_router, workflow_invalid_request_response,
+};
+
+/// A resolved canonical invocation result ready for HTTP presentation.
+pub struct CanonicalInvocationResult<T> {
+    pub binding_id: BindingId,
+    pub result: ApplicationResult<T>,
+}
+
+impl<T> CanonicalInvocationResult<T> {
+    pub fn new(binding_id: BindingId, result: ApplicationResult<T>) -> Self {
+        Self { binding_id, result }
+    }
+
+    pub fn into_http_json(self) -> HttpJsonEnvelope<T> {
+        match self.result {
+            Ok(application) => HttpJsonEnvelope::Success(Box::new(HttpSuccessEnvelope {
+                binding_id: self.binding_id,
+                application,
+            })),
+            Err(application) => {
+                let binding_id = (application.problem.kind()
+                    != ApplicationProblemKind::NotFoundOrNotAuthorized)
+                    .then_some(self.binding_id);
+                HttpJsonEnvelope::Problem(Box::new(HttpProblemEnvelope {
+                    binding_id,
+                    application,
+                }))
+            }
+        }
+    }
+}
+
+/// Outbound HTTP JSON is either an admitted application result or a
+/// pre-admission application problem.
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum HttpJsonEnvelope<T> {
+    Success(Box<HttpSuccessEnvelope<T>>),
+    Problem(Box<HttpProblemEnvelope>),
+}
+
+/// HTTP success preserves the application contract, request identity, scope,
+/// and outcome without reimplementing application semantics.
+#[derive(Serialize)]
+pub struct HttpSuccessEnvelope<T> {
+    pub binding_id: BindingId,
+    #[serde(flatten)]
+    pub application: ApplicationEnvelope<T>,
+}
+
+/// HTTP problem preserves the application's safe problem record verbatim.
+#[derive(Serialize)]
+pub struct HttpProblemEnvelope {
+    /// Concealed denials omit this field so binding existence cannot become an
+    /// authorization oracle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding_id: Option<BindingId>,
+    #[serde(flatten)]
+    pub application: ApplicationProblemEnvelope,
+}
+
+/// SSE presentation of canonical stream events.
+#[derive(Serialize)]
+#[serde(tag = "event", content = "data", rename_all = "snake_case")]
+pub enum HttpSseEvent<T> {
+    Open {
+        correlation_id: RequestId,
+        frontier: StreamFrontier,
+    },
+    Item {
+        sequence: u64,
+        item: T,
+    },
+    Progress {
+        sequence: u64,
+        completed: u64,
+        total: Option<u64>,
+    },
+    ResumeGap {
+        sequence: u64,
+        gap: StreamGap,
+    },
+    Completed {
+        sequence: u64,
+        terminal: StreamTermination,
+    },
+    Cancelled {
+        sequence: u64,
+        terminal: StreamTermination,
+    },
+    TimedOut {
+        sequence: u64,
+        terminal: StreamTermination,
+    },
+    Failed {
+        sequence: u64,
+        terminal: StreamTermination,
+    },
+    Unavailable {
+        sequence: u64,
+        terminal: StreamTermination,
+    },
+    Partial {
+        sequence: u64,
+        terminal: StreamTermination,
+    },
+    EffectUnknown {
+        sequence: u64,
+        terminal: StreamTermination,
+    },
+}
+
+impl<T> HttpSseEvent<T> {
+    pub const fn event_name(&self) -> &'static str {
+        match self {
+            Self::Open { .. } => "open",
+            Self::Item { .. } => "item",
+            Self::Progress { .. } => "progress",
+            Self::ResumeGap { .. } => "resume_gap",
+            Self::Completed { .. } => "completed",
+            Self::Cancelled { .. } => "cancelled",
+            Self::TimedOut { .. } => "timed_out",
+            Self::Failed { .. } => "failed",
+            Self::Unavailable { .. } => "unavailable",
+            Self::Partial { .. } => "partial",
+            Self::EffectUnknown { .. } => "effect_unknown",
+        }
+    }
+
+    pub const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Open { .. } => None,
+            Self::Item { sequence, .. }
+            | Self::Progress { sequence, .. }
+            | Self::ResumeGap { sequence, .. }
+            | Self::Completed { sequence, .. }
+            | Self::Cancelled { sequence, .. }
+            | Self::TimedOut { sequence, .. }
+            | Self::Failed { sequence, .. }
+            | Self::Unavailable { sequence, .. }
+            | Self::Partial { sequence, .. }
+            | Self::EffectUnknown { sequence, .. } => Some(*sequence),
+        }
+    }
+
+    pub const fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed { .. }
+                | Self::Cancelled { .. }
+                | Self::TimedOut { .. }
+                | Self::Failed { .. }
+                | Self::Unavailable { .. }
+                | Self::Partial { .. }
+                | Self::EffectUnknown { .. }
+        )
+    }
+}
+
+impl<T> From<StreamEvent<T>> for HttpSseEvent<T> {
+    fn from(event: StreamEvent<T>) -> Self {
+        let sequence = event.sequence;
+        match event.kind {
+            StreamEventKind::Item(item) => Self::Item { sequence, item },
+            StreamEventKind::Progress { completed, total } => Self::Progress {
+                sequence,
+                completed,
+                total,
+            },
+            StreamEventKind::Gap(gap) => Self::ResumeGap { sequence, gap },
+            StreamEventKind::Terminal(terminal) => match terminal.termination {
+                OperationTermination::Completed => Self::Completed { sequence, terminal },
+                OperationTermination::Cancelled => Self::Cancelled { sequence, terminal },
+                OperationTermination::TimedOut => Self::TimedOut { sequence, terminal },
+                OperationTermination::Failed => Self::Failed { sequence, terminal },
+                OperationTermination::Unavailable => Self::Unavailable { sequence, terminal },
+                OperationTermination::Partial => Self::Partial { sequence, terminal },
+                OperationTermination::EffectUnknown => Self::EffectUnknown { sequence, terminal },
+            },
+        }
+    }
+}
+
+/// SSE framing failures. Application failures remain canonical terminal events.
+#[derive(Debug, Error)]
+pub enum HttpAdapterError {
+    #[error("canonical SSE event could not be encoded")]
+    EventEncoding,
+    #[error("canonical SSE stream ended before its terminal event")]
+    MissingTerminal,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use super::http::invalid_request_problem;
+    use super::{
+        CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOperation,
+        HttpApplicationOwnerKind, HttpSseEvent, application_router,
+    };
+    use tracedecay_application::{
+        ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
+        CancellationSignal, Deadline, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
+        StreamEvent, StreamEventKind,
+    };
+    use tracedecay_domain::UtcMicros;
+    use tracedecay_tool_catalog::{BindingId, SchemaId};
+
+    #[test]
+    fn sse_preserves_canonical_item_and_progress_events() {
+        let item = HttpSseEvent::from(StreamEvent::item(7, "value").expect("item"));
+        assert_eq!(item.sequence(), Some(7));
+        assert!(!item.is_terminal());
+        assert_eq!(
+            serde_json::to_value(item).expect("serialize item"),
+            serde_json::json!({
+                "event": "item",
+                "data": {"sequence": 7, "item": "value"}
+            })
+        );
+
+        let progress = HttpSseEvent::<()>::from(StreamEvent {
+            sequence: 8,
+            kind: StreamEventKind::Progress {
+                completed: 2,
+                total: Some(5),
+            },
+        });
+        assert_eq!(progress.sequence(), Some(8));
+        assert!(!progress.is_terminal());
+        assert_eq!(
+            serde_json::to_value(progress).expect("serialize progress"),
+            serde_json::json!({
+                "event": "progress",
+                "data": {"sequence": 8, "completed": 2, "total": 5}
+            })
+        );
+    }
+
+    #[test]
+    fn http_operations_dispatch_to_concrete_owner_families() {
+        assert_eq!(
+            HttpApplicationOperation::DiagnosticsRead.owner_kind(),
+            HttpApplicationOwnerKind::Primitive
+        );
+        for operation in [
+            "multi_root_scope_set_read",
+            "multi_root_scope_set_compare_and_swap",
+            "multi_root_execute",
+        ] {
+            assert!(
+                HttpApplicationOperation::from_catalog_name(operation).is_none(),
+                "{operation} must not be catalog-addressable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn application_router_does_not_mount_multi_root_routes() {
+        let app = application_router(|request: super::HttpApplicationRequest| async move {
+            let problem = ApplicationProblemEnvelope::new(
+                ResultContractRef::new(SchemaId::new("schema.test.result").expect("schema"), 1)
+                    .expect("contract"),
+                request.request_id,
+                ApplicationProblem::unavailable(
+                    SafeDiagnostic::new("test.unavailable", "Unavailable").expect("diagnostic"),
+                ),
+            )
+            .expect("test application problem envelope");
+            Ok::<_, ApplicationContractError>(CanonicalInvocationResult::<serde_json::Value>::new(
+                BindingId::new("binding.http.test.v1").expect("binding"),
+                Err(problem),
+            ))
+        });
+
+        for path in [
+            "/multi-root/scope-set/read",
+            "/multi-root/scope-set/compare-and-swap",
+            "/multi-root/execute",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .body(Body::empty())
+                        .expect("HTTP request"),
+                )
+                .await
+                .expect("router response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn application_contract_failure_is_an_empty_internal_server_error() {
+        let app = application_router(|_: super::HttpApplicationRequest| async move {
+            Err::<CanonicalInvocationResult<serde_json::Value>, _>(
+                ApplicationContractError::Inconsistent {
+                    field: "application_problem_envelope",
+                },
+            )
+        });
+        let mut request = Request::post("/feedback/list")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("HTTP request");
+        request
+            .extensions_mut()
+            .insert(RequestId::new("request.http.contract-error").expect("request id"));
+        request.extensions_mut().insert(HttpApplicationControls {
+            deadline: Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            cancellation: CancellationSignal::active("cancel.http.contract-error")
+                .expect("cancellation"),
+        });
+
+        let response = app.oneshot(request).await.expect("router response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            to_bytes(response.into_body(), 1024)
+                .await
+                .expect("HTTP body")
+                .is_empty(),
+            "a contract failure must not fabricate an application problem envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_feedback_routes_dispatch_every_http_catalog_operation() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let owner_observed = Arc::clone(&observed);
+        let app = application_router(move |request: super::HttpApplicationRequest| {
+            let observed = Arc::clone(&owner_observed);
+            async move {
+                observed
+                    .lock()
+                    .expect("feedback operation observations")
+                    .push(request.operation);
+                let problem = ApplicationProblemEnvelope::new(
+                    ResultContractRef::new(SchemaId::new("schema.test.result").expect("schema"), 1)
+                        .expect("contract"),
+                    request.request_id,
+                    ApplicationProblem::unavailable(
+                        SafeDiagnostic::new("test.unavailable", "Unavailable").expect("diagnostic"),
+                    ),
+                )
+                .expect("test application problem envelope");
+                Ok::<_, ApplicationContractError>(
+                    CanonicalInvocationResult::<serde_json::Value>::new(
+                        BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
+                            .expect("binding"),
+                        Err(problem),
+                    ),
+                )
+            }
+        });
+        let controls = HttpApplicationControls {
+            deadline: Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            cancellation: CancellationSignal::active("cancel.http.feedback").expect("cancellation"),
+        };
+        let routes = [
+            (
+                "/feedback/diagnostics",
+                HttpApplicationOperation::FeedbackDiagnostics,
+            ),
+            ("/feedback/get", HttpApplicationOperation::FeedbackGet),
+            ("/feedback/expand", HttpApplicationOperation::FeedbackExpand),
+            ("/feedback/list", HttpApplicationOperation::FeedbackList),
+            ("/feedback/impact", HttpApplicationOperation::FeedbackImpact),
+            (
+                "/feedback/advisory_cycle",
+                HttpApplicationOperation::FeedbackAdvisoryCycle,
+            ),
+        ];
+
+        for (index, (path, _)) in routes.iter().enumerate() {
+            let mut request = Request::post(*path)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("HTTP request");
+            request.extensions_mut().insert(
+                RequestId::new(format!("request.http.feedback.{index}")).expect("request id"),
+            );
+            request.extensions_mut().insert(controls.clone());
+            let response = app.clone().oneshot(request).await.expect("router response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        }
+
+        assert_eq!(
+            *observed.lock().expect("feedback operation observations"),
+            routes.map(|(_, operation)| operation)
+        );
+    }
+
+    #[tokio::test]
+    async fn configuration_routes_preserve_typed_effect_inputs_and_controls() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let owner_observed = Arc::clone(&observed);
+        let app = application_router(move |request: super::HttpApplicationRequest| {
+            let observed = Arc::clone(&owner_observed);
+            async move {
+                observed
+                    .lock()
+                    .expect("configuration operation observations")
+                    .push((
+                        request.operation,
+                        request.body.clone(),
+                        request.deadline.clone(),
+                        request.cancellation.context(),
+                    ));
+                let problem = ApplicationProblemEnvelope::new(
+                    ResultContractRef::new(SchemaId::new("schema.test.result").expect("schema"), 1)
+                        .expect("contract"),
+                    request.request_id,
+                    ApplicationProblem::unavailable(
+                        SafeDiagnostic::new("test.unavailable", "Unavailable").expect("diagnostic"),
+                    ),
+                )
+                .expect("test application problem envelope");
+                Ok::<_, ApplicationContractError>(
+                    CanonicalInvocationResult::<serde_json::Value>::new(
+                        BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
+                            .expect("binding"),
+                        Err(problem),
+                    ),
+                )
+            }
+        });
+        let deadline = Deadline::new(UtcMicros(15_000)).expect("deadline");
+        let cancellation =
+            CancellationSignal::active("cancel.http.configuration").expect("cancellation");
+        let controls = HttpApplicationControls {
+            deadline: deadline.clone(),
+            cancellation: cancellation.clone(),
+        };
+
+        for (index, operation) in HttpApplicationOperation::ALL
+            .into_iter()
+            .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::Configuration)
+            .enumerate()
+        {
+            let idempotency_key = format!("configuration.idempotency.http.{index}");
+            let body = serde_json::json!({"idempotency_key": idempotency_key});
+            let mut request = Request::post(operation.route_path())
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("HTTP request");
+            request.extensions_mut().insert(
+                RequestId::new(format!("request.http.configuration.{index}")).expect("request id"),
+            );
+            request.extensions_mut().insert(controls.clone());
+            let response = app.clone().oneshot(request).await.expect("router response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+
+        let observed = observed.lock().expect("configuration observations");
+        assert_eq!(
+            observed.len(),
+            tracedecay_application::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES.len()
+        );
+        for (index, (operation, body, actual_deadline, actual_cancellation)) in
+            observed.iter().enumerate()
+        {
+            assert_eq!(
+                body["idempotency_key"],
+                format!("configuration.idempotency.http.{index}")
+            );
+            assert_eq!(actual_deadline.as_ref(), Some(&deadline));
+            assert_eq!(
+                &actual_cancellation.token_id,
+                &cancellation.context().token_id
+            );
+            assert_eq!(
+                operation.application_route_path(),
+                format!("/application{}", operation.route_path())
+            );
+        }
+    }
+
+    #[test]
+    fn adapter_rejections_use_the_canonical_problem_envelope() {
+        let envelope = invalid_request_problem(
+            RequestId::new("request.http.invalid").unwrap(),
+            "http.invalid_query",
+            "The HTTP query is invalid",
+        )
+        .expect("static HTTP adapter problem is canonical");
+        let value = serde_json::to_value(envelope).expect("serialize canonical problem");
+
+        assert_eq!(value["request_id"], "request.http.invalid");
+        assert_eq!(value["problem"]["kind"], "invalid_request");
+        assert_eq!(value["problem"]["code"], "http.invalid_query");
+        assert_eq!(value["problem"]["owning_layer"], "adapter");
+        assert_eq!(value["problem"]["diagnostic"]["code"], "http.invalid_query");
+    }
+
+    #[test]
+    fn concealed_http_problem_omits_binding_identity() {
+        let problem = ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1).unwrap(),
+            RequestId::new("request.test").unwrap(),
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        )
+        .expect("test application problem envelope");
+        let result = Err(problem);
+        let value = serde_json::to_value(
+            CanonicalInvocationResult::<()>::new(
+                BindingId::new("binding.http.test.v1").unwrap(),
+                result,
+            )
+            .into_http_json(),
+        )
+        .unwrap();
+
+        assert_eq!(value["kind"], "problem");
+        assert!(value["value"].get("binding_id").is_none());
+    }
+
+    #[test]
+    fn non_concealed_http_problem_preserves_binding_identity() {
+        let problem = ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1).unwrap(),
+            RequestId::new("request.test").unwrap(),
+            ApplicationProblem::unavailable(
+                SafeDiagnostic::new("test.unavailable", "Temporarily unavailable").unwrap(),
+            ),
+        )
+        .expect("test application problem envelope");
+        let result = Err(problem);
+        let value = serde_json::to_value(
+            CanonicalInvocationResult::<()>::new(
+                BindingId::new("binding.http.test.v1").unwrap(),
+                result,
+            )
+            .into_http_json(),
+        )
+        .unwrap();
+
+        assert_eq!(value["kind"], "problem");
+        assert_eq!(value["value"]["binding_id"], "binding.http.test.v1");
+    }
+}

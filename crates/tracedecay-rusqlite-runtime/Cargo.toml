@@ -1,0 +1,31 @@
+[package]
+name = "tracedecay-rusqlite-runtime"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+description = "Bundled SQLite runtime for TraceDecay storage adapters"
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[features]
+test-transport = []
+
+[dependencies]
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "hooks", "limits", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ring = "0.17.14"
+sha2 = "0.11.0"
+thiserror = "2"
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+
+[dev-dependencies]
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+tempfile = "3"
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

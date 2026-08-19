@@ -1,0 +1,539 @@
+//! Public read-only Git intelligence and preview/apply surface bindings.
+//!
+//! Internal `stage_hunks` / `unstage_hunks` / `commit_index` capabilities remain
+//! application-only (no surface bindings). Adapters expose only `git_preview`
+//! and `git_apply`; query status/diff/history/blame/hunk reads are callable
+//! independently and expose no mutation capability.
+
+use schemars::JsonSchema;
+use tracedecay_domain::{GitIndexPreviewV1, GitIndexTransactionReceiptV1};
+use tracedecay_tool_catalog::{
+    AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
+    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
+    CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
+    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
+    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, OperationId, PrivacyClass,
+    ProfileId, ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    RouteExposureV1, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement,
+    ServiceId, StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
+};
+
+use crate::current_bindings;
+use crate::error::ApplicationContractError;
+use crate::git::{
+    GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitApplySurfaceRequest, GitBlameSurfaceRequest,
+    GitDiffSurfaceRequest, GitHistorySurfaceRequest, GitHubStackSignalExpandSurfaceRequest,
+    GitHubStackSignalExpandSurfaceResultV1, GitHunksSurfaceRequest, GitPreviewSurfaceRequest,
+    GitReadResultV1, GitStatusSurfaceRequest,
+};
+use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
+use crate::result::ResultContractRef;
+use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+
+struct SurfaceSpec {
+    capability: &'static str,
+    use_case: &'static str,
+    request_schema: &'static str,
+    result_schema: &'static str,
+    operation: &'static str,
+    effect: EffectClass,
+    summary: &'static str,
+    description: &'static str,
+    example: &'static str,
+    surfaces: &'static [BindingSurface],
+}
+
+const CLI_MCP_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
+const TRANSPORT_SURFACES: [BindingSurface; 3] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Http,
+];
+const SURFACE_SPECS: [SurfaceSpec; 8] = [
+    SurfaceSpec {
+        capability: "capability.application.git.status",
+        use_case: "use-case.application.git.status",
+        request_schema: "schema.application.git.status.request",
+        result_schema: "schema.application.git.status.result",
+        operation: "git_status",
+        effect: EffectClass::Read,
+        summary: "Read typed Git status",
+        description: "Read bounded typed status for one exact admitted project worktree.",
+        example: "Show typed Git status for this project",
+        surfaces: &TRANSPORT_SURFACES,
+    },
+    SurfaceSpec {
+        capability: "capability.application.git.diff",
+        use_case: "use-case.application.git.diff",
+        request_schema: "schema.application.git.diff.request",
+        result_schema: "schema.application.git.diff.result",
+        operation: "git_diff",
+        effect: EffectClass::Read,
+        summary: "Read a typed Git diff",
+        description: "Read one bounded working-tree, staged, or exact commit-range diff.",
+        example: "Show the typed staged Git diff",
+        surfaces: &TRANSPORT_SURFACES,
+    },
+    SurfaceSpec {
+        capability: "capability.application.git.history",
+        use_case: "use-case.application.git.history",
+        request_schema: "schema.application.git.history.request",
+        result_schema: "schema.application.git.history.result",
+        operation: "git_history",
+        effect: EffectClass::Read,
+        summary: "Read bounded Git history",
+        description: "Read bounded typed commit history for one exact admitted project worktree.",
+        example: "Show recent typed Git history",
+        surfaces: &TRANSPORT_SURFACES,
+    },
+    SurfaceSpec {
+        capability: "capability.application.git.blame",
+        use_case: "use-case.application.git.blame",
+        request_schema: "schema.application.git.blame.request",
+        result_schema: "schema.application.git.blame.result",
+        operation: "git_blame",
+        effect: EffectClass::Read,
+        summary: "Read typed Git blame",
+        description: "Read bounded typed line provenance for one admitted path.",
+        example: "Show typed Git blame for this file",
+        surfaces: &TRANSPORT_SURFACES,
+    },
+    SurfaceSpec {
+        capability: "capability.application.git.hunks",
+        use_case: "use-case.application.git.hunks",
+        request_schema: "schema.application.git.hunks.request",
+        result_schema: "schema.application.git.hunks.result",
+        operation: "git_hunks",
+        effect: EffectClass::Read,
+        summary: "Read typed Git hunk references",
+        description: "Mint bounded HunkRef evidence from one working-tree or staged diff.",
+        example: "List typed hunk references for the staged diff",
+        surfaces: &TRANSPORT_SURFACES,
+    },
+    SurfaceSpec {
+        capability: "capability.application.git.preview",
+        use_case: "use-case.application.git.preview",
+        request_schema: "schema.application.git.preview.request",
+        result_schema: "schema.application.git.preview.result",
+        operation: "git_preview",
+        effect: EffectClass::Preview,
+        summary: "Preview Git index mutations",
+        description: "Build an immutable preview for selected index mutations with CAS evidence.",
+        example: "Preview staging these hunks",
+        surfaces: &CLI_MCP_SURFACES,
+    },
+    SurfaceSpec {
+        capability: "capability.application.git.apply",
+        use_case: "use-case.application.git.apply",
+        request_schema: "schema.application.git.apply.request",
+        result_schema: "schema.application.git.apply.result",
+        operation: "git_apply",
+        // Public apply is a facade over preview-bound stage/unstage/commit.
+        // The exact Git-index effect class is fixed by the preview identity.
+        effect: EffectClass::Administrative,
+        summary: "Apply a Git index preview",
+        description: "Apply one exact preview identity through daemon-serialized index transactions.",
+        example: "Apply the previewed Git index mutation",
+        surfaces: &CLI_MCP_SURFACES,
+    },
+    SurfaceSpec {
+        capability: "capability.application.github-stack.signal-expand",
+        use_case: "use-case.application.github-stack.signal-expand",
+        request_schema: "schema.application.github-stack.signal-expand.request",
+        result_schema: "schema.application.github-stack.signal-expand.result",
+        operation: GITHUB_STACK_SIGNAL_EXPAND_OPERATION,
+        effect: EffectClass::Read,
+        summary: "Expand one admitted GitHub stack signal",
+        description: "Authorize and expand one durable GitHub stack signal through its exact signal identity and optional delivery-watermark guard.",
+        example: "Expand this admitted GitHub stack signal",
+        surfaces: &TRANSPORT_SURFACES,
+    },
+];
+
+/// Catalog contribution for public Git read and preview/apply bindings.
+pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, ApplicationContractError>
+{
+    let mut capabilities = Vec::with_capacity(SURFACE_SPECS.len());
+    let mut bindings = Vec::new();
+
+    for spec in &SURFACE_SPECS {
+        let capability_id = CapabilityId::new(spec.capability)?;
+        let (spec_bindings, binding_ids) = current_bindings(
+            &capability_id,
+            spec.operation,
+            spec.surfaces.iter().copied(),
+        )?;
+        bindings.extend(spec_bindings);
+        capabilities.push(capability(spec, capability_id, binding_ids)?);
+    }
+
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
+        contribution_id: ContributionId::new("contribution.application.git-surface")?,
+        depends_on: Vec::new(),
+        capabilities,
+        retrieval_primitives: Vec::new(),
+        bindings,
+    })?;
+    let schemas = git_executable_schemas(&contribution)?;
+    Ok(contribution.with_executable_schemas(schemas)?)
+}
+
+/// Daemon-owned public HTTP bindings for the independently callable Git
+/// reads and opaque GitHub stack-signal expansion. Preview and apply remain
+/// MCP/CLI-only because they require their separate mutation journeys.
+pub fn git_surface_executable_binding_registry()
+-> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
+    let contribution = git_surface_catalog_contribution()?;
+    let service_id = ServiceId::new("service.application.git")?;
+    let mut bindings = Vec::with_capacity(SURFACE_SPECS.len());
+
+    for spec in &SURFACE_SPECS {
+        let Some(route_segment) = git_surface_http_route(spec.operation) else {
+            continue;
+        };
+        let capability_id = CapabilityId::new(spec.capability)?;
+        let manifest = contribution
+            .capabilities()
+            .iter()
+            .find(|manifest| manifest.capability_id() == &capability_id)
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "Git executable capability",
+            })?;
+        let schema = contribution.executable_schema(&capability_id).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "Git executable schema",
+            },
+        )?;
+        let http_binding = contribution
+            .bindings()
+            .iter()
+            .find(|binding| {
+                binding.capability_id() == &capability_id
+                    && binding.surface() == BindingSurface::Http
+            })
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "Git HTTP binding",
+            })?;
+        bindings.push(ExecutableBindingAvailabilityV1::available(
+            ExecutableBindingV1::daemon_owned(
+                manifest,
+                OperationId::new(format!("operation.application.{}", spec.operation))?,
+                service_id.clone(),
+                schema.request_schema().clone(),
+                schema.result_schema().clone(),
+                CodecBindingKey::new(format!("codec.application.git.{}.json.v1", spec.operation))?,
+                RouteExposureV1::Public {
+                    binding_id: http_binding.binding_id().clone(),
+                    route_path: format!("/application/{route_segment}"),
+                },
+            )?,
+        ));
+    }
+    ExecutableBindingRegistryV1::new(bindings).map_err(Into::into)
+}
+
+fn git_surface_http_route(operation: &str) -> Option<&'static str> {
+    match operation {
+        "git_status" => Some("git/status"),
+        "git_diff" => Some("git/diff"),
+        "git_history" => Some("git/history"),
+        "git_blame" => Some("git/blame"),
+        "git_hunks" => Some("git/hunks"),
+        GITHUB_STACK_SIGNAL_EXPAND_OPERATION => Some("github-stack/signal-expand"),
+        _ => None,
+    }
+}
+
+/// Rust-owned request/result schema bodies for every public Git surface.
+///
+/// The shared `public_wire` types are the single wire authority: root
+/// transport parsing admits them and SDK generation emits them, so neither
+/// can drift from the other.
+fn git_executable_schemas(
+    contribution: &CatalogContributionV1,
+) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
+    let mut schemas = Vec::with_capacity(SURFACE_SPECS.len());
+    macro_rules! add {
+        ($operation:literal, $request:ty, GitIndexPreviewV1) => {
+            schemas.push(git_executable_schema::<$request, GitIndexPreviewV1>(
+                contribution,
+                $operation,
+                concat!("tracedecay_application::git::", stringify!($request)),
+                "tracedecay_domain::GitIndexPreviewV1",
+            )?)
+        };
+        ($operation:literal, $request:ty, GitIndexTransactionReceiptV1) => {
+            schemas.push(git_executable_schema::<
+                $request,
+                GitIndexTransactionReceiptV1,
+            >(
+                contribution,
+                $operation,
+                concat!("tracedecay_application::git::", stringify!($request)),
+                "tracedecay_domain::GitIndexTransactionReceiptV1",
+            )?)
+        };
+        ($operation:literal, $request:ty, $result:ty) => {
+            schemas.push(git_executable_schema::<$request, $result>(
+                contribution,
+                $operation,
+                concat!("tracedecay_application::git::", stringify!($request)),
+                concat!("tracedecay_application::git::", stringify!($result)),
+            )?)
+        };
+    }
+    add!("git_status", GitStatusSurfaceRequest, GitReadResultV1);
+    add!("git_diff", GitDiffSurfaceRequest, GitReadResultV1);
+    add!("git_history", GitHistorySurfaceRequest, GitReadResultV1);
+    add!("git_blame", GitBlameSurfaceRequest, GitReadResultV1);
+    add!("git_hunks", GitHunksSurfaceRequest, GitReadResultV1);
+    add!("git_preview", GitPreviewSurfaceRequest, GitIndexPreviewV1);
+    add!(
+        "git_apply",
+        GitApplySurfaceRequest,
+        GitIndexTransactionReceiptV1
+    );
+    add!(
+        "github_stack_signal_expand",
+        GitHubStackSignalExpandSurfaceRequest,
+        GitHubStackSignalExpandSurfaceResultV1
+    );
+    Ok(schemas)
+}
+
+fn git_executable_schema<Request, Response>(
+    contribution: &CatalogContributionV1,
+    operation: &str,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
+) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
+where
+    Request: JsonSchema,
+    Response: JsonSchema,
+{
+    let spec = SURFACE_SPECS
+        .iter()
+        .find(|spec| spec.operation == operation)
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "git schema operation",
+        })?;
+    let capability_id = CapabilityId::new(spec.capability)?;
+    let manifest = contribution
+        .capabilities()
+        .iter()
+        .find(|manifest| manifest.capability_id() == &capability_id)
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "git schema capability",
+        })?;
+    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
+        Request,
+        Response,
+    >(
+        manifest, request_rust_type_path, result_rust_type_path
+    )?)
+}
+
+pub fn git_surface_handler_descriptors()
+-> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
+    SURFACE_SPECS.iter().map(handler_descriptor).collect()
+}
+/// Resolve one public Git-surface operation to the exact capability and use
+/// case a daemon-minted request grant must name.
+pub fn git_surface_operation(
+    name: &str,
+) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
+    SURFACE_SPECS
+        .iter()
+        .find(|spec| spec.operation == name)
+        .map(|spec| {
+            let result_schema = schema(spec.result_schema)?;
+            Ok(ApplicationOperation::new(
+                CapabilityId::new(spec.capability)?,
+                UseCaseId::new(spec.use_case)?,
+                ResultContractRef::from_schema(&result_schema),
+                true,
+            ))
+        })
+        .transpose()
+}
+
+fn capability(
+    spec: &SurfaceSpec,
+    capability_id: CapabilityId,
+    binding_ids: Vec<BindingId>,
+) -> Result<CapabilityManifestV1, ApplicationContractError> {
+    Ok(CapabilityManifestV1::new(CapabilityManifestInputV1 {
+        capability_id,
+        use_case_id: UseCaseId::new(spec.use_case)?,
+        routing: RoutingContractV1::new(
+            1,
+            spec.summary,
+            spec.description,
+            vec![spec.example.to_owned()],
+        )?,
+        request_schema: schema(spec.request_schema)?,
+        result_schema: schema(spec.result_schema)?,
+        effect: spec.effect,
+        scope: ScopeRequirement::new(vec![
+            ScopeDimension::Project,
+            ScopeDimension::Repository,
+            ScopeDimension::Worktree,
+        ])?,
+        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
+        denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+        privacy: PrivacyClass::ScopedMetadata,
+        lifecycle: LifecycleClass::Resumable,
+        streaming: StreamingContract::Unsupported,
+        cancellation: CancellationContract::cooperative(cancellation_points(spec.effect))?,
+        deadline: DeadlineContract::new(30_000, deadline_behavior(spec.effect))?,
+        pagination: None,
+        idempotency: if spec.effect.is_effect() {
+            IdempotencyContract::Required
+        } else {
+            IdempotencyContract::NotRequired
+        },
+        inverse: if spec.effect.is_effect() {
+            tracedecay_tool_catalog::InverseContract::Unavailable {
+                reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+            }
+        } else {
+            tracedecay_tool_catalog::InverseContract::NotApplicable
+        },
+        authority_revalidation: RevalidationContract::required(vec![
+            RevalidationPoint::Authority,
+            RevalidationPoint::Scope,
+            RevalidationPoint::Policy,
+            RevalidationPoint::Configuration,
+            RevalidationPoint::ExpectedState,
+        ])?,
+        reconciliation: if spec.effect.is_effect() {
+            ReconciliationContract::Required
+        } else {
+            ReconciliationContract::NotRequired
+        },
+        receipt: if spec.effect.is_effect() {
+            ReceiptContract::DurableEffect
+        } else {
+            ReceiptContract::Operation
+        },
+        terminal_states: TerminalStateContract::new(terminal_states(spec.effect))?,
+        availability: AvailabilityContract::Available,
+        binding_ids,
+        profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
+        required_features: Vec::new(),
+    })?)
+}
+
+fn cancellation_points(effect: EffectClass) -> Vec<CancellationPoint> {
+    if effect.is_effect() {
+        vec![
+            CancellationPoint::BeforeAdmission,
+            CancellationPoint::BeforeEffect,
+            CancellationPoint::EffectInFlight,
+            CancellationPoint::AfterCommit,
+        ]
+    } else {
+        vec![
+            CancellationPoint::BeforeAdmission,
+            CancellationPoint::BeforeRead,
+            CancellationPoint::DuringRead,
+        ]
+    }
+}
+
+fn deadline_behavior(effect: EffectClass) -> DeadlineBehavior {
+    if effect.is_effect() {
+        DeadlineBehavior::ReturnEffectReceipt
+    } else {
+        DeadlineBehavior::ReturnOperationReceipt
+    }
+}
+
+fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
+    if effect.is_effect() {
+        vec![
+            TerminalState::Completed,
+            TerminalState::Cancelled,
+            TerminalState::TimedOut,
+            TerminalState::Failed,
+            TerminalState::EffectUnknown,
+            TerminalState::Partial,
+        ]
+    } else {
+        vec![
+            TerminalState::Completed,
+            TerminalState::Cancelled,
+            TerminalState::TimedOut,
+            TerminalState::Failed,
+            TerminalState::Partial,
+        ]
+    }
+}
+
+fn handler_descriptor(
+    spec: &SurfaceSpec,
+) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
+    let result_schema = schema(spec.result_schema)?;
+    ApplicationHandlerDescriptor::new(
+        ApplicationOperation::new(
+            CapabilityId::new(spec.capability)?,
+            UseCaseId::new(spec.use_case)?,
+            ResultContractRef::from_schema(&result_schema),
+            true,
+        ),
+        schema(spec.request_schema)?,
+        result_schema,
+    )
+}
+
+fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
+    Ok(SchemaRef::new(SchemaId::new(id)?, 1)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_git_bindings_include_reads_and_exclude_internal_index_steps() {
+        let contribution = git_surface_catalog_contribution().expect("contribution");
+        let operations: Vec<_> = contribution
+            .bindings()
+            .iter()
+            .map(|binding| binding.operation().as_str().to_owned())
+            .collect();
+        for expected in [
+            "git_status",
+            "git_diff",
+            "git_history",
+            "git_blame",
+            "git_hunks",
+            "git_preview",
+            "git_apply",
+        ] {
+            assert!(operations.iter().any(|name| name == expected), "{expected}");
+        }
+        assert!(!operations.iter().any(|name| {
+            name.contains("stage_hunks")
+                || name.contains("unstage_hunks")
+                || name.contains("commit_index")
+        }));
+        assert!(contribution.bindings().iter().all(|binding| {
+            binding.surface() != BindingSurface::Http
+                || !matches!(binding.operation().as_str(), "git_preview" | "git_apply")
+        }));
+        for operation in [
+            "git_status",
+            "git_diff",
+            "git_history",
+            "git_blame",
+            "git_hunks",
+        ] {
+            assert!(contribution.bindings().iter().any(|binding| {
+                binding.operation().as_str() == operation
+                    && binding.surface() == BindingSurface::Http
+            }));
+        }
+    }
+}

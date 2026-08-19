@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/tracedecay-api",
+    "crates/tracedecay-application",
     "crates/tracedecay-automation",
     "crates/tracedecay-capture",
     "crates/tracedecay-domain",
@@ -7,15 +9,26 @@ members = [
     "crates/tracedecay-code-index",
     "crates/tracedecay-agent-hosts",
     "crates/tracedecay-dashboard-api",
+    "crates/tracedecay-host-integration",
+    "crates/tracedecay-hooks",
     "crates/tracedecay-jsonrpc",
     "crates/tracedecay-lsp",
     "crates/tracedecay-migrate",
+    "crates/tracedecay-policy",
+    "crates/tracedecay-private-fs",
     "crates/tracedecay-runtime-core",
+    "crates/tracedecay-rusqlite-runtime",
     "crates/tracedecay-sessions",
+    "crates/tracedecay-store",
+    "crates/tracedecay-temporal-query",
+    "crates/tracedecay-tool-catalog",
     "crates/tracedecay-usecases",
 ]
 resolver = "3"
 exclude = [".worktrees", ".codex-worktrees"]
+
+[workspace.package]
+edition = "2024"
 
 [package]
 name = "tracedecay"

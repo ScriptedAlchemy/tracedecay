@@ -1,0 +1,39 @@
+[package]
+name = "tracedecay-application"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Transport-neutral application contracts for TraceDecay V2"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[features]
+# Mounts the native `gix` historical-blob reader beside its port. Off by
+# default so the crate stays a pure contract surface for consumers that only
+# need the typed values.
+native-git = ["dep:gix"]
+
+[dependencies]
+gix = { version = "=0.86.0", default-features = false, features = [
+    "revision",
+    "blob-diff",
+    "parallel",
+    "sha1",
+    "sha256",
+    "status",
+], optional = true }
+schemars = "1.2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+# These are test modules declared inside automation/tests.rs, which is linked
+# into the lib via #[path]; shear cannot follow #[path] inclusions.
+[package.metadata.cargo-shear]
+ignored-paths = ["src/retained_surfaces/sdk/results/automation/admission_binding.rs", "src/retained_surfaces/sdk/results/automation/outer_partial.rs"]

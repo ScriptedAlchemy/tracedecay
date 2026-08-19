@@ -1,14 +1,10 @@
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+//! Legacy graph, extraction, traversal, and context contracts shared by the
+//! root façade and the query subsystem.
+
 use std::collections::{HashMap, HashSet};
 
-/// `serde` `skip_serializing_if` predicate: skip a `bool` field when it is
-/// `false`. Keeps default-off flags (e.g. `dry_run`) out of tool output unless
-/// they are actually set.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_false(value: &bool) -> bool {
-    !*value
-}
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Kinds of nodes in the code graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -83,12 +79,10 @@ pub enum NodeKind {
     PascalUnit,
     PascalProgram,
     PascalRecord,
-    // Protobuf-specific
-    #[cfg(feature = "lang-protobuf")]
+    // Protobuf-specific. These are unconditional domain vocabulary; parser
+    // availability remains a root-crate feature concern.
     ProtoMessage,
-    #[cfg(feature = "lang-protobuf")]
     ProtoService,
-    #[cfg(feature = "lang-protobuf")]
     ProtoRpc,
 }
 
@@ -157,11 +151,8 @@ impl NodeKind {
             NodeKind::PascalUnit => "pascal_unit",
             NodeKind::PascalProgram => "pascal_program",
             NodeKind::PascalRecord => "pascal_record",
-            #[cfg(feature = "lang-protobuf")]
             NodeKind::ProtoMessage => "proto_message",
-            #[cfg(feature = "lang-protobuf")]
             NodeKind::ProtoService => "proto_service",
-            #[cfg(feature = "lang-protobuf")]
             NodeKind::ProtoRpc => "proto_rpc",
         }
     }
@@ -229,11 +220,8 @@ impl NodeKind {
             "pascal_unit" => Some(NodeKind::PascalUnit),
             "pascal_program" => Some(NodeKind::PascalProgram),
             "pascal_record" => Some(NodeKind::PascalRecord),
-            #[cfg(feature = "lang-protobuf")]
             "proto_message" => Some(NodeKind::ProtoMessage),
-            #[cfg(feature = "lang-protobuf")]
             "proto_service" => Some(NodeKind::ProtoService),
-            #[cfg(feature = "lang-protobuf")]
             "proto_rpc" => Some(NodeKind::ProtoRpc),
             _ => None,
         }
@@ -429,7 +417,7 @@ impl ExtractionResult {
     /// insert time but keep its edges, we get FK constraint violations.
     pub fn sanitize(&mut self) {
         let before = self.nodes.len();
-        let bad_ids: std::collections::HashSet<String> = self
+        let bad_ids: HashSet<String> = self
             .nodes
             .iter()
             .filter(|n| n.name.is_empty())
@@ -451,6 +439,45 @@ impl ExtractionResult {
             self.errors
                 .push(format!("stripped {removed} node(s) with empty names"));
         }
+    }
+
+    /// Deterministic canonical row order shared by full-document and
+    /// incremental extraction, so identical content serializes byte-identically
+    /// regardless of traversal path: file rows first, then source position with
+    /// enclosing (larger) spans before their children, with the content-hash id
+    /// as the final total-order tiebreaker.
+    pub fn canonicalize_order(&mut self) {
+        self.nodes.sort_by(|left, right| {
+            let left_is_file = left.kind == NodeKind::File;
+            let right_is_file = right.kind == NodeKind::File;
+            right_is_file
+                .cmp(&left_is_file)
+                .then_with(|| left.start_line.cmp(&right.start_line))
+                .then_with(|| left.start_column.cmp(&right.start_column))
+                .then_with(|| right.end_line.cmp(&left.end_line))
+                .then_with(|| right.end_column.cmp(&left.end_column))
+                .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.edges.sort_by(|left, right| {
+            left.line
+                .cmp(&right.line)
+                .then_with(|| left.source.cmp(&right.source))
+                .then_with(|| left.target.cmp(&right.target))
+                .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+        });
+        self.unresolved_refs.sort_by(|left, right| {
+            left.line
+                .cmp(&right.line)
+                .then_with(|| left.column.cmp(&right.column))
+                .then_with(|| left.from_node_id.cmp(&right.from_node_id))
+                .then_with(|| left.reference_name.cmp(&right.reference_name))
+                .then_with(|| {
+                    left.reference_kind
+                        .as_str()
+                        .cmp(right.reference_kind.as_str())
+                })
+        });
     }
 }
 
@@ -622,7 +649,12 @@ pub fn generate_node_id(file_path: &str, kind: &NodeKind, name: &str, line: u32)
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
-    let hex_str = hex::encode(hash);
+    let mut hex_str = String::with_capacity(hash.len() * 2);
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+    for byte in hash {
+        hex_str.push(HEX_DIGITS[usize::from(byte >> 4)] as char);
+        hex_str.push(HEX_DIGITS[usize::from(byte & 0x0f)] as char);
+    }
     format!("{}:{}", kind.as_str(), &hex_str[..32])
 }
 
@@ -644,6 +676,13 @@ pub struct ResolvedRef {
     pub resolved_by: String,
 }
 
+/// Serde skip helper: skips serializing a bool field when it is
+/// `false`. Keeps default-off flags (e.g. `dry_run`) out of tool output unless
+/// they are actually set.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 /// Result of a single string replacement edit.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EditResult {

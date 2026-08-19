@@ -1,0 +1,25 @@
+[package]
+name = "tracedecay-store"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+description = "Store-facing persistence contracts for TraceDecay"
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[dependencies]
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
+
+# fault_harness.rs is linked into the lib via #[path] under the
+# tracedecay_observation_fault_harness cfg; shear cannot follow #[path].
+[package.metadata.cargo-shear]
+ignored-paths = ["test-support/fault_harness.rs"]

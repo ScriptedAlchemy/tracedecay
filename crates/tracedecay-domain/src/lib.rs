@@ -1,30 +1,75 @@
-#![deny(clippy::all)]
-#![warn(clippy::pedantic)]
-#![cfg_attr(not(test), deny(clippy::unwrap_used))]
-#![cfg_attr(not(test), deny(clippy::expect_used))]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::wildcard_imports)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::unnecessary_wraps)]
-#![allow(clippy::single_match)]
-#![allow(clippy::needless_borrow)]
-#![allow(clippy::map_unwrap_or)]
-#![allow(clippy::redundant_closure)]
-#![allow(clippy::redundant_closure_for_method_calls)]
-#![allow(clippy::format_push_string)]
+//! Pure, versioned domain contracts for TraceDecay V2.
+//!
+//! This crate contains values and validation only. It performs no I/O,
+//! persistence, query execution, policy evaluation, host integration, or async work.
 
-//! Pure, storage-neutral `TraceDecay` domain contracts.
-
+pub mod canonical_text;
 pub mod code_intelligence;
+pub mod configuration;
+pub mod diagnostics;
+pub mod external_source;
+pub mod feedback;
+pub mod framed_log;
+pub mod git;
+pub mod integration;
+pub mod memory;
+pub mod multi_root;
+pub mod observability;
+pub mod observation;
+pub mod remote;
+pub mod repository;
+pub mod research;
+pub mod retrieval;
+pub mod session;
+pub mod session_derived;
+pub mod source_path_policy;
+pub mod work;
+pub mod work_duplicate_adjudication;
+pub mod work_execution_snapshot;
+pub mod work_placement;
+pub mod work_product;
+pub mod work_product_event;
+pub mod work_product_projection;
+pub mod work_read;
+pub mod work_routing;
+pub mod work_run_control;
+pub mod work_runtime;
+pub mod workflow;
+pub mod workflow_fan_out_census;
+pub mod workflow_receipt;
+pub mod workflow_run;
 
 pub use code_intelligence::*;
+pub use configuration::*;
+pub use diagnostics::*;
+pub use external_source::*;
+pub use feedback::*;
+pub use framed_log::*;
+pub use git::*;
+pub use integration::*;
+pub use memory::*;
+pub use multi_root::*;
+pub use observability::*;
+pub use observation::*;
+pub use remote::*;
+pub use repository::*;
+pub use research::*;
+pub use retrieval::*;
+pub use session::*;
+pub use session_derived::*;
+pub use source_path_policy::*;
+pub use work::*;
+pub use work_duplicate_adjudication::*;
+pub use work_execution_snapshot::*;
+pub use work_placement::*;
+pub use work_product::*;
+pub use work_product_event::*;
+pub use work_product_projection::*;
+pub use work_read::*;
+pub use work_routing::*;
+pub use work_run_control::*;
+pub use work_runtime::*;
+pub use workflow::*;
+pub use workflow_fan_out_census::*;
+pub use workflow_receipt::*;
+pub use workflow_run::*;
