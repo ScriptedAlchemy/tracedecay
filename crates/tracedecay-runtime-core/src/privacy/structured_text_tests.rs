@@ -352,6 +352,35 @@ fn lcm_json_duplicate_keys_are_rejected_before_value_materialization() {
 }
 
 #[test]
+fn lcm_json_credential_bearing_keys_quarantine_instead_of_faulting_the_receipt() {
+    // A successfully parsed LCM JSON payload whose object *key* carries
+    // credential material cannot be redacted in place (rewriting a key changes
+    // the document's structure), so the sanitizer refuses it fail-closed. That
+    // refusal is the sanitizer doing its job — it must surface as a structured
+    // quarantine, never as a receipt-construction fault.
+    let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
+    let raw = format!(r#"{{"{credential_key}":"ordinary-value"}}"#);
+
+    assert!(matches!(
+        sanitize_lcm_payload_text(&raw),
+        Err(DetectionError::StructuredQuarantine)
+    ));
+}
+
+#[test]
+fn lcm_json_credential_values_under_ordinary_keys_still_redact_durably() {
+    // The quarantine above is specific to key positions. The same credential in
+    // a *value* position is redactable, so sanitization must stay a durable
+    // redaction rather than widening into a quarantine of every credential hit.
+    let credential = ["sk", "-test-", "1234567890abcdef"].concat();
+    let raw = format!(r#"{{"note":"{credential}"}}"#);
+
+    let sanitized = sanitize_lcm_payload_text(&raw).expect("credential values redact durably");
+    assert!(!sanitized.sanitized_text().contains(&credential));
+    assert!(!sanitized.findings().is_empty());
+}
+
+#[test]
 fn json_preflight_rejects_depth_beyond_the_canonical_parse_limit() {
     let limits = ParseLimits::default_policy();
     let mut raw = String::new();
