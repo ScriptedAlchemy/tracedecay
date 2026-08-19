@@ -381,6 +381,30 @@ async fn drain_hook_delivery_receipts(
     }
 }
 
+/// Replay admission for one retained envelope: re-resolve the native session
+/// behind the protected locator from the registered lifecycle authority, then
+/// run the ordinary daemon admission under that authoritative identity.
+async fn admit_replayed_envelope(
+    graph: &crate::tracedecay::TraceDecay,
+    envelope: HookEventEnvelopeV2,
+) -> HookV2AdmissionOutcomeV1 {
+    admit_replayed_envelope_with_authoritative_session(
+        envelope,
+        |project_id, worktree_id, protected_session_id| async move {
+            crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
+                project_id,
+                worktree_id,
+                protected_session_id,
+            )
+            .await
+        },
+        |envelope, native_session_id| async move {
+            admit_hook_v2_envelope(graph, &envelope, native_session_id, hook_replay_now()).await
+        },
+    )
+    .await
+}
+
 async fn drain_all_hosts(
     graph: &crate::tracedecay::TraceDecay,
     data_root: &Path,
@@ -390,40 +414,10 @@ async fn drain_all_hosts(
         let now = hook_replay_now();
         drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await;
         for envelope in hook_v2_pending_work_envelopes(data_root, *host, now) {
-            let _ = admit_replayed_envelope_with_authoritative_session(
-                envelope,
-                |project_id, worktree_id, protected_session_id| async move {
-                    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
-                        project_id,
-                        worktree_id,
-                        protected_session_id,
-                    )
-                    .await
-                },
-                |envelope, native_session_id| async move {
-                    admit_hook_v2_envelope(graph, &envelope, native_session_id, hook_replay_now())
-                        .await
-                },
-            )
-            .await;
+            let _ = admit_replayed_envelope(graph, envelope).await;
         }
         let report = drain_host_spool_once(data_root, *host, now, |envelope| async move {
-            admit_replayed_envelope_with_authoritative_session(
-                envelope,
-                |project_id, worktree_id, protected_session_id| async move {
-                    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
-                        project_id,
-                        worktree_id,
-                        protected_session_id,
-                    )
-                    .await
-                },
-                |envelope, native_session_id| async move {
-                    admit_hook_v2_envelope(graph, &envelope, native_session_id, hook_replay_now())
-                        .await
-                },
-            )
-            .await
+            admit_replayed_envelope(graph, envelope).await
         })
         .await;
         if let Some(report) = report

@@ -10,6 +10,16 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
+use tracedecay_application::RequestContext;
+use tracedecay_domain::UtcMicros;
+use tracedecay_usecases::configuration::ConfigurationCurrentStateV1;
+
+use crate::agents::context_scout_owner::ProjectContextScoutOwnerV1;
+use crate::agents::context_scout_ports::{
+    AdmittedContextScoutHookV1, ContextScoutAddressResolveOutcomeV1, ContextScoutAuthorityPinV1,
+    ContextScoutLifecycleAddressV1, ProjectContextScoutAddressRegistryV1,
+};
+use crate::agents::context_scout_v2::ContextScoutAddressV1;
 use crate::config::TraceDecayConfig;
 use crate::db::{Database, DatabaseStorageTelemetryHandle};
 use crate::errors::Result;
@@ -56,8 +66,7 @@ pub struct TraceDecay {
     /// new `TraceDecay` rather than mutating an existing one, so the resolved
     /// path is safe to cache for the instance's lifetime.
     db_path_cache: OnceLock<PathBuf>,
-    context_scout_owner:
-        Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
+    context_scout_owner: Option<Arc<ProjectContextScoutOwnerV1>>,
     context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
     #[cfg(any(test, feature = "test-transport"))]
     test_runtime_guard: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
@@ -68,11 +77,11 @@ const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;
 
 #[derive(Clone)]
 struct MountedContextScoutClaimAuthorityV1 {
-    registry: Arc<crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
-    pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
-    context: tracedecay_application::RequestContext,
-    lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
-    address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    registry: Arc<ProjectContextScoutAddressRegistryV1>,
+    pin: ContextScoutAuthorityPinV1,
+    context: RequestContext,
+    lifecycle: ContextScoutLifecycleAddressV1,
+    address: ContextScoutAddressV1,
     input_watermark: [u8; 32],
 }
 
@@ -113,9 +122,7 @@ impl TraceDecay {
         &self.store_layout
     }
 
-    pub(crate) fn context_scout_owner(
-        &self,
-    ) -> Option<&Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>> {
+    pub(crate) fn context_scout_owner(&self) -> Option<&Arc<ProjectContextScoutOwnerV1>> {
         self.context_scout_owner.as_ref()
     }
 
@@ -127,23 +134,21 @@ impl TraceDecay {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn mount_current_context_scout_claim_authority(
         &self,
-        registry: Arc<crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
-        hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
-        pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
-        context: tracedecay_application::RequestContext,
-        lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
-        address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+        registry: Arc<ProjectContextScoutAddressRegistryV1>,
+        hook: &AdmittedContextScoutHookV1,
+        pin: ContextScoutAuthorityPinV1,
+        context: RequestContext,
+        lifecycle: ContextScoutLifecycleAddressV1,
+        address: ContextScoutAddressV1,
         input_watermark: [u8; 32],
-        observed_at: tracedecay_domain::UtcMicros,
+        observed_at: UtcMicros,
     ) -> bool {
         if input_watermark == [0; 32]
             || !self.context_scout_configuration_is_current(&pin).await
             || registry
                 .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
                 .await
-                != crate::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
-                    address,
-                )
+                != ContextScoutAddressResolveOutcomeV1::Resolved(address)
         {
             return false;
         }
@@ -176,13 +181,10 @@ impl TraceDecay {
     /// the mounted address for this hook.
     pub(crate) async fn resolve_current_context_scout_claim_authority(
         &self,
-        hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
-        lifecycle: &crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
-        observed_at: tracedecay_domain::UtcMicros,
-    ) -> Option<(
-        crate::agents::context_scout_v2::ContextScoutAddressV1,
-        [u8; 32],
-    )> {
+        hook: &AdmittedContextScoutHookV1,
+        lifecycle: &ContextScoutLifecycleAddressV1,
+        observed_at: UtcMicros,
+    ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
         let mounted = self
             .context_scout_claim_authorities
             .read()
@@ -200,11 +202,8 @@ impl TraceDecay {
             .registry
             .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
             .await;
-        let resolved = (resolved
-            == crate::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
-                mounted.address,
-            ))
-        .then_some((mounted.address, mounted.input_watermark));
+        let resolved = (resolved == ContextScoutAddressResolveOutcomeV1::Resolved(mounted.address))
+            .then_some((mounted.address, mounted.input_watermark));
         // Re-check currentness after the registry read: a configuration
         // revision that lands mid-resolve must not hand out a stale claim.
         if resolved.is_some()
@@ -220,19 +219,17 @@ impl TraceDecay {
 
     async fn context_scout_configuration_is_current(
         &self,
-        pin: &crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+        pin: &ContextScoutAuthorityPinV1,
     ) -> bool {
         self.configuration_runtime
             .client()
             .current()
             .await
             .ok()
-            .map(
-                |pinned| tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
-                    revision_id: pinned.revision_id,
-                    snapshot: pinned.snapshot,
-                },
-            )
+            .map(|pinned| ConfigurationCurrentStateV1 {
+                revision_id: pinned.revision_id,
+                snapshot: pinned.snapshot,
+            })
             .is_some_and(|current| pin.configuration().matches_current(&current))
     }
 }

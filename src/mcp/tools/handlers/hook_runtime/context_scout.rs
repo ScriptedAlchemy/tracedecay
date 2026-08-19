@@ -466,36 +466,24 @@ pub(super) async fn hook_v2_scout_read(
         .and_then(|limit| usize::try_from(limit).ok())
         .unwrap_or(8);
     let value = match surface {
-        ContextScoutReadSurfaceV1::Recent => {
-            owner.recent_exact(address, limit).await.and_then(|recent| {
-                serde_json::to_value(recent).map_err(|_| {
-                    crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits
-                })
-            })
-        }
+        ContextScoutReadSurfaceV1::Recent => scout_read_payload(owner.recent_exact(address, limit).await),
         ContextScoutReadSurfaceV1::Explain => {
-            owner
-                .explain_exact(address, limit)
-                .await
-                .and_then(|explanation| {
-                    serde_json::to_value(explanation).map_err(|_| {
-                        crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits
-                    })
-                })
+            scout_read_payload(owner.explain_exact(address, limit).await)
         }
-        ContextScoutReadSurfaceV1::Capability => owner.capability().await.and_then(|capability| {
-            serde_json::to_value(capability)
-                .map_err(|_| crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits)
-        }),
-        ContextScoutReadSurfaceV1::Budget => owner.budget().await.and_then(|budget| {
-            serde_json::to_value(budget)
-                .map_err(|_| crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits)
-        }),
+        ContextScoutReadSurfaceV1::Capability => scout_read_payload(owner.capability().await),
+        ContextScoutReadSurfaceV1::Budget => scout_read_payload(owner.budget().await),
     };
-    match value {
-        Ok(value) => Ok(json!({ "action": action, "status": "ready", "value": value })),
-        Err(_) => Ok(json!({ "action": action, "status": "unavailable" })),
-    }
+    Ok(match value {
+        Some(value) => json!({ "action": action, "status": "ready", "value": value }),
+        None => json!({ "action": action, "status": "unavailable" }),
+    })
+}
+
+/// Collapses a typed Scout read into the hook response payload. A failed read
+/// and an unserializable value are both the typed `unavailable` state.
+fn scout_read_payload<T: serde::Serialize, E>(read: std::result::Result<T, E>) -> Option<Value> {
+    read.ok()
+        .and_then(|value| serde_json::to_value(value).ok())
 }
 
 fn scout_store_outcome(
