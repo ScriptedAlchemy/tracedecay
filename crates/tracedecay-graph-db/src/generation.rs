@@ -652,6 +652,8 @@ pub(crate) fn verify_recovered_generation(
 thread_local! {
     static RECOVERED_GENERATION_ENUMERATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static MANIFEST_CANONICALIZATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -662,6 +664,16 @@ pub(crate) fn reset_recovered_generation_enumerations() {
 #[cfg(test)]
 pub(crate) fn recovered_generation_enumerations() -> usize {
     RECOVERED_GENERATION_ENUMERATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_manifest_canonicalizations() {
+    MANIFEST_CANONICALIZATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn manifest_canonicalizations() -> usize {
+    MANIFEST_CANONICALIZATIONS.with(std::cell::Cell::get)
 }
 
 fn physical_namespace_projection_map(
@@ -716,6 +728,8 @@ fn recovered_generation_digest(
     manifest: &GraphGenerationManifest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<String, GraphDbError> {
+    #[cfg(test)]
+    MANIFEST_CANONICALIZATIONS.with(|count| count.set(count.get() + 1));
     let GraphGenerationManifest {
         projection,
         generation,

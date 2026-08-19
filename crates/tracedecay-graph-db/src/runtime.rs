@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 use parking_lot::lock_api::ArcRwLockReadGuard;
-use parking_lot::{RawRwLock, RwLock as ParkingRwLock};
+use parking_lot::{RawRwLock, RwLock as ParkingRwLock, RwLockUpgradableReadGuard};
 
 use crate::lease::VerifiedGenerationState;
 use crate::location::{PersistentGraphStoreState, ValidatedOpen};
@@ -208,56 +208,66 @@ impl GraphDb {
         for relation in &replacement.relations {
             relation.validate()?;
         }
-        let _snapshot_gate = self.inner.snapshot_gate.write();
+        // The replacement batch is derived from the currently stored rows,
+        // so derive and hash it behind an upgradable claim: snapshot readers
+        // proceed while writers queue, keeping the enumerated rows exact.
+        // The exclusive claim covers only the apply.
+        let snapshot_gate = self.inner.snapshot_gate.upgradable_read();
+        let (batch, digest) = {
+            let guard = self.read_guard()?;
+            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+            if let ReplacementPrecondition::Expected(expected) = precondition {
+                let current =
+                    latest_projection(database, &replacement.namespace, &replacement.projection)?
+                        .map(|state| state.commit.watermark);
+                if current.as_ref() != expected {
+                    return Err(GraphDbError::Conflict);
+                }
+            }
+            let retained: BTreeSet<_> = replacement
+                .entities
+                .iter()
+                .map(|entity| entity.identity.clone())
+                .collect();
+            let mut mutations = Vec::new();
+            for relation in
+                projection_relations(database, &replacement.namespace, &replacement.projection)?
+            {
+                mutations.push(GraphMutation::DeleteRelation(relation.relation.identity));
+            }
+            for entity in
+                projection_entities(database, &replacement.namespace, &replacement.projection)?
+            {
+                if !retained.contains(&entity.entity.identity) {
+                    mutations.push(GraphMutation::DeleteEntity(entity.entity.identity));
+                }
+            }
+            mutations.extend(
+                replacement
+                    .entities
+                    .into_iter()
+                    .map(GraphMutation::UpsertEntity),
+            );
+            mutations.extend(
+                replacement
+                    .relations
+                    .into_iter()
+                    .map(GraphMutation::UpsertRelation),
+            );
+            let mut batch = GraphWriteBatch::new(
+                replacement.namespace,
+                replacement.projection,
+                replacement.source_generation,
+                replacement.next_watermark,
+                mutations,
+                replacement.cancellation,
+            )?;
+            let digest = batch.validate_and_digest()?;
+            (batch, digest)
+        };
+        let _snapshot_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        if let ReplacementPrecondition::Expected(expected) = precondition {
-            let current =
-                latest_projection(database, &replacement.namespace, &replacement.projection)?
-                    .map(|state| state.commit.watermark);
-            if current.as_ref() != expected {
-                return Err(GraphDbError::Conflict);
-            }
-        }
-        let retained: BTreeSet<_> = replacement
-            .entities
-            .iter()
-            .map(|entity| entity.identity.clone())
-            .collect();
-        let mut mutations = Vec::new();
-        for relation in
-            projection_relations(database, &replacement.namespace, &replacement.projection)?
-        {
-            mutations.push(GraphMutation::DeleteRelation(relation.relation.identity));
-        }
-        for entity in
-            projection_entities(database, &replacement.namespace, &replacement.projection)?
-        {
-            if !retained.contains(&entity.entity.identity) {
-                mutations.push(GraphMutation::DeleteEntity(entity.entity.identity));
-            }
-        }
-        mutations.extend(
-            replacement
-                .entities
-                .into_iter()
-                .map(GraphMutation::UpsertEntity),
-        );
-        mutations.extend(
-            replacement
-                .relations
-                .into_iter()
-                .map(GraphMutation::UpsertRelation),
-        );
-        let mut batch = GraphWriteBatch::new(
-            replacement.namespace,
-            replacement.projection,
-            replacement.source_generation,
-            replacement.next_watermark,
-            mutations,
-            replacement.cancellation,
-        )?;
-        let digest = batch.validate_and_digest()?;
         let mut state = self.state_write_guard()?;
         self.apply_locked(
             database,
