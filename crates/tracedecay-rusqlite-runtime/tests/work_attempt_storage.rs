@@ -2,6 +2,7 @@
 //! admission, fenced compare-and-swap transitions, authority isolation, and
 //! restart durability over the registered exact-SQL channel.
 
+mod common;
 mod work_registered_store;
 
 use std::{
@@ -40,17 +41,8 @@ use tracedecay_domain::{
     WorkflowOutputName, WorktreeId,
 };
 
+use common::fixture_abs_root;
 use work_registered_store::RegisteredWorkStore;
-
-/// Platform-absolute fixture root: the work contracts require
-/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
-fn fixture_abs_root(posix: &str) -> String {
-    if cfg!(windows) {
-        format!("C:{}", posix.replace('/', "\\"))
-    } else {
-        posix.to_owned()
-    }
-}
 
 fn id<T>(value: &str) -> T
 where

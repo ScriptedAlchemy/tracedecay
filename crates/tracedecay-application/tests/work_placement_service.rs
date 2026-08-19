@@ -9,7 +9,11 @@
 //! and states that "retention expiry is eligibility for a fresh cleanup
 //! preflight, not delete authority".
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
+
+use common::fixture_abs_root;
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
@@ -26,16 +30,6 @@ use tracedecay_domain::{
     WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-
-/// Platform-absolute fixture root: the placement contracts require
-/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
-fn fixture_abs_root(posix: &str) -> String {
-    if cfg!(windows) {
-        format!("C:{}", posix.replace('/', "\\"))
-    } else {
-        posix.to_owned()
-    }
-}
 
 fn id<T>(value: &str) -> T
 where

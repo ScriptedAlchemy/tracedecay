@@ -10,6 +10,7 @@
 //! a crash between the service's read and its write, so the rule is tested
 //! where it is enforced.
 
+mod common;
 mod work_registered_store;
 
 use std::collections::BTreeSet;
@@ -22,17 +23,8 @@ use tracedecay_domain::{
     WorkPlacementTargetV1, WorkPlacementV1, WorktreeId,
 };
 
+use common::fixture_abs_root;
 use work_registered_store::RegisteredWorkStore;
-
-/// Platform-absolute fixture root: placement target roots require
-/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
-fn fixture_abs_root(posix: &str) -> String {
-    if cfg!(windows) {
-        format!("C:{}", posix.replace('/', "\\"))
-    } else {
-        posix.to_owned()
-    }
-}
 
 static ROOT: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(|| fixture_abs_root("/workspace/placement-storage"));
