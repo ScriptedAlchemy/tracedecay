@@ -453,8 +453,16 @@ impl AdmittedProjectionArtifactV1 {
             root: install_path.to_path_buf(),
             members: model.members.clone(),
         };
-        // Revalidate all members before exposing this authority. Each future
-        // session open repeats the same check when it reads the bytes.
+        // Check every required member's structural pin (declared entry,
+        // normalized path, regular non-symlink file, exact length) without
+        // reading its bytes. Byte digests are verified by
+        // `read_member_bytes` at every session open — the only place member
+        // bytes are consumed — matching the artifact-store authority, whose
+        // admission also defers digest checks to reads. Reading and hashing
+        // the whole model file here charged every authority construction
+        // (each scheduled projection's artifact load and each serving
+        // restore attempt) a full model read that session open then
+        // repeated.
         for role in [
             ArtifactMemberRoleV1::Model,
             ArtifactMemberRoleV1::Tokenizer,
@@ -462,7 +470,7 @@ impl AdmittedProjectionArtifactV1 {
             ArtifactMemberRoleV1::SpecialTokensMap,
             ArtifactMemberRoleV1::TokenizerConfig,
         ] {
-            lifecycle_install.read_member_bytes(role)?;
+            lifecycle_install.member_pin_path(role)?;
         }
         Ok(Self {
             runtime_artifact: VerifiedEmbeddingArtifactV1 {
@@ -611,7 +619,15 @@ impl LifecycleInstallArtifactV1 {
         self.members.contains_key(key)
     }
 
-    fn read_member_bytes(&self, role: ArtifactMemberRoleV1) -> Result<Vec<u8>, EmbedError> {
+    /// Resolve one member pin to its on-disk path after the byte-free
+    /// structural checks: the pin exists, its path is a normalized relative
+    /// path, and the target is a regular non-symlink file matching the
+    /// length pin exactly. Digest verification deliberately stays in
+    /// [`Self::read_member_bytes`], where the bytes are consumed.
+    fn member_pin_path(
+        &self,
+        role: ArtifactMemberRoleV1,
+    ) -> Result<(PathBuf, &CatalogMemberPinV1), EmbedError> {
         let key = match role {
             ArtifactMemberRoleV1::Model => "model",
             ArtifactMemberRoleV1::Tokenizer => "tokenizer",
@@ -658,6 +674,11 @@ impl LifecycleInstallArtifactV1 {
                 "cataloged lifecycle member no longer matches its length pin",
             ));
         }
+        Ok((path, pin))
+    }
+
+    fn read_member_bytes(&self, role: ArtifactMemberRoleV1) -> Result<Vec<u8>, EmbedError> {
+        let (path, pin) = self.member_pin_path(role)?;
         let bytes = std::fs::read(path).map_err(|_| {
             fastembed_failure(
                 RuntimeFailureKindV1::CorruptArtifact,
@@ -1558,11 +1579,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn lifecycle_install_authority_revalidates_every_jina_member() {
+    struct LifecycleInstallFixtureV1 {
+        install: tempfile::TempDir,
+        model: CatalogedFastEmbedModelV1,
+    }
+
+    fn lifecycle_install_fixture(model_bytes: &[u8]) -> LifecycleInstallFixtureV1 {
         let install = tempfile::tempdir().expect("lifecycle install");
         let members = [
-            ("model", "model.onnx", b"model".as_slice()),
+            ("model", "model.onnx", model_bytes),
             ("tokenizer", "tokenizer.json", b"tokenizer".as_slice()),
             ("config", "config.json", b"config".as_slice()),
             (
@@ -1604,16 +1629,23 @@ mod tests {
             max_length: 8192,
             members: pins,
         };
-        let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
-            &model,
-            install.path(),
+        LifecycleInstallFixtureV1 { install, model }
+    }
+
+    fn lifecycle_authority_from(
+        fixture: &LifecycleInstallFixtureV1,
+        max_model_bytes: u64,
+    ) -> Result<AdmittedProjectionArtifactV1, EmbedError> {
+        AdmittedProjectionArtifactV1::from_lifecycle_install(
+            &fixture.model,
+            fixture.install.path(),
             id::<ChunkerRevision>("chunker.v1"),
             id::<PrivacyDomainId>("privacy.project-a"),
             7,
             SemanticResourceCeilings {
-                max_model_bytes: 1024,
+                max_model_bytes,
                 max_tokenizer_bytes: 1024,
-                max_resident_bytes: 4096,
+                max_resident_bytes: max_model_bytes.max(4096),
                 max_threads: 1,
                 max_concurrent_sessions: 1,
                 max_batch_size: 4,
@@ -1621,7 +1653,13 @@ mod tests {
                 load_deadline_ms: 1_000,
             },
         )
-        .expect("verified lifecycle authority");
+    }
+
+    #[test]
+    fn lifecycle_install_authority_verifies_member_bytes_at_read() {
+        let fixture = lifecycle_install_fixture(b"model");
+        let authority =
+            lifecycle_authority_from(&fixture, 1024).expect("verified lifecycle authority");
 
         assert_eq!(
             authority
@@ -1644,7 +1682,7 @@ mod tests {
                 }))
             ));
         }
-        std::fs::write(install.path().join("tokenizer.json"), b"mutated")
+        std::fs::write(fixture.install.path().join("tokenizer.json"), b"mutated")
             .expect("corrupt tokenizer");
         assert!(matches!(
             authority
@@ -1652,6 +1690,138 @@ mod tests {
                 .required_member_bytes(ArtifactMemberRoleV1::Tokenizer),
             Err(EmbedError::Runtime(_))
         ));
+    }
+
+    #[test]
+    fn lifecycle_authority_construction_reads_no_member_bytes() {
+        let fixture = lifecycle_install_fixture(b"model");
+        // Same length as the pinned bytes, different content. Only reading
+        // and hashing the file could detect the mismatch, so a successful
+        // construction proves zero member byte reads at construction.
+        std::fs::write(fixture.install.path().join("model.onnx"), b"lodem")
+            .expect("digest-mismatched model member");
+
+        let authority = lifecycle_authority_from(&fixture, 1024)
+            .expect("construction checks structural pins without reading member bytes");
+
+        assert!(
+            matches!(
+                authority
+                    .runtime_artifact()
+                    .required_member_bytes(ArtifactMemberRoleV1::Model),
+                Err(EmbedError::Runtime(RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::CorruptArtifact,
+                    ..
+                }))
+            ),
+            "every byte consumption still verifies the digest pin"
+        );
+        #[cfg(feature = "semantic-fastembed")]
+        assert!(
+            matches!(
+                FastEmbedEmbeddingRuntime.open_session(&authority),
+                Err(EmbedError::Runtime(RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::CorruptArtifact,
+                    ..
+                }))
+            ),
+            "no session can open over digest-mismatched member bytes"
+        );
+    }
+
+    #[test]
+    fn lifecycle_authority_construction_rejects_structural_pin_violations() {
+        let fixture = lifecycle_install_fixture(b"model");
+        let model_path = fixture.install.path().join("model.onnx");
+
+        std::fs::write(&model_path, b"model-longer-than-pin").expect("length-mismatched member");
+        assert!(
+            matches!(
+                lifecycle_authority_from(&fixture, 1024),
+                Err(EmbedError::Runtime(RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::CorruptArtifact,
+                    ..
+                }))
+            ),
+            "a length-pin mismatch fails construction eagerly"
+        );
+
+        std::fs::remove_file(&model_path).expect("remove model member");
+        assert!(
+            matches!(
+                lifecycle_authority_from(&fixture, 1024),
+                Err(EmbedError::Runtime(RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::CorruptArtifact,
+                    ..
+                }))
+            ),
+            "a missing member fails construction eagerly"
+        );
+
+        #[cfg(unix)]
+        {
+            std::fs::write(fixture.install.path().join("model.real"), b"model")
+                .expect("symlink target");
+            std::os::unix::fs::symlink(fixture.install.path().join("model.real"), &model_path)
+                .expect("symlinked member");
+            assert!(
+                matches!(
+                    lifecycle_authority_from(&fixture, 1024),
+                    Err(EmbedError::Runtime(RuntimeFailureV1 {
+                        kind: RuntimeFailureKindV1::CorruptArtifact,
+                        ..
+                    }))
+                ),
+                "a symlinked member fails construction eagerly"
+            );
+        }
+    }
+
+    /// The removed construction work is exactly one [`read_member_bytes`]
+    /// pass over every member, so that pass — still the per-session-open
+    /// verification — is the baseline the cheap construction must beat on
+    /// the same fixture.
+    #[test]
+    fn lifecycle_authority_construction_is_cheaper_than_member_byte_verification() {
+        let model_bytes = vec![0xa5_u8; 16 * 1024 * 1024];
+        let fixture = lifecycle_install_fixture(&model_bytes);
+        let ceiling = 32 * 1024 * 1024;
+        // Also warms the page cache so the baseline measures the removed
+        // read+hash verification work rather than first-touch disk latency.
+        let authority =
+            lifecycle_authority_from(&fixture, ceiling).expect("verified lifecycle authority");
+
+        let baseline_started = std::time::Instant::now();
+        for role in [
+            ArtifactMemberRoleV1::Model,
+            ArtifactMemberRoleV1::Tokenizer,
+            ArtifactMemberRoleV1::Config,
+            ArtifactMemberRoleV1::SpecialTokensMap,
+            ArtifactMemberRoleV1::TokenizerConfig,
+        ] {
+            authority
+                .runtime_artifact()
+                .required_member_bytes(role)
+                .expect("baseline member byte verification");
+        }
+        let baseline = baseline_started.elapsed();
+
+        let constructions = 10;
+        let construction_started = std::time::Instant::now();
+        for _ in 0..constructions {
+            lifecycle_authority_from(&fixture, ceiling).expect("cheap construction");
+        }
+        let construction = construction_started.elapsed();
+
+        eprintln!(
+            "lifecycle authority construction: {constructions} constructions {construction:?} \
+             vs one member byte verification {baseline:?}"
+        );
+        assert!(
+            construction < baseline,
+            "{constructions} authority constructions ({construction:?}) must cost less than one \
+             full member byte verification over the same 16 MiB fixture ({baseline:?})"
+        );
     }
 
     #[test]
