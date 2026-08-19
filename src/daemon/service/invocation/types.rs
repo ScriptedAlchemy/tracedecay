@@ -283,31 +283,49 @@ impl BoundedHookOrchestratorV1 {
                 return;
             }
             let mut work_future = (work)(request, work_cancellation.clone());
-            // Only genuinely completed or superseded work emits terminals. A
-            // cycle that ends in `RetainForReplay` keeps its joined admissions'
-            // durable pending-work records so the replay consumer retries the
-            // producer work. Owner-level cancellation reports nothing: silence
-            // is a normal result, and an adapter must never invent a
-            // termination reason. Cancellation drops the work future instead
-            // of awaiting it: pending work must stop when its owner retires,
-            // not run to completion.
+            // Only genuinely completed or superseded-and-settled work emits
+            // terminals. A cycle that ends in `RetainForReplay` keeps its
+            // joined admissions' durable pending-work records so the replay
+            // consumer retries the producer work. Supersession joins the
+            // cancelled cycle to completion — nested blocking segments must
+            // settle before the receipt terminal is emitted — while owner
+            // retirement drops the work future without a terminal: pending
+            // work must stop when its owner retires, and silence is a normal
+            // result that no adapter may replace with an invented reason.
             let outcome = tokio::select! {
                 biased;
-                () = work_cancellation.cancelled() => None,
                 () = cancellation.cancelled() => {
                     work_cancellation.cancel();
                     None
                 },
-                outcome = &mut work_future => Some(outcome),
-            };
-            let emit_terminal = match outcome {
-                Some(HookOrchestrationWorkOutcomeV1::Completed) => true,
-                Some(HookOrchestrationWorkOutcomeV1::RetainForReplay) => false,
-                None => {
-                    drop(work_future);
-                    operation
+                () = work_cancellation.cancelled() => {
+                    if operation
                         .superseded
                         .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        tokio::select! {
+                            biased;
+                            () = cancellation.cancelled() => None,
+                            outcome = &mut work_future => Some(outcome),
+                        }
+                    } else {
+                        None
+                    }
+                },
+                outcome = &mut work_future => Some(outcome),
+            };
+            let superseded = operation
+                .superseded
+                .load(std::sync::atomic::Ordering::Acquire);
+            let emit_terminal = match outcome {
+                Some(HookOrchestrationWorkOutcomeV1::Completed) => true,
+                // The successor acknowledges the settled obsolete cycle even
+                // when it asked for replay: the newer boundary at the same
+                // address owns the session's current state.
+                Some(HookOrchestrationWorkOutcomeV1::RetainForReplay) => superseded,
+                None => {
+                    drop(work_future);
+                    false
                 }
             };
             Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
