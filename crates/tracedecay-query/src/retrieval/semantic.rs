@@ -5,6 +5,8 @@
 //! performs no artifact admission, vector mutation, ANN lookup, fusion,
 //! reranking, hydration, activation, or calls into another retrieval lane.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
@@ -23,6 +25,11 @@ use super::ports::{
     CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError, candidate_checkpoint_prefix,
     checkpoint_digest, contract_error, lane_candidate_cap,
 };
+
+/// Fallback exact-flat scan deadline when both request budgets omit
+/// `deadline_micros`. Retention is heap-capped; the visit is still a full
+/// generation scan, so a missing request deadline must not run unbounded.
+pub const SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1: u64 = 5_000_000;
 
 mod execution_authority;
 mod service;
@@ -209,11 +216,13 @@ pub struct SemanticVectorScanSummaryV1 {
 
 /// Read-only port over one immutable, fully published vector generation.
 /// The callback shape lets the lane scan without retaining or copying the
-/// complete vector set.
+/// complete vector set. Implementations must invoke `examine` before every
+/// row they inspect, including rows they exclude before invoking `visit`.
 pub trait SemanticVectorReadPort {
     fn scan_exact_flat(
         &self,
         request: SemanticVectorReadRequestV1<'_>,
+        examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
         visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
     ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError>;
 }
@@ -258,11 +267,11 @@ where
     V: SemanticVectorReadPort,
     C: SemanticExecutionControl,
 {
-    fn enforce_record(
+    fn score_record(
         request: &SemanticRetrievalRequestV1<'_>,
         record: &SemanticVectorRecordV1,
         query: &EphemeralQueryEmbeddingV1,
-    ) -> Result<(CompactCandidate, CodeSemanticEvidenceV1), RetrievalPortError> {
+    ) -> Result<CanonicalSemanticDistanceV1, RetrievalPortError> {
         if record.vector_generation != request.vector_generation
             || record.projection_key != *request.projection.projection_key()
         {
@@ -300,16 +309,25 @@ where
             request.projection.embedding_key().dimensions,
             "stored semantic vector",
         )?;
-        let distance = canonical_distance(
+        canonical_distance(
             request.projection.embedding_key().metric,
             &query.values,
             &record.values,
-        )?;
+        )
+    }
+
+    fn materialize_record(
+        request: &SemanticRetrievalRequestV1<'_>,
+        record: &SemanticVectorRecordV1,
+        distance: CanonicalSemanticDistanceV1,
+    ) -> SemanticRankedEntryV1 {
+        #[cfg(test)]
+        SEMANTIC_RETAINED_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         let mut candidate = record.candidate.clone();
         candidate.raw_score = distance.as_descending_score();
-        Ok((
+        SemanticRankedEntryV1 {
             candidate,
-            CodeSemanticEvidenceV1 {
+            evidence: CodeSemanticEvidenceV1 {
                 projection_key: request.projection.embedding_key().clone(),
                 search_index_key: request.search_index_key.clone(),
                 vector_generation: request.vector_generation.clone(),
@@ -317,7 +335,47 @@ where
                 distance,
                 search_kind: SemanticSearchKindV1::ExactFlat,
             },
-        ))
+        }
+    }
+
+    fn retain_scored_record(
+        request: &SemanticRetrievalRequestV1<'_>,
+        record: &SemanticVectorRecordV1,
+        distance: CanonicalSemanticDistanceV1,
+        cap: usize,
+        ranked: &mut BinaryHeap<SemanticRankedEntryV1>,
+    ) {
+        if cap == 0 {
+            return;
+        }
+        // Compare against the heap worst using the same key as SemanticRankedEntryV1
+        // without cloning a losing candidate.
+        let retain = if ranked.len() < cap {
+            true
+        } else if let Some(worst) = ranked.peek() {
+            rank_key(
+                distance,
+                &record.candidate.source_occurrence_id,
+                &record.candidate.retriever_evidence_anchor,
+                &record.chunk_id,
+            )
+            .cmp(&rank_key(
+                worst.evidence.distance,
+                &worst.candidate.source_occurrence_id,
+                &worst.candidate.retriever_evidence_anchor,
+                &worst.evidence.chunk_id,
+            )) == Ordering::Less
+        } else {
+            false
+        };
+        if !retain {
+            return;
+        }
+        let entry = Self::materialize_record(request, record, distance);
+        if ranked.len() == cap {
+            ranked.pop();
+        }
+        ranked.push(entry);
     }
 
     fn retrieve_complete(
@@ -351,38 +409,29 @@ where
             capability_manifest_digest: &request.capability_manifest_digest,
             search_kind: SemanticSearchKindV1::ExactFlat,
         };
-        let scan = self.vectors.scan_exact_flat(scan_request, &mut |record| {
+        let mut examine = || {
             if self.control.is_cancelled() {
                 return Err(RetrievalPortError::Cancelled);
             }
             if deadline_exhausted(request, self.control) {
                 return Err(RetrievalPortError::BudgetExceeded);
             }
-            let (candidate, evidence) = Self::enforce_record(request, record, query)?;
-            if !seen_occurrences.insert(candidate.source_occurrence_id.clone()) {
-                return Err(RetrievalPortError::Contract(
-                    "semantic vector generation contains duplicate source occurrences".to_owned(),
-                ));
-            }
-            eligible_count += 1;
-            if cap == 0 {
-                return Ok(());
-            }
-            let entry = SemanticRankedEntryV1 {
-                candidate,
-                evidence,
-            };
-            if ranked.len() < cap {
-                ranked.push(entry);
-            } else if ranked
-                .peek()
-                .is_some_and(|worst| entry.cmp(worst) == Ordering::Less)
-            {
-                ranked.pop();
-                ranked.push(entry);
-            }
             Ok(())
-        });
+        };
+        let scan = self
+            .vectors
+            .scan_exact_flat(scan_request, &mut examine, &mut |record| {
+                let distance = Self::score_record(request, record, query)?;
+                if !seen_occurrences.insert(record.candidate.source_occurrence_id.clone()) {
+                    return Err(RetrievalPortError::Contract(
+                        "semantic vector generation contains duplicate source occurrences"
+                            .to_owned(),
+                    ));
+                }
+                eligible_count += 1;
+                Self::retain_scored_record(request, record, distance, cap, &mut ranked);
+                Ok(())
+            });
         let summary = match scan {
             Ok(summary) => summary,
             Err(error) => {
@@ -657,20 +706,23 @@ fn semantic_checkpoint_digest(
     ))
 }
 
+fn effective_deadline_micros(request: &SemanticRetrievalRequestV1<'_>) -> u64 {
+    match (
+        request.budget.deadline_micros,
+        request.base.budget.deadline_micros,
+    ) {
+        (Some(lane), Some(base)) => lane.min(base),
+        (Some(lane), None) => lane,
+        (None, Some(base)) => base,
+        (None, None) => SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1,
+    }
+}
+
 fn deadline_exhausted<C: SemanticExecutionControl>(
     request: &SemanticRetrievalRequestV1<'_>,
     control: &C,
 ) -> bool {
-    let elapsed = elapsed_micros(request, control);
-    request
-        .budget
-        .deadline_micros
-        .is_some_and(|deadline| elapsed >= deadline)
-        || request
-            .base
-            .budget
-            .deadline_micros
-            .is_some_and(|deadline| elapsed >= deadline)
+    elapsed_micros(request, control) >= effective_deadline_micros(request)
 }
 
 fn elapsed_micros<C: SemanticExecutionControl>(
@@ -678,6 +730,35 @@ fn elapsed_micros<C: SemanticExecutionControl>(
     control: &C,
 ) -> u64 {
     control.elapsed_micros()
+}
+
+#[cfg(test)]
+thread_local! {
+    static SEMANTIC_RETAINED_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_semantic_retained_materializations() -> usize {
+    SEMANTIC_RETAINED_MATERIALIZATIONS.with(|count| count.replace(0))
+}
+
+fn rank_key<'a>(
+    distance: CanonicalSemanticDistanceV1,
+    source_occurrence_id: &'a tracedecay_domain::SourceOccurrenceId,
+    retriever_evidence_anchor: &'a tracedecay_domain::RetrievalAnchorId,
+    chunk_id: &'a tracedecay_domain::CodeSearchChunkId,
+) -> (
+    CanonicalSemanticDistanceV1,
+    &'a tracedecay_domain::SourceOccurrenceId,
+    &'a tracedecay_domain::RetrievalAnchorId,
+    &'a tracedecay_domain::CodeSearchChunkId,
+) {
+    (
+        distance,
+        source_occurrence_id,
+        retriever_evidence_anchor,
+        chunk_id,
+    )
 }
 
 /// One retained ExactFlat row, ordered by the deterministic semantic ranking
@@ -692,20 +773,18 @@ struct SemanticRankedEntryV1 {
 
 impl SemanticRankedEntryV1 {
     fn rank_cmp(&self, other: &Self) -> Ordering {
-        self.evidence
-            .distance
-            .cmp(&other.evidence.distance)
-            .then_with(|| {
-                self.candidate
-                    .source_occurrence_id
-                    .cmp(&other.candidate.source_occurrence_id)
-            })
-            .then_with(|| {
-                self.candidate
-                    .retriever_evidence_anchor
-                    .cmp(&other.candidate.retriever_evidence_anchor)
-            })
-            .then_with(|| self.evidence.chunk_id.cmp(&other.evidence.chunk_id))
+        rank_key(
+            self.evidence.distance,
+            &self.candidate.source_occurrence_id,
+            &self.candidate.retriever_evidence_anchor,
+            &self.evidence.chunk_id,
+        )
+        .cmp(&rank_key(
+            other.evidence.distance,
+            &other.candidate.source_occurrence_id,
+            &other.candidate.retriever_evidence_anchor,
+            &other.evidence.chunk_id,
+        ))
     }
 }
 
