@@ -30,8 +30,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL,
-    WRITE_DAC, WRITE_OWNER,
+    FileAttributeTagInfo, GetDiskFreeSpaceExW, GetFileInformationByHandleEx, OPEN_ALWAYS,
+    OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -259,6 +259,26 @@ pub fn create_private_file_retained(
         ));
     }
     Ok(file)
+}
+
+/// Returns bytes available to the current user at `path` (quota-aware).
+pub fn available_space(path: &Path) -> io::Result<u64> {
+    let encoded = encode_path(path)?;
+    let mut available = 0_u64;
+    // SAFETY: `encoded` is a NUL-terminated wide path and `available` is a
+    // writable ULARGE_INTEGER. The total/free out-params are unused.
+    let succeeded = unsafe {
+        GetDiskFreeSpaceExW(
+            encoded.as_ptr(),
+            addr_of_mut!(available),
+            null_mut(),
+            null_mut(),
+        )
+    };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(available)
 }
 
 fn open_and_validate(
