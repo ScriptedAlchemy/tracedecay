@@ -29,11 +29,11 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 /// Platform-absolute fixture root: the placement contracts require
 /// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
-fn fixture_root() -> String {
+fn fixture_abs_root(posix: &str) -> String {
     if cfg!(windows) {
-        "C:\\workspace\\linked-placement".to_owned()
+        format!("C:{}", posix.replace('/', "\\"))
     } else {
-        "/workspace/linked-placement".to_owned()
+        posix.to_owned()
     }
 }
 
@@ -97,7 +97,7 @@ fn authority_of(context: &RequestContext) -> WorkAuthority {
 fn linked() -> WorkPlacementTargetV1 {
     WorkPlacementTargetV1::new(
         WorkPlacementKindV1::LinkedWorktree,
-        Some(fixture_root()),
+        Some(fixture_abs_root("/workspace/linked-placement")),
         false,
         true,
     )
