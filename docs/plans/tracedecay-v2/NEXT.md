@@ -399,8 +399,24 @@ the commit as attribution evidence.
   (`c5c0a7663`); LSP protocol sessions register a warming owner before a
   sealed census so initialize/shutdown/exit admit during warming
   (`5e222426e`); Windows getrandom mapping, `large_enum_variant` boxing,
-  and byte-identical consecutive dashboard builds (`28973da32`,
-  `fd5b1dfe8`, `66c69e034`) close the remaining CI job classes.
+    and byte-identical consecutive dashboard builds (`28973da32`,
+    `fd5b1dfe8`, `66c69e034`) close the remaining CI job classes.
+- The remaining Work/workflow product surface is mounted (2026-08-19, PR
+  branch `cursor/mount-workflow-product-surface-2353`). Workflow activation
+  runs tool-catalog semantic admission before the lifecycle transition is
+  journaled (`workflow_admission`: step operations must resolve in the Work
+  executable catalog and `pinned_catalog_digest` must name the live digest;
+  `WorkflowDefinitionService::admit_activation` is the one authority both
+  activation paths run, and the daemon journey asserts the mounted route
+  refuses an uncataloged candidate). The dashboard gained the fourteenth
+  workspace, Workflows — definitions, lifecycle compare-and-swaps, and
+  `get_run` projections over the mounted `/application/workflow` routes and
+  newly generated contracts; handoff and run-control wire types stay
+  uncontracted. A19 outcome: Work mounts no integration apply/review/stack
+  mutation operation and must not (Plan 36 owns apply/receipt); the Work
+  workspace's integration-outcome and stack-capability accounting cards now
+  decode the mounted `operation.work.topology_metrics` projection cell by
+  cell instead of wearing a stale "read model is not published" absence.
 
 ## Remaining work by lane
 

@@ -26,10 +26,13 @@ use tracedecay_application::{
     WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProposalComparisonRequestV1,
     WorkProposalComparisonV1, WorkRetryAttemptOutcomeV1, WorkRunControlReadingV1,
     WorkRunControlRequestV1, WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
+    WorkflowDefinitionActivateRequest, WorkflowDefinitionDisposition, WorkflowDefinitionGetRequest,
+    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRejectRequest, WorkflowDefinitionRetireRequest, WorkflowRunGetRequest,
 };
 use tracedecay_domain::{
     WorkAttemptV1, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
-    WorkRunControlV1,
+    WorkRunControlV1, WorkflowDefinition, WorkflowRunProjection,
 };
 
 use super::analytics_api::{
@@ -174,6 +177,19 @@ struct DashboardContractCatalogV1 {
     work_duplicate_adjudication_result: WorkDuplicateAdjudicationAppendOutcomeV1,
     work_leak_adjudication_command: AdjudicateWorkLeakCommandV1,
     work_leak_adjudication_result: WorkLeakAdjudicationOutcomeV1,
+    /// The workflow definition/run slice the Workflows workspace consumes.
+    /// Handoffs and run control stay uncontracted: the browser never holds a
+    /// bearer or mints fences, command ids, or provider admissions.
+    workflow_definition: WorkflowDefinition,
+    workflow_definition_list_request: WorkflowDefinitionListRequest,
+    workflow_definition_get_request: WorkflowDefinitionGetRequest,
+    workflow_definition_history_request: WorkflowDefinitionHistoryRequest,
+    workflow_definition_activate_request: WorkflowDefinitionActivateRequest,
+    workflow_definition_retire_request: WorkflowDefinitionRetireRequest,
+    workflow_definition_reject_request: WorkflowDefinitionRejectRequest,
+    workflow_definition_disposition: WorkflowDefinitionDisposition,
+    workflow_run_get_request: WorkflowRunGetRequest,
+    workflow_run_projection: WorkflowRunProjection,
     multi_root_capability: MultiRootCapabilityV1,
     multi_root_scope_set_read_request: MultiRootScopeSetReadRequestV1,
     multi_root_scope_set: Option<AuthorizedScopeSet>,
@@ -419,6 +435,75 @@ mod tests {
                 schema["properties"][field]["$ref"],
                 format!("#/$defs/{contract}"),
                 "dashboard catalog field {field} must directly register {contract}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_workflow_contracts_are_registered() {
+        let schema: serde_json::Value = serde_json::from_str(
+            &render_dashboard_contract_schema().expect("render validated dashboard contracts"),
+        )
+        .expect("parse dashboard contract schema");
+        let definitions = schema["$defs"]
+            .as_object()
+            .expect("dashboard contracts expose schema definitions");
+
+        for (field, contract) in [
+            ("workflow_definition", "WorkflowDefinition"),
+            (
+                "workflow_definition_list_request",
+                "WorkflowDefinitionListRequest",
+            ),
+            (
+                "workflow_definition_get_request",
+                "WorkflowDefinitionGetRequest",
+            ),
+            (
+                "workflow_definition_history_request",
+                "WorkflowDefinitionHistoryRequest",
+            ),
+            (
+                "workflow_definition_activate_request",
+                "WorkflowDefinitionActivateRequest",
+            ),
+            (
+                "workflow_definition_retire_request",
+                "WorkflowDefinitionRetireRequest",
+            ),
+            (
+                "workflow_definition_reject_request",
+                "WorkflowDefinitionRejectRequest",
+            ),
+            (
+                "workflow_definition_disposition",
+                "WorkflowDefinitionDisposition",
+            ),
+            ("workflow_run_get_request", "WorkflowRunGetRequest"),
+            ("workflow_run_projection", "WorkflowRunProjection"),
+        ] {
+            assert!(
+                definitions.contains_key(contract),
+                "canonical Workflow contract {contract} is absent from the dashboard catalog"
+            );
+            assert_eq!(
+                schema["properties"][field]["$ref"],
+                format!("#/$defs/{contract}"),
+                "dashboard catalog field {field} must directly register {contract}"
+            );
+        }
+
+        for excluded in [
+            "TaskHandoffIssueRequest",
+            "TaskHandoffRedeemRequest",
+            "WorkflowRunStartRequest",
+            "WorkflowRunPauseRequest",
+            "WorkflowRunResumeRequest",
+            "WorkflowRunCancelRequest",
+        ] {
+            assert!(
+                !definitions.contains_key(excluded),
+                "{excluded} must not be published to the dashboard contract catalog"
             );
         }
     }
