@@ -597,9 +597,16 @@ fn ensure_root(root: &Path) -> Result<(), HookSpoolError> {
             // An existing root must already be private to the current owner:
             // a group/world-writable or foreign-owned directory lets another
             // local account replace spool members despite their per-file
-            // modes.
-            return tracedecay_private_fs::validate_private_directory(root)
-                .map_err(|_| HookSpoolError::UnsafePath);
+            // modes. Transient metadata failures stay Io rather than
+            // condemning the path.
+            return tracedecay_private_fs::validate_private_directory(root).map_err(|error| {
+                match error.kind() {
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => {
+                        HookSpoolError::UnsafePath
+                    }
+                    _ => HookSpoolError::Io,
+                }
+            });
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(HookSpoolError::Io),
@@ -612,8 +619,14 @@ fn ensure_root(root: &Path) -> Result<(), HookSpoolError> {
         // A concurrent opener may win the creation race; the directory is
         // acceptable only if it is private.
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            tracedecay_private_fs::validate_private_directory(root)
-                .map_err(|_| HookSpoolError::UnsafePath)?;
+            tracedecay_private_fs::validate_private_directory(root).map_err(|error| match error
+                .kind()
+            {
+                io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => {
+                    HookSpoolError::UnsafePath
+                }
+                _ => HookSpoolError::Io,
+            })?;
         }
         Err(_) => return Err(HookSpoolError::Io),
     }
