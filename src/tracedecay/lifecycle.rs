@@ -264,20 +264,30 @@ impl TraceDecay {
         // A populated store remains authoritative when its own manifest names
         // this exact root or the registry selected it through this exact path
         // alias. Shared Git identity alone does not grant this precedence,
-        // and a candidate whose manifest also names this exact root voids it:
-        // that split identity must surface as a cutover conflict below.
-        // This resolver uses bounded presence probes only; the subsequent
-        // serving open performs full integrity validation and fails closed.
-        // Legacy duplicates stay untouched, while an empty or unreadable
-        // selected store still reaches the fail-closed diagnostics.
+        // and a *populated* candidate whose manifest also names this exact
+        // root voids it: that split identity must surface as a cutover
+        // conflict below. Empty or unreadable exact-root duplicates do not —
+        // they stay untouched as recoverable history while the healthy
+        // selected store serves. This resolver uses bounded presence probes
+        // only; the subsequent serving open performs full integrity
+        // validation and fails closed.
         if (evidence.selected_manifest_names_exact_root
             || evidence.selected_via_exact_registry_alias)
-            && !evidence.candidates_name_exact_root
             && !candidates.is_empty()
-            && let Some(selected) = selected.as_ref()
+            && let Some(selected_layout) = selected.as_ref()
+            && store_identity_has_bounded_population_evidence(selected_layout).await
         {
-            if store_identity_has_bounded_population_evidence(selected).await {
-                return Ok(Some(selected.clone()));
+            let mut populated_exact_candidate = false;
+            if evidence.candidates_name_exact_root {
+                for candidate in &candidates {
+                    if store_identity_has_bounded_population_evidence(candidate).await {
+                        populated_exact_candidate = true;
+                        break;
+                    }
+                }
+            }
+            if !populated_exact_candidate {
+                return Ok(Some(selected_layout.clone()));
             }
         }
         if candidates.len() > 1 {
