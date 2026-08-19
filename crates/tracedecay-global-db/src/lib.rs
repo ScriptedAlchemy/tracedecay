@@ -33,6 +33,9 @@ pub mod observation;
 mod observation_adapter;
 mod observation_projection;
 mod registered_maintenance;
+pub use registered_maintenance::{
+    REGISTERED_WAL_RECLAIM_TRIGGER_BYTES, RegisteredWalCheckpointReceiptV1, RegisteredWalReclaimV1,
+};
 mod registered_provider_usage;
 #[cfg(test)]
 mod stack_delivery_tests;
