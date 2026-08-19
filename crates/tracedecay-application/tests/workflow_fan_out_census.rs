@@ -145,7 +145,7 @@ fn fixture() -> Fixture {
         id::<ProjectId>("project.workflow.census"),
         vec![WorkflowStep {
             step_id: id::<WorkflowStepId>("fan-out"),
-            operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+            operation: id::<WorkflowOperationRef>("operation.work.start_attempt"),
             predecessors: BTreeSet::new(),
             inputs: Vec::new(),
             outputs: vec![id::<WorkflowOutputName>("finding")],
@@ -444,7 +444,7 @@ fn work_attempt_with_progress(
     let execution = WorkExecutionEnvelopeV1::new(
         identity.clone(),
         binding.clone(),
-        id::<WorkflowOperationRef>("operation.work.attempt_start"),
+        id::<WorkflowOperationRef>("operation.work.start_attempt"),
         snapshot.clone(),
         id::<ProjectId>("project.workflow.census"),
         id::<RepositoryId>("repository.workflow.census"),

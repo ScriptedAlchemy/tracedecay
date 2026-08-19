@@ -132,7 +132,7 @@ fn definition() -> WorkflowDefinition {
         id::<ProjectId>("project.workflow.journal"),
         vec![WorkflowStep {
             step_id: id::<WorkflowStepId>("prepare"),
-            operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+            operation: id::<WorkflowOperationRef>("operation.work.start_attempt"),
             predecessors: BTreeSet::new(),
             inputs: Vec::new(),
             outputs: vec![id::<WorkflowOutputName>("context")],
@@ -152,7 +152,7 @@ fn fan_out_definition() -> WorkflowDefinition {
         id::<ProjectId>("project.workflow.journal"),
         vec![WorkflowStep {
             step_id: id::<WorkflowStepId>("fan-out"),
-            operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+            operation: id::<WorkflowOperationRef>("operation.work.start_attempt"),
             predecessors: BTreeSet::new(),
             inputs: Vec::new(),
             outputs: vec![id::<WorkflowOutputName>("finding")],

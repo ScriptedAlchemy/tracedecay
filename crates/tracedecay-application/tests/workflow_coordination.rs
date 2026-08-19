@@ -7,11 +7,11 @@ use tracedecay_application::{
     RequestId, ResolvedScope, TASK_HANDOFF_LIFETIME_MICROS, TaskHandoffAuthorityError,
     TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffError, TaskHandoffGrant,
     TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffScope, TaskHandoffService,
-    TaskHandoffToken, WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkflowCoordinationError,
-    WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
+    TaskHandoffToken, WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkflowCatalogAdmissionError,
+    WorkflowCoordinationError, WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
     WorkflowDefinitionDisposition, WorkflowDefinitionLifecycleCommand,
     WorkflowDefinitionLifecycleState, WorkflowDefinitionService, WorkflowDefinitionTransitionEntry,
-    WorkflowDefinitionTransitionOutcome,
+    WorkflowDefinitionTransitionOutcome, work_executable_catalog_digest,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
@@ -63,11 +63,14 @@ fn workflow_context(
     .unwrap()
 }
 
+/// A mounted Work operation, so fixtures clear catalog admission.
+const MOUNTED_OPERATION: &str = "operation.work.start_attempt";
+
 fn definition(version: u64) -> WorkflowDefinition {
     definition_for_project(
         version,
         id("project.workflow.coordination"),
-        "operation.graph.workflow_step",
+        MOUNTED_OPERATION,
     )
 }
 
@@ -79,6 +82,20 @@ fn definition_for_project(
     version: u64,
     project_id: ProjectId,
     operation: &str,
+) -> WorkflowDefinition {
+    definition_with_catalog_pin(
+        version,
+        project_id,
+        operation,
+        work_executable_catalog_digest().unwrap(),
+    )
+}
+
+fn definition_with_catalog_pin(
+    version: u64,
+    project_id: ProjectId,
+    operation: &str,
+    pinned_catalog_digest: ManifestDigest,
 ) -> WorkflowDefinition {
     WorkflowDefinition::new(
         id("workflow.definition.coordination"),
@@ -94,7 +111,7 @@ fn definition_for_project(
         }],
         digest('a'),
         digest('b'),
-        digest('c'),
+        pinned_catalog_digest,
     )
     .unwrap()
 }
@@ -947,6 +964,78 @@ fn the_retained_lifecycle_runs_candidate_validated_active_then_retired() {
     assert_eq!(retired.state, WorkflowDefinitionLifecycleState::Retired);
     assert_eq!(retired.revision, 4);
     assert!(retired.state.is_terminal());
+}
+
+#[test]
+fn activation_rejects_a_step_operation_the_catalog_does_not_mount() {
+    let (authority, service, context) = lifecycle_service();
+    let registered = service
+        .register(
+            &context,
+            definition_with_operation(1, "operation.work.not_a_mounted_operation"),
+        )
+        .unwrap();
+    let definition_id = registered.definition_id().clone();
+
+    // Registration stays lenient; Plan 32 rejects "before activation".
+    let denial = service.validate(registered.clone()).unwrap_err();
+    let WorkflowCoordinationError::CatalogAdmissionDenied(
+        WorkflowCatalogAdmissionError::UnknownOperation { step_id, operation },
+    ) = denial
+    else {
+        panic!("expected an unknown-operation catalog denial, got {denial:?}");
+    };
+    assert_eq!(step_id.as_str(), "prepare");
+    assert_eq!(operation.as_str(), "operation.work.not_a_mounted_operation");
+
+    assert_eq!(
+        service
+            .activate(&definition_id, 1, 1, UtcMicros(10))
+            .unwrap_err(),
+        WorkflowCoordinationError::CatalogAdmissionDenied(
+            WorkflowCatalogAdmissionError::UnknownOperation {
+                step_id: id("prepare"),
+                operation: id("operation.work.not_a_mounted_operation"),
+            }
+        )
+    );
+
+    // The denial precedes the lifecycle authority.
+    assert_eq!(
+        service.disposition(&definition_id, 1).unwrap().state,
+        WorkflowDefinitionLifecycleState::Candidate
+    );
+    assert!(authority.state.lock().unwrap().transitions.is_empty());
+}
+
+#[test]
+fn activation_rejects_a_definition_pinned_to_a_foreign_catalog() {
+    let (authority, service, context) = lifecycle_service();
+    let registered = service
+        .register(
+            &context,
+            definition_with_catalog_pin(
+                1,
+                id("project.workflow.coordination"),
+                MOUNTED_OPERATION,
+                digest('c'),
+            ),
+        )
+        .unwrap();
+    let definition_id = registered.definition_id().clone();
+
+    let denial = service
+        .activate(&definition_id, 1, 1, UtcMicros(10))
+        .unwrap_err();
+    let WorkflowCoordinationError::CatalogAdmissionDenied(
+        WorkflowCatalogAdmissionError::CatalogPinMismatch { pinned, current },
+    ) = denial
+    else {
+        panic!("expected a catalog-pin denial, got {denial:?}");
+    };
+    assert_eq!(pinned, digest('c'));
+    assert_eq!(current, work_executable_catalog_digest().unwrap());
+    assert!(authority.state.lock().unwrap().transitions.is_empty());
 }
 
 #[test]

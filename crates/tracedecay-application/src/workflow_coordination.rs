@@ -9,6 +9,9 @@ use std::fmt::{self, Display};
 
 use crate::RequestContext;
 use crate::work_handoff_frontier::WorkHandoffFrontierV1;
+use crate::workflow_admission::{
+    WorkflowCatalogAdmissionError, admit_workflow_definition_operations,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
@@ -341,6 +344,7 @@ pub struct WorkflowDefinitionRejectRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowCoordinationError {
     InvalidDefinition,
+    CatalogAdmissionDenied(WorkflowCatalogAdmissionError),
     ScopeMismatch,
     ImmutableDefinitionConflict,
     DefinitionNotFound,
@@ -353,6 +357,9 @@ impl Display for WorkflowCoordinationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidDefinition => formatter.write_str("workflow definition is invalid"),
+            Self::CatalogAdmissionDenied(denial) => {
+                write!(formatter, "workflow catalog admission denied: {denial}")
+            }
             Self::ScopeMismatch => {
                 formatter.write_str("workflow definition is outside the admitted project")
             }
@@ -413,6 +420,8 @@ where
         }
     }
 
+    /// The preflight for activation: structural shape plus tool-catalog
+    /// semantic admission of every step operation.
     pub fn validate(
         &self,
         definition: WorkflowDefinition,
@@ -420,6 +429,8 @@ where
         definition
             .validate()
             .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+        admit_workflow_definition_operations(&definition)
+            .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)?;
         Ok(WorkflowDefinitionValidation { definition })
     }
 
@@ -452,13 +463,31 @@ where
             .map_err(coordination_authority_error)
     }
 
+    /// Admission every activation must clear before its lifecycle transition
+    /// is journaled: structural revalidation plus tool-catalog admission of
+    /// every step operation. The one authority both activation paths — this
+    /// service and the daemon's journaled effect — run.
+    pub fn admit_activation(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<(), WorkflowCoordinationError> {
+        let definition = self.get(definition_id, definition_version)?;
+        definition
+            .validate()
+            .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+        admit_workflow_definition_operations(&definition)
+            .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)
+    }
+
     /// Advances a registered definition version to `active`.
     ///
     /// Plan 32: "Unknown operations, cycles, dangling references, incompatible
     /// schemas, unbounded fan-out, privilege expansion, unsupported effects,
     /// or recursive generic execution reject before activation." The stored
-    /// payload is revalidated here, and the `candidate -> validated -> active`
-    /// path is recorded as immutable history entries by the authority.
+    /// payload is revalidated and catalog-admitted here, and the
+    /// `candidate -> validated -> active` path is recorded as immutable
+    /// history entries by the authority.
     pub fn activate(
         &self,
         definition_id: &WorkflowDefinitionId,
@@ -466,10 +495,7 @@ where
         expected_revision: u64,
         transitioned_at: UtcMicros,
     ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
-        let definition = self.get(definition_id, definition_version)?;
-        definition
-            .validate()
-            .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+        self.admit_activation(definition_id, definition_version)?;
         self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
             definition_id: definition_id.clone(),
             definition_version,

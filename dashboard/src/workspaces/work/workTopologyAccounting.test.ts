@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  ExecutionTopologyMetricsV1Schema,
   WorkAttemptListV1Schema,
   WorkGraphReadV1Schema,
+  type ExecutionTopologyMetricsV1,
   type WorkAttemptListV1,
 } from '../../contracts/index.ts';
 import { workAttempt as attempt, workAttemptList } from '../../test/workAttemptFixture.ts';
 import { workGraphRead, type WorkGraphVersionSpec } from '../../test/workGraphFixture.ts';
+import {
+  topologyMeasurement,
+  topologyMetricsModel,
+  type TopologyMetricsSpec,
+} from '../../test/workTopologyMetricsFixture.ts';
 import type { WorkResult } from './workApi.ts';
 import type { WorkChannel } from './workChannel.ts';
 import { workGraphReading, type WorkGraphReading } from './workGraphModel.ts';
@@ -50,6 +57,13 @@ function graphOf(spec: WorkGraphVersionSpec = BASE_GRAPH): WorkGraphReading {
     outcome: 'value',
     value: WorkGraphReadV1Schema.parse(workGraphRead(spec)),
   });
+}
+
+function metricsOf(spec: TopologyMetricsSpec = {}): WorkResult<ExecutionTopologyMetricsV1> {
+  return {
+    outcome: 'value',
+    value: ExecutionTopologyMetricsV1Schema.parse(topologyMetricsModel(spec)),
+  };
 }
 
 function graphWithRuntimeGeneration(generationId: string): WorkGraphReading {
@@ -160,34 +174,45 @@ describe('the shape of the ledger', () => {
   /**
    * The no-falsified-UI invariant, asserted over the whole ledger at once.
    *
-   * Nine of the twelve dimensions have no published read model. Every row of
-   * every one of them must be an absence that names the event kind that would
-   * feed it — not a zero, and not a silently omitted row.
+   * The undecoded dimensions must render as absences that name the event kind
+   * that feeds them — not a zero, and not a silently omitted row — and the two
+   * metrics-fed cards must wear the metrics read's own state when that read
+   * has not answered.
    */
-  it('renders every unsupported dimension as a stated absence rather than a zero', () => {
+  it('renders every undecoded dimension as a stated absence rather than a zero', () => {
     const reading = workTopologyAccounting(
       listed([attempt({ taskId: 'alpha', runId: 'run-1', attemptId: 'a-1' })]),
       graphOf(),
     );
 
-    const unsupported: readonly WorkAccountingDimension[] = [
+    const undecoded: readonly WorkAccountingDimension[] = [
       'duplicate_work',
       'conflict_confusion',
       'ready_to_integrated_latency',
-      'integration_outcomes',
       'stale_stack_age',
-      'github_stack_capability',
       'operational_leaks',
       'delivery_fanout',
     ];
 
-    for (const dimension of unsupported) {
+    for (const dimension of undecoded) {
       const card = cardOf(reading, dimension);
       const stated = absence(card.reading);
-      expect(stated.state, dimension).toBe('unsupported_schema');
+      expect(stated.state, dimension).toBe('unsupported');
       expect(stated.detail, dimension).toContain('ExecutionTopologyMetricsV1');
       // The event kind a reviewer greps for, on the card itself.
       expect(stated.detail, dimension).toMatch(/work\.[a-z_]+\.[a-z_.]*v1/);
+      for (const row of card.rows) {
+        expect(row.channel.available, `${dimension} · ${row.key}`).toBe(false);
+      }
+    }
+
+    // The metrics-fed cards carry the read's own state — here, unread — and
+    // never a zero.
+    for (const dimension of ['integration_outcomes', 'github_stack_capability'] as const) {
+      const card = cardOf(reading, dimension);
+      const stated = absence(card.reading);
+      expect(stated.state, dimension).toBe('loading');
+      expect(stated.detail, dimension).toContain('topology-metrics read has not answered');
       for (const row of card.rows) {
         expect(row.channel.available, `${dimension} · ${row.key}`).toBe(false);
       }
@@ -211,7 +236,7 @@ describe('the concurrency ladder', () => {
     // The three rungs no field carries. Each names why, and none is a zero.
     for (const key of ['accepted', 'admitted', 'useful', 'fanout']) {
       const stated = absence(rows.get(key)!);
-      expect(stated.state, key).toBe('unsupported_schema');
+      expect(stated.state, key).toBe('unsupported');
     }
     expect(absence(rows.get('admitted')!).detail).toContain('a count and not a width');
     expect(absence(rows.get('useful')!).detail).toContain('ProgressFrontier');
@@ -400,7 +425,7 @@ describe('the rerun census', () => {
     // A measured zero: this page holds no attempt restarted for this cause.
     expect(figure(rows.get('reason_process_lost')!).value).toBe(0);
 
-    expect(absence(card.reading).state).toBe('unsupported_schema');
+    expect(absence(card.reading).state).toBe('unsupported');
     expect(absence(card.reading).detail).toContain('completed runtime rerun total');
   });
 
@@ -412,10 +437,10 @@ describe('the rerun census', () => {
     const rows = new Map(card.rows.map((row) => [row.key, row.channel]));
     for (const key of ['test_reruns', 'ci_reruns']) {
       const stated = absence(rows.get(key)!);
-      expect(stated.state, key).toBe('unsupported_schema');
+      expect(stated.state, key).toBe('unsupported');
       expect(stated.detail, key).toContain('never summed');
     }
-    expect(absence(card.reading).state).toBe('unsupported_schema');
+    expect(absence(card.reading).state).toBe('unsupported');
     expect(absence(card.reading).detail).toContain('Recovery-required is a rerun owed');
   });
 
@@ -487,7 +512,7 @@ describe('the rerun census', () => {
       ),
     };
     const card = cardOf(workTopologyAccounting(capped, graphOf()), 'duplicate_effects');
-    expect(absence(card.provenance.support).state).toBe('unsupported_schema');
+    expect(absence(card.provenance.support).state).toBe('unsupported');
     expect(absence(card.provenance.eligible).state).toBe('partial');
     expect(absence(card.provenance.eligible).detail).toContain('not a full eligible denominator');
     const coverage = card.provenance.intervalCoverage;
@@ -527,7 +552,7 @@ describe('duplicate effects', () => {
       'duplicate_effects',
     );
 
-    expect(absence(card.reading).state).toBe('unsupported_schema');
+    expect(absence(card.reading).state).toBe('unsupported');
     expect(figure(card.provenance.eligible)).toEqual({
       value: 2,
       unit: 'attempts',
@@ -536,14 +561,14 @@ describe('duplicate effects', () => {
 
     // No adjudication read exists. Its support is unknown, not a case count of
     // zero; zero would be an observed answer the contract never supplied.
-    expect(absence(card.provenance.support).state).toBe('unsupported_schema');
+    expect(absence(card.provenance.support).state).toBe('unsupported');
     expect(absence(card.provenance.support).detail).toContain('adjudication support');
 
     const rows = new Map(card.rows.map((row) => [row.key, row.channel]));
     expect(figure(rows.get('effect_compound_non_repeatable')!).value).toBe(2);
     expect(figure(rows.get('effect_intercepted')!).value).toBe(1);
     expect(figure(rows.get('effect_observational')!).value).toBe(1);
-    expect(absence(rows.get('adjudicated_duplicates')!).state).toBe('unsupported_schema');
+    expect(absence(rows.get('adjudicated_duplicates')!).state).toBe('unsupported');
   });
 });
 
@@ -555,8 +580,8 @@ describe('blocked time', () => {
     );
     const rows = new Map(card.rows.map((row) => [row.key, row.channel]));
 
-    expect(absence(rows.get('unioned_blocked_time')!).state).toBe('unsupported_schema');
-    expect(absence(rows.get('attributed_blocked_time')!).state).toBe('unsupported_schema');
+    expect(absence(rows.get('unioned_blocked_time')!).state).toBe('unsupported');
+    expect(absence(rows.get('attributed_blocked_time')!).state).toBe('unsupported');
 
     const effort = figure(rows.get('blocked_effort')!);
     expect(effort.value).toBe(7);
@@ -596,28 +621,197 @@ describe('the conflict confusion matrices', () => {
   });
 });
 
-describe('the near misses', () => {
-  /** `WorkFallbackTopology` is the provider-executable fallback and looks like
-   * the thing this card wants. Naming it in the absence is what stops the next
-   * reader from wiring the wrong contract into the right-sounding slot. */
-  it('names the provider fallback as NOT the GitHub generic fallback', () => {
-    const card = cardOf(
-      workTopologyAccounting(listed([]), graphOf()),
-      'github_stack_capability',
-    );
-    expect(absence(card.reading).detail).toContain('WorkFallbackTopology');
-    expect(absence(card.reading).detail).toContain('never counted into this card');
+describe('observed integration outcomes', () => {
+  const KNOWN = { eligible: 8, observed: 7, completed: 7, unknown: 1, state: 'known' };
+  const WIPED = { eligible: null, observed: 0, unknown: 1, state: 'unknown' };
+
+  /** One `work_merge_attempts_total` kind × outcome cell. A null value with a
+   * reason models projector suppression, which also wipes the coverage. */
+  function mergeCell(kind: string, outcome: string, value: number | null, unavailable?: string) {
+    return topologyMeasurement({
+      metric: 'work_merge_attempts_total',
+      value,
+      unit: 'events',
+      denominator: 'observed_native_integrations',
+      dimensions: [
+        { dimension: 'integration_kind', value: kind },
+        { dimension: 'integration_outcome', value: outcome },
+      ],
+      coverage: value == null ? WIPED : KNOWN,
+      unavailable,
+    });
+  }
+
+  const MERGE_CELLS = metricsOf({
+    measurements: [
+      mergeCell('fast_forward', 'succeeded', 6),
+      mergeCell('cherry_pick', 'conflicted', 1),
+      // A sibling descriptor this card must not decode into a count row.
+      topologyMeasurement({
+        metric: 'work_merge_success_ratio',
+        value: 0.75,
+        unit: 'ratio',
+        denominator: 'observed_native_integrations',
+        dimensions: [{ dimension: 'integration_kind', value: 'fast_forward' }],
+        coverage: KNOWN,
+      }),
+    ],
   });
 
-  it('refuses to read an observed integration outcome off the pinned policy', () => {
-    const card = cardOf(workTopologyAccounting(listed([]), graphOf()), 'integration_outcomes');
-    expect(absence(card.reading).detail).toContain('integration STRATEGY');
-    for (const key of ['fast_forward', 'merge', 'cherry_pick']) {
-      const row = card.rows.find((entry) => entry.key === key);
-      expect(row?.channel.available, key).toBe(false);
+  it('decodes the projector’s kind × outcome cells verbatim', () => {
+    const card = cardOf(
+      workTopologyAccounting(listed([]), graphOf(), undefined, MERGE_CELLS),
+      'integration_outcomes',
+    );
+
+    const rows = new Map(card.rows.map((row) => [row.key, row.channel]));
+    expect(rows.size).toBe(2);
+    expect(figure(rows.get('fast_forward_succeeded')!).value).toBe(6);
+    expect(figure(rows.get('cherry_pick_conflicted')!).value).toBe(1);
+
+    // The headline states the projector's own observed count; nothing sums
+    // the cells into a total the projection never published.
+    expect(card.reading.available).toBe(true);
+    if (!card.reading.available) throw new Error('unreachable');
+    expect(card.reading.value).toContain('7 observed native integrations');
+    expect(card.reading.value).toContain('never summed here');
+
+    // Provenance is the metric envelope's own coverage and revision.
+    expect(figure(card.provenance.support).value).toBe(7);
+    expect(figure(card.provenance.eligible).value).toBe(8);
+    const revision = card.provenance.descriptorRevision;
+    if (!revision.available) throw new Error('expected a metric descriptor revision');
+    expect(revision.value.kind).toBe('metric_descriptor');
+    expect(revision.value.value).toBe('execution-topology-metrics.v1');
+  });
+
+  it('propagates the typed absence when the support floor suppresses every cell', () => {
+    // A card over nothing but suppressed cells wears the projector's reason —
+    // never an available "0 observed" headline read off a wiped envelope.
+    const suppressed = metricsOf({
+      measurements: [
+        mergeCell('fast_forward', 'succeeded', null, 'support_floor_unmet'),
+        mergeCell('cherry_pick', 'conflicted', null, 'support_floor_unmet'),
+      ],
+    });
+    const card = cardOf(
+      workTopologyAccounting(listed([]), graphOf(), undefined, suppressed),
+      'integration_outcomes',
+    );
+
+    const stated = absence(card.reading);
+    expect(stated.detail).toContain('typed absence');
+    expect(stated.detail).toContain('support floor unmet');
+    expect(card.rows).toHaveLength(2);
+    for (const row of card.rows) {
+      expect(row.channel.available, row.key).toBe(false);
+    }
+    // Counted facets carry the same typed reason; the horizon and the
+    // untouched descriptor revision stay real.
+    expect(absence(card.provenance.support).detail).toContain('support floor unmet');
+    expect(absence(card.provenance.eligible).detail).toContain('support floor unmet');
+    expect(card.provenance.horizon.available).toBe(true);
+    const revision = card.provenance.descriptorRevision;
+    if (!revision.available) throw new Error('expected the cell descriptor revision');
+    expect(revision.value.value).toBe('execution-topology-metrics.v1');
+  });
+
+  it('states readable and suppressed cells separately when they coexist', () => {
+    const mixed = metricsOf({
+      measurements: [
+        mergeCell('fast_forward', 'succeeded', 6),
+        mergeCell('cherry_pick', 'conflicted', null, 'support_floor_unmet'),
+      ],
+    });
+    const card = cardOf(
+      workTopologyAccounting(listed([]), graphOf(), undefined, mixed),
+      'integration_outcomes',
+    );
+
+    expect(card.reading.available).toBe(true);
+    if (!card.reading.available) throw new Error('unreachable');
+    expect(card.reading.value).toContain('1 readable kind/outcome cell');
+    expect(card.reading.value).toContain('1 cell stays a typed absence');
+    // Headline coverage comes from a readable cell's envelope, never a
+    // suppressed one.
+    expect(figure(card.provenance.support).value).toBe(7);
+  });
+
+  it('carries the projector’s typed absence for an empty horizon rather than zero cells', () => {
+    const empty = metricsOf({
+      measurements: [
+        topologyMeasurement({
+          metric: 'work_merge_attempts_total',
+          value: null,
+          unit: 'events',
+          denominator: 'observed_native_integrations',
+          dimensions: [],
+          unavailable: 'no_eligible_evidence',
+        }),
+      ],
+    });
+    const card = cardOf(
+      workTopologyAccounting(listed([]), graphOf(), undefined, empty),
+      'integration_outcomes',
+    );
+    expect(card.rows).toHaveLength(0);
+    const stated = absence(card.reading);
+    expect(stated.detail).toContain('typed absence');
+    expect(stated.detail).toContain('no eligible evidence');
+  });
+
+  it('carries the metrics read’s refusal rather than an empty ledger', () => {
+    const card = cardOf(
+      workTopologyAccounting(listed([]), graphOf(), undefined, {
+        outcome: 'refused',
+        state: 'unavailable',
+        detail: 'the observation store is unavailable',
+      }),
+      'integration_outcomes',
+    );
+    const stated = absence(card.reading);
+    expect(stated.state).toBe('unavailable');
+    expect(stated.detail).toContain('the observation store is unavailable');
+    for (const facet of WORK_ACCOUNTING_FACETS) {
+      expect(card.provenance[facet].available, facet).toBe(false);
     }
   });
+});
 
+describe('GitHub stack capability', () => {
+  it('reads the projection’s own capability state and fallback observations', () => {
+    const card = cardOf(
+      workTopologyAccounting(listed([]), graphOf(), undefined, metricsOf({
+        githubStackCapability: {
+          capability: 'enabled',
+          standard_git_fallback_available: true,
+          other_forge_fallback_available: null,
+          coverage: { eligible: 3, observed: 3, completed: 3, state: 'known' },
+        },
+      })),
+      'github_stack_capability',
+    );
+
+    expect(card.reading.available).toBe(true);
+    if (!card.reading.available) throw new Error('unreachable');
+    expect(card.reading.value).toContain('capability enabled');
+    expect(card.reading.value).toContain('standard-git fallback available');
+    // A null field is unobserved, never coerced into off or on.
+    expect(card.reading.value).toContain('other-forge fallback unobserved');
+  });
+
+  it('states the projector’s typed reason when no trustworthy observation exists', () => {
+    const card = cardOf(
+      workTopologyAccounting(listed([]), graphOf(), undefined, metricsOf()),
+      'github_stack_capability',
+    );
+    const stated = absence(card.reading);
+    expect(stated.detail).toContain('no trustworthy capability observation');
+    expect(stated.detail).toContain('no eligible evidence');
+  });
+});
+
+describe('the near misses', () => {
   it('does not borrow the retry weave for adjudicated duplicate work', () => {
     const card = cardOf(workTopologyAccounting(listed([]), graphOf()), 'duplicate_work');
     expect(absence(card.reading).detail).toContain('retry chain and not duplicate work');

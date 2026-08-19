@@ -119,16 +119,28 @@ pub(in crate::daemon::service::invocation) async fn execute_workflow_application
             )
         }
         WorkflowApplicationInvocation::ActivateDefinition(request) => {
-            let prepared = WorkflowEffectPreparedV1::activate_definition(
-                input_digest.clone(),
-                WorkflowDefinitionLifecycleCommand {
-                    definition_id: request.definition_id,
-                    definition_version: request.definition_version,
-                    operation: WorkflowLifecycleOperation::Activate,
-                    expected_revision: request.expected_revision,
-                    transitioned_at: observed_at,
-                },
-            );
+            // Plan 32: catalog admission rejects before the lifecycle
+            // command is journaled; a denial is the same canonical problem
+            // effect every other refused mutation records.
+            let prepared = match services
+                .definitions()
+                .admit_activation(&request.definition_id, request.definition_version)
+            {
+                Ok(()) => WorkflowEffectPreparedV1::activate_definition(
+                    input_digest.clone(),
+                    WorkflowDefinitionLifecycleCommand {
+                        definition_id: request.definition_id,
+                        definition_version: request.definition_version,
+                        operation: WorkflowLifecycleOperation::Activate,
+                        expected_revision: request.expected_revision,
+                        transitioned_at: observed_at,
+                    },
+                ),
+                Err(error) => WorkflowEffectPreparedV1::problem(
+                    input_digest.clone(),
+                    workflow_effect_problem(workflow_coordination_problem(error)),
+                ),
+            };
             execute_journaled_workflow_effect(
                 &registered,
                 services.effects(),
