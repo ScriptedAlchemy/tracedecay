@@ -29,6 +29,7 @@ const PROJECTION_KEYS: &[&str] = &[
     "trigger",
     "task",
     "task_key",
+    "error",
     "started_at",
     "completed_at",
     "completed_at_micros",
@@ -94,6 +95,11 @@ pub(super) struct RunLedgerRowProjection {
     pub(super) trigger: AutomationTrigger,
     pub(super) task: AgentTaskKind,
     pub(super) task_key: Option<String>,
+    /// True when the row's `error` field equals the session-evidence
+    /// budget-exhausted label. The projection compares while streaming
+    /// instead of capturing the field: failed runs carry arbitrarily long
+    /// backend error messages that must not be bounded or allocated here.
+    pub(super) session_evidence_budget_exhausted_error: bool,
     pub(super) started_at: String,
     pub(super) completed_at: String,
     pub(super) completed_at_micros: Option<i64>,
@@ -1222,6 +1228,8 @@ impl<'a> JsonRangeReader<'a> {
         let mut task = None;
         let mut task_key = None;
         let mut task_key_seen = false;
+        let mut session_evidence_budget_exhausted_error = false;
+        let mut error_seen = false;
         let mut started_at = None;
         let mut completed_at = None;
         let mut completed_at_micros = None;
@@ -1291,6 +1299,20 @@ impl<'a> JsonRangeReader<'a> {
                         "automation task key",
                     )?;
                 }
+                "error" => {
+                    if error_seen {
+                        return self.fail("duplicate error field");
+                    }
+                    error_seen = true;
+                    session_evidence_budget_exhausted_error = if self.peek_byte()? == Some(b'n') {
+                        self.skip_literal(b"null")?;
+                        false
+                    } else {
+                        self.read_string_equals(
+                            tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED,
+                        )?
+                    };
+                }
                 "started_at" => {
                     if started_at.is_some() {
                         return self.fail("duplicate started_at field");
@@ -1355,6 +1377,7 @@ impl<'a> JsonRangeReader<'a> {
                 .ok_or_else(|| config_error("automation ledger row is missing trigger"))?,
             task: task.ok_or_else(|| config_error("automation ledger row is missing task"))?,
             task_key,
+            session_evidence_budget_exhausted_error,
             started_at: started_at
                 .ok_or_else(|| config_error("automation ledger row is missing started_at"))?,
             completed_at: completed_at
