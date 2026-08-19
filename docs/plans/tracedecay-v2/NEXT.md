@@ -417,6 +417,20 @@ the commit as attribution evidence.
   workspace's integration-outcome and stack-capability accounting cards now
   decode the mounted `operation.work.topology_metrics` projection cell by
   cell instead of wearing a stale "read model is not published" absence.
+- A18 outcome (2026-08-19): `CodeIndexGenerationPublished` resolves as
+  unadvertise for the dashboard surface plus verified-path confirmation for
+  the daemon bus. The dashboard SSE variant
+  `DashboardEventKindV1::CodeIndexGenerationPublished` was declared-but-unfed
+  — no frontend subscriber, omitted from generated contracts — so it was
+  deleted rather than thin-wired (`afe627324`). The scheduler-internal
+  `CodeIndexGenerationPublishedV1` broadcast keeps its real production
+  consumer (the post-mount query-authority waiter in
+  `src/daemon/project_composition/code_index_activation.rs`) and is fed only
+  after the durable publication compare-and-swap, the verified graph snapshot
+  publish (`publish_verified_snapshot`, the Plan 39 watermark advance), and
+  the serving swap; retained restores stay `Noop` and never re-broadcast,
+  pinned by
+  `restart_remount_serves_the_retained_generation_without_republishing`.
 
 ## Remaining work by lane
 
