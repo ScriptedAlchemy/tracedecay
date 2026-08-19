@@ -196,8 +196,24 @@ pub(crate) fn validate_supplied_manifest_binding(
         | GraphGenerationReplaySource::SemanticVectorGeneration(_) => {
             validate_metadata_binding(publication, manifest, validate_expected_digest, check)
         }
-        GraphGenerationReplaySource::InlineManifest(_)
-        | GraphGenerationReplaySource::SealedCodeGeneration(_) => Err(GraphDbError::Conflict),
+        // A sealed code generation journals only its replay source, so the
+        // supplied manifest cannot be compared field-by-field against a
+        // journaled manifest. The identity check below still pins it exactly:
+        // the journaled dependency-closure and expected-recovered digests were
+        // derived from the manifest at append time, so only the manifest that
+        // was journaled can pass. Refusing every supplied sealed manifest here
+        // made each code-graph publication fail as `Conflict` immediately
+        // after its own journal append, permanently wedging activation.
+        GraphGenerationReplaySource::SealedCodeGeneration(source) => {
+            validate_sealed_replay(&source)?;
+            validate_publication_manifest_identity(
+                publication,
+                manifest,
+                validate_expected_digest,
+                check,
+            )
+        }
+        GraphGenerationReplaySource::InlineManifest(_) => Err(GraphDbError::Conflict),
     }
 }
 

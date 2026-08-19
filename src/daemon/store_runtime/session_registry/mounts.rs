@@ -150,6 +150,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             remote_replay_transaction,
             remote_recovery_authorities: Mutex::new(BTreeMap::new()),
             project_owners: super::ProjectRuntimeOwnerRegistryV1::default(),
+            code_graph_publication_gates: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
             retained_hook_tasks: RetainedHookTasks::new(),
             session_sync_service: Arc::new(std::sync::OnceLock::new()),
