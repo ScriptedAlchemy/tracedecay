@@ -28,6 +28,7 @@
 //! protected through the existing [`RegisteredGlobalDb::lcm_protect_session_raw_messages`]
 //! pass rather than a duplicate path.
 
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::privacy::{lcm_payload_detector_revision, sanitize_lcm_payload_text};
 use tracedecay_sessions::runtime::{
     SessionMessageRecord,
@@ -37,7 +38,6 @@ use tracedecay_sessions::runtime::{
         raw, schema,
     },
 };
-use tracedecay_runtime_core::db::engine::params;
 
 use super::RegisteredGlobalDb;
 
@@ -354,8 +354,11 @@ impl RegisteredGlobalDb {
         };
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
-        let staged =
-            raw::stage_raw_message_with_payload_tracked(storage_root, &record, &mut payload_rollback)?;
+        let staged = raw::stage_raw_message_with_payload_tracked(
+            storage_root,
+            &record,
+            &mut payload_rollback,
+        )?;
         let transaction = self
             .begin_write_transaction()
             .await
@@ -463,11 +466,11 @@ fn stored_provider_metadata(row: &RescanRow) -> Result<Option<String>, LcmError>
                 reason: format!("stored LCM metadata is not valid JSON: {error}"),
             }
         })?;
-    let object = metadata.as_object_mut().ok_or_else(|| {
-        LcmError::SanitizationRefused {
+    let object = metadata
+        .as_object_mut()
+        .ok_or_else(|| LcmError::SanitizationRefused {
             reason: "stored LCM metadata must be a JSON object".to_owned(),
-        }
-    })?;
+        })?;
     object.remove("ingest_protection");
     if object.is_empty() {
         return Ok(None);

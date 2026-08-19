@@ -812,12 +812,11 @@ const MAX_PROVIDER_METADATA_BYTES: u64 = 1_048_576;
 pub fn provider_metadata_requires_resanitization(
     provider_metadata_json: &str,
 ) -> Result<bool, LcmError> {
-    let original =
-        serde_json::from_str::<JsonValue>(provider_metadata_json).map_err(|error| {
-            LcmError::SanitizationRefused {
-                reason: format!("stored LCM provider metadata is not valid JSON: {error}"),
-            }
-        })?;
+    let original = serde_json::from_str::<JsonValue>(provider_metadata_json).map_err(|error| {
+        LcmError::SanitizationRefused {
+            reason: format!("stored LCM provider metadata is not valid JSON: {error}"),
+        }
+    })?;
     let sanitized =
         sanitize_provider_metadata_json(provider_metadata_json, MAX_PROVIDER_METADATA_BYTES)
             .ok_or_else(|| LcmError::SanitizationRefused {
