@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_domain::{CodeGenerationId, RepositoryId, UtcMicros};
@@ -34,7 +36,7 @@ mod metadata_replay;
 mod replay_decode;
 mod support;
 
-use support::{RegisteredGraph, TestCancellation, registration};
+use support::{RegisteredGraph, TestCancellation, owner_registration, registration};
 
 struct Probe {
     cancellation: RuntimeCancellationIdentityV1,
@@ -77,6 +79,26 @@ struct AtomicTestCancellation(Arc<AtomicU8>);
 impl GraphCancellation for AtomicTestCancellation {
     fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::SeqCst) != 0
+    }
+}
+
+/// Parks the polling operation at one exact cancellation probe so a test can
+/// hold the registry entry in its in-flight state deterministically.
+#[derive(Debug)]
+struct GateOnPoll {
+    polls: AtomicUsize,
+    gate_on: usize,
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
+impl GraphCancellation for GateOnPoll {
+    fn is_cancelled(&self) -> bool {
+        if self.polls.fetch_add(1, Ordering::SeqCst) + 1 == self.gate_on {
+            self.entered.wait();
+            self.release.wait();
+        }
+        false
     }
 }
 
@@ -1164,6 +1186,186 @@ fn superseded_journaled_publication_seats_historically_on_retry() {
                 &mut authority,
                 &context,
                 &g2_record.publication.key.projection,
+            )
+            .unwrap()
+            .generation(),
+        &GraphGenerationId::new("g2").unwrap()
+    );
+}
+
+/// The complete Plan 39/25 live-activation conflict in one journey: the
+/// producer's publish retry arrives while the graph runtime is mid-close
+/// (`Closing`) and its journaled expected prior head has been superseded by
+/// the producer's own publication (the durable CAS already advanced). The
+/// attach must wait out the close and remount, and the publish must
+/// recompute the recovered generation digest from actual rows, match the
+/// journaled expectation, and seat the verified head that serves reads —
+/// never loop `Conflict` or leave the projection without an installed head.
+#[test]
+fn recovered_digest_seats_under_closing_and_superseded_head_conflict() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("seat-journey", "work");
+    let g1 = manifest(identity.clone(), "g1", "g1", vec![], vec![]);
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'a',
+    );
+    let g1_commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let g1_head = g1_commit.head.clone();
+    drop(g1_commit);
+    let g2 = manifest(identity.clone(), "g2", "g2", vec![], vec![]);
+    let g2_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g2,
+        "publish:g2",
+        Some(g1_head.clone()),
+        'b',
+    );
+    let g2_commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g2_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let g2_head = g2_commit.head.clone();
+    drop(g2_commit);
+
+    // Park a close mid-flight so the registry entry is `Closing` when the
+    // seat retry arrives. `close` probes its cancellation once before
+    // reserving and once while `Closing`; the gate parks the second probe.
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let mut gated = registration(registered.binding.clone(), temp.path());
+    gated.cancellation = Arc::new(GateOnPoll {
+        polls: AtomicUsize::new(0),
+        gate_on: 2,
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let closer = {
+        let registry = registered.registry.clone();
+        thread::spawn(move || registry.close(&gated))
+    };
+    entered.wait();
+
+    // The seat retry: attach while the close is in flight, then publish the
+    // journaled g2 whose expected prior (g1's head) was superseded by g2's
+    // own durable publication.
+    let seat = {
+        let registry = registered.registry.clone();
+        let binding = registered.binding.clone();
+        let root = temp.path().to_path_buf();
+        thread::spawn(move || {
+            let attachment = registry
+                .resolve_owner_attachment(owner_registration(registration(binding.clone(), &root)))
+                .expect("the seat attach must wait for the in-flight close and remount");
+            drop(attachment);
+            let (control, probe) = control_and_probe();
+            let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+            let commit = registry.publish_verified(
+                registration(binding, &root),
+                &mut authority,
+                &context,
+                &g2_record.publication.key,
+                None,
+            );
+            (authority, g2_record, commit)
+        })
+    };
+    // Let the seat retry observe the in-flight close before releasing it.
+    thread::sleep(Duration::from_millis(50));
+    release.wait();
+    assert!(closer.join().unwrap().unwrap());
+    let (mut authority, g2_record, commit) = seat.join().unwrap();
+    let commit =
+        commit.expect("the producer's own superseded-head publication must seat, not conflict");
+
+    // The recovered digest was recomputed from actual rows after the remount
+    // and matches the journaled expectation bound at publication time.
+    assert_eq!(
+        commit.recovered_digest,
+        g2_record.publication.expected_recovered_digest
+    );
+    assert_eq!(commit.head, g2_head);
+    assert_eq!(
+        commit.head.recovered_digest,
+        g2_record.publication.expected_recovered_digest
+    );
+    // The seat installed the verified head: reads serve g2's actual rows
+    // without any further recovery.
+    let snapshot = registered
+        .registry
+        .verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &identity,
+        )
+        .expect("the seated head must serve installed reads");
+    assert_eq!(
+        snapshot.generation(),
+        &GraphGenerationId::new("g2").unwrap()
+    );
+    assert_eq!(
+        snapshot
+            .entity(
+                &GraphEntityRef::new(
+                    identity.clone(),
+                    GraphEntityId::new("entity:shared").unwrap(),
+                ),
+                Arc::new(TestCancellation),
+            )
+            .unwrap()
+            .unwrap()
+            .properties
+            .get(&GraphPropertyName::new("marker").unwrap()),
+        Some(&GraphProperty::String("g2".to_owned()))
+    );
+    // The superseded g1 retry still seats as historical evidence with its own
+    // matching recovered digest and never displaces the installed head.
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let historical = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .expect("the superseded publication must seat historically");
+    assert_eq!(
+        historical.recovered_digest,
+        g1_record.publication.expected_recovered_digest
+    );
+    assert_eq!(historical.head, g1_head);
+    assert_eq!(
+        registered
+            .registry
+            .verified_snapshot(
+                registration(registered.binding.clone(), temp.path()),
+                &identity,
             )
             .unwrap()
             .generation(),
