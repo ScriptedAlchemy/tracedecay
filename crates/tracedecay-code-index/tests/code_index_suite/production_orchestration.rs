@@ -88,6 +88,47 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
     }
 }
 
+/// Models the mispartitioned publication stores the production owner must
+/// refuse: one physical active pointer that ignores the requested scope, so
+/// the generation sealed for one branch/worktree is answered for every scope.
+#[derive(Clone, Default)]
+struct PartialKeyPublicationStore {
+    active: Arc<Mutex<Option<Arc<CodeIndexPublishedGenerationV1>>>>,
+}
+
+impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
+    fn load_active(
+        &self,
+        _scope: &CodeIndexGenerationScopeV1,
+    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        Ok(self
+            .active
+            .lock()
+            .expect("publication lock")
+            .as_ref()
+            .map(|generation| generation.as_ref().clone()))
+    }
+
+    fn publish_atomically(
+        &mut self,
+        _scope: &CodeIndexGenerationScopeV1,
+        expected_active_generation: Option<&CodeGenerationId>,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let mut active = self.active.lock().expect("publication lock");
+        if active
+            .as_ref()
+            .map(|current| current.manifest().generation_id.clone())
+            .as_ref()
+            != expected_active_generation
+        {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
+        *active = Some(generation);
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ApplyingProjectionSink;
 
@@ -940,6 +981,257 @@ fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
     assert!(second.projection().request().changes.deleted.is_empty());
     assert!(!second.projection().request().changes.reused.is_empty());
     assert_eq!(store.scope_count(), 1);
+}
+
+/// A checkout misclassified as "not a git repository" resolves a scope
+/// without a reference or worktree while the store still answers with the
+/// sealed git-identified generation. That answer must be one terminal typed
+/// reset state — never the generic contract error callers can only retry on
+/// a one-second cadence — and the sealed generation's git identity must
+/// survive the refusal untouched.
+#[test]
+fn misclassified_non_git_scope_reaches_a_terminal_reset_state_instead_of_retrying() {
+    let store = PartialKeyPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
+    let hawk_request = request_in_scope(
+        "file.identity.hawk",
+        1_100_000,
+        "refs/heads/hawk",
+        Some("worktree.primary"),
+        "commit.hawk.1",
+    );
+    let hawk_scope = CodeIndexGenerationScopeV1::for_snapshot(&hawk_request.snapshot);
+    let sealed = owner
+        .build_and_publish(hawk_request, &ActiveControl)
+        .expect("git-identified generation publishes");
+
+    let non_git = request("file.identity.non-git", 1_200_000);
+    let non_git_scope = CodeIndexGenerationScopeV1::for_snapshot(&non_git.snapshot);
+    assert_eq!(non_git_scope.reference, None);
+    assert_eq!(non_git_scope.worktree, None);
+
+    let read = owner
+        .active_generation(&non_git_scope)
+        .expect_err("a git-identified generation never dispatches onto a non-git scope");
+    assert!(
+        matches!(
+            &read,
+            CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
+            )
+        ),
+        "the refusal must be the terminal reset state, not a retryable error: {read}"
+    );
+
+    let rebuild = owner
+        .build_and_publish(non_git, &ActiveControl)
+        .expect_err("a reconcile under the misclassified identity refuses terminally");
+    assert!(
+        matches!(
+            &rebuild,
+            CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
+            )
+        ),
+        "repeat reconciles reach the same terminal state instead of spinning: {rebuild}"
+    );
+
+    // The sealed generation and its real git identity survive the refusal.
+    let retained = store
+        .load_active(&hawk_scope)
+        .expect("read publication state")
+        .expect("the sealed generation is never dropped by the refusal");
+    assert_eq!(retained.manifest(), sealed.manifest());
+    assert_eq!(retained.sealed_scope(), hawk_scope);
+}
+
+/// The complement of the terminal refusal: a genuinely non-git snapshot is a
+/// first-class terminal outcome. It indexes as its own genesis slot beside
+/// git-identified generations instead of erroring or adopting one of them.
+#[test]
+fn non_git_scope_stays_independently_active_beside_git_identified_generations() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
+    let hawk_request = request_in_scope(
+        "file.terminal.hawk",
+        1_100_000,
+        "refs/heads/hawk",
+        Some("worktree.primary"),
+        "commit.hawk.1",
+    );
+    let hawk_scope = CodeIndexGenerationScopeV1::for_snapshot(&hawk_request.snapshot);
+    let hawk = owner
+        .build_and_publish(hawk_request, &ActiveControl)
+        .expect("git-identified generation publishes");
+
+    let non_git_request = request("file.terminal.non-git", 1_200_000);
+    let non_git_scope = CodeIndexGenerationScopeV1::for_snapshot(&non_git_request.snapshot);
+    let non_git = owner
+        .build_and_publish(non_git_request, &ActiveControl)
+        .expect("a non-git snapshot indexes as its own terminal outcome");
+
+    assert!(non_git.manifest().parent_generation.is_none());
+    assert_eq!(store.scope_count(), 2);
+    assert_eq!(
+        owner
+            .active_generation(&hawk_scope)
+            .expect("hawk scope read")
+            .expect("hawk stays active")
+            .manifest(),
+        hawk.manifest()
+    );
+    assert_eq!(
+        owner
+            .active_generation(&non_git_scope)
+            .expect("non-git scope read")
+            .expect("non-git stays active")
+            .manifest(),
+        non_git.manifest()
+    );
+}
+
+/// Config dispatch is full-scope exact. A store matching on a partial key
+/// (repository-only pointer) must never get a generation sealed for one
+/// branch/worktree dispatched onto another scope — neither onto a different
+/// worktree (the PR checkout) nor onto the same worktree under a different
+/// sealed branch label.
+#[test]
+fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
+    let store = PartialKeyPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let hawk_request = request_in_scope(
+        "file.dispatch.hawk",
+        1_100_000,
+        "refs/heads/hawk",
+        Some("worktree.hawk"),
+        "commit.hawk.1",
+    );
+    let hawk_scope = CodeIndexGenerationScopeV1::for_snapshot(&hawk_request.snapshot);
+    let hawk = owner
+        .build_and_publish(hawk_request, &ActiveControl)
+        .expect("hawk generation publishes");
+
+    let pr_worktree_scope = CodeIndexGenerationScopeV1 {
+        repository: hawk_scope.repository.clone(),
+        reference: Some(id::<RefId>("refs/heads/pr-1234")),
+        worktree: Some(id::<WorktreeId>("worktree.pr")),
+    };
+    let moved_label_scope = CodeIndexGenerationScopeV1 {
+        repository: hawk_scope.repository.clone(),
+        reference: Some(id::<RefId>("refs/heads/pr-1234")),
+        worktree: hawk_scope.worktree.clone(),
+    };
+    for foreign_scope in [&pr_worktree_scope, &moved_label_scope] {
+        let refused = owner
+            .active_generation(foreign_scope)
+            .expect_err("a generation sealed for hawk never dispatches onto another scope");
+        assert!(
+            matches!(
+                &refused,
+                CodeIndexProductionErrorV1::Publication(
+                    CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
+                )
+            ),
+            "full-scope dispatch mismatch must be the terminal reset state: {refused}"
+        );
+    }
+
+    // The exact sealed full scope still dispatches.
+    assert_eq!(
+        owner
+            .active_generation(&hawk_scope)
+            .expect("exact scope read")
+            .expect("hawk stays active for its own scope")
+            .manifest(),
+        hawk.manifest()
+    );
+}
+
+/// The code shard/slot key is the sealed branch label inside the full scope —
+/// never a filesystem path (the scope carries none) and never the generation
+/// id: successive generations share their branch's slot while a second branch
+/// on the same worktree splits into its own independently active slot.
+#[test]
+fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
+    let first = owner
+        .build_and_publish(
+            request_in_scope(
+                "file.shard.hawk.1",
+                1_100_000,
+                "refs/heads/hawk",
+                Some("worktree.shared"),
+                "commit.hawk.1",
+            ),
+            &ActiveControl,
+        )
+        .expect("first hawk generation publishes");
+    let second = owner
+        .build_and_publish(
+            request_in_scope(
+                "file.shard.hawk.2",
+                1_200_000,
+                "refs/heads/hawk",
+                Some("worktree.shared"),
+                "commit.hawk.1",
+            ),
+            &ActiveControl,
+        )
+        .expect("second hawk generation publishes");
+
+    // A new generation id under the same sealed branch label reuses the slot.
+    assert_ne!(
+        first.manifest().generation_id,
+        second.manifest().generation_id
+    );
+    assert_eq!(second.sealed_scope(), first.sealed_scope());
+    assert_eq!(store.scope_count(), 1);
+
+    // The same worktree under another sealed branch label is its own slot.
+    let pr = owner
+        .build_and_publish(
+            request_in_scope(
+                "file.shard.pr.1",
+                1_300_000,
+                "refs/heads/pr-1234",
+                Some("worktree.shared"),
+                "commit.pr.1",
+            ),
+            &ActiveControl,
+        )
+        .expect("pr generation publishes");
+    assert_eq!(pr.sealed_scope().worktree, first.sealed_scope().worktree);
+    assert_ne!(pr.sealed_scope(), first.sealed_scope());
+    assert_eq!(
+        pr.sealed_scope().reference,
+        Some(id::<RefId>("refs/heads/pr-1234"))
+    );
+    assert!(pr.manifest().parent_generation.is_none());
+    assert_eq!(store.scope_count(), 2);
+    assert_eq!(
+        owner
+            .active_generation(&second.sealed_scope())
+            .expect("hawk slot read")
+            .expect("hawk slot stays active")
+            .manifest(),
+        second.manifest()
+    );
+
+    // The sealed branch label is durable through the sealed codec, so a
+    // restored generation still names the exact slot it was sealed for.
+    let restored = CodeIndexPublishedGenerationV1::decode_sealed(
+        &pr.encode_sealed().expect("pr generation seals"),
+    )
+    .expect("pr generation restores");
+    assert_eq!(restored.sealed_scope(), pr.sealed_scope());
 }
 
 #[test]
