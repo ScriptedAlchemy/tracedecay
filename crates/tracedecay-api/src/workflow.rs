@@ -123,12 +123,8 @@ impl WorkflowOperation {
     }
 
     /// Whether the operation reads without producing a durable effect.
-    ///
-    /// Mirrors the catalog's effect class for each Workflow operation
-    /// (`workflow_executable_binding_registry`), and the parity is pinned by
-    /// `read_only_operations_mirror_the_catalog_effect_class` below so the two
-    /// cannot drift. The selected-project dashboard gateway admits exactly
-    /// this set by POST.
+    /// Parity with the catalog's effect class is pinned by
+    /// `read_only_operations_mirror_the_catalog_effect_class`.
     pub const fn is_read_only(self) -> bool {
         matches!(
             self,

@@ -13,36 +13,14 @@ import {
 import type { WorkRoute } from '../work/workApi.ts';
 
 /**
- * The canonical Workflow routes this dashboard calls or documents.
- *
- * Each one names an operation of the canonical `WorkflowOperation` descriptor
- * (`crates/tracedecay-api/src/workflow.rs`): same operation id, same
- * `/application/workflow/<segment>` path the catalog advertises
- * (`workflow_executable_binding_registry`), reached through the dashboard's
- * `/api/application` nest. They are written out rather than derived because
- * there is no generated route table on the dashboard side, and a route
- * invented here would be a request the daemon has never mounted.
- *
- * Declared is not the same as mounted-for-the-browser. Six of the sixteen
- * Workflow operations are deliberately NOT declared here:
- *
- *   handoff-issue / handoff-redeem     the dashboard never holds a bearer
- *                                      token and must not grow a client that
- *                                      could redeem one.
- *   start-run / pause-run / resume-run the browser must not mint execution
- *   / cancel-run                       fences, command ids, or provider
- *                                      admissions; runs are started and
- *                                      controlled by their owning surfaces
- *                                      and observed here through `get-run`.
- *
- * Register, validate, get, and diff stay undeclared until the workspace grows
- * a definition-authoring journey; a declared-but-uncalled route would be
- * advertising the dashboard does not back.
+ * The Workflow routes this dashboard calls: same operation ids and
+ * `/application/workflow/<segment>` paths as the canonical `WorkflowOperation`
+ * descriptor (`crates/tracedecay-api/src/workflow.rs`). Handoffs and run
+ * control are deliberately undeclared — the browser never holds a bearer or
+ * mints fences/command ids — and register/validate/get/diff stay undeclared
+ * until an authoring journey exists.
  */
 
-/** Every registered definition version, newest data straight off the durable
- * authority. The response is the daemon's own list; an empty array is a real
- * empty registry, never a substitute for a refusal. */
 export const WORKFLOW_LIST_DEFINITIONS_ROUTE = {
   operation: 'operation.workflow.list_definitions',
   path: '/api/application/workflow/list-definitions',
@@ -58,12 +36,8 @@ export const WORKFLOW_DEFINITION_HISTORY_ROUTE = {
   response: z.array(WorkflowDefinitionSchema),
 } as const satisfies WorkRoute<unknown, unknown>;
 
-/**
- * The three lifecycle transitions, each a compare-and-swap against the
- * disposition revision the caller last saw. A stale revision is a typed
- * conflict, never a silent overwrite; catalog admission gates activate on the
- * daemon before the transition is journaled.
- */
+/** The three lifecycle compare-and-swaps; catalog admission gates activate
+ * on the daemon before the transition is journaled. */
 export const WORKFLOW_ACTIVATE_DEFINITION_ROUTE = {
   operation: 'operation.workflow.activate_definition',
   path: '/api/application/workflow/activate-definition',
@@ -85,8 +59,7 @@ export const WORKFLOW_REJECT_DEFINITION_ROUTE = {
   response: WorkflowDefinitionDispositionSchema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
-/** One run's projection: status, sequence, per-step states and receipts,
- * rebuilt from the run's own event journal. */
+/** One run's projection, rebuilt from the run's own event journal. */
 export const WORKFLOW_GET_RUN_ROUTE = {
   operation: 'operation.workflow.get_run',
   path: '/api/application/workflow/get-run',

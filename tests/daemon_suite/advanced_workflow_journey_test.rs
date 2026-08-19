@@ -605,9 +605,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         })
         .expect("mounted workflow definition registration");
 
-    // Catalog admission gates production activation: a registered candidate
-    // whose step names an operation the executable catalog does not mount is
-    // refused before its lifecycle transition is journaled (Plan 32).
+    // Catalog admission refuses an uncataloged step operation before the
+    // lifecycle transition is journaled (Plan 32).
     let uncataloged_definition_id: WorkflowDefinitionId =
         id("workflow.advanced-production-journey.uncataloged");
     let uncataloged = WorkflowDefinition::new(

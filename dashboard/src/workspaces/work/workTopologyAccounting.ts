@@ -47,23 +47,14 @@ import {
  *
  * WHERE THE NUMBERS COME FROM, AND WHERE THEY DO NOT
  *
- * Plan 26 owns eleven persisted execution-topology events and projects them
- * into `ExecutionTopologyMetricsV1`
- * (`crates/tracedecay-application/src/execution_topology_metrics/`, whose
- * `EXECUTION_TOPOLOGY_EVENT_KINDS_V1` is the exact list this module names in
- * its absences). That read model IS published — `operation.work.topology_metrics`
- * is mounted at `/api/work/topology-metrics` and its contract is generated —
- * and this ledger consumes its integration and stack families:
- *
- *   integration outcomes   the `work_merge_attempts_total` kind × outcome
- *                          cells, decoded verbatim in
- *                          `workAccountingMetrics.ts`; a typed-absent cell
- *                          stays the projector's own absence.
- *   stack capability       the model's `github_stack_capability` reading, a
- *                          typed operational state rather than a count.
- *
- * The remaining event-fed dimensions render as typed absences naming the
- * event kind a reviewer can grep for: this lens does not decode their
+ * `ExecutionTopologyMetricsV1` is published at `operation.work.topology_metrics`
+ * (`/api/work/topology-metrics`), and this ledger consumes its integration and
+ * stack families through `workAccountingMetrics.ts`: the
+ * `work_merge_attempts_total` kind × outcome cells and the
+ * `github_stack_capability` reading, each cell decoded verbatim with the
+ * projector's own typed absences. The remaining event-fed dimensions render
+ * as typed absences naming the event kind a reviewer can grep for
+ * (`EXECUTION_TOPOLOGY_EVENT_KINDS_V1`): this lens does not decode their
  * descriptors, and an absence stated is not a zero shown.
  *
  * Three further dimensions have a real, mounted source on the attempt and

@@ -1,11 +1,6 @@
-/**
- * The Workflows page over the mounted `/application/workflow` routes.
- *
- * The invariant under test is the same one every workspace carries: a refusal
- * is never an empty registry, an empty registry is drawn only when the daemon
- * actually answered one, and every rendered figure is a decoded generated
- * contract rather than a browser-owned substitute.
- */
+/** The Workflows page over the mounted `/application/workflow` routes: a
+ * refusal is never an empty registry, and every rendered figure is a decoded
+ * generated contract. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -65,8 +60,7 @@ function envelope(payload: unknown) {
   };
 }
 
-/** Answers exactly the routes a test names and refuses anything else, so a
- * test that accidentally depends on another route fails loudly. */
+/** Answers exactly the routes a test names; anything else fails loudly. */
 function serve(handler: (url: string, init?: RequestInit) => { status: number; body: unknown }) {
   const calls: { url: string; body: unknown }[] = [];
   vi.stubGlobal(
@@ -212,8 +206,6 @@ describe('the Workflows page over mounted routes', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'activate' }));
     expect(await screen.findByText(/disposition active · revision 3/)).toBeTruthy();
 
-    // Switching to another definition must not carry the first definition's
-    // transition result or revision draft under the new heading.
     const draft = screen.getByLabelText('Expected revision');
     await userEvent.clear(draft);
     await userEvent.type(draft, '7');

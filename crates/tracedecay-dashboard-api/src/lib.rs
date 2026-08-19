@@ -1607,9 +1607,8 @@ async fn project_scoped_api_gateway(
                 (application.dashboard_feedback_router, "feedback/")
             }
             SelectedProjectApplicationRead::Work => (application.dashboard_work_router, "work/"),
-            // Workflow reads answer from the selected project's own canonical
-            // application router: stripping `application/` leaves the
-            // `/workflow/{operation}` path that router mounts.
+            // Stripping `application/` leaves the `/workflow/{operation}`
+            // path the project's canonical application router mounts.
             SelectedProjectApplicationRead::Workflow => (application.http_router, "application/"),
         };
         let Some(operation) = tail.strip_prefix(family) else {
@@ -2914,9 +2913,6 @@ mod authority_tests {
             None
         );
 
-        // `list-definitions` is the canonical Workflow read the Workflows
-        // workspace issues under a selected project; naming it keeps the
-        // intent legible beside the derived loop below.
         assert_eq!(
             selected_project_application_read(
                 &Method::POST,
@@ -2937,9 +2933,7 @@ mod authority_tests {
                 );
                 assert_eq!(selected_project_application_read(&Method::GET, tail), None);
             } else {
-                // Lifecycle transitions, handoffs, and run control stay
-                // refused: a selected project is read-only through this
-                // gateway.
+                // Mutations stay refused: the gateway is read-only.
                 assert_eq!(
                     selected_project_application_read(&Method::POST, tail),
                     None,

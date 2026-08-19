@@ -177,11 +177,9 @@ struct DashboardContractCatalogV1 {
     work_duplicate_adjudication_result: WorkDuplicateAdjudicationAppendOutcomeV1,
     work_leak_adjudication_command: AdjudicateWorkLeakCommandV1,
     work_leak_adjudication_result: WorkLeakAdjudicationOutcomeV1,
-    /// The workflow definition/run slice the Workflows workspace consumes off
-    /// the mounted `/api/application/workflow` routes. Handoff issue/redeem
-    /// stay uncontracted for the dashboard because it never holds a bearer;
-    /// run start/pause/resume/cancel stay uncontracted because the browser
-    /// must not mint fences, command ids, or provider admissions.
+    /// The workflow definition/run slice the Workflows workspace consumes.
+    /// Handoffs and run control stay uncontracted: the browser never holds a
+    /// bearer or mints fences, command ids, or provider admissions.
     workflow_definition: WorkflowDefinition,
     workflow_definition_list_request: WorkflowDefinitionListRequest,
     workflow_definition_get_request: WorkflowDefinitionGetRequest,
@@ -495,8 +493,6 @@ mod tests {
             );
         }
 
-        // The dashboard never holds a handoff bearer and never mints run
-        // fences or command ids, so those wire types stay uncontracted here.
         for excluded in [
             "TaskHandoffIssueRequest",
             "TaskHandoffRedeemRequest",

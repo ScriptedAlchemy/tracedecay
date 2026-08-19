@@ -1,24 +1,21 @@
-/**
- * One canonical `ExecutionTopologyMetricsV1` fixture, shaped like the Rust
- * projector's output and parsed with the generated schema by consumers so a
- * hand-shaped object the daemon could never send cannot keep a test green.
- */
+/** `ExecutionTopologyMetricsV1` fixtures, shaped like the Rust projector's
+ * output; consumers parse them with the generated schema. */
 
 const HORIZON = {
   since_micros: 1_753_000_000_000_000,
   until_micros: 1_753_003_600_000_000,
 };
 
-export interface TopologyMetricsCoverageSpec {
-  eligible: number | null;
-  observed: number;
-  completed: number;
-  censored: number;
-  unknown: number;
-  state: string;
+interface CoverageSpec {
+  eligible?: number | null;
+  observed?: number;
+  completed?: number;
+  censored?: number;
+  unknown?: number;
+  state?: string;
 }
 
-export function topologyMetricsCoverage(spec: Partial<TopologyMetricsCoverageSpec> = {}) {
+function coverage(spec: CoverageSpec = {}) {
   return {
     eligible: spec.eligible ?? null,
     observed: spec.observed ?? 0,
@@ -30,19 +27,17 @@ export function topologyMetricsCoverage(spec: Partial<TopologyMetricsCoverageSpe
   };
 }
 
-export interface TopologyMeasurementSpec {
+export function topologyMeasurement(spec: {
   metric: string;
   value: number | null;
   unit: string;
   denominator: string;
   dimensions: readonly { dimension: string; value: string }[];
-  coverage?: Partial<TopologyMetricsCoverageSpec>;
+  coverage?: CoverageSpec;
   unavailable?: string;
-}
-
-export function topologyMeasurement(spec: TopologyMeasurementSpec) {
+}) {
   const unavailable = spec.unavailable ?? null;
-  const coverage = topologyMetricsCoverage(spec.coverage);
+  const cellCoverage = coverage(spec.coverage);
   return {
     dimensions: spec.dimensions,
     unavailable,
@@ -52,8 +47,8 @@ export function topologyMeasurement(spec: TopologyMeasurementSpec) {
       value: spec.value,
       unit: spec.unit,
       denominator: spec.denominator,
-      denominator_value: coverage.eligible,
-      coverage,
+      denominator_value: cellCoverage.eligible,
+      coverage: cellCoverage,
       evidence_class: 'measurement',
       provenance: {
         source: 'observability_envelope',
@@ -79,10 +74,10 @@ export interface TopologyMetricsSpec {
     capability: string | null;
     standard_git_fallback_available: boolean | null;
     other_forge_fallback_available: boolean | null;
-    coverage?: Partial<TopologyMetricsCoverageSpec>;
+    coverage?: CoverageSpec;
     unavailable?: string | null;
   };
-  coverage?: Partial<TopologyMetricsCoverageSpec>;
+  coverage?: CoverageSpec;
 }
 
 export function topologyMetricsModel(spec: TopologyMetricsSpec = {}) {
@@ -93,24 +88,16 @@ export function topologyMetricsModel(spec: TopologyMetricsSpec = {}) {
     watermark: 'observability:topology:41',
     observed_at_micros: HORIZON.until_micros,
     current: true,
-    coverage: topologyMetricsCoverage(spec.coverage ?? { observed: 9, completed: 9, state: 'known' }),
+    coverage: coverage(spec.coverage ?? { observed: 9, completed: 9, state: 'known' }),
     emission_coverage: { emitted: 9, delayed: 0, dropped: 0, sampled_events: 0 },
-    github_stack_capability:
-      capability === undefined
-        ? {
-            capability: null,
-            standard_git_fallback_available: null,
-            other_forge_fallback_available: null,
-            coverage: topologyMetricsCoverage({ unknown: 1 }),
-            unavailable: 'no_eligible_evidence',
-          }
-        : {
-            capability: capability.capability,
-            standard_git_fallback_available: capability.standard_git_fallback_available,
-            other_forge_fallback_available: capability.other_forge_fallback_available,
-            coverage: topologyMetricsCoverage(capability.coverage),
-            unavailable: capability.unavailable ?? null,
-          },
+    github_stack_capability: {
+      capability: capability?.capability ?? null,
+      standard_git_fallback_available: capability?.standard_git_fallback_available ?? null,
+      other_forge_fallback_available: capability?.other_forge_fallback_available ?? null,
+      coverage: coverage(capability?.coverage ?? { unknown: 1 }),
+      unavailable:
+        capability === undefined ? 'no_eligible_evidence' : (capability.unavailable ?? null),
+    },
     drill_anchors: [{ cursor: 'topology-observation-41' }],
     measurements: spec.measurements ?? [],
   };

@@ -63,8 +63,7 @@ fn workflow_context(
     .unwrap()
 }
 
-/// A canonical mounted Work operation, so a fixture definition clears catalog
-/// admission unless a test deliberately names an unknown one.
+/// A mounted Work operation, so fixtures clear catalog admission.
 const MOUNTED_OPERATION: &str = "operation.work.start_attempt";
 
 fn definition(version: u64) -> WorkflowDefinition {
@@ -974,9 +973,7 @@ fn activation_rejects_a_step_operation_the_catalog_does_not_mount() {
         .unwrap();
     let definition_id = registered.definition_id().clone();
 
-    // Registration stays lenient — Plan 32 rejects "before activation" — so
-    // the unknown operation must be refused by validate and activate, not by
-    // the candidate insert above.
+    // Registration stays lenient; Plan 32 rejects "before activation".
     let denial = service.validate(registered.clone()).unwrap_err();
     let WorkflowCoordinationError::CatalogAdmissionDenied(
         WorkflowCatalogAdmissionError::UnknownOperation { step_id, operation },
@@ -999,8 +996,7 @@ fn activation_rejects_a_step_operation_the_catalog_does_not_mount() {
         )
     );
 
-    // The denial happens before the lifecycle authority: the disposition
-    // stays candidate and no transition history is appended.
+    // The denial precedes the lifecycle authority.
     assert_eq!(
         service.disposition(&definition_id, 1).unwrap().state,
         WorkflowDefinitionLifecycleState::Candidate
