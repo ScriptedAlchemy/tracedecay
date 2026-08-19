@@ -1,15 +1,11 @@
 //! Work-conflict predictions and linked outcomes from the mounted
 //! native-integration owner.
 //!
-//! The preflight tree merge is TraceDecay's mechanical conflict oracle: one
-//! frozen merge relation is either mechanically integrable or natively
-//! conflicted before any apply is authorized. That disposition is recorded as
-//! an uncalibrated rule prediction bound to the exact preview identity. The
-//! terminal apply receipt is the independent native-git adjudication of the
-//! same relation and links back through the same deterministic
-//! `prediction_ref`. Reads, refusals, already-integrated previews, and
-//! previews whose merge evaluation never completed emit nothing; telemetry
-//! failure never changes the owner's already-decided result.
+//! The preflight tree merge is the mechanical conflict oracle; its
+//! disposition is recorded as an uncalibrated rule prediction bound to the
+//! exact preview identity, and the terminal apply receipt is the independent
+//! native-git adjudication linking back through the same deterministic
+//! `prediction_ref`. Telemetry failure never changes the owner's result.
 
 use tracedecay_application::{
     NativeIntegrationPreviewProjectionV1, NativeIntegrationReceiptProjectionV1,

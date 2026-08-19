@@ -1,24 +1,13 @@
 //! Once-per-project-open adoption-eligibility census over the composed
 //! application capability catalog.
 //!
-//! `application_catalog_contributions` is the one closed composition authority
-//! the daemon serves (root composition in [`crate::catalog_composition`]
-//! validates exactly this set), so enumerating it is a complete census of the
-//! catalog-composed adoption families and each emitted observation carries
-//! `CoverageStateV1::Known`. Per family: `eligible` counts every composed
-//! capability, `enabled` those declared eligible for the default application
-//! profile — the profile the daemon's application surface actually serves
-//! (`src/mcp/tools/handlers/application_surface.rs`) — and `available` the
-//! enabled ones whose availability contract is callable. This mirrors the two
-//! filter stages of `catalog_composition::application_profile` split into
-//! their funnel order, so `available <= enabled <= eligible` holds by
-//! construction.
-//!
-//! Families with no catalog-composed capability (`automation`, `work`,
-//! `workflow`, `hooks`, `mcp`, `dashboard`) are not emitted: those product
-//! capabilities are not represented in this catalog authority, so a zero
-//! census with `Known` coverage would falsely claim their eligible
-//! population is empty.
+//! `application_catalog_contributions` is the one closed composition
+//! authority the daemon serves, so enumerating it is a complete census
+//! (`Known` coverage). Per family: `eligible` = every composed capability,
+//! `enabled` = default-profile eligible, `available` = enabled and callable —
+//! the exact filter stages of `catalog_composition::application_profile` in
+//! funnel order. Families with no composed capability are not emitted: a
+//! `Known`-zero census would falsely claim their population is empty.
 
 use std::collections::BTreeMap;
 use std::path::Path;

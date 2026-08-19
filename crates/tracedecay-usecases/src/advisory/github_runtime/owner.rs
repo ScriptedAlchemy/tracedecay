@@ -35,9 +35,8 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::Database;
 
 /// Canonical Observatory mount for the coordinator observations this owner
-/// produces: the exact project/repository probe owner, the one bounded
-/// project producer, and the project observation database. Absent when the
-/// composition root could not mount all three; refresh then keeps producing
+/// produces. Absent when the composition root could not mount the probe
+/// owner, producer, and observation database; refresh then keeps producing
 /// product anchors without canonical capability/drift receipts.
 #[derive(Clone)]
 pub struct GitHubStackObservabilityV1 {
@@ -47,11 +46,9 @@ pub struct GitHubStackObservabilityV1 {
 }
 
 impl GitHubStackObservabilityV1 {
-    /// Offers one validated coordinator observation to the canonical bounded
-    /// Observatory producer as a capability receipt plus one receipt per
-    /// exact drift interval. Telemetry refusal is logged, never propagated:
-    /// the advisory refresh that produced the observation continues
-    /// unchanged.
+    /// Offers one validated coordinator observation as a capability receipt
+    /// plus one receipt per exact drift interval. Telemetry refusal is
+    /// logged, never propagated to the refresh product path.
     pub fn record(
         &self,
         source_binding: &GitHubStackProviderSourceBindingV1,
@@ -64,22 +61,12 @@ impl GitHubStackObservabilityV1 {
             source_binding,
             observation,
         );
-        match capability {
-            GitHubStackCapabilityObservationResultV1::Enqueued => {}
-            GitHubStackCapabilityObservationResultV1::DroppedAtCapacity => {
-                tracing::warn!(
-                    event = "github_stack_capability_observation_dropped",
-                    "GitHub stack capability receipt was dropped at producer capacity"
-                );
-            }
-            GitHubStackCapabilityObservationResultV1::Unavailable { event_kind, reason } => {
-                tracing::warn!(
-                    event = "github_stack_capability_observation_unavailable",
-                    observation_kind = event_kind,
-                    reason = ?reason,
-                    "GitHub stack capability receipt could not enter the canonical producer"
-                );
-            }
+        if capability != GitHubStackCapabilityObservationResultV1::Enqueued {
+            tracing::warn!(
+                event = "github_stack_capability_observation_refused",
+                outcome = ?capability,
+                "GitHub stack capability receipt did not enter the canonical producer"
+            );
         }
         match record_github_stack_drifts(
             self.observation_db.as_ref(),
@@ -89,20 +76,11 @@ impl GitHubStackObservabilityV1 {
             observation,
         ) {
             GitHubStackDriftObservationResultV1::Emitted { dropped: 0, .. } => {}
-            GitHubStackDriftObservationResultV1::Emitted { enqueued, dropped } => {
+            refused => {
                 tracing::warn!(
-                    event = "github_stack_drift_observation_dropped",
-                    enqueued,
-                    dropped,
-                    "GitHub stack drift receipts were partially dropped at producer capacity"
-                );
-            }
-            GitHubStackDriftObservationResultV1::Unavailable { event_kind, reason } => {
-                tracing::warn!(
-                    event = "github_stack_drift_observation_unavailable",
-                    observation_kind = event_kind,
-                    reason = ?reason,
-                    "GitHub stack drift receipts could not enter the canonical producer"
+                    event = "github_stack_drift_observation_refused",
+                    outcome = ?refused,
+                    "GitHub stack drift receipts did not fully enter the canonical producer"
                 );
             }
         }
@@ -234,11 +212,9 @@ where
                     stack_observed_at,
                 ) {
                     Ok(observation) => {
-                        // Canonical Observatory receipts are offered before
-                        // anchor publication: a publication refusal below is
-                        // a product-path outcome and must not conceal the
-                        // capability/drift observation the coordinator
-                        // already made.
+                        // Offered before anchor publication so a publication
+                        // refusal below cannot conceal the observation the
+                        // coordinator already made.
                         if let Some(stack_observability) = &self.stack_observability {
                             stack_observability.record(&source_binding, &observation);
                         }

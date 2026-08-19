@@ -1,15 +1,10 @@
 //! Terminal no-progress receipts for wall-exhausted Work provider attempts.
 //!
-//! The live attempt-execution owner arms one wall deadline from the pinned
-//! execution envelope and kills the provider process (whole process group /
-//! process tree) when it elapses. The provider-attempt authority commits no
-//! intermediate progress frontier — the durable trail is
-//! `Leased -> Running -> terminal`, and heartbeats never reset the deadline —
-//! so at that kill the frontier is provably zero, the stall is the full
-//! measured wall since the attempt began executing, and no run budget remains
-//! above the exhausted envelope deadline. The killed provider's worktree
-//! effects are not reconciled by the timeout handler, so the effect outcome
-//! is truthfully unknown.
+//! The provider-attempt authority commits no intermediate progress frontier
+//! (`Leased -> Running -> terminal`, heartbeats never reset the deadline), so
+//! at the wall-exhaustion kill the frontier is provably zero, the stall is
+//! the measured wall since the attempt began, no run budget remains, and the
+//! unreconciled worktree effect outcome is truthfully unknown.
 
 use tracedecay_domain::{
     CoverageStateV1, EffectReconciliationOutcomeV1, NoProgressEscalationV1, NoProgressObservedV1,
@@ -23,12 +18,7 @@ use super::{
 };
 
 /// One wall-exhaustion kill measured by the live attempt-execution owner.
-///
-/// Every field is a value the owner actually holds at the kill site: the
-/// exact attempt identity, the envelope's absolute run deadline, the resolved
-/// work-topology (concurrency) policy digest pinned at registration, the wall
-/// budget that was armed, and the monotonic stall measured from attempt start
-/// to the moment the deadline fired.
+/// Every field is a value the owner actually holds at the kill site.
 pub struct WorkNoProgressObservationV1<'a> {
     pub attempt: &'a WorkAttemptIdentityV1,
     pub run_deadline: UtcMicros,
@@ -38,13 +28,9 @@ pub struct WorkNoProgressObservationV1<'a> {
     pub observed_at: UtcMicros,
 }
 
-/// Offers one no-progress terminal fact without awaiting telemetry.
-///
-/// The payload contract refuses a zero wall budget (a deadline that had
-/// already elapsed before execution is not a measured stall) and a stall
-/// shorter than the budget that was armed, so a caller cannot fabricate a
-/// timeout that was never measured. Emission never changes the already
-/// decided timed-out product handling.
+/// Offers one no-progress terminal fact without awaiting telemetry. The
+/// payload contract refuses a zero wall budget and a stall shorter than the
+/// armed budget; emission never changes the timed-out product handling.
 pub fn record_no_progress_observation(
     producer: Option<&BoundedObservabilityProducerV1>,
     observation: &WorkNoProgressObservationV1<'_>,
@@ -67,12 +53,9 @@ pub fn record_no_progress_observation(
     }
 }
 
-/// Builds the canonical owner envelope for one wall-exhaustion kill.
-///
-/// The run-deadline reference hashes the exact attempt identity and the
-/// pinned absolute deadline instant, so the same run deadline replays to the
-/// same opaque local reference and raw task/run/attempt identifiers never
-/// enter the exportable payload.
+/// Builds the canonical owner envelope for one wall-exhaustion kill. The
+/// run-deadline reference hashes the exact attempt identity and deadline, so
+/// replays are idempotent and raw identifiers never enter the payload.
 fn no_progress_observation_envelope(
     identity: &ObservabilityProducerIdentityV1,
     canonical_project_scope: &str,

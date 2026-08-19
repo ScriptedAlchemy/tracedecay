@@ -298,35 +298,18 @@ pub(crate) async fn settle_project_hint_outcomes(
 }
 
 /// Records this pass's settled hints as one linked adoption-outcome funnel
-/// (`adoption.outcome.linked.v1`) through the project-bound session authority
-/// — the registered store the other Plan 26 producers already write. Strictly
-/// downstream telemetry: the record result is discarded (logged at debug)
-/// after the settlement outcome is determined, so an unavailable or
-/// non-project-bound observation store never changes what settlement returns.
+/// (`adoption.outcome.linked.v1`). Strictly downstream telemetry: the record
+/// result is discarded after the settlement outcome is determined.
 ///
-/// Every stage carries only what the settlement proved:
-/// * The idempotent `hint_outcome` write is the exactly-once terminal ledger
-///   (already-resolved hint ids are never re-resolved), so a funnel record
-///   counts only hints settled this pass and cross-pass sums never
-///   double-count a hint. Unresolved hints are re-scanned by later passes
-///   and are deliberately not carried as per-pass censored mass — that would
-///   re-count the same open hint at every ingest; their absence is declared
-///   through `Partial` census coverage instead.
-/// * `invoked` = settled hints: each was durably delivered to the agent
-///   (`hint_emitted` written at injection) and correlated this pass;
-///   `terminal` is the same settled population (`acted` + `ignored`).
-/// * `independently_useful` = `acted` only: the correlator observed the
-///   agent's subsequent tool activity from the independently ingested
-///   session store (`session_messages_after`) and verified a
-///   category-matching tracedecay tool fired inside the horizon — behavioral
-///   evidence, not display, click, or self-report, which Plan 26 forbids as
-///   success outcomes. `ignored` settles terminal-but-not-useful.
-/// * `repeat_useful` = 0: settlement resolves each hint exactly once at the
-///   first matching tool and never verifies repeat use, so zero is what it
-///   proves.
-/// * `census_coverage` is `Known` only when every scanned hint settled; an
-///   unresolved remainder leaves this pass's invoked census provably
-///   incomplete and weakens it to `Partial`.
+/// Every stage carries only what settlement proved: the idempotent
+/// `hint_outcome` write is the exactly-once terminal ledger, so
+/// `invoked`/`terminal` count only hints settled this pass and cross-pass
+/// sums never double-count. `independently_useful` = `acted` only — the
+/// correlator behaviorally verified a category-matching tool fired in the
+/// independently ingested session activity (never display/self-report).
+/// `repeat_useful` stays 0 (settlement never verifies repeat use), unresolved
+/// hints are re-scanned later rather than carried as per-pass censored mass,
+/// and their presence weakens `census_coverage` to `Partial`.
 async fn record_settled_adoption_outcomes(sessions: &RegisteredGlobalDb, stats: HintOutcomeStats) {
     let settled = stats.written() as u64;
     if settled == 0 {

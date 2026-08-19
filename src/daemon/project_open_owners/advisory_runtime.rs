@@ -976,10 +976,9 @@ async fn resolve_production_github_provider_config(
     })
 }
 
-/// Mounts the canonical Observatory lane for GitHub stack observations: the
-/// exact probe owner plus the one project-bound bounded producer. Telemetry
-/// mounting failure is logged and yields `None` — the review refresh owner
-/// keeps its product path either way.
+/// Mounts the canonical Observatory lane for GitHub stack observations.
+/// Telemetry mounting failure is logged and yields `None` — the review
+/// refresh owner keeps its product path either way.
 async fn resolve_github_stack_observability(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -987,19 +986,22 @@ async fn resolve_github_stack_observability(
     github_owner: &str,
     github_repository: &str,
 ) -> Option<tracedecay_usecases::advisory::GitHubStackObservabilityV1> {
+    let unavailable = |reason: &str, detail: String| {
+        tracing::warn!(
+            event = "github_stack_observability_mount",
+            outcome = "unavailable",
+            reason,
+            detail,
+            project = %project_root.display(),
+            "GitHub stack observability lane is not mounted"
+        );
+    };
     let topology_policy = match crate::config::topology::resolved_work_topology_policy(
         &state.scout_configuration.snapshot,
     ) {
         Ok(policy) => policy.clone(),
         Err(error) => {
-            tracing::warn!(
-                event = "github_stack_observability_mount",
-                outcome = "unavailable",
-                reason = "work_topology_policy",
-                error = ?error,
-                project = %project_root.display(),
-                "GitHub stack observability mount is unavailable without a work topology policy"
-            );
+            unavailable("work_topology_policy", format!("{error:?}"));
             return None;
         }
     };
@@ -1016,14 +1018,7 @@ async fn resolve_github_stack_observability(
     ) {
         Ok(probe_owner) => probe_owner,
         Err(error) => {
-            tracing::warn!(
-                event = "github_stack_observability_mount",
-                outcome = "unavailable",
-                reason = "probe_owner",
-                error = ?error,
-                project = %project_root.display(),
-                "GitHub stack observability probe owner refused to mount"
-            );
+            unavailable("probe_owner", format!("{error:?}"));
             return None;
         }
     };
@@ -1032,13 +1027,7 @@ async fn resolve_github_stack_observability(
         .observability_producer(Some(project_root))
         .await
     else {
-        tracing::warn!(
-            event = "github_stack_observability_mount",
-            outcome = "unavailable",
-            reason = "producer_unmounted",
-            project = %project_root.display(),
-            "GitHub stack observability has no mounted project producer"
-        );
+        unavailable("producer_unmounted", String::new());
         return None;
     };
     Some(tracedecay_usecases::advisory::GitHubStackObservabilityV1 {

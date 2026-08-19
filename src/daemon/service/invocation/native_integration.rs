@@ -171,8 +171,7 @@ pub(super) async fn execute_native_integration(
         execution.owner_preview.as_ref(),
     );
     // Telemetry only: the preflight disposition and terminal apply receipt
-    // additionally prove one mechanical conflict prediction/outcome pair, and
-    // a failed offer never changes the already-decided owner result.
+    // additionally prove one mechanical conflict prediction/outcome pair.
     match record_work_conflict_observation(
         registered.scope.project_id.as_str(),
         observability_producer.as_deref(),
@@ -185,18 +184,11 @@ pub(super) async fn execute_native_integration(
         | WorkConflictObservationResultV1::Unavailable {
             reason: WorkConflictObservationUnavailableV1::NotAdjudicated,
         } => {}
-        WorkConflictObservationResultV1::DroppedAtCapacity { event_kind } => {
+        refused => {
             tracing::debug!(
-                event_kind,
+                outcome = ?refused,
                 operation = surface_operation.as_str(),
-                "work-conflict observation dropped at producer capacity"
-            );
-        }
-        WorkConflictObservationResultV1::Unavailable { reason } => {
-            tracing::debug!(
-                ?reason,
-                operation = surface_operation.as_str(),
-                "work-conflict observation unavailable"
+                "work-conflict observation was not recorded"
             );
         }
     }

@@ -1010,16 +1010,10 @@ async fn execute_app_server<S>(
     }
 }
 
-/// Offers Plan 26's no-progress terminal for one wall-exhausted attempt.
-///
-/// The provider-attempt authority commits no progress frontier between
-/// `Running` and the terminal transition, and heartbeats never reset the wall
-/// deadline, so the stall is the monotonic elapsed time measured from the
-/// owner's attempt-start instant to the moment the deadline arm fired. A zero
-/// armed budget means the envelope deadline had already elapsed before the
-/// select was armed; that state is not a measured stall, so the payload
-/// contract refuses it and nothing is emitted. Emission never alters the
-/// timed-out product handling.
+/// Offers Plan 26's no-progress terminal for one wall-exhausted attempt. The
+/// stall is the monotonic elapsed time from attempt start to the deadline arm
+/// firing; a zero armed budget is refused by the payload contract, and
+/// emission never alters the timed-out product handling.
 fn offer_no_progress_observation(
     observability_producer: Option<&BoundedObservabilityProducerV1>,
     identity: &WorkAttemptIdentityV1,

@@ -1,10 +1,6 @@
 //! Canonical Plan 26 observability lane for one mounted code-index worktree.
-//!
-//! The reconcile worker and the query search path already compute the exact
-//! lifecycle and composition evidence Plan 26 measures; this mount carries the
-//! project-bound observation authority to those sites. Telemetry never changes
-//! the product path: every refusal below is logged and dropped, and an
-//! uninstalled lane simply records nothing.
+//! Telemetry never changes the product path: refusals are logged and dropped,
+//! and an uninstalled lane records nothing.
 
 use std::sync::Arc;
 
@@ -42,9 +38,7 @@ impl CodeIndexObservabilityV1 {
     }
 
     /// Records one terminal reconcile pass as a canonical index lifecycle
-    /// observation beside the in-memory cadence receipt the worker already
-    /// keeps. A storage refusal is logged, never propagated: the generation
-    /// this pass published stays published.
+    /// observation beside the worker's in-memory cadence receipt.
     pub(in crate::daemon) async fn record_reconcile_outcome(
         &self,
         outcome: &CodeIndexReconcileOutcomeV1,
@@ -64,17 +58,15 @@ impl CodeIndexObservabilityV1 {
     }
 
     /// Offers the Plan 26 retrieval-pipeline families projected from one
-    /// completed query composition to the bounded producer. Non-blocking on
-    /// the query hot path; refused envelopes are accounted by the producer's
-    /// own telemetry-drop evidence and logged here.
+    /// completed query composition to the bounded producer, non-blocking on
+    /// the query hot path.
     pub(in crate::daemon) fn record_retrieval_composition(
         &self,
         authorized: &AuthorizedQueryFallbackV1,
         budget: &RetrievalBudget,
     ) {
-        // Tokens are countable only after hydration, which happens beyond this
-        // boundary; the projection reports partial synthesis coverage rather
-        // than a fabricated zero.
+        // Tokens are countable only after hydration; the projection reports
+        // partial synthesis coverage rather than a fabricated zero.
         let observation = observe_composition(
             &authorized.fallback_lanes,
             &authorized.composition,
