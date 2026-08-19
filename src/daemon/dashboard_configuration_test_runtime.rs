@@ -24,7 +24,8 @@ use crate::daemon_client::invocation_now_micros;
 use crate::daemon_contract::{DaemonInvocationOutcome, DaemonInvocationRequest};
 use crate::dashboard::{
     DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
-    DashboardConfigurationApplyFuture,
+    DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
+    DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
@@ -127,6 +128,37 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
                 ),
                 _ => Err(unavailable_error(&self.result_contract, request_id)),
             }
+        })
+    }
+
+    fn read_multi_root_scope_set(
+        &self,
+        _control: DashboardHttpRequestControlV1,
+        _scope_set_id: tracedecay_domain::ScopeSetId,
+    ) -> DashboardScopeSetReadFuture<'_> {
+        // This runtime registers only the configuration and retained owners;
+        // multi-root scope-set reads route through the daemon project
+        // invocation owner, which is deliberately absent here.
+        Box::pin(async {
+            Err(DashboardDaemonReadUnavailableV1 {
+                detail: "the dashboard configuration test runtime serves no multi-root scope-set reads"
+                    .to_owned(),
+            })
+        })
+    }
+
+    fn native_integration_status(
+        &self,
+        control: DashboardHttpRequestControlV1,
+        transaction_id: tracedecay_domain::NativeIntegrationTransactionId,
+    ) -> crate::dashboard::DashboardNativeIntegrationStatusFuture<'_> {
+        Box::pin(async move {
+            crate::mcp::tools::handlers::dashboard::dashboard_native_integration_status(
+                self,
+                &control,
+                transaction_id,
+            )
+            .await
         })
     }
 }

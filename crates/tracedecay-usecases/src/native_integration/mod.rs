@@ -2,6 +2,7 @@
 
 mod authorization;
 mod gix_adapter;
+mod status_broadcast;
 mod topology;
 mod transaction;
 
@@ -9,6 +10,7 @@ pub use authorization::{
     DaemonNativeIntegrationAuthorization, NativeIntegrationAuthorizationError,
 };
 pub use gix_adapter::GixNativeIntegrationAdapter;
+pub use status_broadcast::NativeIntegrationStatusBroadcastV1;
 pub use topology::ExactPairNativeIntegrationTopology;
 pub use transaction::{
     NativeApplyEffectV1, NativeIntegrationAuthorizationOutcomeV1,

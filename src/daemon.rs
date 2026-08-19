@@ -187,6 +187,7 @@ pub(crate) mod dashboard_automation;
 mod dashboard_configuration_test_runtime;
 pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay;
+pub(crate) mod privacy_remediation;
 pub(crate) mod project_open_owners;
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_configuration_test_runtime::{

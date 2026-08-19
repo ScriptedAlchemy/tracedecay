@@ -78,7 +78,6 @@ pub mod display;
 pub mod doctor;
 pub mod errors;
 pub mod external_tools;
-pub mod extraction_worker;
 pub mod git;
 mod git_index_transactions;
 pub mod git_intelligence;
