@@ -10,7 +10,7 @@ mod storage;
 
 pub(crate) use bench::handle_bench;
 pub(crate) use branch::handle_branch_action;
-pub(crate) use daemon::daemon_tool_json;
+pub(crate) use daemon::{daemon_tool_json, daemon_tool_json_until};
 pub use gain::handle_gain;
 pub(crate) use index::{handle_init, handle_no_command, handle_sync};
 pub(crate) use profile_storage::handle_profile_storage_action;

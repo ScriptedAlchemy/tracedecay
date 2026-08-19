@@ -22,8 +22,15 @@ def main() -> None:
     )["package"]["version"]
     registry = json.loads((repository / "server.json").read_text(encoding="utf-8"))
     assert registry["version"] == package_version
-    assert "164 MCP tools" in registry["description"]
-    assert "50+ languages" in registry["description"]
+    expected_description = (
+        "Local semantic code intelligence, project memory, and workflow context "
+        "for AI coding agents."
+    )
+    assert registry["description"] == expected_description
+    assert (
+        MODULE.manifest(package_version, "x86_64-linux")["description"]
+        == expected_description
+    )
 
     release_config = json.loads(
         (repository / "release-please-config.json").read_text(encoding="utf-8")

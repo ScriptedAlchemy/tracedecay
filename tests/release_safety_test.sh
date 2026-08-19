@@ -23,8 +23,13 @@ with Path("Cargo.toml").open("rb") as handle:
     root = tomllib.load(handle)
 
 version = Path("version.txt").read_text(encoding="utf-8").strip()
+release_manifest_path = Path(
+    ".release-please-manifest-beta.json"
+    if "-" in version
+    else ".release-please-manifest.json"
+)
 release_manifest = json.loads(
-    Path(".release-please-manifest.json").read_text(encoding="utf-8")
+    release_manifest_path.read_text(encoding="utf-8")
 )
 server_manifest = json.loads(Path("server.json").read_text(encoding="utf-8"))
 if root["package"].get("publish") is not False:
@@ -34,7 +39,9 @@ if (
     or release_manifest.get(".") != version
     or server_manifest.get("version") != version
 ):
-    raise SystemExit("release version authorities are not aligned")
+    raise SystemExit(
+        f"release version authorities are not aligned with {release_manifest_path}"
+    )
 with Path("Cargo.lock").open("rb") as handle:
     lockfile = tomllib.load(handle)
 root_locks = [

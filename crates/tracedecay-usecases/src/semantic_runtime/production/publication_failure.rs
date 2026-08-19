@@ -481,4 +481,63 @@ mod tests {
             "semantic runtime publication commit_batch failed: store_concurrent_mutation"
         );
     }
+
+    #[test]
+    fn shared_recorder_keeps_first_live_pair_across_resume_and_commit() {
+        use tracedecay_semantic::SemanticRuntimeScheduleFailureV1;
+
+        let publication_failure = SemanticPublicationFailureRecorderV1::default();
+        let resume_failure = publication_failure.clone();
+        let commit_failure = publication_failure.clone();
+
+        let first = resume_failure.retain_for_resume(&SemanticVectorGraphErrorV1::Rejected(
+            "backend path is private".to_owned(),
+        ));
+        let second = commit_failure.commit_batch(&VectorGenerationStoreErrorV1::ConcurrentMutation);
+
+        assert_eq!(first, SemanticRuntimeScheduleFailureV1::Publication);
+        assert_eq!(second, SemanticRuntimeScheduleFailureV1::Publication);
+        let receipt = publication_failure
+            .receipt()
+            .expect("first live pair receipt");
+        assert_eq!(receipt.stage, SemanticPublicationStageV1::RetainForResume);
+        assert_eq!(
+            receipt.category,
+            SemanticPublicationFailureCategoryV1::GraphRejected
+        );
+        assert_eq!(
+            receipt.detail(),
+            "semantic runtime publication retain_for_resume failed: graph_rejected"
+        );
+        assert!(!receipt.detail().contains("private"));
+    }
+
+    #[test]
+    fn shared_recorder_keeps_commit_batch_when_it_is_the_first_live_pair() {
+        use tracedecay_semantic::SemanticRuntimeScheduleFailureV1;
+
+        let publication_failure = SemanticPublicationFailureRecorderV1::default();
+        let resume_failure = publication_failure.clone();
+        let commit_failure = publication_failure.clone();
+
+        let first = commit_failure.commit_batch(&VectorGenerationStoreErrorV1::ConcurrentMutation);
+        let second = resume_failure.retain_for_resume(&SemanticVectorGraphErrorV1::Rejected(
+            "backend path is private".to_owned(),
+        ));
+
+        assert_eq!(first, SemanticRuntimeScheduleFailureV1::Publication);
+        assert_eq!(second, SemanticRuntimeScheduleFailureV1::Publication);
+        let receipt = publication_failure
+            .receipt()
+            .expect("first live pair receipt");
+        assert_eq!(receipt.stage, SemanticPublicationStageV1::CommitBatch);
+        assert_eq!(
+            receipt.category,
+            SemanticPublicationFailureCategoryV1::StoreConcurrentMutation
+        );
+        assert_eq!(
+            receipt.detail(),
+            "semantic runtime publication commit_batch failed: store_concurrent_mutation"
+        );
+    }
 }

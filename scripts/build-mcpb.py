@@ -29,7 +29,10 @@ def manifest(version: str, platform: str) -> dict[str, object]:
         "manifest_version": "0.3",
         "name": "tracedecay",
         "version": version,
-        "description": "Semantic code intelligence for 50+ languages through 164 MCP tools.",
+        "description": (
+            "Local semantic code intelligence, project memory, and workflow context "
+            "for AI coding agents."
+        ),
         "author": {
             "name": "ScriptedAlchemy",
             "url": "https://github.com/ScriptedAlchemy",
