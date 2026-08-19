@@ -58,7 +58,20 @@ impl HookOrchestrationRequestV1 {
     }
 }
 
-type HookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HookOrchestrationWorkOutcomeV1 {
+    Completed,
+    RetryableFailure,
+}
+
+impl From<()> for HookOrchestrationWorkOutcomeV1 {
+    fn from((): ()) -> Self {
+        Self::Completed
+    }
+}
+
+type HookOrchestrationFutureV1 =
+    Pin<Box<dyn Future<Output = HookOrchestrationWorkOutcomeV1> + Send + 'static>>;
 type HookOrchestrationWorkV1 = dyn Fn(
         HookOrchestrationRequestV1,
         tracedecay_runtime_core::cancellation::CancellationToken,
@@ -113,10 +126,13 @@ impl BoundedHookOrchestratorV1 {
             + Send
             + Sync
             + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Into<HookOrchestrationWorkOutcomeV1>,
     {
-        let work: Arc<HookOrchestrationWorkV1> =
-            Arc::new(move |request, cancellation| Box::pin(work(request, cancellation)));
+        let work: Arc<HookOrchestrationWorkV1> = Arc::new(move |request, cancellation| {
+            let future = work(request, cancellation);
+            Box::pin(async move { future.await.into() })
+        });
         (max_concurrent > 0).then(|| {
             Arc::new(Self {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
@@ -135,7 +151,6 @@ impl BoundedHookOrchestratorV1 {
             envelope.repository_id,
             envelope.worktree_id,
             envelope.protected_session_id,
-            request.lifecycle.as_ref(),
         ))
         .ok()
         .map(|digest| digest.as_str().to_owned())
@@ -275,22 +290,24 @@ impl BoundedHookOrchestratorV1 {
             // adapter must never invent a termination reason. Cancellation
             // drops the work future instead of awaiting it: pending work must
             // stop when its owner retires, not run to completion.
-            let completed = tokio::select! {
+            let outcome = tokio::select! {
                 biased;
-                () = work_cancellation.cancelled() => false,
+                () = work_cancellation.cancelled() => None,
                 () = cancellation.cancelled() => {
                     work_cancellation.cancel();
-                    false
+                    None
                 },
-                () = &mut work_future => true,
+                outcome = &mut work_future => Some(outcome),
             };
-            let emit_terminal = if completed {
-                true
-            } else {
-                drop(work_future);
-                operation
-                    .superseded
-                    .load(std::sync::atomic::Ordering::Acquire)
+            let emit_terminal = match outcome {
+                Some(HookOrchestrationWorkOutcomeV1::Completed) => true,
+                Some(HookOrchestrationWorkOutcomeV1::RetryableFailure) => false,
+                None => {
+                    drop(work_future);
+                    operation
+                        .superseded
+                        .load(std::sync::atomic::Ordering::Acquire)
+                }
             };
             Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
             drop(permit);

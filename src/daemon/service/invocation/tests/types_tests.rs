@@ -332,7 +332,12 @@ async fn hook_orchestration_supersedes_same_address_without_replay_delay() {
     let mut second = HookOrchestrationRequestV1::from_envelope(
         second_envelope,
         &hook_binding(),
-        Some(hook_lifecycle()),
+        Some(ContextScoutLifecycleAddressV1 {
+            turn_id: tracedecay_domain::TurnId::new("turn.advisory-hook.next").unwrap(),
+            logical_message_id: tracedecay_domain::MessageId::new("message.advisory-hook.next")
+                .unwrap(),
+            ..hook_lifecycle()
+        }),
         1,
         false,
     )
@@ -361,6 +366,48 @@ async fn hook_orchestration_supersedes_same_address_without_replay_delay() {
     assert_eq!(
         second_completions.load(std::sync::atomic::Ordering::Relaxed),
         1
+    );
+}
+
+#[tokio::test]
+async fn retryable_hook_work_does_not_acknowledge_the_durable_admission() {
+    let attempted = Arc::new(tokio::sync::Notify::new());
+    let observed_attempted = Arc::clone(&attempted);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
+        let attempted = Arc::clone(&observed_attempted);
+        async move {
+            attempted.notify_one();
+            HookOrchestrationWorkOutcomeV1::RetryableFailure
+        }
+    })
+    .unwrap();
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_completions = Arc::clone(&completions);
+    let mut request = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    request.completion = Some(Arc::new(move || {
+        observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+
+    assert_eq!(
+        runtime.admit(request),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    attempted.notified().await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        completions.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "retryable producer failure must leave the durable hook pending for replay"
     );
 }
 

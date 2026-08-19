@@ -90,8 +90,9 @@ use crate::daemon::service::invocation::{
     BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
     DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
     DaemonAdvisoryCycleInvocationRequest, HookOrchestrationRequestV1, HookOrchestrationTriggerV1,
-    advisory_cycle_invocation_result, daemon_operation_event_authority,
-    register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
+    HookOrchestrationWorkOutcomeV1, advisory_cycle_invocation_result,
+    daemon_operation_event_authority, register_hook_orchestration_runtime,
+    unregister_hook_orchestration_runtime,
 };
 use crate::daemon::service::project_runtime::RegisteredDeliveryReadAuthorityV1;
 use crate::errors::{Result, TraceDecayError};
@@ -183,7 +184,23 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         deadline: MonotonicDeadline,
         agent_stop_gate: bool,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
-        let mut invocation = (self.lsp_input)(request).await?;
+        self.run_cycle_with_lsp_input(
+            Arc::clone(&self.lsp_input),
+            request,
+            deadline,
+            agent_stop_gate,
+        )
+        .await
+    }
+
+    async fn run_cycle_with_lsp_input(
+        &self,
+        lsp_input: FeedbackCycleLspInput,
+        request: FeedbackCycleRequest,
+        deadline: MonotonicDeadline,
+        agent_stop_gate: bool,
+    ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
+        let mut invocation = lsp_input(request).await?;
         if agent_stop_gate {
             invocation.request.input.request.trigger = FeedbackTriggerV1::AgentStopGate;
             invocation = FeedbackCycleInvocation::new(invocation.context, invocation.request)
@@ -489,14 +506,81 @@ async fn install_project_open_context_scout_configuration(
 
 /// Producer inputs retained for the bounded hook cycle: the durable Scout
 /// owner and address registry, the committed-publication read port, and the
-/// sealed census that maps saved-edit hooks back to indexed documents.
+/// exact current-generation authority that maps saved-edit hooks back to
+/// indexed documents.
 struct ProjectOpenScoutProducerV1 {
     graph: Arc<crate::tracedecay::TraceDecay>,
     scout_owner: Arc<ProjectContextScoutOwnerV1>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
     feedback_runtime: Arc<FeedbackRuntime>,
     project_root: std::path::PathBuf,
-    indexed_files: Vec<String>,
+    scope: tracedecay_application::ResolvedScope,
+    code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
+    code_graph: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
+    requester: tracedecay_domain::ActorId,
+    diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
+}
+
+async fn current_feedback_lsp_input(
+    producer: &ProjectOpenScoutProducerV1,
+    indexed_files: &[String],
+) -> std::result::Result<FeedbackCycleLspInput, LspRuntimeFailure> {
+    let pinned_configuration = producer
+        .graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-configuration"))?;
+    let current_configuration = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+        revision_id: pinned_configuration.revision_id,
+        snapshot: pinned_configuration.snapshot,
+    };
+    let configuration_digest = current_configuration
+        .snapshot
+        .effective_behavior_digest
+        .clone();
+    let policy_digest = canonical_sha256(&(
+        "tracedecay.project-open.policy.v1",
+        &configuration_digest,
+        POLICY_REVISION_V1,
+    ))
+    .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-policy"))?;
+    let runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync> =
+        Arc::new(ProductionFeedbackRuntimeStateV1::new(
+            Arc::clone(&producer.code_graph),
+            configuration_digest,
+            policy_digest,
+        ));
+    let authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort> =
+        Arc::new(ProjectOpenFeedbackCycleAuthorizationV1 {
+            project_root: producer.project_root.clone(),
+            scope: producer.scope.clone(),
+            configuration: Arc::clone(producer.graph.configuration_runtime()),
+        });
+    let mounted_providers = producer
+        .diagnostic_broker
+        .lock()
+        .await
+        .mounted_providers_for_files(indexed_files);
+    resolve_production_feedback_cycle_parts(ProductionFeedbackCycleOpenV1 {
+        project_root: producer.project_root.clone(),
+        scope: producer.scope.clone(),
+        access_configuration: current_configuration,
+        requester: producer.requester.clone(),
+        authorization,
+        code_graph: Arc::clone(&producer.code_graph),
+        project_runtime_db: producer.session_db.clone(),
+        runtime_state,
+        document_identity: Arc::new(producer.code_index_schedulers.clone()),
+        code_index_identity: Arc::new(producer.code_index_schedulers.clone()),
+        test_attribution: Arc::new(producer.code_index_schedulers.clone()),
+        mounted_providers,
+    })
+    .await
+    .map(|parts| parts.lsp_input)
+    .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-input"))
 }
 
 /// One admitted hook boundary's advisory-and-Scout cycle: the Plan 09
@@ -510,17 +594,45 @@ async fn run_production_hook_cycle(
     producer: Arc<ProjectOpenScoutProducerV1>,
     request: HookOrchestrationRequestV1,
     work_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
-) {
+) -> HookOrchestrationWorkOutcomeV1 {
     if work_cancellation.is_cancelled() {
-        return;
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
+    let Some(generation) = producer
+        .code_index_schedulers
+        .latest_complete_ready_decoded_for_root_scope(&producer.project_root, &producer.scope)
+        .await
+    else {
+        observe_hook_feedback_cycle_terminal(
+            &cycle.registration.host_delivery.source_observations,
+            &request,
+            FeedbackOutcomeV1::Unavailable,
+        );
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
+    };
+    let mut indexed_files = generation
+        .generation()
+        .snapshot()
+        .files
+        .iter()
+        .map(|file| file.logical_path.clone())
+        .collect::<Vec<_>>();
+    indexed_files.sort();
     let Some(document_uri) = hook_feedback_document_uri_or_observe(
         &producer.project_root,
-        &producer.indexed_files,
+        &indexed_files,
         &request,
         &cycle.registration.host_delivery.source_observations,
     ) else {
-        return;
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
+    };
+    let Ok(lsp_input) = current_feedback_lsp_input(&producer, &indexed_files).await else {
+        observe_hook_feedback_cycle_terminal(
+            &cycle.registration.host_delivery.source_observations,
+            &request,
+            FeedbackOutcomeV1::Unavailable,
+        );
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let diagnostic_trigger = match request.trigger {
         HookOrchestrationTriggerV1::SavedEdit => DiagnosticTrigger::DocumentSave,
@@ -529,7 +641,8 @@ async fn run_production_hook_cycle(
         }
     };
     let execution = match cycle
-        .run_cycle(
+        .run_cycle_with_lsp_input(
+            lsp_input,
             FeedbackCycleRequest {
                 root_uri: cycle.root_uri.clone(),
                 document_uri,
@@ -547,11 +660,11 @@ async fn run_production_hook_cycle(
                 &request,
                 FeedbackOutcomeV1::Unavailable,
             );
-            return;
+            return HookOrchestrationWorkOutcomeV1::RetryableFailure;
         }
     };
     if work_cancellation.is_cancelled() {
-        return;
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
     let observed_at = execution.observed_at;
     // The Scout tail re-pins the current Plan 20 configuration: a revision
@@ -564,7 +677,7 @@ async fn run_production_hook_cycle(
         .current()
         .await
     else {
-        return;
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let current_configuration = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
         revision_id: pinned_configuration.revision_id.clone(),
@@ -573,15 +686,15 @@ async fn run_production_hook_cycle(
     let Some(scout_configuration) =
         ContextScoutConfigurationPinV1::from_current(&current_configuration)
     else {
-        return;
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     if scout_configuration.configuration_digest() != &execution.configuration_digest {
-        return;
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
     let Ok(model_config) = tracedecay_agent_hosts::automation::config::from_configuration_snapshot(
         &pinned_configuration.snapshot,
     ) else {
-        return;
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     if install_project_open_context_scout_configuration(
         producer.scout_owner.as_ref(),
@@ -591,10 +704,10 @@ async fn run_production_hook_cycle(
     .await
     .is_err()
     {
-        return;
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
     let Some(lifecycle) = request.lifecycle else {
-        return;
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let Some(pin) = ContextScoutAuthorityPinV1::new(
         &execution.context,
@@ -602,7 +715,7 @@ async fn run_production_hook_cycle(
         scout_configuration,
         observed_at,
     ) else {
-        return;
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let assembler = ContextScoutCanonicalInputAssemblerV1::new(
         producer.scout_registry.as_ref(),
@@ -618,7 +731,7 @@ async fn run_production_hook_cycle(
         )
         .await
     else {
-        return;
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let trigger = match request.trigger {
         HookOrchestrationTriggerV1::SavedEdit => ContextScoutTriggerV1::SavedEdit,
@@ -664,7 +777,7 @@ async fn run_production_hook_cycle(
                 .collect(),
         },
     ) else {
-        return;
+        return HookOrchestrationWorkOutcomeV1::Completed;
     };
     let outcome = producer
         .scout_owner
@@ -674,8 +787,8 @@ async fn run_production_hook_cycle(
             work_cancellation.clone(),
         )
         .await;
-    if matches!(outcome, Ok(ContextScoutRuntimeOutcomeV1::Enqueued { .. })) {
-        let _ = producer
+    match outcome {
+        Ok(ContextScoutRuntimeOutcomeV1::Enqueued { .. }) => producer
             .graph
             .mount_current_context_scout_claim_authority(
                 Arc::clone(&producer.scout_registry),
@@ -687,7 +800,15 @@ async fn run_production_hook_cycle(
                 selection.input_watermark,
                 observed_at,
             )
-            .await;
+            .await
+            .then_some(HookOrchestrationWorkOutcomeV1::Completed)
+            .unwrap_or(HookOrchestrationWorkOutcomeV1::RetryableFailure),
+        Ok(ContextScoutRuntimeOutcomeV1::Suppressed { .. }) => {
+            HookOrchestrationWorkOutcomeV1::Completed
+        }
+        Ok(ContextScoutRuntimeOutcomeV1::Unavailable) | Err(_) => {
+            HookOrchestrationWorkOutcomeV1::RetryableFailure
+        }
     }
 }
 
@@ -1135,7 +1256,12 @@ async fn register_production_advisory_owner(
         scout_registry,
         feedback_runtime: feedback_cycle.feedback_runtime(),
         project_root: project_root.to_path_buf(),
-        indexed_files: state.indexed_files.clone(),
+        scope: state.scope.clone(),
+        code_index_schedulers: invocation.code_index_schedulers.clone(),
+        session_db: state.session_db.clone(),
+        code_graph: Arc::clone(&state.code_graph),
+        requester: state.requester.clone(),
+        diagnostic_broker: Arc::clone(&state.diagnostic_broker),
     });
     let work_cycle = Arc::clone(&advisory_cycle);
     let work =
@@ -1143,9 +1269,7 @@ async fn register_production_advisory_owner(
               work_cancellation: tracedecay_runtime_core::cancellation::CancellationToken| {
             let cycle = Arc::clone(&work_cycle);
             let producer = Arc::clone(&producer);
-            async move {
-                run_production_hook_cycle(cycle, producer, request, work_cancellation).await;
-            }
+            async move { run_production_hook_cycle(cycle, producer, request, work_cancellation).await }
         };
     let orchestrator =
         BoundedHookOrchestratorV1::new(1, work).ok_or_else(|| TraceDecayError::Config {
