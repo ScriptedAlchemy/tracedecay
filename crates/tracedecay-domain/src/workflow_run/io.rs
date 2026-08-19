@@ -3,9 +3,7 @@ use std::collections::BTreeSet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    WorkArtifactRefV1, WorkAttemptIdentityV1, WorkflowOutputName, WorkflowOutputReference,
-};
+use crate::{WorkArtifactRefV1, WorkAttemptIdentityV1, WorkflowOutputName};
 
 use super::WorkflowRunStateError;
 
@@ -101,30 +99,3 @@ impl<'de> Deserialize<'de> for WorkflowStepOutput {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowStepInput {
-    reference: WorkflowOutputReference,
-    artifacts: Vec<WorkflowOutputArtifact>,
-}
-
-impl WorkflowStepInput {
-    pub(super) fn from_output(
-        reference: WorkflowOutputReference,
-        output: &WorkflowStepOutput,
-    ) -> Result<Self, WorkflowRunStateError> {
-        output.validate()?;
-        Ok(Self {
-            reference,
-            artifacts: output.artifacts.clone(),
-        })
-    }
-
-    pub fn reference(&self) -> &WorkflowOutputReference {
-        &self.reference
-    }
-
-    pub fn artifacts(&self) -> &[WorkflowOutputArtifact] {
-        &self.artifacts
-    }
-}
