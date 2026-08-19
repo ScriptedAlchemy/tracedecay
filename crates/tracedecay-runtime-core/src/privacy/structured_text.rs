@@ -15,6 +15,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::sync::OnceLock;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -656,6 +657,22 @@ pub fn sanitize_code_source_bytes(
     Ok(CodeSourceSanitizationV1 {
         sanitized_bytes: sanitized.into_bytes(),
         receipt,
+    })
+}
+
+/// Effective LCM-payload detector revision: the pinned sanitizer contract
+/// bound to a digest of the compiled credential rule documents.
+///
+/// The contract string names the receipt shape and never changes with a rule
+/// refresh, so it cannot tell an at-rest rescan whether previously accepted
+/// bytes were evaluated under the current rules. This revision changes exactly
+/// when the vendored catalogue or the local supplement changes, which is
+/// exactly when a completed-rescan watermark must invalidate.
+pub fn lcm_payload_detector_revision() -> &'static str {
+    static REVISION: OnceLock<String> = OnceLock::new();
+    REVISION.get_or_init(|| {
+        let digest = super::length_prefixed_sha256_hex(&super::rules::rule_document_bytes());
+        format!("{LCM_PAYLOAD_SANITIZER_VERSION_V1}+rules.{}", &digest[..16])
     })
 }
 

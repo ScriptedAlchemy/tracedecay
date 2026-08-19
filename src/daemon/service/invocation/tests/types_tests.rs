@@ -109,14 +109,15 @@ async fn hook_orchestration_backpressures_without_waiting() {
         observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         completion_notification.notify_one();
     }));
-    // A distinct hook event at a distinct work address is real new work, so it
-    // must contend for the single permit rather than join or supersede the
-    // admitted boundary.
+    // A distinct hook event from a distinct native session is real new work,
+    // so it must contend for the single permit rather than join or supersede
+    // the admitted boundary.
     let mut other_envelope = hook_envelope(HookEventV2::SavedEdit {
         file_id: [8; 16],
         changed_range_count: 1,
     });
     other_envelope.event_id = [2; 16];
+    other_envelope.protected_session_id = [9; 32];
     let other_request = HookOrchestrationRequestV1::from_envelope(
         other_envelope,
         &hook_binding(),

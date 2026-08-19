@@ -18,50 +18,42 @@ pub mod runtime;
 pub mod spool;
 
 pub use admission_ledger::{
-    HookAdmissionDecisionV1, HookAdmissionLedgerError, HookAdmissionLedgerLimitsV1,
-    HookAdmissionLedgerOpenReportV1, HookAdmissionLedgerReceiptV1, HookAdmissionLedgerV1,
-    hook_admission_digest,
+    HookAdmissionDecisionV1, HookAdmissionLedgerLimitsV1, HookAdmissionLedgerReceiptV1,
+    HookAdmissionLedgerV1,
 };
 pub use capture::{
     NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1, capture_native_event_for_replay,
 };
 pub use config::{
     HOOK_CONFIGURATION_SCHEMA_VERSION, HookConfigurationFileReaderV1,
-    HookConfigurationFileWriterV1, HookConfigurationPublicationError,
-    HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationStoreV1,
-    HookConfigurationPublisherV1, HookConfigurationReadOutcomeV1, HookConfigurationReadStoreV1,
-    HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, MAX_HOOK_CONFIGURATION_BYTES,
-    hook_configuration_path,
+    HookConfigurationFileWriterV1, HookConfigurationPublisherV1, HookConfigurationReadOutcomeV1,
+    HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, hook_configuration_path,
 };
 pub use core_events::{
     DaemonHookEvent, HOOK_EVENT_METHOD, HookAgent, HookEventNotifyOutcomeV1, HookRouteMetadata,
     HookTerminalReceipt,
 };
 pub use delivery_spool::{
-    HookDeliveryReceiptSpoolV1, HookDeliverySourceReceiptV1, HookDeliverySpoolError,
-    hook_delivery_receipt_spool_root,
+    HookDeliveryReceiptSpoolV1, HookDeliverySourceReceiptV1, hook_delivery_receipt_spool_root,
 };
 pub use native::{
-    DecodedNativeHookEventV1, DecodedOpenCodeLspEventV1, NativeEnvelopeMaterialV1,
-    NativeHookDecodeError, NativeHookSignalV1, OpenCodePluginSurfaceV1,
-    ProfileScopedNativeHookAdmissionV1, decode_bound_native_hook_event, decode_native_hook_event,
-    decode_opencode_lsp_event, decode_opencode_plugin_event,
+    DecodedNativeHookEventV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,
+    OpenCodePluginSurfaceV1, ProfileScopedNativeHookAdmissionV1, decode_bound_native_hook_event,
+    decode_native_hook_event, decode_opencode_lsp_event, decode_opencode_plugin_event,
 };
 pub use runtime::{
-    AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HOOK_SYNCHRONOUS_BUDGET_MICROS,
-    HookAdmissionFutureV1, HookAdmissionReceiptV1, HookDeliveryFutureV1,
-    HookFeedbackDeliveryOutcomeV1, HookFeedbackDeliveryPortV1, HookFeedbackDeliveryRouteV1,
-    HookFeedbackDeliveryV1, HookFeedbackRollbackSwitchV1, HookGuidanceDispositionV1,
-    HookGuidanceStateV1, HookImmediateAdmissionStateV1, HookImmediateAdmissionV1,
-    HookReadyGuidanceV1, HookRuntimeControlV1, HookRuntimeErrorV1, HookScopedFeedbackV1,
-    HookSynchronousDeadlineV1, HookSynchronousResultV1, admit_async_exact_scope,
-    deliver_feedback_with_rollback, deliver_feedback_with_rollback_async, deliver_hook_feedback,
+    AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HookAdmissionFutureV1,
+    HookAdmissionReceiptV1, HookDeliveryFutureV1, HookFeedbackDeliveryOutcomeV1,
+    HookFeedbackDeliveryPortV1, HookFeedbackDeliveryRouteV1, HookFeedbackDeliveryV1,
+    HookFeedbackRollbackSwitchV1, HookGuidanceDispositionV1, HookGuidanceStateV1,
+    HookImmediateAdmissionStateV1, HookImmediateAdmissionV1, HookReadyGuidanceV1,
+    HookRuntimeControlV1, HookRuntimeErrorV1, HookScopedFeedbackV1, HookSynchronousDeadlineV1,
+    admit_async_exact_scope, deliver_feedback_with_rollback, deliver_hook_feedback,
     finish_synchronous_hook,
 };
 pub use spool::{
-    HookReplayBatchV1, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
-    HookSpoolError, HookSpoolLimitsV1, HookSpoolOpenReportV1, HookSpoolRecordV1,
-    HookSpoolResetReasonV1, HookSpoolV1, HookSpoolWriterLeaseV1, hook_spool_checksum,
+    HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1, HookSpoolError,
+    HookSpoolRecordV1, HookSpoolV1,
 };
 
 use serde::{Deserialize, Serialize};

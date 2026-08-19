@@ -394,9 +394,6 @@ pub enum Commands {
         #[command(subcommand)]
         action: HostBundleAction,
     },
-    /// Extraction worker (spawned by tracedecay itself; not for direct use).
-    #[command(name = "extract-worker", hide = true)]
-    ExtractWorker,
     /// PreToolUse hook handler (called by Claude Code, not by users directly)
     #[command(name = "hook-pre-tool-use", hide = true)]
     HookPreToolUse,

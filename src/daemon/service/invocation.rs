@@ -297,6 +297,17 @@ pub(crate) struct DaemonInvocationService {
     worktree_holder_admission: crate::daemon::native_integration::WorktreeHolderAdmissionFenceV1,
     session_holder_databases:
         Arc<Mutex<BTreeMap<PathBuf, crate::global_db::RegisteredGlobalDbLeaseV1>>>,
+    /// Per-project fan-out of observed native-integration transaction
+    /// statuses. The invocation handler publishes; LSP sessions read and
+    /// notify. Created on demand under one project-root key shared by both.
+    native_integration_status_broadcasts: Arc<
+        Mutex<
+            BTreeMap<
+                PathBuf,
+                Arc<tracedecay_usecases::native_integration::NativeIntegrationStatusBroadcastV1>,
+            >,
+        >,
+    >,
 }
 
 #[cfg(test)]
@@ -330,7 +341,22 @@ impl DaemonInvocationService {
             worktree_holder_admission:
                 crate::daemon::native_integration::daemon_worktree_holder_admission_fence(),
             session_holder_databases: Arc::new(Mutex::new(BTreeMap::new())),
+            native_integration_status_broadcasts: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    /// The one status broadcast shared by the native-integration invocation
+    /// handler and every LSP session factory registered for `project_root`.
+    pub(crate) async fn native_integration_status_broadcast(
+        &self,
+        project_root: &Path,
+    ) -> Arc<tracedecay_usecases::native_integration::NativeIntegrationStatusBroadcastV1> {
+        let mut broadcasts = self.native_integration_status_broadcasts.lock().await;
+        Arc::clone(
+            broadcasts
+                .entry(project_root.to_path_buf())
+                .or_default(),
+        )
     }
 
     pub(crate) fn github_stack_coordinator(

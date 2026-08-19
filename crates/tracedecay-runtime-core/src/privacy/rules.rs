@@ -42,6 +42,19 @@ const VENDORED_SOURCE: &str = "vendor/gitleaks/gitleaks.toml";
 const SUPPLEMENT_RULES_TOML: &str = include_str!("rules/supplement.toml");
 const SUPPLEMENT_SOURCE: &str = "supplement.toml";
 
+/// The exact rule-document bytes the detector compiles, in evaluation order.
+///
+/// Revision-sensitive consumers (the at-rest privacy rescan watermark) bind to
+/// this data rather than to the pinned sanitizer contract string, because a
+/// vendored-catalogue or supplement refresh changes what the detector finds
+/// without changing the receipt contract.
+pub(crate) const fn rule_document_bytes() -> [&'static [u8]; 2] {
+    [
+        VENDORED_RULES_TOML.as_bytes(),
+        SUPPLEMENT_RULES_TOML.as_bytes(),
+    ]
+}
+
 /// Upstream's generated "context" rules all open with this preamble: an
 /// unanchored run of identifier bytes ahead of the provider keyword. Its
 /// presence is what distinguishes a rule that matches `provider_key = <secret>`

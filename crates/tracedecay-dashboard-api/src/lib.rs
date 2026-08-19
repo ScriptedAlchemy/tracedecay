@@ -21,7 +21,8 @@ pub mod tracedecay;
 // the dashboard-facing project runtime trait.
 pub use application_surface::{
     DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
-    DashboardConfigurationApplyFuture,
+    DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
+    DashboardNativeIntegrationStatusFuture, DashboardScopeSetReadFuture,
 };
 pub use tracedecay::DashboardProjectRuntime;
 
@@ -106,6 +107,8 @@ pub use loom_api::{
 mod memory_analysis;
 mod memory_api;
 mod memory_service;
+mod multi_root_api;
+mod native_integration_api;
 pub mod project_graph;
 pub mod project_registry;
 mod projects;
@@ -139,7 +142,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Extension, Path as AxumPath, State};
 use axum::http::{HeaderMap, Method, Request, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
@@ -806,6 +809,10 @@ pub async fn build_selected_project_state(
     cg: Arc<TraceDecay>,
     active: &DashboardState,
 ) -> Result<DashboardState> {
+    let application_invocation_executor = selected_project_application_runtime(
+        active.application_invocation_executor.as_ref(),
+        cg.project_root(),
+    )?;
     build_state_inner(
         cg.as_ref(),
         Some(Arc::clone(&cg)),
@@ -841,11 +848,21 @@ pub async fn build_selected_project_state(
             explorer_semantic_reader: active.explorer_semantic_reader.clone(),
             feedback_status_reader: active.feedback_status_reader.clone(),
             code_diagnostics_broker: None,
-            application_invocation_executor: active.application_invocation_executor.clone(),
+            application_invocation_executor,
             delivery_settlement_authority: None,
         },
     )
     .await
+}
+
+fn selected_project_application_runtime(
+    active: Option<&Arc<dyn DashboardApplicationRuntime>>,
+    project_root: &std::path::Path,
+) -> Result<Option<Arc<dyn DashboardApplicationRuntime>>> {
+    active
+        .map(|runtime| runtime.for_project_root(project_root))
+        .transpose()
+        .map_err(config_error)
 }
 
 pub fn config_error(message: impl Into<String>) -> TraceDecayError {
@@ -1276,6 +1293,8 @@ fn router_with_active_application(
         .route("/api/code-index/{*tail}", any(active_api_gateway))
         .route("/api/remote/{*tail}", any(active_api_gateway))
         .route("/api/feedback/status", any(active_api_gateway))
+        .route("/api/multi-root/{*tail}", any(active_api_gateway))
+        .route("/api/native-integration/{*tail}", any(active_api_gateway))
         .route("/api/events", any(active_api_gateway))
         .route("/api/events/delivery-ack", any(active_api_gateway))
         .with_state(runtime)
@@ -1303,6 +1322,14 @@ fn router_with_active_application(
 fn project_api_router() -> Router<DashboardState> {
     Router::new()
         .route("/api/capabilities", get(capabilities))
+        .route(
+            "/api/multi-root/collection",
+            get(multi_root_api::resolve_collection),
+        )
+        .route(
+            "/api/native-integration/status",
+            get(native_integration_api::status),
+        )
         .route("/api/feedback/status", get(feedback_api::status))
         // Holographic memory plugin API (mirrors holographic_plus plugin_api.py)
         .route("/api/plugins/holographic/", get(memory_api::overview))
@@ -1751,7 +1778,10 @@ async fn forward_project_request(
 
 /// Capability discovery for hosts and future delegated-host extensions. The UI
 /// (or a wrapper) can probe this to decide which panels/actions to enable.
-async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
+async fn capabilities(
+    State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> Json<Value> {
     let has_lcm = state.lcm_read_authority.is_some();
     let automation = automation_config_api::effective_automation_config(&state);
     let (automation_configured, automation_mode, automation_payload) = match automation {
@@ -1791,18 +1821,17 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
     };
     let standalone_automation = automation_mode == "standalone_backend";
     // Multi-root reads are served by the daemon, never by the dashboard's own
-    // stores. Report the transport the UI would actually have to use rather
-    // than a fixed string: without an admitted application executor there is
-    // no way to reach a scope set at all.
-    let multi_root = if state.application_invocation_executor.is_some() {
-        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
-            "no multi-root scope set is mounted for this project",
-        )
-    } else {
-        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
-            "the daemon application transport is not admitted for this dashboard",
-        )
-    };
+    // stores. Capability discovery resolves through the mounted named-collection
+    // resolver: with no configured default collection this reports the typed
+    // no-collection state, and `/api/multi-root/collection` resolves explicit
+    // targets through the same authority.
+    let multi_root_resolver_mounted = state.application_invocation_executor.is_some();
+    let multi_root = multi_root_api::resolve_collection_capability(
+        &state,
+        control.map(|Extension(control)| control),
+        None,
+    )
+    .await;
     Json(json!({
         "name": "tracedecay-dashboard",
         "version": crate::version::build_version(),
@@ -1837,7 +1866,9 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             // Settings tab: aggregated project/user config editing plus
             // read-only environment and storage-path display.
             "settings": true,
-            "multi_root": false,
+            // Named-collection resolution is mounted whenever the daemon
+            // application transport is admitted for this dashboard.
+            "multi_root": multi_root_resolver_mounted,
         },
         "automation": automation_payload,
         "dashboards": ["tracedecay"],
@@ -2231,7 +2262,7 @@ mod authority_tests {
         let fixture = DashboardStateFixture::open("project.dashboard-state").await;
         let expected_path = fixture.layout.graph_db_path.display().to_string();
         let state = fixture.state;
-        let Json(capabilities) = capabilities(State(state.clone())).await;
+        let Json(capabilities) = capabilities(State(state.clone()), None).await;
 
         assert_eq!(state.mem_db_path, expected_path);
         assert_eq!(state._database_guards.len(), 1);
@@ -2245,6 +2276,323 @@ mod authority_tests {
             state.code_diagnostics_authority.is_none(),
             "direct dashboard must not construct an analyzer authority"
         );
+    }
+
+    /// Serves exactly one persisted named collection, mirroring the daemon
+    /// scope-set read: an exact-id hit answers the frozen scope set, anything
+    /// else is a truthful absent read. Optionally answers one scripted
+    /// native-integration status result.
+    #[derive(Clone)]
+    struct SingleCollectionRuntime {
+        scope_set: tracedecay_application::AuthorizedScopeSet,
+        native_integration_status: Option<tracedecay_application::NativeIntegrationSurfaceResultV1>,
+        rebound_roots: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+    }
+
+    impl SingleCollectionRuntime {
+        fn with_native_integration_status(
+            mut self,
+            result: tracedecay_application::NativeIntegrationSurfaceResultV1,
+        ) -> Self {
+            self.native_integration_status = Some(result);
+            self
+        }
+
+        fn persisted(collection: &str) -> Self {
+            use std::collections::BTreeSet;
+
+            let capability = "capability.multi-root.query";
+            let use_case = "use-case.multi-root.query";
+            let scope = tracedecay_application::ResolvedScope::new(
+                ProjectId::new("project.dashboard-collection").expect("project"),
+                tracedecay_domain::RepositoryId::new("repository.dashboard-collection")
+                    .expect("repository"),
+                tracedecay_domain::WorktreeId::new("worktree.main").expect("worktree"),
+                Some(tracedecay_domain::RefId::new("refs/heads/main").expect("reference")),
+            )
+            .expect("scope");
+            let grant = tracedecay_application::CapabilityGrantSnapshot::new(
+                "grant.dashboard-collection"
+                    .to_owned()
+                    .try_into()
+                    .expect("grant id"),
+                1,
+                tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                    .expect("digest"),
+                tracedecay_domain::ActorId::new("actor.issuer").expect("issuer"),
+                tracedecay_domain::UtcMicros(1),
+                tracedecay_domain::UtcMicros(1_000),
+                scope.clone(),
+                BTreeSet::from([
+                    tracedecay_tool_catalog::CapabilityId::new(capability).expect("capability")
+                ]),
+                BTreeSet::from([
+                    tracedecay_tool_catalog::UseCaseId::new(use_case).expect("use case")
+                ]),
+                tracedecay_application::DisclosureClass::Evidence,
+            )
+            .expect("grant");
+            let context = tracedecay_application::RequestContext::new(
+                tracedecay_domain::ActorId::new("actor.requester").expect("actor"),
+                scope,
+                grant,
+                tracedecay_application::RequestId::new("request.dashboard-collection")
+                    .expect("request id"),
+                tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(900))
+                    .expect("deadline"),
+                tracedecay_application::CancellationContext::active("cancel.dashboard-collection")
+                    .expect("cancellation"),
+            )
+            .expect("context");
+            let scope_set = tracedecay_application::AuthorizedScopeSetAuthority::authorize(
+                tracedecay_domain::ScopeSetId::new(collection).expect("collection id"),
+                tracedecay_domain::ScopeSetRevision::new(1).expect("revision"),
+                vec![context],
+                &tracedecay_tool_catalog::CapabilityId::new(capability).expect("capability"),
+                &tracedecay_tool_catalog::UseCaseId::new(use_case).expect("use case"),
+                tracedecay_domain::UtcMicros(10),
+            )
+            .expect("authorized scope set");
+            Self {
+                scope_set,
+                native_integration_status: None,
+                rebound_roots: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl DashboardApplicationRuntime for SingleCollectionRuntime {
+        fn user_profile_id(&self) -> Option<&tracedecay_domain::UserProfileId> {
+            None
+        }
+
+        fn for_project_root(
+            &self,
+            project_root: &std::path::Path,
+        ) -> std::result::Result<Arc<dyn DashboardApplicationRuntime>, String> {
+            self.rebound_roots
+                .lock()
+                .expect("selected project bindings")
+                .push(project_root.to_path_buf());
+            Ok(Arc::new(self.clone()))
+        }
+
+        fn routers(
+            &self,
+            _active_project_id: ProjectId,
+        ) -> std::result::Result<DashboardApplicationRouters, String> {
+            Err("the single-collection test runtime mounts no application routers".to_owned())
+        }
+
+        fn apply_configuration_batch(
+            &self,
+            _request_id: tracedecay_application::RequestId,
+            _mutations: Vec<tracedecay_usecases::configuration::DirectConfigurationMutation>,
+            _expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId,
+            _idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey,
+        ) -> DashboardConfigurationApplyFuture<'_> {
+            Box::pin(async {
+                Err(
+                    DashboardConfigurationApplyError::ApplicationContractViolation(
+                        tracedecay_application::ApplicationContractError::Inconsistent {
+                            field: "single-collection test runtime configuration",
+                        },
+                    ),
+                )
+            })
+        }
+
+        fn read_multi_root_scope_set(
+            &self,
+            _control: DashboardHttpRequestControlV1,
+            scope_set_id: tracedecay_domain::ScopeSetId,
+        ) -> application_surface::DashboardScopeSetReadFuture<'_> {
+            let read =
+                (self.scope_set.scope_set_id() == &scope_set_id).then(|| self.scope_set.clone());
+            Box::pin(async move { Ok(read) })
+        }
+
+        fn native_integration_status(
+            &self,
+            _control: DashboardHttpRequestControlV1,
+            _transaction_id: tracedecay_domain::NativeIntegrationTransactionId,
+        ) -> application_surface::DashboardNativeIntegrationStatusFuture<'_> {
+            let result = self.native_integration_status.clone();
+            Box::pin(async move {
+                result.ok_or(application_surface::DashboardDaemonReadUnavailableV1 {
+                    detail:
+                        "the single-collection test runtime scripts no native-integration status"
+                            .to_owned(),
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn selected_project_runtime_rebinds_to_the_selected_root() {
+        let runtime = SingleCollectionRuntime::persisted("scope-set.dashboard-selected-project");
+        let rebound_roots = Arc::clone(&runtime.rebound_roots);
+        let active: Arc<dyn DashboardApplicationRuntime> = Arc::new(runtime);
+        let selected_root = std::path::Path::new("/registered/selected-project");
+
+        let selected = selected_project_application_runtime(Some(&active), selected_root)
+            .expect("selected project runtime binding");
+
+        assert!(selected.is_some());
+        assert_eq!(
+            *rebound_roots.lock().expect("selected project bindings"),
+            vec![selected_root.to_path_buf()]
+        );
+    }
+
+    #[tokio::test]
+    async fn capabilities_with_admitted_transport_report_the_typed_no_collection_state() {
+        let fixture =
+            DashboardStateFixture::open("project.dashboard-collection-capabilities").await;
+        let mut state = fixture.state;
+        state.application_invocation_executor = Some(Arc::new(SingleCollectionRuntime::persisted(
+            "scope-set.dashboard-capabilities",
+        )));
+
+        let Json(capabilities) = capabilities(State(state), None).await;
+
+        assert_eq!(capabilities["features"]["multi_root"], true);
+        assert_eq!(capabilities["multi_root"]["status"], "unavailable");
+        assert_eq!(
+            capabilities["multi_root"]["reason"],
+            "no default multi-root collection is configured; name an explicit collection"
+        );
+    }
+
+    #[tokio::test]
+    async fn dashboard_resolves_a_named_multi_root_collection() {
+        let fixture = DashboardStateFixture::open("project.dashboard-collection-resolve").await;
+        let mut state = fixture.state;
+        let runtime = SingleCollectionRuntime::persisted("scope-set.dashboard-resolve");
+        let expected_digest = runtime.scope_set.digest().clone();
+        state.application_invocation_executor = Some(Arc::new(runtime));
+
+        let mounted = multi_root_api::resolve_collection_capability(
+            &state,
+            Some(dashboard_lcm_test_control()),
+            Some(tracedecay_domain::ScopeSetId::new("scope-set.dashboard-resolve").unwrap()),
+        )
+        .await;
+        let tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::Mounted {
+            scope_set_id,
+            revision,
+            scope_set_digest,
+            root_count,
+        } = mounted
+        else {
+            panic!("an explicit persisted collection must resolve as mounted");
+        };
+        assert_eq!(scope_set_id.as_str(), "scope-set.dashboard-resolve");
+        assert_eq!(revision.get(), 1);
+        assert_eq!(scope_set_digest, expected_digest);
+        assert_eq!(root_count, 1);
+
+        // An explicit target naming an unpersisted collection is a typed
+        // not-persisted state, never a silent fallback to another scope set.
+        let missing = multi_root_api::resolve_collection_capability(
+            &state,
+            Some(dashboard_lcm_test_control()),
+            Some(tracedecay_domain::ScopeSetId::new("scope-set.dashboard-missing").unwrap()),
+        )
+        .await;
+        let tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::Unavailable { reason } =
+            missing
+        else {
+            panic!("an unpersisted collection must stay typed unavailable");
+        };
+        assert_eq!(
+            reason,
+            "multi-root collection scope-set.dashboard-missing names no persisted scope set for this project"
+        );
+    }
+
+    async fn json_response_body(response: axum::response::Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("response body");
+        (status, serde_json::from_slice(&body).expect("json body"))
+    }
+
+    #[tokio::test]
+    async fn dashboard_serves_the_native_integration_status_application_result() {
+        let fixture = DashboardStateFixture::open("project.dashboard-native-status").await;
+        let mut state = fixture.state;
+        let projection = tracedecay_application::NativeIntegrationStatusProjectionV1 {
+            transaction_id: tracedecay_domain::NativeIntegrationTransactionId::new(
+                "transaction.dashboard.native",
+            )
+            .expect("transaction"),
+            preview_id: tracedecay_domain::NativeIntegrationPreviewId::new(
+                "preview.dashboard.native",
+            )
+            .expect("preview"),
+            preview_digest: tracedecay_domain::ManifestDigest::new(format!(
+                "sha256:{}",
+                "d".repeat(64)
+            ))
+            .expect("digest"),
+            repository_id: tracedecay_domain::RepositoryId::new("repository.dashboard.native")
+                .expect("repository"),
+            destination_ref: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
+            phase: tracedecay_domain::NativeIntegrationPhaseV1::Terminal,
+            phase_revision: 4,
+            cancellation_requested: false,
+            terminal_outcome: Some(
+                tracedecay_domain::NativeIntegrationTerminalOutcomeV1::Committed,
+            ),
+            updated_at: tracedecay_domain::UtcMicros(9),
+        };
+        state.application_invocation_executor = Some(Arc::new(
+            SingleCollectionRuntime::persisted("scope-set.dashboard-native")
+                .with_native_integration_status(
+                    tracedecay_application::NativeIntegrationSurfaceResultV1::Status(
+                        projection.clone(),
+                    ),
+                ),
+        ));
+
+        let response = native_integration_api::status(
+            State(state),
+            Some(Extension(dashboard_lcm_test_control())),
+            axum::extract::Query(native_integration_api::NativeIntegrationStatusQueryV1 {
+                transaction_id: "transaction.dashboard.native".to_owned(),
+            }),
+        )
+        .await;
+        let (status, body) = json_response_body(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["outcome"], "status");
+        assert_eq!(body["transaction_id"], "transaction.dashboard.native");
+        assert_eq!(body["phase"], "terminal");
+        assert_eq!(body["terminal_outcome"], "committed");
+        assert_eq!(body["phase_revision"], projection.phase_revision);
+    }
+
+    #[tokio::test]
+    async fn standalone_dashboard_reports_native_integration_authority_unmounted() {
+        let fixture =
+            DashboardStateFixture::open("project.dashboard-native-status-standalone").await;
+
+        let response = native_integration_api::status(
+            State(fixture.state),
+            Some(Extension(dashboard_lcm_test_control())),
+            axum::extract::Query(native_integration_api::NativeIntegrationStatusQueryV1 {
+                transaction_id: "transaction.dashboard.native".to_owned(),
+            }),
+        )
+        .await;
+        let (status, body) = json_response_body(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["outcome"], "unavailable");
+        assert_eq!(body["reason"], "authority_unmounted");
     }
 
     #[tokio::test]

@@ -8,14 +8,14 @@ use thiserror::Error;
 
 use crate::{
     ManifestDigest, RunId, UtcMicros, WorkAttemptIdentityV1, WorkCommandId, WorkflowDefinition,
-    WorkflowOutputName, WorkflowOutputReference, WorkflowPlacementReceipt,
-    WorkflowStepEffectOutcome, WorkflowStepEffectReceipt, WorkflowStepId,
+    WorkflowOutputName, WorkflowPlacementReceipt, WorkflowStepEffectOutcome,
+    WorkflowStepEffectReceipt, WorkflowStepId,
 };
 
 mod fan_out;
 mod io;
 pub use fan_out::{WorkflowFanOutChildPlanV1, WorkflowFanOutFailurePolicyV1, WorkflowFanOutPlanV1};
-pub use io::{WorkflowOutputArtifact, WorkflowStepInput, WorkflowStepOutput};
+pub use io::{WorkflowOutputArtifact, WorkflowStepOutput};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkflowRunStateError {
@@ -35,8 +35,6 @@ pub enum WorkflowRunStateError {
     UnknownStep,
     #[error("workflow step outputs do not match the definition")]
     InvalidStepOutputs,
-    #[error("workflow step inputs are not available")]
-    InputsUnavailable,
     #[error("workflow definition is invalid")]
     InvalidDefinition,
     #[error("workflow placement receipt is invalid or stale")]
@@ -888,42 +886,5 @@ impl WorkflowRunProjection {
 
     pub fn step(&self, step_id: &WorkflowStepId) -> Option<&WorkflowStepRunProjection> {
         self.steps.get(step_id)
-    }
-
-    pub fn ready_steps(&self) -> Vec<WorkflowStepId> {
-        self.steps
-            .iter()
-            .filter_map(|(step_id, step)| {
-                (step.status == WorkflowStepStatus::Ready).then_some(step_id.clone())
-            })
-            .collect()
-    }
-
-    pub fn resolved_inputs(
-        &self,
-        step_id: &WorkflowStepId,
-    ) -> Result<Vec<WorkflowStepInput>, WorkflowRunStateError> {
-        let definition = self
-            .definition
-            .steps()
-            .iter()
-            .find(|step| &step.step_id == step_id)
-            .ok_or(WorkflowRunStateError::UnknownStep)?;
-        definition
-            .inputs
-            .iter()
-            .map(|reference| self.resolve_input(reference))
-            .collect()
-    }
-
-    fn resolve_input(
-        &self,
-        reference: &WorkflowOutputReference,
-    ) -> Result<WorkflowStepInput, WorkflowRunStateError> {
-        self.steps
-            .get(&reference.producer_step_id)
-            .and_then(|step| step.outputs.get(&reference.output_name))
-            .ok_or(WorkflowRunStateError::InputsUnavailable)
-            .and_then(|output| WorkflowStepInput::from_output(reference.clone(), output))
     }
 }

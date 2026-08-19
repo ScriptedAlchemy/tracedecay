@@ -37,7 +37,7 @@ pub(crate) mod queries;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
 pub use lifecycle::MovedStoreAdoption;
-pub(crate) use lifecycle::{git_remote_url, is_fts_only_corruption};
+pub(crate) use lifecycle::git_remote_url;
 
 /// Central orchestrator that coordinates all subsystems of the code graph.
 ///

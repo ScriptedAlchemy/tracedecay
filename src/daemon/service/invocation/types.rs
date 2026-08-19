@@ -131,24 +131,17 @@ impl BoundedHookOrchestratorV1 {
     }
 
     fn stable_address(request: &HookOrchestrationRequestV1) -> Option<HookOrchestrationAddressV1> {
-        let envelope = request.hook.envelope();
-        // Only session-stable lifecycle identity enters the address: turn and
+        // Only session-stable identity enters the address: lifecycle turn and
         // message identifiers advance on every native tool call, and a newer
-        // boundary must land on the incumbent's exact address to supersede it.
-        let lifecycle = request.lifecycle.as_ref().map(|lifecycle| {
-            (
-                &lifecycle.profile_id,
-                &lifecycle.provider_id,
-                &lifecycle.session_id,
-            )
-        });
+        // boundary must land on the incumbent's exact address to supersede it
+        // whether or not its Scout lifecycle resolved yet.
+        let envelope = request.hook.envelope();
         canonical_sha256(&(
             "tracedecay.advisory-hook-address.v1",
             envelope.project_id,
             envelope.repository_id,
             envelope.worktree_id,
             envelope.protected_session_id,
-            lifecycle,
         ))
         .ok()
         .map(|digest| digest.as_str().to_owned())

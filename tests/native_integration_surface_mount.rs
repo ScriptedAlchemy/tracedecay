@@ -152,6 +152,36 @@ fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
     }
 }
 
+/// The dashboard consumes the read-only status projection over the same
+/// application result; every mutating transaction operation stays off the
+/// dashboard so no gateway can advance a transaction, apply edits, or mutate
+/// Git from it.
+#[test]
+fn only_the_status_read_carries_a_dashboard_binding() {
+    let contribution =
+        native_integration_surface_catalog_contribution().expect("catalog contribution");
+    for (_, name) in JOURNEY {
+        let declares_dashboard = contribution.bindings().iter().any(|binding| {
+            binding.operation().as_str() == name
+                && binding.surface() == BindingSurface::Dashboard
+        });
+        assert_eq!(
+            declares_dashboard,
+            name == "native_integration_status",
+            "{name} dashboard exposure must match the read-only status contract"
+        );
+    }
+    let resolved = resolve_catalog_tool_binding(
+        BindingSurface::Dashboard,
+        "tracedecay_native_integration_status",
+    )
+    .expect("dashboard binding resolution");
+    assert!(
+        resolved.is_some(),
+        "the status dashboard binding is declared but the production resolver answers nothing"
+    );
+}
+
 fn assert_cli_and_mcp_bindings(contribution: &CatalogContributionV1, name: &str) {
     for surface in [BindingSurface::Cli, BindingSurface::Mcp] {
         assert!(

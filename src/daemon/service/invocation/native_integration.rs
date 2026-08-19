@@ -44,6 +44,7 @@ use tracedecay_domain::{
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
 };
 use tracedecay_store::NativeIntegrationStore;
+use tracedecay_usecases::native_integration::NativeIntegrationStatusBroadcastV1;
 use tracedecay_usecases::observability::{
     BoundedObservabilityProducerV1, WorkConflictObservationResultV1,
     WorkConflictObservationUnavailableV1, record_native_integration_transition,
@@ -70,6 +71,7 @@ pub(super) async fn execute_native_integration(
     registered: Option<RegisteredConfigurationRuntime>,
     owner: Option<DaemonNativeIntegrationOwner>,
     observability_producer: Option<Arc<BoundedObservabilityProducerV1>>,
+    status_broadcast: Option<Arc<NativeIntegrationStatusBroadcastV1>>,
     surface_operation: crate::application_surface::ApplicationSurfaceOperation,
     request: NativeIntegrationSurfaceRequest,
     observed_at: UtcMicros,
@@ -154,6 +156,7 @@ pub(super) async fn execute_native_integration(
                 request,
                 observed_at,
                 signal,
+                status_broadcast,
             )
             .await;
             match executed {
@@ -236,12 +239,42 @@ impl NativeIntegrationExecutionV1 {
     }
 }
 
+/// Publishes one observed transaction status to the project's read-only
+/// notification fan-out. Delivery is best-effort observation: a missing
+/// broadcast changes nothing about the operation result.
+fn publish_transaction_status(
+    broadcast: Option<&Arc<NativeIntegrationStatusBroadcastV1>>,
+    status: &tracedecay_domain::NativeIntegrationTransactionStatusV1,
+) {
+    if let Some(broadcast) = broadcast {
+        broadcast.publish(NativeIntegrationStatusProjectionV1::from(status));
+    }
+}
+
+/// Reads and publishes the durable status a mutation just advanced, from the
+/// same blocking context that ran the mutation.
+fn publish_current_transaction_status(
+    broadcast: Option<&Arc<NativeIntegrationStatusBroadcastV1>>,
+    owner: &DaemonNativeIntegrationOwner,
+    transaction_id: &tracedecay_domain::NativeIntegrationTransactionId,
+) {
+    if broadcast.is_none() {
+        return;
+    }
+    if let Ok(Some(status)) = owner.service().status(NativeIntegrationStatusRequestV1 {
+        transaction_id: transaction_id.clone(),
+    }) {
+        publish_transaction_status(broadcast, &status);
+    }
+}
+
 /// Runs one operation against the mounted per-project owner.
 ///
 /// The kernel and its store bridge are synchronous (native Git plus a bounded
 /// store actor), so every owner call crosses to a blocking thread; the
 /// coordinator's own cancellation map keeps a running apply cancellable
 /// through the separate cancel operation.
+#[allow(clippy::too_many_arguments)]
 async fn execute_with_owner(
     wire_request_id: &str,
     owner: DaemonNativeIntegrationOwner,
@@ -249,6 +282,7 @@ async fn execute_with_owner(
     request: NativeIntegrationSurfaceRequest,
     observed_at: UtcMicros,
     signal: CancellationSignal,
+    status_broadcast: Option<Arc<NativeIntegrationStatusBroadcastV1>>,
 ) -> Result<NativeIntegrationExecutionV1, ApplicationProblem> {
     let invalid = invalid_native_integration_request;
     match request {
@@ -455,6 +489,7 @@ async fn execute_with_owner(
                 };
                 let signal_preview = preview.clone();
                 let signal_approval = approval.clone();
+                let applied_transaction_id = apply.transaction_id.clone();
                 let application_request = NativeIntegrationApplyRequestV1 {
                     context,
                     transaction_id: apply.transaction_id,
@@ -462,7 +497,13 @@ async fn execute_with_owner(
                     approval,
                     observed_at,
                 };
-                match owner.service().apply(application_request, &signal) {
+                let apply_outcome = owner.service().apply(application_request, &signal);
+                publish_current_transaction_status(
+                    status_broadcast.as_ref(),
+                    &owner,
+                    &applied_transaction_id,
+                );
+                match apply_outcome {
                     Ok(receipt) => {
                         if let Some(runtime) = stack_runtime.as_ref()
                             && let Some(stack_signal) =
@@ -500,11 +541,14 @@ async fn execute_with_owner(
                     .await
                     .map_err(|_| unavailable_native_integration())?;
             match outcome {
-                Ok(Some(status)) => Ok(NativeIntegrationExecutionV1::without_preview(
-                    NativeIntegrationSurfaceResultV1::Status(
-                        NativeIntegrationStatusProjectionV1::from(&status),
-                    ),
-                )),
+                Ok(Some(status)) => {
+                    publish_transaction_status(status_broadcast.as_ref(), &status);
+                    Ok(NativeIntegrationExecutionV1::without_preview(
+                        NativeIntegrationSurfaceResultV1::Status(
+                            NativeIntegrationStatusProjectionV1::from(&status),
+                        ),
+                    ))
+                }
                 Ok(None) => Ok(NativeIntegrationExecutionV1::without_preview(
                     NativeIntegrationSurfaceResultV1::unavailable(
                         NativeIntegrationSurfaceUnavailableV1::UnknownTransaction,
@@ -515,14 +559,22 @@ async fn execute_with_owner(
             }
         }
         NativeIntegrationSurfaceRequest::Cancel(cancel) => {
+            let cancelled_transaction_id = cancel.transaction_id.clone();
             let application_request = NativeIntegrationCancelRequestV1 {
                 transaction_id: cancel.transaction_id,
                 requested_at: observed_at,
             };
-            let outcome =
-                tokio::task::spawn_blocking(move || owner.service().cancel(application_request))
-                    .await
-                    .map_err(|_| unavailable_native_integration())?;
+            let outcome = tokio::task::spawn_blocking(move || {
+                let disposition = owner.service().cancel(application_request);
+                publish_current_transaction_status(
+                    status_broadcast.as_ref(),
+                    &owner,
+                    &cancelled_transaction_id,
+                );
+                disposition
+            })
+            .await
+            .map_err(|_| unavailable_native_integration())?;
             match outcome {
                 Ok(disposition) => Ok(NativeIntegrationExecutionV1::without_preview(
                     NativeIntegrationSurfaceResultV1::from_cancel(disposition),
