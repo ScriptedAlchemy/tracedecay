@@ -70,6 +70,11 @@ use tracedecay_lsp::analyzer::broker::MountedLspProvider;
 const POLICY_REVISION_V1: u64 = 1;
 const MANAGED_CAPABILITY: &str = "capability.diagnostics.current";
 
+/// Typed failure class reported when a cycle's pinned configuration no longer
+/// matches the live revision. Callers that own the pinned parts remount them
+/// under the current configuration when they observe this class.
+pub const FEEDBACK_CYCLE_CONFIGURATION_DRIFT_CLASS: &str = "feedback-cycle-configuration-drift";
+
 /// Inputs required to open one production feedback-cycle registration.
 pub struct ProductionFeedbackCycleOpenV1 {
     pub project_root: PathBuf,
@@ -815,7 +820,9 @@ fn production_lsp_input(
             if access.configuration_revision != threshold_pin.configuration_revision
                 || access.configuration_digest != threshold_pin.configuration_digest
             {
-                return Err(LspRuntimeFailure::new("feedback-cycle-configuration-drift"));
+                return Err(LspRuntimeFailure::new(
+                    FEEDBACK_CYCLE_CONFIGURATION_DRIFT_CLASS,
+                ));
             }
             let context =
                 authorized_daemon_request_context(&scope, &requester, access, observed_at)

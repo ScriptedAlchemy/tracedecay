@@ -608,6 +608,20 @@ impl DaemonAdvisoryRuntimeRegistrar {
         )?))
     }
 
+    /// Retires the configuration-pinned feedback and advisory owners so the
+    /// project-open owner task can rebuild them under the current
+    /// configuration revision.
+    pub(crate) async fn withdraw_for_reconfiguration(
+        &self,
+        project_root: &Path,
+    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
+        self.service
+            .project_runtimes
+            .withdraw_feedback_and_advisory_for_reconfiguration(project_root)
+            .await
+            .map_err(Into::into)
+    }
+
     pub(crate) async fn publish(
         &self,
         project_root: &Path,

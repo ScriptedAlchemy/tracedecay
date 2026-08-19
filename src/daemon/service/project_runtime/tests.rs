@@ -556,6 +556,75 @@ async fn withdrawing_hands_the_component_back_exactly_once() {
 }
 
 #[tokio::test]
+async fn reconfiguration_withdraw_unblocks_a_fresh_advisory_publication() {
+    struct StubCyclePort;
+    impl tracedecay_lsp::FeedbackCycleRuntimePort for StubCyclePort {
+        fn execute(
+            &self,
+            _request: tracedecay_lsp::FeedbackCycleRequest,
+        ) -> tracedecay_lsp::LspRuntimeFuture<Result<(), tracedecay_lsp::LspRuntimeFailure>> {
+            Box::pin(async { Err(tracedecay_lsp::LspRuntimeFailure::new("stub-cycle")) })
+        }
+    }
+    struct StubAdvisoryPort;
+    impl super::super::invocation::DaemonAdvisoryCycleInvocationPort for StubAdvisoryPort {
+        fn invoke(
+            &self,
+            _request: super::super::invocation::DaemonAdvisoryCycleInvocationRequest,
+        ) -> super::super::invocation::DaemonAdvisoryCycleInvocationFuture<'_> {
+            Box::pin(async {
+                Err(tracedecay_application::ApplicationProblem::cancelled_before_admission())
+            })
+        }
+    }
+    let advisory = || {
+        (
+            RegisteredAdvisoryRuntimeV1::new(Arc::new(()) as Arc<dyn Any + Send + Sync>),
+            DaemonAdvisoryCycleInvocationOwner::new(
+                tracedecay_domain::ProjectId::new("project.advisory.reconfiguration").unwrap(),
+                Arc::new(StubAdvisoryPort),
+            ),
+            Arc::new(StubCyclePort) as Arc<dyn tracedecay_lsp::FeedbackCycleRuntimePort>,
+        )
+    };
+    let registry = ProjectRuntimeRegistryV1::default();
+    let project = root("alpha");
+    registry
+        .publish(
+            project.clone(),
+            Arc::new(SwitchableFeedbackCycleRuntimeV1::new(Arc::new(
+                StubCyclePort,
+            ))),
+        )
+        .await
+        .unwrap();
+    let (runtime, cycle, input) = advisory();
+    registry
+        .publish_advisory_atomically(&project, runtime, cycle, input)
+        .await
+        .expect("first advisory publication");
+    let (runtime, cycle, input) = advisory();
+    assert!(
+        registry
+            .publish_advisory_atomically(&project, runtime, cycle, input)
+            .await
+            .is_err(),
+        "a live advisory owner keeps its slots"
+    );
+
+    registry
+        .withdraw_feedback_and_advisory_for_reconfiguration(&project)
+        .await
+        .expect("withdraw for reconfiguration");
+
+    let (runtime, cycle, input) = advisory();
+    registry
+        .publish_advisory_atomically(&project, runtime, cycle, input)
+        .await
+        .expect("the remount republishes over the withdrawn slots");
+}
+
+#[tokio::test]
 async fn one_project_s_components_are_not_another_s() {
     let registry = ProjectRuntimeRegistryV1::default();
     registry.publish(root("alpha"), component(1)).await.unwrap();

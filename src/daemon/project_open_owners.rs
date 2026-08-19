@@ -979,14 +979,13 @@ pub(super) async fn register_project_open_production_owners(
 
     let mut mounted_providers = Vec::new();
     let mut lsp_session_factory = None;
-    let mut indexed_files = Vec::new();
     let diagnostic_broker = server.diagnostics_lsp();
     let indexed_generation = invocation
         .code_index_schedulers
         .latest_complete_ready_decoded_for_root_scope(project_root, &scope)
         .await;
     if let Some(generation) = indexed_generation {
-        indexed_files = generation
+        let mut indexed_files = generation
             .generation()
             .snapshot()
             .files
@@ -1110,7 +1109,6 @@ pub(super) async fn register_project_open_production_owners(
         admitted_root_uri,
         diagnostic_broker,
         lsp_session_factory,
-        indexed_files,
     })
 }
 

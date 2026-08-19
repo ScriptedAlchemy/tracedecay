@@ -28,9 +28,6 @@ pub(crate) struct ProjectOpenDependentOwnerState {
         Arc<tokio::sync::Mutex<DiagnosticBroker>>,
     pub(in crate::daemon::project_open_owners) lsp_session_factory:
         Option<Arc<DaemonLspSessionFactory>>,
-    /// Sorted logical paths from the sealed code-index census, used to map an
-    /// admitted saved-edit hook back to its exact indexed document.
-    pub(in crate::daemon::project_open_owners) indexed_files: Vec<String>,
 }
 
 pub(super) fn advisory_monotonic_deadline(

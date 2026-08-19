@@ -966,6 +966,13 @@ fn hash16(bytes: &[u8]) -> [u8; 16] {
     output
 }
 
+/// Native saved-edit file identity for one exact provider-reported path.
+/// Producers reverse-map an admitted `SavedEdit` hook to its indexed document
+/// by minting candidate identities through this same function.
+pub(crate) fn native_file_id_for_path(file_path: &str) -> [u8; 16] {
+    hash16(file_path.as_bytes())
+}
+
 fn hash32(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }

@@ -962,6 +962,53 @@ impl ProjectRuntimeRegistryV1 {
         }
     }
 
+    /// Withdraws the configuration-pinned feedback and advisory owners so the
+    /// project-open owner task can rebuild them under a new configuration
+    /// revision. Slots under an active reservation are awaited, not raced:
+    /// the withdraw belongs to the same owner task that performs mounts, so a
+    /// live reservation means a foreign writer is mid-publication.
+    pub(crate) async fn withdraw_feedback_and_advisory_for_reconfiguration(
+        &self,
+        project_root: &Path,
+    ) -> Result<(), ProjectRuntimeRegistryError> {
+        loop {
+            let mut reservation_changed = self.reservation_changed.subscribe();
+            let withdrawn = {
+                let root_fences = self.lock_root_fences();
+                let mut runtimes = self.lock_runtimes();
+                if self.closed.load(Ordering::Acquire) || root_fences.contains(project_root) {
+                    return Err(ProjectRuntimeRegistryError::Closed);
+                }
+                let Some(runtime) = runtimes.get_mut(project_root) else {
+                    return Ok(());
+                };
+                let reserved = runtime.reservations.iter().any(|type_id| {
+                    *type_id == TypeId::of::<RegisteredAdvisoryRuntimeV1>()
+                        || *type_id == TypeId::of::<DaemonAdvisoryCycleInvocationOwner>()
+                        || *type_id == TypeId::of::<Arc<FeedbackCycleRuntime>>()
+                        || *type_id == TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>()
+                });
+                (!reserved).then(|| {
+                    (
+                        runtime.advisory.take(),
+                        runtime.advisory_cycle.take(),
+                        runtime.feedback_cycle.take(),
+                    )
+                })
+            };
+            if let Some(withdrawn) = withdrawn {
+                // Dropped outside the registry lock: retiring the advisory
+                // registration unregisters global hook authorities whose drop
+                // paths must never run under this registry's mutex.
+                drop(withdrawn);
+                return Ok(());
+            }
+            if reservation_changed.changed().await.is_err() {
+                return Err(ProjectRuntimeRegistryError::Closed);
+            }
+        }
+    }
+
     /// Withdraw a component, returning it if it was there.
     #[cfg(test)]
     pub(crate) async fn withdraw<C>(&self, project_root: &Path) -> Option<C>

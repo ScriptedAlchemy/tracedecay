@@ -240,8 +240,9 @@ pub(crate) use primitive::{
 };
 pub(crate) use types::{
     BoundedHookOrchestratorV1, DaemonLspInvocationOwner, HookOrchestrationAdmissionV1,
-    HookOrchestrationRequestV1, HookOrchestrationTriggerV1, admit_registered_hook_orchestration,
-    register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
+    HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
+    admit_registered_hook_orchestration, register_hook_orchestration_runtime,
+    unregister_hook_orchestration_runtime,
 };
 // `pub(super)` on these shapes, in their original flat-file home, meant
 // "visible to `daemon::service`" (their home's actual parent); nesting them

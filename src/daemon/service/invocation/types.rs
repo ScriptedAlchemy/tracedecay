@@ -2,6 +2,7 @@
 
 use super::*;
 use tracedecay_application::RegisteredRootLocatorV1;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,11 +59,19 @@ impl HookOrchestrationRequestV1 {
     }
 }
 
-type HookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-type HookOrchestrationWorkV1 = dyn Fn(
-        HookOrchestrationRequestV1,
-        tracedecay_runtime_core::cancellation::CancellationToken,
-    ) -> HookOrchestrationFutureV1
+/// Terminal state of one executed hook cycle. Only `Completed` acknowledges
+/// the admissions joined to the cycle; `RetainForReplay` leaves their durable
+/// pending-work records in place so the daemon replay consumer retries the
+/// producer work after the unavailable input recovers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HookOrchestrationWorkOutcomeV1 {
+    Completed,
+    RetainForReplay,
+}
+
+type HookOrchestrationFutureV1 =
+    Pin<Box<dyn Future<Output = HookOrchestrationWorkOutcomeV1> + Send + 'static>>;
+type HookOrchestrationWorkV1 = dyn Fn(HookOrchestrationRequestV1, CancellationToken) -> HookOrchestrationFutureV1
     + Send
     + Sync;
 /// Exact hook identity: one project, one worktree, one hook event. Two
@@ -76,7 +85,7 @@ type HookOrchestrationCompletionV1 = Arc<dyn Fn() + Send + Sync + 'static>;
 
 struct HookOrchestrationInFlightEntryV1 {
     event: HookOrchestrationEventKeyV1,
-    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+    cancellation: CancellationToken,
     superseded: std::sync::atomic::AtomicBool,
     completions: StdMutex<Vec<HookOrchestrationCompletionV1>>,
 }
@@ -100,20 +109,14 @@ pub(crate) struct BoundedHookOrchestratorV1 {
     permits: Arc<Semaphore>,
     work: Arc<HookOrchestrationWorkV1>,
     in_flight: Arc<StdMutex<HookOrchestrationInFlightV1>>,
-    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+    cancellation: CancellationToken,
 }
 
 impl BoundedHookOrchestratorV1 {
     pub(crate) fn new<F, Fut>(max_concurrent: usize, work: F) -> Option<Arc<Self>>
     where
-        F: Fn(
-                HookOrchestrationRequestV1,
-                tracedecay_runtime_core::cancellation::CancellationToken,
-            ) -> Fut
-            + Send
-            + Sync
-            + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        F: Fn(HookOrchestrationRequestV1, CancellationToken) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = HookOrchestrationWorkOutcomeV1> + Send + 'static,
     {
         let work: Arc<HookOrchestrationWorkV1> =
             Arc::new(move |request, cancellation| Box::pin(work(request, cancellation)));
@@ -122,20 +125,30 @@ impl BoundedHookOrchestratorV1 {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
                 work,
                 in_flight: Arc::new(StdMutex::new(HookOrchestrationInFlightV1::default())),
-                cancellation: tracedecay_runtime_core::cancellation::CancellationToken::new(),
+                cancellation: CancellationToken::new(),
             })
         })
     }
 
     fn stable_address(request: &HookOrchestrationRequestV1) -> Option<HookOrchestrationAddressV1> {
         let envelope = request.hook.envelope();
+        // Only session-stable lifecycle identity enters the address: turn and
+        // message identifiers advance on every native tool call, and a newer
+        // boundary must land on the incumbent's exact address to supersede it.
+        let lifecycle = request.lifecycle.as_ref().map(|lifecycle| {
+            (
+                &lifecycle.profile_id,
+                &lifecycle.provider_id,
+                &lifecycle.session_id,
+            )
+        });
         canonical_sha256(&(
             "tracedecay.advisory-hook-address.v1",
             envelope.project_id,
             envelope.repository_id,
             envelope.worktree_id,
             envelope.protected_session_id,
-            request.lifecycle.as_ref(),
+            lifecycle,
         ))
         .ok()
         .map(|digest| digest.as_str().to_owned())
@@ -227,7 +240,7 @@ impl BoundedHookOrchestratorV1 {
                 };
                 Some(permit)
             };
-            let work_cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+            let work_cancellation = CancellationToken::new();
             let operation = Arc::new(HookOrchestrationInFlightEntryV1 {
                 event,
                 cancellation: work_cancellation,
@@ -270,27 +283,32 @@ impl BoundedHookOrchestratorV1 {
                 return;
             }
             let mut work_future = (work)(request, work_cancellation.clone());
-            // Only completed or superseded work emits terminals. Owner-level
-            // cancellation reports nothing: silence is a normal result, and an
-            // adapter must never invent a termination reason. Cancellation
-            // drops the work future instead of awaiting it: pending work must
-            // stop when its owner retires, not run to completion.
-            let completed = tokio::select! {
+            // Only genuinely completed or superseded work emits terminals. A
+            // cycle that ends in `RetainForReplay` keeps its joined admissions'
+            // durable pending-work records so the replay consumer retries the
+            // producer work. Owner-level cancellation reports nothing: silence
+            // is a normal result, and an adapter must never invent a
+            // termination reason. Cancellation drops the work future instead
+            // of awaiting it: pending work must stop when its owner retires,
+            // not run to completion.
+            let outcome = tokio::select! {
                 biased;
-                () = work_cancellation.cancelled() => false,
+                () = work_cancellation.cancelled() => None,
                 () = cancellation.cancelled() => {
                     work_cancellation.cancel();
-                    false
+                    None
                 },
-                () = &mut work_future => true,
+                outcome = &mut work_future => Some(outcome),
             };
-            let emit_terminal = if completed {
-                true
-            } else {
-                drop(work_future);
-                operation
-                    .superseded
-                    .load(std::sync::atomic::Ordering::Acquire)
+            let emit_terminal = match outcome {
+                Some(HookOrchestrationWorkOutcomeV1::Completed) => true,
+                Some(HookOrchestrationWorkOutcomeV1::RetainForReplay) => false,
+                None => {
+                    drop(work_future);
+                    operation
+                        .superseded
+                        .load(std::sync::atomic::Ordering::Acquire)
+                }
             };
             Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
             drop(permit);
