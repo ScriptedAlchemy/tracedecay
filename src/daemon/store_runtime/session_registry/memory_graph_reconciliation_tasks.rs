@@ -49,6 +49,15 @@ impl DaemonSessionRuntimeRegistryV1 {
         for owner in self.memory_graph_reconciliation_owners() {
             match owner.shutdown().await {
                 Ok(MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined) => {}
+                // The daemon shutdown owner cancels reconciliation while the
+                // runtime is alive and then deliberately closes the session
+                // relation graphs BEFORE joining, so a stuck pass is forced
+                // out through typed graph errors. The join's own re-cancel
+                // then finds the runtime it just closed. `RuntimeUnavailable`
+                // still guarantees every worker joined (the panic terminals
+                // are distinct), so after a deliberate close it is a clean
+                // shutdown, not an unfinished task.
+                Ok(MemoryGraphReconciliationRetirementTerminalV1::RuntimeUnavailable) => {}
                 Ok(terminal) => failures.push(format!(
                     "memory graph reconciliation shutdown terminal state: {terminal:?}"
                 )),

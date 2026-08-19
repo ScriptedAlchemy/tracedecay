@@ -391,11 +391,24 @@ fn log_client_drain_shutdown_receipt(receipt: &shutdown_orchestration::DaemonShu
 
 fn log_background_shutdown_receipt(receipt: &shutdown_coordination::ShutdownReceipt) {
     for owner in receipt.unfinished() {
+        // The receipt keeps each owner's typed status; the log must carry it
+        // too, or every unfinished owner reads as the same anonymous hang.
+        let detail = receipt
+            .owners
+            .iter()
+            .find(|entry| entry.name == *owner)
+            .map(|entry| match &entry.status {
+                shutdown_coordination::ShutdownStatus::Clean => "clean".to_owned(),
+                shutdown_coordination::ShutdownStatus::Failed(error) => error.clone(),
+                shutdown_coordination::ShutdownStatus::TimedOut => "timed_out".to_owned(),
+            })
+            .unwrap_or_else(|| "unreported".to_owned());
         log_daemon_event(
             "daemon_shutdown",
             &[
                 ("outcome", "background_task_unfinished".to_string()),
                 ("owner", (*owner).to_string()),
+                ("detail", detail),
             ],
         );
     }
