@@ -399,8 +399,37 @@ the commit as attribution evidence.
   (`c5c0a7663`); LSP protocol sessions register a warming owner before a
   sealed census so initialize/shutdown/exit admit during warming
   (`5e222426e`); Windows getrandom mapping, `large_enum_variant` boxing,
-  and byte-identical consecutive dashboard builds (`28973da32`,
-  `fd5b1dfe8`, `66c69e034`) close the remaining CI job classes.
+    and byte-identical consecutive dashboard builds (`28973da32`,
+    `fd5b1dfe8`, `66c69e034`) close the remaining CI job classes.
+- The remaining Work/workflow product surface is mounted (2026-08-19, PR
+  branch `cursor/mount-workflow-product-surface-2353`). Workflow activation
+  now runs tool-catalog semantic admission before the lifecycle transition is
+  journaled: `tracedecay_application::workflow_admission` resolves every step
+  operation against the canonical Work executable catalog and requires the
+  definition's `pinned_catalog_digest` to name the live executable catalog
+  digest; `WorkflowDefinitionService::admit_activation` is the one authority
+  the service and the daemon's journaled activate both run, and
+  `validate_definition` answers the same admission. Coordination tests cover
+  unknown-operation and foreign-catalog-pin denials before any journaled
+  transition, and the daemon journey asserts the mounted activate route
+  refuses an uncataloged candidate as a typed `invalid_request` (fixtures
+  that named the never-cataloged `operation.work.attempt_start` now name the
+  mounted `operation.work.start_attempt`). The dashboard gained the
+  fourteenth workspace, Workflows: definitions list, decoded step tables,
+  the three compare-and-swap lifecycle transitions, and `get_run`
+  projections over the mounted `/application/workflow` routes and newly
+  generated contracts; handoff and run-control wire types are asserted
+  absent from the dashboard contract catalog because the browser never holds
+  a bearer or mints fences/command ids. A19 investigation outcome: Work
+  mounts no integration apply/review/stack mutation operation and must not —
+  Plan 24 keeps accepted integration lowered only through the Plan 36
+  native-integration family; the "advertised" Work integration ops exist
+  only in stale dated mount lists in Plans 24/11c. The Work workspace's
+  observed integration-outcome and GitHub-stack-capability accounting cards
+  now decode the mounted `operation.work.topology_metrics` projection cell
+  by cell instead of wearing a stale "read model is not published" absence;
+  undecoded dimensions keep truthful `unsupported` wording naming their
+  event family.
 
 ## Remaining work by lane
 
