@@ -1,7 +1,9 @@
 //! Root-owned application transport injected into the dashboard adapter.
 
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::Json;
@@ -109,6 +111,19 @@ pub trait DashboardApplicationRuntime: Send + Sync {
     /// Exact profile bound by the daemon handshake. A dashboard mounted
     /// without that identity cannot advertise or dispatch profile writes.
     fn user_profile_id(&self) -> Option<&UserProfileId>;
+
+    /// Rebinds the daemon transport to one selected project's exact root.
+    /// Implementations that cannot prove such a binding fail closed instead
+    /// of reusing the active project's transport.
+    fn for_project_root(
+        &self,
+        project_root: &Path,
+    ) -> std::result::Result<Arc<dyn DashboardApplicationRuntime>, String> {
+        Err(format!(
+            "the dashboard application runtime cannot bind selected project '{}'",
+            project_root.display()
+        ))
+    }
 
     fn routers(
         &self,

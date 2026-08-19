@@ -809,6 +809,10 @@ pub async fn build_selected_project_state(
     cg: Arc<TraceDecay>,
     active: &DashboardState,
 ) -> Result<DashboardState> {
+    let application_invocation_executor = selected_project_application_runtime(
+        active.application_invocation_executor.as_ref(),
+        cg.project_root(),
+    )?;
     build_state_inner(
         cg.as_ref(),
         Some(Arc::clone(&cg)),
@@ -844,11 +848,21 @@ pub async fn build_selected_project_state(
             explorer_semantic_reader: active.explorer_semantic_reader.clone(),
             feedback_status_reader: active.feedback_status_reader.clone(),
             code_diagnostics_broker: None,
-            application_invocation_executor: active.application_invocation_executor.clone(),
+            application_invocation_executor,
             delivery_settlement_authority: None,
         },
     )
     .await
+}
+
+fn selected_project_application_runtime(
+    active: Option<&Arc<dyn DashboardApplicationRuntime>>,
+    project_root: &std::path::Path,
+) -> Result<Option<Arc<dyn DashboardApplicationRuntime>>> {
+    active
+        .map(|runtime| runtime.for_project_root(project_root))
+        .transpose()
+        .map_err(config_error)
 }
 
 pub fn config_error(message: impl Into<String>) -> TraceDecayError {
@@ -2268,9 +2282,11 @@ mod authority_tests {
     /// scope-set read: an exact-id hit answers the frozen scope set, anything
     /// else is a truthful absent read. Optionally answers one scripted
     /// native-integration status result.
+    #[derive(Clone)]
     struct SingleCollectionRuntime {
         scope_set: tracedecay_application::AuthorizedScopeSet,
         native_integration_status: Option<tracedecay_application::NativeIntegrationSurfaceResultV1>,
+        rebound_roots: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
     }
 
     impl SingleCollectionRuntime {
@@ -2340,6 +2356,7 @@ mod authority_tests {
             Self {
                 scope_set,
                 native_integration_status: None,
+                rebound_roots: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
     }
@@ -2347,6 +2364,17 @@ mod authority_tests {
     impl DashboardApplicationRuntime for SingleCollectionRuntime {
         fn user_profile_id(&self) -> Option<&tracedecay_domain::UserProfileId> {
             None
+        }
+
+        fn for_project_root(
+            &self,
+            project_root: &std::path::Path,
+        ) -> std::result::Result<Arc<dyn DashboardApplicationRuntime>, String> {
+            self.rebound_roots
+                .lock()
+                .expect("selected project bindings")
+                .push(project_root.to_path_buf());
+            Ok(Arc::new(self.clone()))
         }
 
         fn routers(
@@ -2398,6 +2426,23 @@ mod authority_tests {
                 })
             })
         }
+    }
+
+    #[test]
+    fn selected_project_runtime_rebinds_to_the_selected_root() {
+        let runtime = SingleCollectionRuntime::persisted("scope-set.dashboard-selected-project");
+        let rebound_roots = Arc::clone(&runtime.rebound_roots);
+        let active: Arc<dyn DashboardApplicationRuntime> = Arc::new(runtime);
+        let selected_root = std::path::Path::new("/registered/selected-project");
+
+        let selected = selected_project_application_runtime(Some(&active), selected_root)
+            .expect("selected project runtime binding");
+
+        assert!(selected.is_some());
+        assert_eq!(
+            *rebound_roots.lock().expect("selected project bindings"),
+            vec![selected_root.to_path_buf()]
+        );
     }
 
     #[tokio::test]

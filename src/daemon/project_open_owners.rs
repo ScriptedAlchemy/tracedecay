@@ -1100,7 +1100,6 @@ pub(super) async fn register_project_open_production_owners(
         )
         .await;
     });
-
     // At-rest privacy remediation is bounded background work after fail-closed
     // admission; it never blocks admission or retrieval.
     crate::daemon::privacy_remediation::spawn_at_rest_privacy_remediation(

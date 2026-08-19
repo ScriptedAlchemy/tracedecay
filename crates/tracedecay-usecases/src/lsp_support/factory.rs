@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::runtime::Handle;
 use tracedecay_application::NativeIntegrationStatusProjectionV1;
@@ -297,6 +298,7 @@ impl DaemonLspSessionFactory {
         Some(session.with_native_integration_status_port(Arc::new(
             FederatedNativeIntegrationStatus {
                 roots: native_integration_status,
+                next_root: AtomicUsize::new(0),
             },
         )))
     }
@@ -307,19 +309,105 @@ impl DaemonLspSessionFactory {
 /// merging discloses nothing a single-root session would not see.
 struct FederatedNativeIntegrationStatus {
     roots: Vec<Arc<dyn NativeIntegrationStatusPort>>,
+    next_root: AtomicUsize,
 }
 
 impl NativeIntegrationStatusPort for FederatedNativeIntegrationStatus {
     fn poll_status(&self, maximum: usize) -> Vec<NativeIntegrationStatusProjectionV1> {
-        let mut merged = Vec::new();
-        for root in &self.roots {
-            let remaining = maximum.saturating_sub(merged.len());
-            if remaining == 0 {
+        if maximum == 0 || self.roots.is_empty() {
+            return Vec::new();
+        }
+        let mut root_statuses = self
+            .roots
+            .iter()
+            .map(|root| root.poll_status(maximum).into_iter())
+            .collect::<Vec<_>>();
+        let root_count = root_statuses.len();
+        let first_root = self.next_root.fetch_add(1, Ordering::Relaxed) % root_count;
+        let mut merged = Vec::with_capacity(maximum);
+        loop {
+            let mut progressed = false;
+            for offset in 0..root_count {
+                let root_index = (first_root + offset) % root_count;
+                if let Some(status) = root_statuses[root_index].next() {
+                    merged.push(status);
+                    progressed = true;
+                    if merged.len() == maximum {
+                        return merged;
+                    }
+                }
+            }
+            if !progressed {
                 break;
             }
-            merged.extend(root.poll_status(remaining).into_iter().take(remaining));
         }
         merged
+    }
+}
+
+#[cfg(test)]
+mod native_integration_status_tests {
+    use std::sync::Arc;
+
+    use tracedecay_application::NativeIntegrationStatusProjectionV1;
+    use tracedecay_domain::{
+        ManifestDigest, NativeIntegrationPhaseV1, NativeIntegrationPreviewId,
+        NativeIntegrationTransactionId, RefId, RepositoryId, UtcMicros,
+    };
+    use tracedecay_lsp::NativeIntegrationStatusPort;
+
+    use super::FederatedNativeIntegrationStatus;
+
+    struct StaticStatuses(Vec<NativeIntegrationStatusProjectionV1>);
+
+    impl NativeIntegrationStatusPort for StaticStatuses {
+        fn poll_status(&self, maximum: usize) -> Vec<NativeIntegrationStatusProjectionV1> {
+            self.0.iter().take(maximum).cloned().collect()
+        }
+    }
+
+    fn status(
+        repository: &str,
+        transaction: &str,
+        updated_at: i64,
+    ) -> NativeIntegrationStatusProjectionV1 {
+        NativeIntegrationStatusProjectionV1 {
+            transaction_id: NativeIntegrationTransactionId::new(transaction).expect("transaction"),
+            preview_id: NativeIntegrationPreviewId::new(format!("preview.{transaction}"))
+                .expect("preview"),
+            preview_digest: ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("digest"),
+            repository_id: RepositoryId::new(repository).expect("repository"),
+            destination_ref: RefId::new("refs/heads/main").expect("ref"),
+            phase: NativeIntegrationPhaseV1::Prepared,
+            phase_revision: 1,
+            cancellation_requested: false,
+            terminal_outcome: None,
+            updated_at: UtcMicros(updated_at),
+        }
+    }
+
+    #[test]
+    fn bounded_federated_poll_represents_each_root_before_reusing_one_root() {
+        let first: Arc<dyn NativeIntegrationStatusPort> = Arc::new(StaticStatuses(vec![
+            status("repository.first", "transaction.first-a", 3),
+            status("repository.first", "transaction.first-b", 2),
+        ]));
+        let second: Arc<dyn NativeIntegrationStatusPort> = Arc::new(StaticStatuses(vec![status(
+            "repository.second",
+            "transaction.second",
+            1,
+        )]));
+        let federated = FederatedNativeIntegrationStatus {
+            roots: vec![first, second],
+            next_root: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let statuses = federated.poll_status(2);
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].repository_id.as_str(), "repository.first");
+        assert_eq!(statuses[1].repository_id.as_str(), "repository.second");
     }
 }
 
