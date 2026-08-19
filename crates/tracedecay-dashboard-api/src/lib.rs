@@ -2254,8 +2254,7 @@ mod authority_tests {
     /// native-integration status result.
     struct SingleCollectionRuntime {
         scope_set: tracedecay_application::AuthorizedScopeSet,
-        native_integration_status:
-            Option<tracedecay_application::NativeIntegrationSurfaceResultV1>,
+        native_integration_status: Option<tracedecay_application::NativeIntegrationSurfaceResultV1>,
     }
 
     impl SingleCollectionRuntime {
@@ -2293,10 +2292,10 @@ mod authority_tests {
                 tracedecay_domain::UtcMicros(1_000),
                 scope.clone(),
                 BTreeSet::from([
-                    tracedecay_tool_catalog::CapabilityId::new(capability).expect("capability"),
+                    tracedecay_tool_catalog::CapabilityId::new(capability).expect("capability")
                 ]),
                 BTreeSet::from([
-                    tracedecay_tool_catalog::UseCaseId::new(use_case).expect("use case"),
+                    tracedecay_tool_catalog::UseCaseId::new(use_case).expect("use case")
                 ]),
                 tracedecay_application::DisclosureClass::Evidence,
             )
@@ -2349,11 +2348,13 @@ mod authority_tests {
             _idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey,
         ) -> DashboardConfigurationApplyFuture<'_> {
             Box::pin(async {
-                Err(DashboardConfigurationApplyError::ApplicationContractViolation(
-                    tracedecay_application::ApplicationContractError::Inconsistent {
-                        field: "single-collection test runtime configuration",
-                    },
-                ))
+                Err(
+                    DashboardConfigurationApplyError::ApplicationContractViolation(
+                        tracedecay_application::ApplicationContractError::Inconsistent {
+                            field: "single-collection test runtime configuration",
+                        },
+                    ),
+                )
             })
         }
 
@@ -2362,8 +2363,8 @@ mod authority_tests {
             _control: DashboardHttpRequestControlV1,
             scope_set_id: tracedecay_domain::ScopeSetId,
         ) -> application_surface::DashboardScopeSetReadFuture<'_> {
-            let read = (self.scope_set.scope_set_id() == &scope_set_id)
-                .then(|| self.scope_set.clone());
+            let read =
+                (self.scope_set.scope_set_id() == &scope_set_id).then(|| self.scope_set.clone());
             Box::pin(async move { Ok(read) })
         }
 
@@ -2375,8 +2376,9 @@ mod authority_tests {
             let result = self.native_integration_status.clone();
             Box::pin(async move {
                 result.ok_or(application_surface::DashboardDaemonReadUnavailableV1 {
-                    detail: "the single-collection test runtime scripts no native-integration status"
-                        .to_owned(),
+                    detail:
+                        "the single-collection test runtime scripts no native-integration status"
+                            .to_owned(),
                 })
             })
         }
@@ -2480,7 +2482,9 @@ mod authority_tests {
             phase: tracedecay_domain::NativeIntegrationPhaseV1::Terminal,
             phase_revision: 4,
             cancellation_requested: false,
-            terminal_outcome: Some(tracedecay_domain::NativeIntegrationTerminalOutcomeV1::Committed),
+            terminal_outcome: Some(
+                tracedecay_domain::NativeIntegrationTerminalOutcomeV1::Committed,
+            ),
             updated_at: tracedecay_domain::UtcMicros(9),
         };
         state.application_invocation_executor = Some(Arc::new(

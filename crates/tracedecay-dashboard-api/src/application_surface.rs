@@ -86,6 +86,18 @@ pub type DashboardScopeSetReadFuture<'a> = Pin<
     >,
 >;
 
+pub type DashboardNativeIntegrationStatusFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<
+                    NativeIntegrationSurfaceResultV1,
+                    DashboardDaemonReadUnavailableV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
 /// The daemon transport could not answer a dashboard read. The detail is a
 /// safe diagnostic, never store paths or payload content.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,18 +143,6 @@ pub trait DashboardApplicationRuntime: Send + Sync {
         transaction_id: NativeIntegrationTransactionId,
     ) -> DashboardNativeIntegrationStatusFuture<'a>;
 }
-
-pub type DashboardNativeIntegrationStatusFuture<'a> = Pin<
-    Box<
-        dyn Future<
-                Output = std::result::Result<
-                    NativeIntegrationSurfaceResultV1,
-                    DashboardDaemonReadUnavailableV1,
-                >,
-            > + Send
-            + 'a,
-    >,
->;
 
 #[cfg(test)]
 mod tests {

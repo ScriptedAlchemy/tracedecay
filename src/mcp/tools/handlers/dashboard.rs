@@ -29,8 +29,9 @@ use super::support::generic_tool_result;
 use crate::dashboard::{
     AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
     DashboardApplicationRuntime, DashboardAutomationWriter, DashboardConfigurationApplyError,
-    DashboardConfigurationApplyFuture, DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
-    DashboardDaemonReadUnavailableV1, DashboardStateCompositionV1, bind_dashboard,
+    DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
+    DashboardHttpRequestControlV1, DashboardScopeSetReadFuture, DashboardStateCompositionV1,
+    bind_dashboard,
     build_state_with_automation_reconciler, router, validate_dashboard_host,
 };
 

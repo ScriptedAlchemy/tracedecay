@@ -24,8 +24,8 @@ use crate::daemon_client::invocation_now_micros;
 use crate::daemon_contract::{DaemonInvocationOutcome, DaemonInvocationRequest};
 use crate::dashboard::{
     DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
-    DashboardConfigurationApplyFuture, DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
-    DashboardDaemonReadUnavailableV1,
+    DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
+    DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
