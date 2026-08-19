@@ -557,7 +557,7 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let _ = reply.send(result);
             }
             SnapshotCommand::ReleaseMemory { reply } => {
-                let _ = reply.send(shrink_connection_memory(&*transaction));
+                let _ = reply.send(shrink_connection_memory(&transaction));
             }
             SnapshotCommand::End { reply } => {
                 let result = transaction.rollback().map_err(|error| {
