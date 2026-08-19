@@ -334,6 +334,7 @@ pub(super) fn workflow_coordination_problem(
             DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
         tracedecay_application::WorkflowCoordinationError::InvalidDefinition
+        | tracedecay_application::WorkflowCoordinationError::CatalogAdmissionDenied(_)
         | tracedecay_application::WorkflowCoordinationError::ImmutableDefinitionConflict
         | tracedecay_application::WorkflowCoordinationError::IllegalLifecycleTransition
         | tracedecay_application::WorkflowCoordinationError::LifecycleRevisionConflict => {
