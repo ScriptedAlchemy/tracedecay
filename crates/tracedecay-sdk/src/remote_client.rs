@@ -92,7 +92,7 @@ impl EnrolledRemoteClient {
         credential: impl AsRef<[u8]>,
         timeout: Duration,
     ) -> Result<Self, RemoteClientError> {
-        Self::build(endpoint, credential, timeout, None)
+        Self::build(endpoint, credential, timeout, None, false)
     }
 
     /// Builds a client with one explicit additional HTTPS trust root.
@@ -107,7 +107,22 @@ impl EnrolledRemoteClient {
             credential,
             timeout,
             Some(root_certificate_pem.as_ref()),
+            false,
         )
+    }
+
+    /// Targets the local daemon's own application listener, which nests the
+    /// same Remote Brain router at `/remote` that the external TLS listener
+    /// serves. The operations, envelopes, credential header, and response
+    /// validation are identical to the enrolled HTTPS target; only the
+    /// transport trust differs, so plaintext HTTP is admitted exclusively
+    /// for loopback hosts.
+    pub fn new_local_daemon(
+        endpoint: impl AsRef<str>,
+        credential: impl AsRef<[u8]>,
+        timeout: Duration,
+    ) -> Result<Self, RemoteClientError> {
+        Self::build(endpoint, credential, timeout, None, true)
     }
 
     fn build(
@@ -115,19 +130,28 @@ impl EnrolledRemoteClient {
         credential: impl AsRef<[u8]>,
         timeout: Duration,
         root_certificate_pem: Option<&[u8]>,
+        allow_loopback_http: bool,
     ) -> Result<Self, RemoteClientError> {
         let endpoint = reqwest::Url::parse(endpoint.as_ref())
             .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
-        if endpoint.scheme() != "https"
+        let scheme_admitted = match endpoint.scheme() {
+            "https" => true,
+            "http" => allow_loopback_http && host_is_loopback(&endpoint),
+            _ => false,
+        };
+        if !scheme_admitted
             || endpoint.host_str().is_none()
             || endpoint.query().is_some()
             || endpoint.fragment().is_some()
             || endpoint.username() != ""
             || endpoint.password().is_some()
         {
-            return Err(RemoteClientError::Configuration(
-                "Remote Brain endpoint must be a credential-free HTTPS URL".to_owned(),
-            ));
+            return Err(RemoteClientError::Configuration(if allow_loopback_http {
+                "local daemon Remote Brain endpoint must be a credential-free loopback HTTP or HTTPS URL"
+                    .to_owned()
+            } else {
+                "Remote Brain endpoint must be a credential-free HTTPS URL".to_owned()
+            }));
         }
         let credential = credential.as_ref();
         if validate_remote_secret_length(credential).is_err() {
@@ -356,6 +380,23 @@ impl EnrolledRemoteClient {
     }
 }
 
+/// Whether the endpoint host is a loopback address. Plaintext HTTP toward the
+/// local daemon's nested `/remote` mount is safe only when the bytes never
+/// leave the machine; any other host requires HTTPS.
+fn host_is_loopback(endpoint: &reqwest::Url) -> bool {
+    let Some(host) = endpoint.host_str() else {
+        return false;
+    };
+    let address = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(address) = address.parse::<std::net::IpAddr>() {
+        return address.is_loopback();
+    }
+    host.eq_ignore_ascii_case("localhost")
+}
+
 fn credential_header(credential: &[u8]) -> Result<HeaderValue, RemoteClientError> {
     if validate_remote_secret_length(credential).is_err() {
         return Err(RemoteClientError::Configuration(
@@ -544,6 +585,47 @@ mod tests {
         )
         .expect_err("plaintext endpoint must fail");
 
+        assert!(matches!(error, RemoteClientError::Configuration(_)));
+    }
+
+    #[test]
+    fn local_daemon_target_admits_loopback_http_only() {
+        let credential = "0123456789abcdef0123456789abcdef";
+        for endpoint in [
+            "http://127.0.0.1:39181/remote/",
+            "http://[::1]:39181/remote/",
+            "http://localhost:39181/remote/",
+            "https://remote.example/remote/",
+        ] {
+            EnrolledRemoteClient::new_local_daemon(endpoint, credential, Duration::from_secs(1))
+                .unwrap_or_else(|error| {
+                    panic!("local daemon target must admit {endpoint}: {error}")
+                });
+        }
+
+        for endpoint in [
+            "http://remote.example/remote/",
+            "http://10.0.0.7:39181/remote/",
+            "ftp://127.0.0.1/remote/",
+        ] {
+            let error = EnrolledRemoteClient::new_local_daemon(
+                endpoint,
+                credential,
+                Duration::from_secs(1),
+            )
+            .expect_err("plaintext beyond loopback must fail closed");
+            assert!(matches!(error, RemoteClientError::Configuration(_)));
+        }
+    }
+
+    #[test]
+    fn enrolled_remote_target_still_refuses_loopback_http() {
+        let error = EnrolledRemoteClient::new(
+            "http://127.0.0.1:39181/remote/",
+            "0123456789abcdef0123456789abcdef",
+            Duration::from_secs(1),
+        )
+        .expect_err("the enrolled remote target must stay HTTPS-only");
         assert!(matches!(error, RemoteClientError::Configuration(_)));
     }
 
