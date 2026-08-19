@@ -14,6 +14,7 @@ use crate::observation::{
 };
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::StoredCursor;
+use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
     JsonlResumeState, MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlSkippedReason,
     TranscriptIngestError, TranscriptIngestResult, preflight_strict_jsonl,
@@ -216,6 +217,13 @@ impl ActiveAdmission<'_> {
                     TranscriptIngestError::Cancelled {
                         provider: self.provider,
                     }
+                } else if outcome.retryable {
+                    // A retryable advance failure — a cursor CAS lost to a
+                    // peer ingestor, a still-mounting write authority — says
+                    // nothing about the record; wrapping it as NonDurable
+                    // laundered the admission's own verdict into a terminal
+                    // non-retryable disposition.
+                    host_admission_error(self.provider, outcome)
                 } else {
                     TranscriptIngestError::NonDurableRecord {
                         provider: self.provider,
@@ -328,18 +336,18 @@ impl ActiveAdmission<'_> {
                 )
                 .await
             }
+            // Only retryable outcomes reach here (the arm above matched the
+            // rest). A retryable admission failure says nothing about the
+            // record itself, so the admission authority's own verdict must
+            // survive to classification — wrapping it as NonDurable laundered
+            // a converging cursor conflict into a terminal Degraded record.
             Err(outcome) => {
                 if is_admission_cancellation(&outcome, &self.cancellation) {
                     Err(TranscriptIngestError::Cancelled {
                         provider: self.provider,
                     })
                 } else {
-                    Err(TranscriptIngestError::NonDurableRecord {
-                        provider: self.provider,
-                        offset: frame.checkpoint.offset,
-                        end_offset: frame.checkpoint.end_offset,
-                        reason: outcome.reason_code.unwrap_or("host_admission_incomplete"),
-                    })
+                    Err(host_admission_error(self.provider, outcome))
                 }
             }
         }

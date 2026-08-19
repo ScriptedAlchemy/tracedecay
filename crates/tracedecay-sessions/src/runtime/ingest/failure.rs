@@ -298,7 +298,10 @@ pub fn classify_transcript_ingest_disposition(
     } = error
     {
         // The record itself is rejected: nothing about the authority is
-        // degraded beyond this one non-durable record.
+        // degraded beyond this one non-durable record. Transient admission
+        // failures never take this shape — the ingest wrappers route them
+        // through `HostAdmission`, which carries the authority's own
+        // retryability verdict.
         return TranscriptIngestDisposition {
             reason_code: non_durable_reason_code(reason),
             retryable: false,
@@ -609,5 +612,37 @@ mod cancellation_tests {
         });
 
         assert!(cancelled_provider_outcome(&error).is_none());
+    }
+
+    #[test]
+    fn host_admission_verdict_survives_classification_while_record_rejection_stays_permanent() {
+        // The laundering this pins against: a retryable admission failure
+        // (a cursor CAS lost to a peer ingestor) wrapped so classification
+        // reported it terminal. The verdict must pass through untouched.
+        let conflict = source::TranscriptIngestError::HostAdmission {
+            provider: "cursor",
+            reason: "cursor_conflict",
+            retryable: true,
+        };
+        let disposition = classify_transcript_ingest_disposition(&conflict);
+        assert_eq!(disposition.reason_code, "cursor_conflict");
+        assert!(
+            disposition.retryable,
+            "a cursor CAS lost to a peer ingestor is converging, not terminal"
+        );
+
+        let malformed = source::TranscriptIngestError::NonDurableRecord {
+            provider: "cursor",
+            offset: 10,
+            end_offset: 40,
+            reason: "malformed snapshot JSON",
+        };
+        let disposition = classify_transcript_ingest_disposition(&malformed);
+        assert_eq!(disposition.reason_code, "malformed_snapshot_json");
+        assert!(
+            !disposition.retryable,
+            "a genuine content rejection stays permanent"
+        );
+        assert_eq!(disposition.status, HostAdmissionStatus::Degraded);
     }
 }
