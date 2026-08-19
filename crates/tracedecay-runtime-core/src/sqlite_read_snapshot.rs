@@ -250,7 +250,7 @@ impl SnapshotSet {
                 copied_bytes = copied_bytes.saturating_add(snapshot.copy_bytes);
                 prepared.push(snapshot);
             }
-            let available = fs2::available_space(&scratch.path)?;
+            let available = tracedecay_private_fs::available_space(&scratch.path)?;
             preparation_control.checkpoint()?;
             if copied_bytes > available {
                 return Err(insufficient_scratch_space(
