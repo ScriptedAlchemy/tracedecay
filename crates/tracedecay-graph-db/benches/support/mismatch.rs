@@ -76,12 +76,12 @@ impl ExactMismatchReplay {
         let mut mismatch = ExactRecoveredDigestMismatch::new(&mut graph.authority);
         let error = graph
             .registry
-            .publish_verified_manifest(
+            .publish_verified(
                 registration,
                 &mut mismatch,
                 &publish_context,
                 &key,
-                manifest.clone(),
+                Some(manifest.clone()),
             )
             .expect_err("the exact recovered-digest mismatch must reject publication");
         assert!(
@@ -131,12 +131,12 @@ impl ExactMismatchReplay {
         let commit = self
             .graph
             .registry
-            .publish_verified_manifest(
+            .publish_verified(
                 registration,
                 &mut self.graph.authority,
                 &context,
                 &self.key,
-                self.manifest,
+                Some(self.manifest),
             )
             .expect("exact mismatch replay reopens and verifies");
         assert_eq!(commit.head.key, self.key);

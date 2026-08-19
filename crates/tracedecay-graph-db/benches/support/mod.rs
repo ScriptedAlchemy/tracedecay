@@ -254,12 +254,12 @@ impl PersistentBenchmarkGraph {
         let registration = self.registration();
         let commit = self
             .registry
-            .publish_verified_manifest(
+            .publish_verified(
                 registration,
                 &mut self.authority,
                 &publish_context,
                 &key,
-                manifest,
+                Some(manifest),
             )
             .expect("benchmark generation publishes and verifies");
         drop(completion);

@@ -19,9 +19,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RefId, UtcMicros, WorktreeId};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::graph::{
-    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
-};
+use tracedecay_usecases::graph::{CodeGraphReadError, CodeGraphReadRequest};
 
 use super::project_code_graph_projection_read_port;
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
@@ -106,6 +104,16 @@ impl Fixture {
     }
 }
 
+/// A branch-label move on the same checkout must pass the port's scope
+/// admission. This fixture runs a bare scheduler registry with no persistent
+/// Grafeo activation authority, and interactive reads deliberately have no
+/// in-memory fallback — so a fully served read is unreachable here and both
+/// scopes terminate at the typed not-activated state. The assertion is the
+/// admission decision itself: the moved label reaches activation (the same
+/// terminal the retained scope gets) instead of the scope denial a foreign
+/// worktree receives. The full served moved-label journey is proven against
+/// real activation by
+/// `daemon::code_index_scheduler::tests::moved_reference_label_still_serves_the_exact_worktree_as_current`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn moved_branch_label_still_opens_the_exact_checkouts_graph_read() {
     let fixture = Fixture::mount().await;
@@ -119,14 +127,31 @@ async fn moved_branch_label_still_opens_the_exact_checkouts_graph_read() {
         moved, fixture.retained_scope,
         "the moved label must produce a distinct full scope (label and digest)"
     );
-    let context = request_context(moved, "moved-label");
 
-    let read = port
+    let retained_context = request_context(fixture.retained_scope.clone(), "retained-label");
+    let retained_terminal = port
+        .open(CodeGraphReadRequest::from_context(&retained_context, UtcMicros(1)))
+        .await
+        .expect_err("this fixture has no persistent activation, so even the retained scope stops there");
+    assert!(
+        !matches!(retained_terminal, CodeGraphReadError::Denied),
+        "the retained scope must never be scope-denied: {retained_terminal:?}"
+    );
+
+    let context = request_context(moved, "moved-label");
+    let moved_terminal = port
         .open(CodeGraphReadRequest::from_context(&context, UtcMicros(1)))
         .await
-        .expect("a branch-label move on the same worktree keeps the graph read open");
-    read.reader(&context, UtcMicros(1))
-        .expect("the verified read serves an interactive reader for the same checkout");
+        .expect_err("same fixture, same activation terminal");
+    assert!(
+        !matches!(moved_terminal, CodeGraphReadError::Denied),
+        "a branch-label move on the same worktree must pass scope admission: {moved_terminal:?}"
+    );
+    assert_eq!(
+        format!("{retained_terminal:?}"),
+        format!("{moved_terminal:?}"),
+        "the moved label must terminate exactly where the retained scope does"
+    );
 
     fixture.registry.shutdown().await;
 }

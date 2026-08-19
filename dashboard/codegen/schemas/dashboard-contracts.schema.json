@@ -20659,6 +20659,34 @@
       ],
       "type": "object"
     },
+    "WorkAuthority": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "repository_id": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "worktree_id": {
+          "$ref": "#/$defs/WorktreeId"
+        }
+      },
+      "required": [
+        "project_id",
+        "repository_id",
+        "worktree_id",
+        "actor_id",
+        "policy_digest"
+      ],
+      "type": "object"
+    },
     "WorkCalibratedSizingV1": {
       "additionalProperties": false,
       "description": "Calibrated sizing. Emitted ONLY when support >= floor. Every field named separately\nper Plan 06 :84-85; `support_floor` carries the governing floor into the record.",
@@ -27409,12 +27437,978 @@
       ],
       "type": "object"
     },
+    "WorkflowDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "definition_id": {
+          "$ref": "#/$defs/WorkflowDefinitionId"
+        },
+        "definition_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pinned_catalog_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "pinned_configuration_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "pinned_policy_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/WorkflowStep"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "definition_id",
+        "definition_version",
+        "project_id",
+        "steps",
+        "pinned_policy_digest",
+        "pinned_configuration_digest",
+        "pinned_catalog_digest"
+      ],
+      "type": "object"
+    },
+    "WorkflowDefinitionActivateRequest": {
+      "additionalProperties": false,
+      "description": "Wire request for [`WorkflowDefinitionService::activate`].",
+      "properties": {
+        "definition_id": {
+          "$ref": "#/$defs/WorkflowDefinitionId"
+        },
+        "definition_version": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "definition_id",
+        "definition_version",
+        "expected_revision"
+      ],
+      "type": "object"
+    },
+    "WorkflowDefinitionDisposition": {
+      "additionalProperties": false,
+      "description": "Revisioned lifecycle disposition of one definition version.",
+      "properties": {
+        "definition_id": {
+          "$ref": "#/$defs/WorkflowDefinitionId"
+        },
+        "definition_version": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkflowDefinitionLifecycleState"
+        },
+        "transitioned_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "definition_id",
+        "definition_version",
+        "state",
+        "revision",
+        "transitioned_at"
+      ],
+      "type": "object"
+    },
+    "WorkflowDefinitionGetRequest": {
+      "additionalProperties": false,
+      "description": "Wire request for [`WorkflowDefinitionService::get`].",
+      "properties": {
+        "definition_id": {
+          "$ref": "#/$defs/WorkflowDefinitionId"
+        },
+        "definition_version": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "definition_id",
+        "definition_version"
+      ],
+      "type": "object"
+    },
+    "WorkflowDefinitionHistoryRequest": {
+      "additionalProperties": false,
+      "description": "Wire request for [`WorkflowDefinitionService::history`].",
+      "properties": {
+        "definition_id": {
+          "$ref": "#/$defs/WorkflowDefinitionId"
+        }
+      },
+      "required": [
+        "definition_id"
+      ],
+      "type": "object"
+    },
+    "WorkflowDefinitionId": {
+      "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+      "type": "string"
+    },
+    "WorkflowDefinitionLifecycleState": {
+      "description": "Durable lifecycle disposition of one immutable workflow definition version.\n\nPlan 32 (\"Typed workflow definitions\"): \"Lifecycle retains candidate,\nvalidate, activate, retire, reject, list, get, diff, and history operations\nthrough the same application surfaces.\" The definition payload itself stays\nimmutable — \"Editing creates a new version; admitted runs remain pinned\" —\nso the disposition is a separate revisioned aggregate keyed by the same\ndefinition identity.",
+      "enum": [
+        "candidate",
+        "validated",
+        "active",
+        "retired",
+        "rejected"
+      ],
+      "type": "string"
+    },
+    "WorkflowDefinitionListRequest": {
+      "additionalProperties": false,
+      "description": "Wire request for [`WorkflowDefinitionService::list`].",
+      "type": "object"
+    },
+    "WorkflowDefinitionRejectRequest": {
+      "additionalProperties": false,
+      "description": "Wire request for [`WorkflowDefinitionService::reject`].",
+      "properties": {
+        "definition_id": {
+          "$ref": "#/$defs/WorkflowDefinitionId"
+        },
+        "definition_version": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "definition_id",
+        "definition_version",
+        "expected_revision"
+      ],
+      "type": "object"
+    },
+    "WorkflowDefinitionRetireRequest": {
+      "additionalProperties": false,
+      "description": "Wire request for [`WorkflowDefinitionService::retire`].",
+      "properties": {
+        "definition_id": {
+          "$ref": "#/$defs/WorkflowDefinitionId"
+        },
+        "definition_version": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "definition_id",
+        "definition_version",
+        "expected_revision"
+      ],
+      "type": "object"
+    },
+    "WorkflowFanOut": {
+      "additionalProperties": false,
+      "properties": {
+        "max_width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_width"
+      ],
+      "type": "object"
+    },
+    "WorkflowFanOutChildPlanV1": {
+      "additionalProperties": false,
+      "properties": {
+        "admit_command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "attempt_identity": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "create_command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "initiative": {
+          "$ref": "#/$defs/WorkInitiativeV1"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "item": {
+          "$ref": "#/$defs/WorkItemV1"
+        },
+        "milestone": {
+          "$ref": "#/$defs/WorkMilestoneV1"
+        },
+        "plan": {
+          "$ref": "#/$defs/WorkPlanV1"
+        },
+        "proposal": {
+          "$ref": "#/$defs/WorkProposalV1"
+        },
+        "proposal_command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "attempt_identity",
+        "create_command_id",
+        "proposal_command_id",
+        "admit_command_id",
+        "initiative",
+        "plan",
+        "milestone",
+        "item",
+        "proposal",
+        "instructions"
+      ],
+      "type": "object"
+    },
+    "WorkflowFanOutFailurePolicyV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "policy": {
+              "const": "fail_fast",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "policy": {
+              "const": "collect",
+              "type": "string"
+            }
+          },
+          "required": [
+            "policy"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "policy": {
+              "const": "require_at_least",
+              "type": "string"
+            },
+            "successes": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "policy",
+            "successes"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkflowFanOutPlanV1": {
+      "additionalProperties": false,
+      "properties": {
+        "admitted_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "authority": {
+          "$ref": "#/$defs/WorkAuthority",
+          "description": "Exact Work authority that admitted this plan. Recovery may execute the\nplan only from a runtime with this byte-identical authority."
+        },
+        "children": {
+          "items": {
+            "$ref": "#/$defs/WorkflowFanOutChildPlanV1"
+          },
+          "type": "array"
+        },
+        "commit": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "effect_state": {
+          "$ref": "#/$defs/WorkEffectStateV1"
+        },
+        "execution_snapshot": {
+          "$ref": "#/$defs/WorkExecutionSnapshot"
+        },
+        "failure_policy": {
+          "$ref": "#/$defs/WorkflowFanOutFailurePolicyV1"
+        },
+        "maximum_parallel": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "operation": {
+          "$ref": "#/$defs/WorkflowOperationRef"
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "step_id": {
+          "$ref": "#/$defs/WorkflowStepId"
+        }
+      },
+      "required": [
+        "authority",
+        "step_id",
+        "operation",
+        "plan_digest",
+        "admitted_at",
+        "maximum_parallel",
+        "failure_policy",
+        "execution_snapshot",
+        "reference",
+        "commit",
+        "effect_state",
+        "children"
+      ],
+      "type": "object"
+    },
     "WorkflowOperationRef": {
       "description": "Strongly typed canonical identity: `WorkflowOperationRef`.",
       "type": "string"
     },
+    "WorkflowOutputArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/WorkArtifactRefV1"
+        },
+        "attempt_identity": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        }
+      },
+      "required": [
+        "attempt_identity",
+        "artifact"
+      ],
+      "type": "object"
+    },
     "WorkflowOutputName": {
       "description": "Strongly typed canonical identity: `WorkflowOutputName`.",
+      "type": "string"
+    },
+    "WorkflowOutputReference": {
+      "additionalProperties": false,
+      "properties": {
+        "output_name": {
+          "$ref": "#/$defs/WorkflowOutputName"
+        },
+        "producer_step_id": {
+          "$ref": "#/$defs/WorkflowStepId"
+        }
+      },
+      "required": [
+        "producer_step_id",
+        "output_name"
+      ],
+      "type": "object"
+    },
+    "WorkflowPlacementReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/WorkProviderBackendV1"
+        },
+        "configuration_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "model": {
+          "type": "string"
+        },
+        "placement_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "provider_registry_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "route": {
+          "$ref": "#/$defs/WorkProviderRouteV1"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "step_id": {
+          "$ref": "#/$defs/WorkflowStepId"
+        },
+        "topology_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "worktree_placement": {
+          "$ref": "#/$defs/WorktreePlacementModeV1"
+        }
+      },
+      "required": [
+        "run_id",
+        "step_id",
+        "route",
+        "backend",
+        "model",
+        "configuration_digest",
+        "topology_digest",
+        "provider_registry_digest",
+        "worktree_placement",
+        "placement_digest"
+      ],
+      "type": "object"
+    },
+    "WorkflowRunEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "event": {
+          "$ref": "#/$defs/WorkflowRunEventKind"
+        },
+        "input_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_id",
+        "sequence",
+        "command_id",
+        "input_digest",
+        "occurred_at",
+        "event"
+      ],
+      "type": "object"
+    },
+    "WorkflowRunEventKind": {
+      "oneOf": [
+        {
+          "properties": {
+            "definition": {
+              "$ref": "#/$defs/WorkflowDefinition"
+            },
+            "fan_out_plans": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/WorkflowFanOutPlanV1"
+              },
+              "type": "array"
+            },
+            "pinned_provider_registry_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "pinned_topology_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "type": {
+              "const": "admitted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "definition",
+            "pinned_topology_digest",
+            "pinned_provider_registry_digest",
+            "fan_out_plans"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "attempts": {
+              "items": {
+                "$ref": "#/$defs/WorkAttemptIdentityV1"
+              },
+              "type": "array"
+            },
+            "step_id": {
+              "$ref": "#/$defs/WorkflowStepId"
+            },
+            "type": {
+              "const": "fan_out_children_released",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "step_id",
+            "attempts"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "attempts": {
+              "items": {
+                "$ref": "#/$defs/WorkAttemptIdentityV1"
+              },
+              "type": "array"
+            },
+            "step_id": {
+              "$ref": "#/$defs/WorkflowStepId"
+            },
+            "type": {
+              "const": "fan_out_children_settled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "step_id",
+            "attempts"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "placement": {
+              "$ref": "#/$defs/WorkflowPlacementReceipt"
+            },
+            "step_id": {
+              "$ref": "#/$defs/WorkflowStepId"
+            },
+            "type": {
+              "const": "step_started",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "step_id",
+            "placement"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "effect_receipt": {
+              "$ref": "#/$defs/WorkflowStepEffectReceipt"
+            },
+            "outputs": {
+              "items": {
+                "$ref": "#/$defs/WorkflowStepOutput"
+              },
+              "type": "array"
+            },
+            "step_id": {
+              "$ref": "#/$defs/WorkflowStepId"
+            },
+            "type": {
+              "const": "step_completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "step_id",
+            "outputs",
+            "effect_receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "effect_receipt": {
+              "$ref": "#/$defs/WorkflowStepEffectReceipt"
+            },
+            "outputs": {
+              "items": {
+                "$ref": "#/$defs/WorkflowStepOutput"
+              },
+              "type": "array"
+            },
+            "step_id": {
+              "$ref": "#/$defs/WorkflowStepId"
+            },
+            "type": {
+              "const": "step_failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "step_id",
+            "outputs",
+            "effect_receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "paused",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "resumed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "cancellation_requested",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "cancelled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkflowRunGetRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        }
+      },
+      "required": [
+        "run_id"
+      ],
+      "type": "object"
+    },
+    "WorkflowRunProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "definition": {
+          "$ref": "#/$defs/WorkflowDefinition"
+        },
+        "fan_out_plans": {
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkflowFanOutPlanV1"
+          },
+          "type": "object"
+        },
+        "history": {
+          "items": {
+            "$ref": "#/$defs/WorkflowRunEvent"
+          },
+          "type": "array"
+        },
+        "pinned_provider_registry_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "pinned_topology_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "released_fan_out_attempts": {
+          "items": {
+            "$ref": "#/$defs/WorkAttemptIdentityV1"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "settled_fan_out_attempts": {
+          "items": {
+            "$ref": "#/$defs/WorkAttemptIdentityV1"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "status": {
+          "$ref": "#/$defs/WorkflowRunStatus"
+        },
+        "steps": {
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkflowStepRunProjection"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "run_id",
+        "definition",
+        "pinned_topology_digest",
+        "pinned_provider_registry_digest",
+        "status",
+        "sequence",
+        "steps",
+        "fan_out_plans",
+        "released_fan_out_attempts",
+        "settled_fan_out_attempts",
+        "history"
+      ],
+      "type": "object"
+    },
+    "WorkflowRunStatus": {
+      "enum": [
+        "running",
+        "paused",
+        "cancelling",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "WorkflowStep": {
+      "additionalProperties": false,
+      "properties": {
+        "fan_out": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowFanOut"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/WorkflowOutputReference"
+          },
+          "type": "array"
+        },
+        "operation": {
+          "$ref": "#/$defs/WorkflowOperationRef"
+        },
+        "outputs": {
+          "items": {
+            "$ref": "#/$defs/WorkflowOutputName"
+          },
+          "type": "array"
+        },
+        "predecessors": {
+          "items": {
+            "$ref": "#/$defs/WorkflowStepId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "step_id": {
+          "$ref": "#/$defs/WorkflowStepId"
+        }
+      },
+      "required": [
+        "step_id",
+        "operation",
+        "predecessors",
+        "inputs",
+        "outputs",
+        "fan_out"
+      ],
+      "type": "object"
+    },
+    "WorkflowStepEffectOutcome": {
+      "enum": [
+        "completed",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "WorkflowStepEffectReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "outcome": {
+          "$ref": "#/$defs/WorkflowStepEffectOutcome"
+        },
+        "output_set_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "placement_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "receipt_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "step_id": {
+          "$ref": "#/$defs/WorkflowStepId"
+        }
+      },
+      "required": [
+        "run_id",
+        "step_id",
+        "placement_digest",
+        "outcome",
+        "effect_digest",
+        "output_set_digest",
+        "receipt_digest"
+      ],
+      "type": "object"
+    },
+    "WorkflowStepId": {
+      "description": "Strongly typed canonical identity: `WorkflowStepId`.",
+      "type": "string"
+    },
+    "WorkflowStepOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/WorkflowOutputArtifact"
+          },
+          "type": "array"
+        },
+        "output_name": {
+          "$ref": "#/$defs/WorkflowOutputName"
+        }
+      },
+      "required": [
+        "output_name",
+        "artifacts"
+      ],
+      "type": "object"
+    },
+    "WorkflowStepRunProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "effect_receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowStepEffectReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkflowStepOutput"
+          },
+          "type": "object"
+        },
+        "placement_receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowPlacementReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/WorkflowStepStatus"
+        }
+      },
+      "required": [
+        "status",
+        "outputs",
+        "placement_receipt",
+        "effect_receipt"
+      ],
+      "type": "object"
+    },
+    "WorkflowStepStatus": {
+      "enum": [
+        "blocked",
+        "ready",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
       "type": "string"
     },
     "WorkflowSynthesisDraft": {
@@ -27924,6 +28918,37 @@
     },
     "work_topology_view_request": {
       "$ref": "#/$defs/WorkTopologyViewRequestV1"
+    },
+    "workflow_definition": {
+      "$ref": "#/$defs/WorkflowDefinition",
+      "description": "The workflow definition/run slice the Workflows workspace consumes off\nthe mounted `/api/application/workflow` routes. Handoff issue/redeem\nstay uncontracted for the dashboard because it never holds a bearer;\nrun start/pause/resume/cancel stay uncontracted because the browser\nmust not mint fences, command ids, or provider admissions."
+    },
+    "workflow_definition_activate_request": {
+      "$ref": "#/$defs/WorkflowDefinitionActivateRequest"
+    },
+    "workflow_definition_disposition": {
+      "$ref": "#/$defs/WorkflowDefinitionDisposition"
+    },
+    "workflow_definition_get_request": {
+      "$ref": "#/$defs/WorkflowDefinitionGetRequest"
+    },
+    "workflow_definition_history_request": {
+      "$ref": "#/$defs/WorkflowDefinitionHistoryRequest"
+    },
+    "workflow_definition_list_request": {
+      "$ref": "#/$defs/WorkflowDefinitionListRequest"
+    },
+    "workflow_definition_reject_request": {
+      "$ref": "#/$defs/WorkflowDefinitionRejectRequest"
+    },
+    "workflow_definition_retire_request": {
+      "$ref": "#/$defs/WorkflowDefinitionRetireRequest"
+    },
+    "workflow_run_get_request": {
+      "$ref": "#/$defs/WorkflowRunGetRequest"
+    },
+    "workflow_run_projection": {
+      "$ref": "#/$defs/WorkflowRunProjection"
     }
   },
   "required": [
@@ -28027,6 +29052,16 @@
     "work_duplicate_adjudication_result",
     "work_leak_adjudication_command",
     "work_leak_adjudication_result",
+    "workflow_definition",
+    "workflow_definition_list_request",
+    "workflow_definition_get_request",
+    "workflow_definition_history_request",
+    "workflow_definition_activate_request",
+    "workflow_definition_retire_request",
+    "workflow_definition_reject_request",
+    "workflow_definition_disposition",
+    "workflow_run_get_request",
+    "workflow_run_projection",
     "multi_root_capability",
     "multi_root_scope_set_read_request",
     "multi_root_scope_set",

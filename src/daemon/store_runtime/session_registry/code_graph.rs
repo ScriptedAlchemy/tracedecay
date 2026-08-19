@@ -826,24 +826,14 @@ impl RetainedCodeGraphRuntimeV1 {
                 ))),
                 deadline: deadline_at,
             };
-            match manifest {
-                // The already-built projection manifest rides along so first
-                // publication does not re-read and re-project the sealed
-                // artifact through the replay manifest provider.
-                Some(manifest) => self.graph_registry.publish_verified_manifest(
-                    registration,
-                    storage,
-                    &context,
-                    key,
-                    manifest,
-                ),
-                // A pending predecessor journaled by an interrupted publisher
-                // carries no in-hand manifest; publication reconstructs it
-                // from the journaled canonical replay source.
-                None => self
-                    .graph_registry
-                    .publish_verified(registration, storage, &context, key),
-            }
+            // The already-built projection manifest rides along so first
+            // publication does not re-read and re-project the sealed artifact
+            // through the replay manifest provider; a pending predecessor
+            // journaled by an interrupted publisher carries no in-hand
+            // manifest, so publication reconstructs it from the journaled
+            // canonical replay source.
+            self.graph_registry
+                .publish_verified(registration, storage, &context, key, manifest)
         };
         match storage
             .replay(&publication_key, &context)
