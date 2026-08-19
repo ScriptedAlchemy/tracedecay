@@ -18,6 +18,7 @@ mod read_model_tests;
 mod retrieval_emit;
 mod store;
 mod work_blocked_interval_emit;
+mod work_conflict_emit;
 mod work_duplicate_emit;
 mod work_operation_resource_emit;
 mod work_owner_observation_recovery;
@@ -75,6 +76,10 @@ pub use tracedecay_global_db::{
 };
 pub use work_blocked_interval_emit::{
     record_work_blocked_interval_observation, work_blocked_interval_observation_envelope,
+};
+pub use work_conflict_emit::{
+    WorkConflictObservationResultV1, WorkConflictObservationUnavailableV1,
+    record_work_conflict_observation,
 };
 pub use work_duplicate_emit::record_work_duplicate_observation;
 pub use work_operation_resource_emit::record_work_operation_resource;
