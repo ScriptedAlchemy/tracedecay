@@ -36,10 +36,13 @@ struct SlowSchemaAuthority {
 
 impl ExactSqlWriteAuthority for SlowSchemaAuthority {
     fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
+        // Three slow checks must push the whole batch past the ordinary
+        // per-statement deadline, whatever the test-mode limit is calibrated
+        // to, so the revalidated batch provably carries no guessed deadline.
         if intent == ExactSqlWriteIntent::ExecuteBatch
             && self.execute_batch_checks.fetch_add(1, Ordering::AcqRel) < 3
         {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(EXACT_SQL_EXECUTION_LIMIT / 2);
         }
         Ok(())
     }

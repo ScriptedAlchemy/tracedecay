@@ -87,7 +87,8 @@ fn active_transaction_hits_absolute_lease_and_releases_writer() {
     };
 
     assert!(matches!(error, ExactSqlError::TransactionExpired));
-    assert!(started.elapsed() < Duration::from_secs(2));
+    // Expiry must land near the absolute lease, not multiples beyond it.
+    assert!(started.elapsed() < EXACT_SQL_TRANSACTION_LIMIT * 2);
     channel
         .execute_batch("CREATE TABLE after_absolute_expiry (value INTEGER)".to_owned())
         .unwrap();
