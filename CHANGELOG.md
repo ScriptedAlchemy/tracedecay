@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.74](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.73...v0.0.74) (2026-08-19)
+
+
+### Bug Fixes
+
+* **daemon:** abort watchers before joins ([fa93535](https://github.com/ScriptedAlchemy/tracedecay/commit/fa935352e75c9cdb9b22ea3f513ac247c002eaae))
+* **daemon:** bound maintenance shutdown ([caba6eb](https://github.com/ScriptedAlchemy/tracedecay/commit/caba6eba7ae2a41bcd9c8827230a39db101331b0))
+* **db:** restrict consolidation authority ([a556506](https://github.com/ScriptedAlchemy/tracedecay/commit/a556506d2eaf460fc62fb6f74603c17dc043e5fc))
+* **migrate:** authorize staged databases ([850414b](https://github.com/ScriptedAlchemy/tracedecay/commit/850414bb1a91a3ee3ea89470a14de455332a9054))
+* **storage:** fail closed on unreadable inventory ([6e92ed4](https://github.com/ScriptedAlchemy/tracedecay/commit/6e92ed4f3d5501700a666b3b103119413b70d6d1))
+* **storage:** harden project store authority and resolution ([3050018](https://github.com/ScriptedAlchemy/tracedecay/commit/30500186caa9375d3daa145aee0f88803e51792f))
+* **storage:** harden recovery validation ([71b19fc](https://github.com/ScriptedAlchemy/tracedecay/commit/71b19fc1f9ed03e8a5be7507d7d241b3dffd18aa))
+* **storage:** honor aliases with repository markers ([91944bc](https://github.com/ScriptedAlchemy/tracedecay/commit/91944bc6ce0828e9556411de45be135249a2a677))
+* **storage:** isolate branch recovery markers ([82876ea](https://github.com/ScriptedAlchemy/tracedecay/commit/82876ea591988eb0e3d242f1e3d727a18991d81d))
+* **storage:** preserve exact-root precedence ([df96e9b](https://github.com/ScriptedAlchemy/tracedecay/commit/df96e9b5c2ba3aba162ab47c91777567d17ae181))
+* **storage:** reject empty recovery stores ([043a047](https://github.com/ScriptedAlchemy/tracedecay/commit/043a047e03b87cdeb0bf77241a852ec2bf0f80d7))
+* **storage:** trust exact worktree registry aliases ([a79f70c](https://github.com/ScriptedAlchemy/tracedecay/commit/a79f70cc3bb4b307ff17444a3adafaae8b52f670))
+* **storage:** validate auxiliary health first ([a818fcd](https://github.com/ScriptedAlchemy/tracedecay/commit/a818fcdcbc8f90e00fbf95437f43dd05e41001e3))
+
+
+### Performance Improvements
+
+* **mcp:** reuse active selected project ([726ce54](https://github.com/ScriptedAlchemy/tracedecay/commit/726ce54d4a2578efa8bf4774e898f4364d25bcdf))
+* **session:** bound correlation presence checks ([25b67d1](https://github.com/ScriptedAlchemy/tracedecay/commit/25b67d1f526f116398701d47753e877e85cd4c56))
+* **storage:** avoid duplicate recovery scans ([2467ff9](https://github.com/ScriptedAlchemy/tracedecay/commit/2467ff9dc5609916a28304384f0b1341639e3050))
+* **storage:** avoid full counts on exact roots ([ab7be60](https://github.com/ScriptedAlchemy/tracedecay/commit/ab7be60b9164afe6b2100b51bdaabe94c1380b09))
+* **storage:** bound conflict inventory ([a299410](https://github.com/ScriptedAlchemy/tracedecay/commit/a2994101fb83565eae98151308fabb68682ce2e3))
+* **storage:** check the serving branch graph ([ac0b0c9](https://github.com/ScriptedAlchemy/tracedecay/commit/ac0b0c91b45117069629b29adf1fb5300dfbef4f))
+* **storage:** trust healthy exact root among duplicates ([133ca5c](https://github.com/ScriptedAlchemy/tracedecay/commit/133ca5c48bac9ecfb054f9ea59e6435feeca0e94))
+
 ## [0.0.73](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.72...v0.0.73) (2026-08-04)
 
 
