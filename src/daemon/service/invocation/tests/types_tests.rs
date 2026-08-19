@@ -3,6 +3,650 @@
 
 use super::*;
 
+#[test]
+fn hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
+    let saved = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    assert_eq!(saved.trigger, HookOrchestrationTriggerV1::SavedEdit);
+
+    let stop = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SessionBoundary {
+            boundary: HookBoundaryV1::TurnComplete,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    assert_eq!(stop.trigger, HookOrchestrationTriggerV1::Stop);
+
+    let without_scout_lifecycle = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        None,
+        1,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        without_scout_lifecycle.trigger,
+        HookOrchestrationTriggerV1::SavedEdit
+    );
+    assert!(without_scout_lifecycle.lifecycle.is_none());
+
+    assert!(
+        HookOrchestrationRequestV1::from_envelope(
+            hook_envelope(HookEventV2::TestLifecycle {
+                test_run_id: [8; 16],
+                test_count: 1,
+                phase: tracedecay_hooks::HookLifecyclePhaseV1::Completed,
+                receipt_id: Some([9; 16]),
+            }),
+            &hook_binding(),
+            Some(hook_lifecycle()),
+            1,
+            false,
+        )
+        .is_none()
+    );
+    assert_eq!(
+        HookOrchestrationRequestV1::from_envelope(
+            hook_envelope(HookEventV2::SessionBoundary {
+                boundary: HookBoundaryV1::Start,
+            }),
+            &hook_binding(),
+            Some(hook_lifecycle()),
+            1,
+            true,
+        )
+        .unwrap()
+        .trigger,
+        HookOrchestrationTriggerV1::Explicit
+    );
+}
+
+#[tokio::test]
+async fn hook_orchestration_backpressures_without_waiting() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let work_release = Arc::clone(&release);
+    let work = move |_, _| {
+        let release = Arc::clone(&work_release);
+        async move { release.notified().await }
+    };
+    let runtime = BoundedHookOrchestratorV1::new(1, work).unwrap();
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_completions = Arc::clone(&completions);
+    let completed = Arc::new(tokio::sync::Notify::new());
+    let completion_notification = Arc::clone(&completed);
+    let mut request = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        None,
+        1,
+        false,
+    )
+    .unwrap();
+    request.completion = Some(Arc::new(move || {
+        observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        completion_notification.notify_one();
+    }));
+    // A distinct hook event at a distinct work address is real new work, so it
+    // must contend for the single permit rather than join or supersede the
+    // admitted boundary.
+    let mut other_envelope = hook_envelope(HookEventV2::SavedEdit {
+        file_id: [8; 16],
+        changed_range_count: 1,
+    });
+    other_envelope.event_id = [2; 16];
+    let other_request = HookOrchestrationRequestV1::from_envelope(
+        other_envelope,
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        runtime.admit(request),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    assert_eq!(
+        runtime.admit(other_request),
+        HookOrchestrationAdmissionV1::Backpressured
+    );
+    assert_eq!(completions.load(std::sync::atomic::Ordering::Relaxed), 0);
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), completed.notified())
+        .await
+        .expect("producer work completion");
+    assert_eq!(
+        completions.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "only completed producer work may clear the durable outbox"
+    );
+}
+
+#[tokio::test]
+async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
+    let ran_synchronously = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let work_ran_synchronously = Arc::clone(&ran_synchronously);
+    let ran = Arc::new(tokio::sync::Notify::new());
+    let work_ran = Arc::clone(&ran);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
+        let ran = Arc::clone(&work_ran);
+        let ran_synchronously = Arc::clone(&work_ran_synchronously);
+        async move {
+            ran_synchronously.store(true, std::sync::atomic::Ordering::Release);
+            ran.notify_one();
+        }
+    })
+    .unwrap();
+    assert!(register_hook_orchestration_runtime([3; 16], [5; 16], &runtime));
+
+    assert_eq!(
+        admit_registered_hook_orchestration(
+            hook_envelope(HookEventV2::SavedEdit {
+                file_id: [7; 16],
+                changed_range_count: 1,
+            }),
+            hook_binding(),
+            None,
+            1,
+            false,
+            None,
+        ),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    assert!(
+        !ran_synchronously.load(std::sync::atomic::Ordering::Acquire),
+        "hook admission must return before daemon-owned provider or model work begins"
+    );
+    ran.notified().await;
+    unregister_hook_orchestration_runtime([3; 16], [5; 16], &runtime);
+}
+
+#[tokio::test]
+async fn hook_orchestration_registry_refuses_a_foreign_live_incumbent() {
+    let incumbent = BoundedHookOrchestratorV1::new(1, |_, _| async {}).unwrap();
+    let successor = BoundedHookOrchestratorV1::new(1, |_, _| async {}).unwrap();
+    assert!(register_hook_orchestration_runtime(
+        [13; 16], [15; 16], &incumbent
+    ));
+    assert!(
+        !register_hook_orchestration_runtime([13; 16], [15; 16], &successor),
+        "a live incumbent must keep its hook locator pair"
+    );
+    // A foreign runtime never unregisters the incumbent.
+    unregister_hook_orchestration_runtime([13; 16], [15; 16], &successor);
+    assert!(register_hook_orchestration_runtime(
+        [13; 16], [15; 16], &incumbent
+    ));
+    unregister_hook_orchestration_runtime([13; 16], [15; 16], &incumbent);
+    assert!(register_hook_orchestration_runtime(
+        [13; 16], [15; 16], &successor
+    ));
+    unregister_hook_orchestration_runtime([13; 16], [15; 16], &successor);
+}
+
+#[tokio::test]
+async fn hook_orchestration_coalesces_duplicate_work_and_completes_every_admission() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let work_release = Arc::clone(&release);
+    let work_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_work_calls = Arc::clone(&work_calls);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
+        let release = Arc::clone(&work_release);
+        let work_calls = Arc::clone(&observed_work_calls);
+        async move {
+            work_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            release.notified().await;
+        }
+    })
+    .unwrap();
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let completed = Arc::new(tokio::sync::Notify::new());
+    let mut request = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    let first_completions = Arc::clone(&completions);
+    let first_completed = Arc::clone(&completed);
+    request.completion = Some(Arc::new(move || {
+        first_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        first_completed.notify_one();
+    }));
+    let mut duplicate = request.clone();
+    let duplicate_completions = Arc::clone(&completions);
+    let duplicate_completed = Arc::clone(&completed);
+    duplicate.completion = Some(Arc::new(move || {
+        duplicate_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        duplicate_completed.notify_one();
+    }));
+
+    assert_eq!(
+        runtime.admit(request),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    tokio::task::yield_now().await;
+    assert_eq!(
+        runtime.admit(duplicate),
+        HookOrchestrationAdmissionV1::Enqueued,
+        "an exact duplicate must join the admitted work instead of consuming capacity"
+    );
+    assert_eq!(work_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while completions.load(std::sync::atomic::Ordering::Relaxed) != 2 {
+            completed.notified().await;
+        }
+    })
+    .await
+    .expect("both joined admissions complete");
+    assert_eq!(work_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn hook_orchestration_supersedes_same_address_without_replay_delay() {
+    struct WorkGuard {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for WorkGuard {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let observed_first_started = Arc::clone(&first_started);
+    let first_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_first_drop = Arc::clone(&first_dropped);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |request, cancellation| {
+        let first_started = Arc::clone(&observed_first_started);
+        let first_dropped = Arc::clone(&observed_first_drop);
+        async move {
+            if request.hook.envelope().event_id == [1; 16] {
+                let _guard = WorkGuard {
+                    dropped: first_dropped,
+                };
+                first_started.notify_one();
+                cancellation.cancelled().await;
+            }
+        }
+    })
+    .unwrap();
+    let first_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_first_completions = Arc::clone(&first_completions);
+    let mut first = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    first.completion = Some(Arc::new(move || {
+        observed_first_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    assert_eq!(runtime.admit(first), HookOrchestrationAdmissionV1::Enqueued);
+    first_started.notified().await;
+
+    let second_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_second_completions = Arc::clone(&second_completions);
+    let second_completed = Arc::new(tokio::sync::Notify::new());
+    let observed_second_completed = Arc::clone(&second_completed);
+    let mut second_envelope = hook_envelope(HookEventV2::SessionBoundary {
+        boundary: HookBoundaryV1::TurnComplete,
+    });
+    second_envelope.event_id = [2; 16];
+    let mut second = HookOrchestrationRequestV1::from_envelope(
+        second_envelope,
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    second.completion = Some(Arc::new(move || {
+        observed_second_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        observed_second_completed.notify_one();
+    }));
+    assert_eq!(
+        runtime.admit(second),
+        HookOrchestrationAdmissionV1::Enqueued,
+        "a newer edit/stop event at the same address must replace queued work"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        second_completed.notified(),
+    )
+    .await
+    .expect("superseding event runs as soon as the cancelled worker releases capacity");
+    assert!(first_dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(
+        first_completions.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the successful successor acknowledges coalesced obsolete work"
+    );
+    assert_eq!(
+        second_completions.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
+
+#[tokio::test]
+async fn superseded_blocking_work_is_joined_before_its_receipt_terminal() {
+    let (blocking_started, blocking_started_receiver) = tokio::sync::oneshot::channel();
+    let blocking_started = Arc::new(std::sync::Mutex::new(Some(blocking_started)));
+    let blocking_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let blocking_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let successor_release = Arc::new(tokio::sync::Notify::new());
+    let work_started = Arc::clone(&blocking_started);
+    let work_gate = Arc::clone(&blocking_gate);
+    let work_finished = Arc::clone(&blocking_finished);
+    let work_successor_release = Arc::clone(&successor_release);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |request, _cancellation| {
+        let started = Arc::clone(&work_started);
+        let gate = Arc::clone(&work_gate);
+        let finished = Arc::clone(&work_finished);
+        let successor_release = Arc::clone(&work_successor_release);
+        async move {
+            if request.hook.envelope().event_id == [1; 16] {
+                let task = tokio::task::spawn_blocking(move || {
+                    if let Some(started) = started
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        let _ = started.send(());
+                    }
+                    let (released, changed) = &*gate;
+                    let mut released = released
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    while !*released {
+                        released = changed
+                            .wait(released)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                    finished.store(true, std::sync::atomic::Ordering::Release);
+                });
+                let _ = task.await;
+            } else {
+                successor_release.notified().await;
+            }
+        }
+    })
+    .unwrap();
+    let first_terminal = Arc::new(tokio::sync::Notify::new());
+    let observed_first_terminal = Arc::clone(&first_terminal);
+    let nested_finished_at_terminal = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_nested_finished = Arc::clone(&nested_finished_at_terminal);
+    let completion_finished = Arc::clone(&blocking_finished);
+    let mut first = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    first.completion = Some(Arc::new(move || {
+        observed_nested_finished.store(
+            completion_finished.load(std::sync::atomic::Ordering::Acquire),
+            std::sync::atomic::Ordering::Release,
+        );
+        observed_first_terminal.notify_one();
+    }));
+    assert_eq!(runtime.admit(first), HookOrchestrationAdmissionV1::Enqueued);
+    blocking_started_receiver
+        .await
+        .expect("blocking provider work started");
+
+    let mut successor_envelope = hook_envelope(HookEventV2::SessionBoundary {
+        boundary: HookBoundaryV1::TurnComplete,
+    });
+    successor_envelope.event_id = [2; 16];
+    let successor = HookOrchestrationRequestV1::from_envelope(
+        successor_envelope,
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        runtime.admit(successor),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    let (released, changed) = &*blocking_gate;
+    *released
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+    changed.notify_all();
+    let terminal = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        first_terminal.notified(),
+    )
+    .await;
+    successor_release.notify_one();
+    assert!(
+        terminal.is_ok(),
+        "the superseded operation must emit its own receipt terminal"
+    );
+    assert!(
+        nested_finished_at_terminal.load(std::sync::atomic::Ordering::Acquire),
+        "the receipt terminal must follow settlement of nested blocking work"
+    );
+}
+
+#[tokio::test]
+async fn superseded_queued_work_emits_its_own_receipt_terminal() {
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let work_started = Arc::clone(&first_started);
+    let first_release = Arc::new(tokio::sync::Notify::new());
+    let work_release = Arc::clone(&first_release);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |request, cancellation| {
+        let started = Arc::clone(&work_started);
+        let release = Arc::clone(&work_release);
+        async move {
+            if request.hook.envelope().event_id == [1; 16] {
+                started.notify_one();
+                cancellation.cancelled().await;
+                release.notified().await;
+            }
+        }
+    })
+    .unwrap();
+    let request = |event_id, completion| {
+        let mut envelope = hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        });
+        envelope.event_id = event_id;
+        let mut request = HookOrchestrationRequestV1::from_envelope(
+            envelope,
+            &hook_binding(),
+            Some(hook_lifecycle()),
+            1,
+            false,
+        )
+        .unwrap();
+        request.completion = completion;
+        request
+    };
+    assert_eq!(
+        runtime.admit(request([1; 16], None)),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    first_started.notified().await;
+
+    let queued_terminal = Arc::new(tokio::sync::Notify::new());
+    let observed_queued_terminal = Arc::clone(&queued_terminal);
+    assert_eq!(
+        runtime.admit(request(
+            [2; 16],
+            Some(Arc::new(move || observed_queued_terminal.notify_one())),
+        )),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    assert_eq!(
+        runtime.admit(request([3; 16], None)),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    let terminal = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        queued_terminal.notified(),
+    )
+    .await;
+    first_release.notify_one();
+    assert!(
+        terminal.is_ok(),
+        "superseded work that never acquired capacity must settle its own receipt"
+    );
+}
+
+#[tokio::test]
+async fn hook_orchestration_bounds_coalesced_completion_waiters() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let work_release = Arc::clone(&release);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
+        let release = Arc::clone(&work_release);
+        async move {
+            release.notified().await;
+        }
+    })
+    .unwrap();
+    let completion = Arc::new(|| {}) as Arc<dyn Fn() + Send + Sync>;
+    let request = |completion| {
+        let mut request = HookOrchestrationRequestV1::from_envelope(
+            hook_envelope(HookEventV2::SavedEdit {
+                file_id: [7; 16],
+                changed_range_count: 1,
+            }),
+            &hook_binding(),
+            Some(hook_lifecycle()),
+            1,
+            false,
+        )
+        .unwrap();
+        request.completion = Some(completion);
+        request
+    };
+    let first = request(Arc::clone(&completion));
+    assert_eq!(runtime.admit(first), HookOrchestrationAdmissionV1::Enqueued);
+    for _ in 1..MAX_COALESCED_HOOK_COMPLETIONS {
+        let duplicate = request(Arc::clone(&completion));
+        assert_eq!(
+            runtime.admit(duplicate),
+            HookOrchestrationAdmissionV1::Enqueued
+        );
+    }
+    let overflow = request(completion);
+    assert_eq!(
+        runtime.admit(overflow),
+        HookOrchestrationAdmissionV1::Backpressured
+    );
+    release.notify_one();
+}
+
+#[tokio::test]
+async fn dropping_hook_orchestrator_cancels_daemon_owned_work_without_false_completion() {
+    struct PendingWork {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl std::future::Future for PendingWork {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl Drop for PendingWork {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let work_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_work_drop = Arc::clone(&work_dropped);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| PendingWork {
+        dropped: Arc::clone(&observed_work_drop),
+    })
+    .unwrap();
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_completions = Arc::clone(&completions);
+    let mut request = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    request.completion = Some(Arc::new(move || {
+        observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    assert_eq!(
+        runtime.admit(request),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    tokio::task::yield_now().await;
+    drop(runtime);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !work_dropped.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retiring the retained owner cancels its worker");
+    assert_eq!(
+        completions.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "cancelled work is not reported as completed"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     #[derive(Clone, Copy, Debug)]

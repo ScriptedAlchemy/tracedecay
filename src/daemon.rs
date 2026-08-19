@@ -158,6 +158,7 @@ use connection_serving::{
     await_project_owner_or_disconnect, serve_routed_rmcp_connection, serve_windows_broker_client,
     serve_windows_broker_client_with_class,
 };
+pub(crate) mod context_scout_lifecycle;
 mod core_admission;
 mod engine;
 #[cfg(unix)]
@@ -368,8 +369,8 @@ pub(crate) use service::invocation::{
     DaemonFeedbackRuntimeRegistrationError, DaemonInvocationService, DaemonLspOwnerRegistrar,
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
     DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
-    DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1, admit_hook_orchestration,
-    daemon_operation_event_authority,
+    DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1,
+    admit_registered_hook_orchestration, daemon_operation_event_authority,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
