@@ -1,6 +1,9 @@
+mod common;
+
 use std::collections::BTreeSet;
 use std::fmt;
 
+use common::fixture_abs_root;
 use serde_json::json;
 use tracedecay_application::{
     AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
@@ -26,16 +29,6 @@ where
 
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
-
-/// Platform-absolute fixture root: registered roots require
-/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
-fn fixture_abs_root(posix: &str) -> String {
-    if cfg!(windows) {
-        format!("C:{}", posix.replace('/', "\\"))
-    } else {
-        posix.to_owned()
-    }
 }
 
 fn context(worktree: &str, suffix: &str) -> RequestContext {

@@ -1,6 +1,10 @@
+mod common;
+
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
+
+use common::fixture_abs_root;
 
 use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
@@ -133,16 +137,6 @@ fn registered_locator(binding: &StoreRuntimeBindingV1) -> VerifiedStoreLocatorV1
         StoreIncarnationV1::new(1).unwrap(),
         LocatorDigest::new(format!("sha256:{}", "5".repeat(64))).unwrap(),
     )
-}
-
-/// Platform-absolute fixture root: registered roots require
-/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
-fn fixture_abs_root(posix: &str) -> String {
-    if cfg!(windows) {
-        format!("C:{}", posix.replace('/', "\\"))
-    } else {
-        posix.to_owned()
-    }
 }
 
 fn id<T>(value: &str) -> T

@@ -1,5 +1,8 @@
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 
+use common::fixture_abs_root;
 use tracedecay_application::{
     CancellationContext, WorkflowFailurePolicy, WorkflowFanOutCensusEvidenceV1,
     WorkflowFanOutRequest, WorkflowProviderAdmission, derive_workflow_fan_out_census,
@@ -28,16 +31,6 @@ use tracedecay_domain::{
     WorkflowOutputName, WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext,
     WorkflowRunProjection, WorkflowStep, WorkflowStepId, WorktreeId,
 };
-
-/// Platform-absolute fixture root: the work contracts require
-/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
-fn fixture_abs_root(posix: &str) -> String {
-    if cfg!(windows) {
-        format!("C:{}", posix.replace('/', "\\"))
-    } else {
-        posix.to_owned()
-    }
-}
 
 fn id<T>(value: &str) -> T
 where
