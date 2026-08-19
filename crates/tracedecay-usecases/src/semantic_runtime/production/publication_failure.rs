@@ -442,4 +442,43 @@ mod tests {
             "semantic runtime publication commit_batch failed: missing_build_state"
         );
     }
+
+    #[test]
+    fn live_publication_failures_keep_stage_and_category_without_private_detail() {
+        use tracedecay_semantic::SemanticRuntimeScheduleFailureV1;
+
+        let resume = SemanticPublicationFailureRecorderV1::default();
+        let failure = resume.retain_for_resume(&SemanticVectorGraphErrorV1::Rejected(
+            "backend path is private".to_owned(),
+        ));
+        assert_eq!(failure, SemanticRuntimeScheduleFailureV1::Publication);
+        let receipt = resume.receipt().expect("retain_for_resume receipt");
+        assert_eq!(receipt.stage, SemanticPublicationStageV1::RetainForResume);
+        assert_eq!(
+            receipt.category,
+            SemanticPublicationFailureCategoryV1::GraphRejected
+        );
+        assert_eq!(
+            receipt.detail(),
+            "semantic runtime publication retain_for_resume failed: graph_rejected"
+        );
+        assert!(
+            !receipt.detail().contains("private"),
+            "receipt must not leak graph rejection detail"
+        );
+
+        let commit = SemanticPublicationFailureRecorderV1::default();
+        let failure = commit.commit_batch(&VectorGenerationStoreErrorV1::ConcurrentMutation);
+        assert_eq!(failure, SemanticRuntimeScheduleFailureV1::Publication);
+        let receipt = commit.receipt().expect("commit_batch receipt");
+        assert_eq!(receipt.stage, SemanticPublicationStageV1::CommitBatch);
+        assert_eq!(
+            receipt.category,
+            SemanticPublicationFailureCategoryV1::StoreConcurrentMutation
+        );
+        assert_eq!(
+            receipt.detail(),
+            "semantic runtime publication commit_batch failed: store_concurrent_mutation"
+        );
+    }
 }

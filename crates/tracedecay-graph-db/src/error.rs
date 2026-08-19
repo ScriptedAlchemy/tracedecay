@@ -25,6 +25,19 @@ impl GraphBudgetKind {
             Self::Mutation => "mutation",
         }
     }
+
+    /// Parses a budget name produced by [`Self::as_str`]. Returns `None` for
+    /// projection-local budget names that have no graph-db equivalent.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "read" => Some(Self::Read),
+            "write" => Some(Self::Write),
+            "capacity" => Some(Self::Capacity),
+            "mutation" => Some(Self::Mutation),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for GraphBudgetKind {
@@ -128,6 +141,28 @@ mod tests {
                 .to_string(),
             "graph write budget exhausted (limit 4194304)"
         );
+    }
+
+    #[test]
+    fn budget_kind_from_name_round_trips_and_rejects_unnamed() {
+        assert_eq!(
+            GraphBudgetKind::from_name("read"),
+            Some(GraphBudgetKind::Read)
+        );
+        assert_eq!(
+            GraphBudgetKind::from_name("write"),
+            Some(GraphBudgetKind::Write)
+        );
+        assert_eq!(
+            GraphBudgetKind::from_name("capacity"),
+            Some(GraphBudgetKind::Capacity)
+        );
+        assert_eq!(
+            GraphBudgetKind::from_name("mutation"),
+            Some(GraphBudgetKind::Mutation)
+        );
+        assert_eq!(GraphBudgetKind::from_name(""), None);
+        assert_eq!(GraphBudgetKind::from_name("unnamed"), None);
     }
 
     #[test]

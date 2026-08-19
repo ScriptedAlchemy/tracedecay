@@ -1622,7 +1622,7 @@ impl CodeIndexSchedulerErrorV1 {
             Self::GraphProjection(error) => matches!(
                 error,
                 CodeGraphProjectionError::Cancelled
-                    | CodeGraphProjectionError::BudgetExhausted
+                    | CodeGraphProjectionError::BudgetExhausted { .. }
                     | CodeGraphProjectionError::DeadlineExceeded
                     | CodeGraphProjectionError::Conflict
                     | CodeGraphProjectionError::Unavailable(_)

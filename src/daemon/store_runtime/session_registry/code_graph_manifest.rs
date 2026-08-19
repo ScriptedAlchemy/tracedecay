@@ -368,8 +368,12 @@ fn classify_sealed_projection_build_error(error: CodeGraphProjectionError) -> Gr
     match error {
         CodeGraphProjectionError::Cancelled => GraphDbError::Cancelled,
         CodeGraphProjectionError::DeadlineExceeded => GraphDbError::DeadlineExceeded,
-        CodeGraphProjectionError::BudgetExhausted => {
-            GraphDbError::budget_exhausted(GraphBudgetKind::Read, u64::MAX)
+        CodeGraphProjectionError::BudgetExhausted { budget, limit } => {
+            // Preserve the exact budget identity across the round-trip; an
+            // unrecognized name is a projection-local budget, reported under
+            // the read class with its real limit rather than a fabricated one.
+            let kind = GraphBudgetKind::from_name(&budget).unwrap_or(GraphBudgetKind::Read);
+            GraphDbError::budget_exhausted(kind, limit)
         }
         other => GraphDbError::Corrupt {
             message: format!("sealed code generation graph projection is invalid: {other}"),
@@ -386,7 +390,7 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId};
     use tracedecay_graph_db::{
-        GraphDbError, GraphGenerationManifestProvider, GraphProjectorRevision,
+        GraphBudgetKind, GraphDbError, GraphGenerationManifestProvider, GraphProjectorRevision,
         SealedCodeGenerationReplay, SealedGraphStateDigest,
     };
     use tracedecay_store::{
@@ -550,8 +554,14 @@ mod tests {
             GraphDbError::Cancelled
         );
         assert!(matches!(
-            classify_sealed_projection_build_error(CodeGraphProjectionError::BudgetExhausted),
-            GraphDbError::BudgetExhausted { .. }
+            classify_sealed_projection_build_error(CodeGraphProjectionError::BudgetExhausted {
+                budget: "capacity".to_owned(),
+                limit: 7,
+            }),
+            GraphDbError::BudgetExhausted {
+                kind: GraphBudgetKind::Capacity,
+                limit: 7,
+            }
         ));
         assert!(matches!(
             classify_sealed_projection_build_error(CodeGraphProjectionError::Contract(

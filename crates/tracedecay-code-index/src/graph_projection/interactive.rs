@@ -241,7 +241,10 @@ impl CodeGraphInteractiveReader {
         let cancellation = self.read_cancellation(request_cancellation)?;
         let catalog = self.catalog(cancellation)?;
         if catalog.files.len() > max_files {
-            return Err(CodeGraphProjectionError::BudgetExhausted);
+            return Err(CodeGraphProjectionError::BudgetExhausted {
+                budget: "file census".to_owned(),
+                limit: u64::try_from(max_files).unwrap_or(u64::MAX),
+            });
         }
         Ok(catalog.files.values().cloned().collect())
     }

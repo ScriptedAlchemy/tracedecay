@@ -638,7 +638,10 @@ fn exhausted_fanout_budget_is_a_typed_refusal() {
             request(),
         )
         .expect_err("zero fan-out budget must refuse");
-    assert_eq!(error, CodeGraphProjectionError::BudgetExhausted);
+    assert!(matches!(
+        error,
+        CodeGraphProjectionError::BudgetExhausted { .. }
+    ));
 }
 
 #[test]

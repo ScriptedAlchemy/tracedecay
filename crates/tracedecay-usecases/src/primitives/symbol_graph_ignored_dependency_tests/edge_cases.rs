@@ -213,7 +213,10 @@ fn candidate_read_failures_preserve_stable_typed_semantics() {
             "application.symbol-graph.ignored-dependency-candidate-read-unavailable",
         ),
         (
-            CodeGraphProjectionError::BudgetExhausted,
+            CodeGraphProjectionError::BudgetExhausted {
+                budget: "read".to_owned(),
+                limit: 1,
+            },
             PrimitiveFailureKind::Unavailable,
             "application.symbol-graph.ignored-dependency-candidate-read-budget-exhausted",
         ),
