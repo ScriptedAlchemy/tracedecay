@@ -28,34 +28,33 @@ impl NativeIntegrationStatusBroadcastV1 {
     /// publication (older `phase_revision` for the same transaction) never
     /// overwrites newer durable evidence.
     pub fn publish(&self, projection: NativeIntegrationStatusProjectionV1) {
-        let Ok(mut statuses) = self.statuses.lock() else {
-            return;
-        };
+        let mut statuses = self
+            .statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match statuses.get(&projection.transaction_id) {
             Some(current) if current.phase_revision > projection.phase_revision => return,
             _ => {}
         }
         statuses.insert(projection.transaction_id.clone(), projection);
-        while statuses.len() > MAX_BROADCAST_TRANSACTIONS {
-            let Some(oldest) = statuses
+        if statuses.len() > MAX_BROADCAST_TRANSACTIONS
+            && let Some(oldest) = statuses
                 .iter()
                 .min_by_key(|(_, status)| status.updated_at)
                 .map(|(transaction_id, _)| transaction_id.clone())
-            else {
-                break;
-            };
+        {
             statuses.remove(&oldest);
         }
     }
-
 }
 
 impl NativeIntegrationStatusPort for NativeIntegrationStatusBroadcastV1 {
     /// The most recently updated projections, newest first.
     fn poll_status(&self, maximum: usize) -> Vec<NativeIntegrationStatusProjectionV1> {
-        let Ok(statuses) = self.statuses.lock() else {
-            return Vec::new();
-        };
+        let statuses = self
+            .statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut recent = statuses.values().cloned().collect::<Vec<_>>();
         recent.sort_by_key(|status| std::cmp::Reverse(status.updated_at));
         recent.truncate(maximum);

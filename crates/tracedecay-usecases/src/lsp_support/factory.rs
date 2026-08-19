@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tokio::runtime::Handle;
+use tracedecay_application::NativeIntegrationStatusProjectionV1;
 use tracedecay_lsp::{
     AdmittedRoot, AnalyzerCancellationAdapter, AnalyzerCancellationPort, AuthorizedLspWorkspace,
     CanonicalContextProjectionAuthority, CanonicalDiagnosticSnapshotAuthority,
@@ -17,7 +18,6 @@ use tracedecay_lsp::{
     NativeIntegrationStatusPort, OverlaySnapshot, SemanticProviderOutcome, SemanticProviderPort,
     SemanticRequest, SemanticResponse, UpstreamCapabilities, WorkspaceDiagnosticSnapshotOutcome,
 };
-use tracedecay_application::NativeIntegrationStatusProjectionV1;
 
 use super::runtime_adapters::runtime_spawner;
 
@@ -294,13 +294,11 @@ impl DaemonLspSessionFactory {
         if native_integration_status.is_empty() {
             return Some(session);
         }
-        Some(
-            session.with_native_integration_status_port(Arc::new(
-                FederatedNativeIntegrationStatus {
-                    roots: native_integration_status,
-                },
-            )),
-        )
+        Some(session.with_native_integration_status_port(Arc::new(
+            FederatedNativeIntegrationStatus {
+                roots: native_integration_status,
+            },
+        )))
     }
 }
 

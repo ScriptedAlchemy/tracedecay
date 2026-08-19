@@ -90,11 +90,11 @@ use context_controller::bind_context_document_digest;
 use diagnostics_controller::DiagnosticsController;
 use dynamic_diagnostics_controller::DynamicDiagnosticsController;
 use lifecycle_controller::LifecycleController;
+use native_integration_controller::NativeIntegrationController;
 pub use outbound_controller::DaemonLspProtocolTransport;
 use outbound_controller::OutboundController;
 #[cfg(test)]
 use outbound_controller::QueuedFrame;
-use native_integration_controller::NativeIntegrationController;
 use semantic_controller::SemanticController;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

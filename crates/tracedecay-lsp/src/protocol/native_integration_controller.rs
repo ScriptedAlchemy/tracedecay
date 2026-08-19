@@ -68,18 +68,14 @@ where
             self.native_integration
                 .notified
                 .insert(projection.transaction_id.clone(), projection);
-            while self.native_integration.notified.len()
-                > MAX_TRACKED_NATIVE_INTEGRATION_TRANSACTIONS
-            {
-                let Some(oldest) = self
+            if self.native_integration.notified.len() > MAX_TRACKED_NATIVE_INTEGRATION_TRANSACTIONS
+                && let Some(oldest) = self
                     .native_integration
                     .notified
                     .iter()
                     .min_by_key(|(_, status)| status.updated_at)
                     .map(|(transaction_id, _)| transaction_id.clone())
-                else {
-                    break;
-                };
+            {
                 self.native_integration.notified.remove(&oldest);
             }
         }
@@ -150,19 +146,14 @@ mod tests {
         frames
             .into_iter()
             .map(|frame| serde_json::from_slice::<Value>(&frame).unwrap())
-            .filter(|message| {
-                message["method"] == TRACEDECAY_NATIVE_INTEGRATION_STATUS_METHOD
-            })
+            .filter(|message| message["method"] == TRACEDECAY_NATIVE_INTEGRATION_STATUS_METHOD)
             .collect()
     }
 
     #[test]
     fn ready_sessions_forward_each_status_change_exactly_once() {
-        let port = ScriptedStatusPort::holding(projection(
-            NativeIntegrationPhaseV1::Prepared,
-            1,
-            None,
-        ));
+        let port =
+            ScriptedStatusPort::holding(projection(NativeIntegrationPhaseV1::Prepared, 1, None));
         let mut session =
             session().with_native_integration_status_port(Arc::clone(&port) as Arc<_>);
         initialize(&mut session);
@@ -191,11 +182,8 @@ mod tests {
 
     #[test]
     fn sessions_before_initialization_receive_no_native_integration_notifications() {
-        let port = ScriptedStatusPort::holding(projection(
-            NativeIntegrationPhaseV1::Prepared,
-            1,
-            None,
-        ));
+        let port =
+            ScriptedStatusPort::holding(projection(NativeIntegrationPhaseV1::Prepared, 1, None));
         let mut session = session().with_native_integration_status_port(port as Arc<_>);
 
         session.flush_due(1);

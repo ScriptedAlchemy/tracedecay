@@ -8,8 +8,7 @@
 
 use tracedecay_application::NativeIntegrationStatusProjectionV1;
 
-pub const TRACEDECAY_NATIVE_INTEGRATION_STATUS_METHOD: &str =
-    "tracedecay/nativeIntegrationStatus";
+pub const TRACEDECAY_NATIVE_INTEGRATION_STATUS_METHOD: &str = "tracedecay/nativeIntegrationStatus";
 
 /// The most recent status projections one session flush may forward.
 pub(crate) const MAX_NATIVE_INTEGRATION_STATUS_PER_POLL: usize = 16;
