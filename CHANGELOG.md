@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.2](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.1...v0.1.0-beta.2) (2026-08-19)
+
+
+### Features
+
+* mount privacy remediation, multi-root dashboard scope, native-integration notifications ([70182de](https://github.com/ScriptedAlchemy/tracedecay/commit/70182de3eae04a3cf81b03d6b2274de8fc0536cb))
+* **privacy:** rescan at-rest LCM store bytes under current detector ([1c58d39](https://github.com/ScriptedAlchemy/tracedecay/commit/1c58d39caf5311ff30bb121cdc1e71ec68764632))
+* **privacy:** rescan at-rest LCM store bytes under the current detector ([327011a](https://github.com/ScriptedAlchemy/tracedecay/commit/327011a7460f2ec220b50b96ead256e85f87c097))
+* **scout:** remount the Context Scout producer path and Plan 20 flag ([ab6099e](https://github.com/ScriptedAlchemy/tracedecay/commit/ab6099e45651a249d7699cb2300cd8764a0cea66))
+
+
+### Bug Fixes
+
+* **daemon:** harden project privacy and status routing ([f1655c8](https://github.com/ScriptedAlchemy/tracedecay/commit/f1655c8ae3efc44c229f7ee7eab760a1aec57558))
+* **daemon:** join reconciliation workers before closing retained graphs ([59b3760](https://github.com/ScriptedAlchemy/tracedecay/commit/59b37600047d2abc5909275986c1f00eb85055c6))
+* **graph-db:** scale batch bound and keep budget identity ([2af6170](https://github.com/ScriptedAlchemy/tracedecay/commit/2af6170194a417e3f7d4819cce5fa5e31fb40004))
+* **privacy:** scan labels and drain retained statuses ([a19bc5a](https://github.com/ScriptedAlchemy/tracedecay/commit/a19bc5a11597bf22a1c3b6aea39d9f7f9a73e651))
+* **scout:** keep hook cycles live and retryable ([d9e69f7](https://github.com/ScriptedAlchemy/tracedecay/commit/d9e69f72b8ea6d6f6446f2972a3bd57b39407941))
+* **sessions:** carry admission retry verdict through jsonl ingest wrap ([42cb37d](https://github.com/ScriptedAlchemy/tracedecay/commit/42cb37dd19b04b89fbab3b503ce6f8ccee92fc85))
+
 ## [0.1.0-beta.1](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta...v0.1.0-beta.1) (2026-08-19)
 
 
