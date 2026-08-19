@@ -39,7 +39,7 @@ pub(crate) const DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT: usize = 8;
 const MAX_UNREGISTERED_STORE_PAGE_LIMIT: usize = 64;
 const UNREGISTERED_STORE_DIRECTORY_ENTRY_MULTIPLIER: usize = 8;
 
-enum ProjectDirectoryWorkV1 {
+pub(super) enum ProjectDirectoryWorkV1 {
     Project(String),
     Quarantine {
         project_id: String,
@@ -341,7 +341,7 @@ async fn census_unregistered_project_dirs_page(
 /// opaque; it is accepted only when the directory identity still matches, so
 /// a replacement restarts safely instead of seeking a stale location.
 #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-fn read_project_directory_page(
+pub(super) fn read_project_directory_page(
     profile_root: &Path,
     cursor: Option<&str>,
     limit: usize,
@@ -576,7 +576,7 @@ fn reset_errno() {
 }
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-fn read_project_directory_page(
+pub(super) fn read_project_directory_page(
     profile_root: &Path,
     cursor: Option<&str>,
     limit: usize,
@@ -729,7 +729,7 @@ struct PortableDirectoryCursor {
 }
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-fn portable_inventory_path(profile_root: &Path, signature: &str) -> std::path::PathBuf {
+pub(super) fn portable_inventory_path(profile_root: &Path, signature: &str) -> std::path::PathBuf {
     profile_root
         .join("maintenance")
         .join("unregistered-project-directory-inventory-v2")
@@ -737,7 +737,7 @@ fn portable_inventory_path(profile_root: &Path, signature: &str) -> std::path::P
 }
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-fn portable_directory_signature(directory: &Path) -> std::io::Result<String> {
+pub(super) fn portable_directory_signature(directory: &Path) -> std::io::Result<String> {
     let metadata = directory.metadata()?;
     let modified = metadata
         .modified()?
@@ -792,7 +792,7 @@ fn portable_inventory_matches(path: &Path, signature: &str) -> bool {
 }
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-fn portable_inventory_entry_is_valid(name: &str) -> bool {
+pub(super) fn portable_inventory_entry_is_valid(name: &str) -> bool {
     quarantined_project_id(name).is_some() || crate::storage::validate_project_id(name).is_ok()
 }
 
@@ -943,7 +943,7 @@ pub(super) fn forget_portable_inventory_builder_for_test(inventory: &Path) {
 }
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-fn advance_portable_inventory(
+pub(super) fn advance_portable_inventory(
     projects_dir: &Path,
     inventory: &Path,
     signature: &str,

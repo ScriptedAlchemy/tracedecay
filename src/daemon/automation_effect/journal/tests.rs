@@ -2590,6 +2590,9 @@ fn physical_reopen_rejects_a_corrupt_swapped_terminal() {
     assert!(reserve_or_replay_blocking(&path, admission).is_err());
 }
 
+// The scheduler module itself is unix-only; its request-identity contract
+// can only be exercised where it compiles.
+#[cfg(unix)]
 #[test]
 fn scheduler_stable_request_identity_reopens_the_same_terminal() {
     let temp = tempfile::tempdir().expect("tempdir");
