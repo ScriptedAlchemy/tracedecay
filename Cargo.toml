@@ -64,12 +64,12 @@ name = "tracedecay"
 version = "0.1.0-beta.1"
 publish = false
 edition.workspace = true
-description = "Code intelligence tool that builds a semantic knowledge graph from Rust, Go, Java, Scala, TypeScript, Python, C, C++, Kotlin, C#, Swift, and many more codebases"
+description = "Local semantic code intelligence, project memory, and workflow context for AI coding agents."
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 homepage = "https://github.com/ScriptedAlchemy/tracedecay"
 readme = "README.md"
-keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "claude"]
+keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "semantic-search"]
 categories = ["development-tools", "command-line-utilities"]
 # Explicit source-archive whitelist retained for local distribution validation.
 # Frontend sources are deliberately excluded: build.rs embeds the canonical

@@ -4,6 +4,7 @@ version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 description = "TraceDecay product use cases shared by CLI, MCP, HTTP, hooks, and daemon adapters"
 # PACKAGING SEAM: `semantic_runtime` byte-pins the shipped search-quality
 # candidate workload with `include_str!` against a repo-root fixture
