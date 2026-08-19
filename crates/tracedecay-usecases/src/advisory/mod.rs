@@ -75,7 +75,7 @@ pub use github_runtime::{
     GitHubReviewRefreshStateV1, GitHubReviewRefreshStoreCommitOutcomeV1,
     GitHubReviewRefreshStoreReadOutcomeV1, GitHubReviewRuntimeOwnerBuildErrorV1,
     GitHubReviewRuntimeOwnerConfigV1, GitHubReviewRuntimeOwnerV1, GitHubReviewStoreManifestEntryV1,
-    GitHubReviewStoreManifestLoadOutcomeV1, GitHubReviewStoreManifestV1,
+    GitHubReviewStoreManifestLoadOutcomeV1, GitHubReviewStoreManifestV1, GitHubStackObservabilityV1,
     MAX_GITHUB_READ_RESPONSE_BYTES_V1, MAX_GITHUB_REVIEW_STORE_MANIFEST_ENTRIES_V1,
     ProjectGitHubAnchorAuthorityV1, ProjectGitHubRegistrarAuthoritiesV1,
     ProjectGitHubReleaseAuthorityOpenOutcomeV1, ProjectGitHubReleasePageV1,
