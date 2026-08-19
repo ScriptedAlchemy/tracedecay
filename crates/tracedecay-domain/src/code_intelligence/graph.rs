@@ -676,13 +676,18 @@ pub struct ResolvedRef {
     pub resolved_by: String,
 }
 
-/// Serde skip helper: skips serializing a bool field when it is
+// The result contracts below are still consumed by the pre-V2 runtime-core
+// and root-crate edit/accounting paths; the stacked V2 delivery removes them
+// together with those callers.
+
+/// `serde` `skip_serializing_if` predicate: skip a `bool` field when it is
 /// `false`. Keeps default-off flags (e.g. `dry_run`) out of tool output unless
 /// they are actually set.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(value: &bool) -> bool {
     !*value
 }
+
 /// Result of a single string replacement edit.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EditResult {
