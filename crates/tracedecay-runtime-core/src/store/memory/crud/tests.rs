@@ -186,6 +186,50 @@ async fn exact_update_replay_returns_the_same_fact_delta_and_commit_receipt() {
     assert_eq!(committed.commit_receipt(), replayed.commit_receipt());
 }
 
+/// The correction-time payload purge is scoped to detector findings: a clean
+/// superseded payload row must survive an ordinary update so as-of reads keep
+/// serving the fact's history.
+#[tokio::test]
+async fn update_retains_clean_superseded_payload_rows_for_as_of_reads() {
+    let (_directory, database) = database().await;
+    let store = DatabaseFactStore::new(&database);
+    let control = write_control();
+    let target = added_target(&store, &control).await;
+
+    store
+        .update_project_memory_fact(
+            update_command(
+                target.clone(),
+                "operation.crud-clean-supersede",
+                "The canonical update keeps clean history readable.",
+                0.8,
+            ),
+            &control,
+        )
+        .await
+        .expect("commit clean canonical update");
+
+    let mut rows = database
+        .read_connection()
+        .query(
+            "SELECT COUNT(*) FROM memory_v2_assertion_payloads WHERE fact_id = ?1",
+            [target.fact_id().as_str()],
+        )
+        .await
+        .expect("count at-rest payload rows");
+    let retained: i64 = rows
+        .next()
+        .await
+        .expect("read payload row count")
+        .expect("payload row count is present")
+        .get(0)
+        .expect("payload row count is an integer");
+    assert_eq!(
+        retained, 2,
+        "a clean superseded payload row must stay readable for as-of history"
+    );
+}
+
 #[tokio::test]
 async fn reused_update_operation_with_changed_patch_conflicts_without_mutation() {
     let (_directory, database) = database().await;
