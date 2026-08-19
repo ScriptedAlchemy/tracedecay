@@ -506,6 +506,35 @@ fn bounded_scan_retains_the_cap_smallest_rows_by_tie_break_order() {
 }
 
 #[test]
+fn capped_exact_flat_scan_materializes_only_retained_rows() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 2);
+    let rows = vec![
+        record(&request, "a", vec![1.0, 0.0]),
+        record(&request, "b", vec![1.0, 0.0]),
+        record(&request, "c", vec![0.0, 1.0]),
+        record(&request, "d", vec![0.0, 1.0]),
+    ];
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(&request, rows);
+    let control = FixedExecutionControl::default();
+    let _ = take_semantic_retained_materializations();
+
+    let outcome = SemanticCodeRetriever::new(&embedder, &vectors, &control)
+        .retrieve_semantic(&request)
+        .expect("semantic retrieval");
+    let RetrieverOutcome::Complete(batch) = outcome else {
+        panic!("expected a complete semantic batch");
+    };
+
+    assert_eq!(batch.coverage.examined, 4);
+    assert_eq!(batch.coverage.eligible, 4);
+    assert_eq!(batch.candidates.len(), 2);
+    assert_eq!(take_semantic_retained_materializations(), 2);
+}
+
+#[test]
 fn privacy_identity_mismatch_fails_before_embedding_or_vector_reads() {
     let query_view = query_view();
     let projection = projection();
