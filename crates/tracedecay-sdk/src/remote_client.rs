@@ -111,12 +111,10 @@ impl EnrolledRemoteClient {
         )
     }
 
-    /// Targets the local daemon's own application listener, which nests the
-    /// same Remote Brain router at `/remote` that the external TLS listener
-    /// serves. The operations, envelopes, credential header, and response
-    /// validation are identical to the enrolled HTTPS target; only the
-    /// transport trust differs, so plaintext HTTP is admitted exclusively
-    /// for loopback hosts.
+    /// Targets the local daemon's application listener, which nests the same
+    /// Remote Brain router at `/remote` as the external TLS listener. Same
+    /// operations, envelopes, credential header, and response validation;
+    /// plaintext HTTP is admitted for loopback hosts only.
     pub fn new_local_daemon(
         endpoint: impl AsRef<str>,
         credential: impl AsRef<[u8]>,
@@ -163,6 +161,12 @@ impl EnrolledRemoteClient {
             HeaderValue::from_bytes([b"Bearer ".as_slice(), credential].concat().as_slice())
                 .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
         let mut builder = HttpClient::builder().timeout(timeout);
+        if endpoint.scheme() == "http" {
+            // reqwest's system-proxy default would forward the plaintext
+            // request — Bearer credential included — to an HTTP_PROXY/
+            // ALL_PROXY host; loopback traffic never uses a proxy.
+            builder = builder.no_proxy();
+        }
         if let Some(pem) = root_certificate_pem {
             let mut certificates = reqwest::Certificate::from_pem_bundle(pem)
                 .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
@@ -380,9 +384,8 @@ impl EnrolledRemoteClient {
     }
 }
 
-/// Whether the endpoint host is a loopback address. Plaintext HTTP toward the
-/// local daemon's nested `/remote` mount is safe only when the bytes never
-/// leave the machine; any other host requires HTTPS.
+/// Whether the endpoint host is a loopback address; any other host requires
+/// HTTPS.
 fn host_is_loopback(endpoint: &reqwest::Url) -> bool {
     let Some(host) = endpoint.host_str() else {
         return false;
