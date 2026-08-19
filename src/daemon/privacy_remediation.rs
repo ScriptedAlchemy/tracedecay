@@ -160,19 +160,18 @@ mod tests {
         .expect("legacy receipt id")
     }
 
-    /// Persists one fact exactly as an ingest path running an older vendored
-    /// ruleset could have: the receipt binds the raw payload without the
-    /// current detector rules ever evaluating it. The store's write firewall
-    /// pins the sanitizer revision string, so the legacy condition being
-    /// simulated is a ruleset refresh within the pinned revision.
-    async fn seed_legacy_fact(
-        database: &crate::db::Database,
+    /// Receipt-bound raw payload material exactly as an ingest path running
+    /// an older vendored ruleset could have persisted it: the receipt binds
+    /// the payload without the current detector rules ever evaluating it. The
+    /// store's write firewall pins the sanitizer revision string, so the
+    /// legacy condition being simulated is a ruleset refresh within the
+    /// pinned revision.
+    fn legacy_fact_material(
         owner: &FactOwnerV1,
-        label: &str,
         content: &str,
         source_label: Option<&str>,
         metadata: Value,
-    ) {
+    ) -> ProjectMemoryFactAddMaterialV1 {
         let mut tags = Vec::new();
         let mut entities = Vec::new();
         let payload_reference = FactPayloadV1::canonicalize_material(
@@ -204,7 +203,7 @@ mod tests {
             Some(payload_reference),
         )
         .expect("legacy sanitization receipt");
-        let command = ProjectMemoryFactAddMaterialV1::new(
+        ProjectMemoryFactAddMaterialV1::new(
             owner.clone(),
             content.to_owned(),
             FactCategoryV1::Project,
@@ -218,15 +217,26 @@ mod tests {
             None,
         )
         .expect("legacy fact material")
-        .into_command(
-            ProvenanceId::new(format!("operation.privacy-legacy.{label}"))
-                .expect("legacy operation id"),
-        )
-        .expect("legacy fact command");
+    }
+
+    async fn seed_legacy_fact(
+        database: &crate::db::Database,
+        owner: &FactOwnerV1,
+        label: &str,
+        content: &str,
+        source_label: Option<&str>,
+        metadata: Value,
+    ) -> tracedecay_store::ProjectMemoryFactAddOutcomeV1 {
+        let command = legacy_fact_material(owner, content, source_label, metadata)
+            .into_command(
+                ProvenanceId::new(format!("operation.privacy-legacy.{label}"))
+                    .expect("legacy operation id"),
+            )
+            .expect("legacy fact command");
         DatabaseFactStore::new(database)
             .add_project_memory_fact(command, &remediation_write_control())
             .await
-            .expect("persist legacy fact");
+            .expect("persist legacy fact")
     }
 
     async fn served_contents(
@@ -406,17 +416,86 @@ mod tests {
         let owner = FactOwnerV1::Project {
             project_id: project_id.clone(),
         };
-        for index in 0..257_u16 {
-            seed_legacy_fact(
-                &database,
-                &owner,
-                &format!("dirty-{index}"),
-                &format!("credential {index} is {}", secret()),
-                None,
-                json!({"fixture": "many-dirty", "index": index}),
-            )
-            .await;
-        }
+
+        // Per-write graph publication makes 257 sequential adds quadratic in
+        // store size (and past the CI slow-timeout ceiling), so the bulk is
+        // seeded through one store-level curation batch: one commit for 256
+        // dirty facts, one ordinary add for the 257th. The clean anchor fact
+        // supplies the reviewed evidence reference every curation add
+        // requires.
+        let anchor = seed_legacy_fact(
+            &database,
+            &owner,
+            "anchor",
+            "the retry budget is three attempts",
+            None,
+            json!({"fixture": "anchor"}),
+        )
+        .await;
+        let ProjectMemoryFactProjectionV1::Available(anchor) = anchor.fact() else {
+            panic!("the anchor fact must be served");
+        };
+        let seed_confidence = Confidence::new(0.9).expect("seed confidence");
+        let outer_operation_id = ProvenanceId::new("operation.privacy-legacy.batch-seed")
+            .expect("seed batch operation id");
+        let operations = (0..256_usize)
+            .map(|index| {
+                let child_operation_id =
+                    tracedecay_store::derive_project_memory_fact_curation_child_operation_id(
+                        &outer_operation_id,
+                        index,
+                        tracedecay_store::ProjectMemoryFactCurationMutationKindV1::Add,
+                    )
+                    .expect("seed child operation id");
+                let command = legacy_fact_material(
+                    &owner,
+                    &format!("credential {index} is {}", secret()),
+                    None,
+                    json!({"fixture": "many-dirty", "index": index}),
+                )
+                .into_command(child_operation_id)
+                .expect("seed add command");
+                let evidence = tracedecay_store::ProjectMemoryFactCurationEvidenceV1::new(
+                    &owner,
+                    vec![tracedecay_store::ProjectMemoryFactCurationReviewRefV1::new(
+                        tracedecay_store::ProjectMemoryFactIdV1::new(
+                            owner.clone(),
+                            anchor.fact_id().clone(),
+                        )
+                        .expect("anchor fact identity"),
+                        anchor.last_event_id().clone(),
+                    )],
+                    seed_confidence,
+                    "legacy privacy fixture seed".to_owned(),
+                )
+                .expect("seed evidence");
+                tracedecay_store::ProjectMemoryFactCurationOperationV1::Add(
+                    tracedecay_store::ProjectMemoryFactCurationAddV1::new(command, evidence)
+                        .expect("seed curation add"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let seed_batch = tracedecay_store::ProjectMemoryFactCurationBatchV1::new(
+            owner.clone(),
+            outer_operation_id,
+            None,
+            seed_confidence,
+            operations,
+        )
+        .expect("seed curation batch");
+        DatabaseFactStore::new(&database)
+            .apply_project_memory_fact_curation(seed_batch, &remediation_write_control())
+            .await
+            .expect("persist bulk legacy facts");
+        seed_legacy_fact(
+            &database,
+            &owner,
+            "dirty-tail",
+            &format!("credential tail is {}", secret()),
+            None,
+            json!({"fixture": "many-dirty", "index": "tail"}),
+        )
+        .await;
 
         let memory = MemoryApplication::new(owner, DatabaseFactStore::new(&database))
             .expect("owner-bound memory application");
@@ -429,10 +508,18 @@ mod tests {
             .await
             .expect("every bounded remediation batch commits");
 
-        assert_eq!(receipt.scanned_facts, 257);
-        assert_eq!(receipt.clean_facts, 0);
+        assert_eq!(receipt.scanned_facts, 258);
+        assert_eq!(receipt.clean_facts, 1, "only the anchor fact is clean");
         assert_eq!(receipt.quarantined_facts, 257);
         assert_eq!(receipt.curation_receipts.len(), 5);
+        assert_eq!(
+            receipt
+                .curation_receipts
+                .iter()
+                .map(tracedecay_store::ProjectMemoryFactCurationReceiptV1::facts_removed)
+                .sum::<u64>(),
+            257
+        );
         assert_eq!(
             persisted_payload_rows_containing(&database, &secret()).await,
             0,
