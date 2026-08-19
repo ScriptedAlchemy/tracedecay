@@ -1346,6 +1346,75 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     assert_ne!(changed.generation_id, initial.generation_id);
 }
 
+/// The generation-publication broadcast carries only verified publishes —
+/// generations that crossed the durable publication compare-and-swap, the
+/// verified graph snapshot publish, and the serving swap. A restart that
+/// restores a retained generation is a `Noop` apply and must reach the
+/// serving slot silently: the post-mount query-authority waiter re-reads the
+/// serving slot for restores and trusts this bus only for verified publishes.
+#[tokio::test]
+async fn restart_remount_serves_the_retained_generation_without_republishing() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let first = CodeIndexSchedulerRegistryV1::new(1);
+    first
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let sealed = wait_for_initial_generation(&first, fixture.path()).await;
+    first.shutdown().await;
+
+    let restarted = CodeIndexSchedulerRegistryV1::new(1);
+    // Subscribed before the remount. The per-worktree worker is serial, so a
+    // broadcast wrongly emitted by the restore-era passes would sit in this
+    // receiver ahead of the edit-triggered publication received below.
+    let mut publications = restarted.subscribe_generation_publications();
+    restarted
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("remount worktree over the retained store");
+    let restored = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(generation) = restarted.latest_generation_id(fixture.path()).await {
+                break generation;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("restart serves a generation");
+    assert_eq!(
+        restored, sealed,
+        "the restart serves the retained generation, not a rebuilt one"
+    );
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        restarted
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await
+    );
+    let first_broadcast = tokio::time::timeout(Duration::from_secs(5), publications.recv())
+        .await
+        .expect("post-restart publication timeout")
+        .expect("post-restart publication event");
+    assert_ne!(
+        first_broadcast.generation_id, sealed,
+        "the retained restore stays silent; the first broadcast is the rebuilt generation"
+    );
+    restarted.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -7695,4 +7764,136 @@ async fn wait_for_event_to_ready(
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// The installed Plan 26 observability lane must persist one canonical index
+/// lifecycle observation when a reconcile publishes a generation, and the
+/// retrieval-pipeline families when a query composition completes, all in the
+/// one project observation store.
+#[tokio::test]
+async fn installed_observability_lane_records_index_and_retrieval_observations() {
+    let _pin = crate::config::PinnedUserDataDir::new();
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        fixture.path(),
+        scope.project_id.clone(),
+    )
+    .await
+    .expect("registered runtime");
+    let database = runtime.project_database_arc().expect("project database");
+    let producer = Arc::new(
+        tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+            database.clone(),
+            tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+                authorized_scope_ref: scope.project_id.as_str().to_owned(),
+                process_boot_id: "boot:code-index-observability".to_owned(),
+                producer_revision: "code-index-observability-test.v1".to_owned(),
+                configuration_revision: "code-index-observability-config.v1".to_owned(),
+                policy_revision: "code-index-observability-policy.v1".to_owned(),
+            },
+            64,
+        )
+        .expect("bounded producer"),
+    );
+    registry
+        .install_index_observability(
+            fixture.path(),
+            super::observability::CodeIndexObservabilityV1::new(
+                database.clone(),
+                Arc::clone(&producer),
+            ),
+        )
+        .await
+        .expect("install observability lane");
+
+    // A reconcile after installation publishes a new generation and must leave
+    // one canonical index lifecycle observation beside the cadence receipt.
+    let initial = registry
+        .latest_generation_id(fixture.path())
+        .await
+        .expect("initial generation");
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await
+    );
+    let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+
+    // One real query composition through the mounted authority carries the
+    // retrieval-pipeline families through the bounded producer.
+    let _executed = registry
+        .execute_query_search(&scope, core_search_request("alpha"))
+        .await
+        .expect("query search");
+
+    registry.shutdown().await;
+    producer.shutdown().await.expect("flush producer");
+
+    let port =
+        tracedecay_usecases::observability::RegisteredObservabilityPortV1::new(database.as_ref());
+    let observability_query =
+        |event_kinds: Vec<String>| tracedecay_application::ObservabilityQueryV1 {
+            authorized_scope_ref: scope.project_id.as_str().to_owned(),
+            event_kinds,
+            horizon: tracedecay_application::ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: i64::MAX,
+            },
+            after_watermark: None,
+            limit: 256,
+        };
+    let index_page = tracedecay_application::ObservabilityQueryPort::query(
+        &port,
+        observability_query(vec!["index.measurement.observed.v1".to_owned()]),
+    )
+    .await
+    .expect("index lifecycle events");
+    assert!(
+        index_page.events.iter().any(|event| matches!(
+            &event.payload,
+            tracedecay_domain::ObservabilityPayloadV1::Index(observation)
+                if observation.outcome == tracedecay_domain::IndexOutcomeV1::Published
+                    && observation.kind
+                        == tracedecay_domain::IndexObservationKindV1::Publication
+        )),
+        "a published reconcile must leave a canonical publication observation"
+    );
+
+    let retrieval_page = tracedecay_application::ObservabilityQueryPort::query(
+        &port,
+        observability_query(vec![
+            "retrieval.planner.decided.v1".to_owned(),
+            "retrieval.synthesis.completed.v1".to_owned(),
+            "retrieval.source.observed.v1".to_owned(),
+        ]),
+    )
+    .await
+    .expect("retrieval pipeline events");
+    let planner = retrieval_page
+        .events
+        .iter()
+        .find_map(|event| match &event.payload {
+            tracedecay_domain::ObservabilityPayloadV1::RetrievalPlanner(planner) => {
+                Some(planner.clone())
+            }
+            _ => None,
+        })
+        .expect("one planner observation per composition");
+    assert_eq!(
+        planner.requested_lanes,
+        vec!["exact_literal", "lexical", "graph"],
+        "the observation reflects the lanes the composition actually ran"
+    );
+    assert!(
+        retrieval_page.events.iter().any(|event| matches!(
+            &event.payload,
+            tracedecay_domain::ObservabilityPayloadV1::RetrievalSynthesis(_)
+        )),
+        "the composition's synthesis observation must be persisted"
+    );
 }

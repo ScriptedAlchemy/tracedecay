@@ -1,0 +1,102 @@
+# Beta prerelease channel for the codex/tracedecay-total-redesign-plan branch.
+#
+# Every push to the branch opens or updates a release PR proposing the next
+# vX.Y.Z-beta.N version (release-please versioning strategy "prerelease",
+# config: release-please-config-beta.json, manifest:
+# .release-please-manifest-beta.json). Merging that PR makes this workflow tag
+# the merge commit and publish a GitHub *prerelease* (never marked "latest"),
+# which triggers .github/workflows/release-beta.yml to build, attest, and
+# upload `tracedecay-beta-<tag>-<platform>` archives — the exact asset names
+# the CLI beta upgrade channel expects (src/cloud.rs::asset_name).
+#
+# Force a cycle without waiting for a push:
+#   gh workflow run beta-release-please.yml --ref codex/tracedecay-total-redesign-plan
+# then merge the "chore(release): release X.Y.Z-beta.N" PR it opens.
+#
+# Download + install a published beta manually (macOS arm64):
+#   gh release download vX.Y.Z-beta.N -p 'tracedecay-beta-vX.Y.Z-beta.N-aarch64-macos.tar.gz'
+#   tar xzf tracedecay-beta-vX.Y.Z-beta.N-aarch64-macos.tar.gz
+#   install -m 755 tracedecay ~/.cargo/bin/tracedecay
+#
+# Rebuild assets for an existing beta tag (recovery):
+#   gh workflow run release-beta.yml --ref vX.Y.Z-beta.N -f release_tag=vX.Y.Z-beta.N
+
+name: Beta Release Please
+
+on:
+  push:
+    branches: [codex/tracedecay-total-redesign-plan]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beta-release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Open beta release PR or create GitHub prerelease
+    if: >-
+      github.repository == 'ScriptedAlchemy/tracedecay' &&
+      vars.BETA_CHANNEL_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Open beta release PR or create GitHub prerelease
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          target-branch: codex/tracedecay-total-redesign-plan
+          config-file: release-please-config-beta.json
+          manifest-file: .release-please-manifest-beta.json
+
+      - name: Checkout release PR
+        if: steps.release.outputs.prs_created == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      # release-beta.yml resolves the prerelease version with
+      # `cargo metadata --locked`, so the release PR must carry a lockfile
+      # that matches the bumped Cargo.toml — same invariant as the stable
+      # channel's lockfile step in release-please.yml.
+      - name: Update release PR lockfile
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          RELEASE_PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          RELEASE_PR_BRANCH=$(
+            jq --exit-status --raw-output \
+              '.headBranchName | select(type == "string" and length > 0)' \
+              <<<"$RELEASE_PR_JSON"
+          )
+          release_version=$(tr -d '[:space:]' < version.txt)
+          if [[ -z "$release_version" ]]; then
+            echo "Release version is empty" >&2
+            exit 1
+          fi
+          cargo update -p tracedecay --precise "$release_version"
+
+          if git diff --quiet -- Cargo.lock; then
+            exit 0
+          fi
+
+          unexpected_paths=$(git diff --name-only -- . ':(exclude)Cargo.lock')
+          if [[ -n "$unexpected_paths" ]]; then
+            echo "Cargo metadata changed unexpected paths:" >&2
+            echo "$unexpected_paths" >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore(release): update root lockfile"
+          git push origin "HEAD:$RELEASE_PR_BRANCH"

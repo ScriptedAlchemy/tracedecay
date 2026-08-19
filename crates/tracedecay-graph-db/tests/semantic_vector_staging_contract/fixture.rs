@@ -728,12 +728,12 @@ impl ContractFixture {
         with_context("source.publish", |context| {
             self.graph
                 .registry
-                .publish_verified_manifest(
+                .publish_verified(
                     self.registration(),
                     &mut authority,
                     context,
                     &key,
-                    manifest,
+                    Some(manifest),
                 )
                 .unwrap();
         });

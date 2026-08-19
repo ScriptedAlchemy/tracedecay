@@ -35,24 +35,29 @@ use crate::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 
 use tracedecay_application::{
     CancelWorkAttemptCommand, CancellationContext, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, RequestId, ResolvedScope, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
+    DisclosureClass, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
+    RequestId, ResolvedScope, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
     WorkAttemptCapacityVerdictV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
     WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
     WorkAttemptStoragePort, WorkAttemptStreamChannelV1, WorkAttemptStreamSummaryV1,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
-    OperationActivationOutcomeV1, OperationStageV1, ProjectId, ProposalId, ProviderId, RefId,
-    RepositoryId, RunId, SessionId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1,
-    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
-    WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
-    WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId,
+    EffectReconciliationOutcomeV1, ManifestDigest, NoProgressEscalationV1, ObservabilityPayloadV1,
+    ObservabilityTerminalResultV1, OperationActivationOutcomeV1, OperationStageV1, ProjectId,
+    ProposalId, ProviderId, RefId, RepositoryId, RunId, SessionId, TaskId, UtcMicros,
+    WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1,
+    WorkAttemptV1, WorkAuthority, WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy,
+    WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
     WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
     WorkGraphVersionV1, WorkLeaseFenceV1, WorkLeaseId, WorkProductEventSequenceV1,
     WorkProductSourceWatermarkV1, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
-    WorkSandboxPolicy, WorkflowOperationRef, WorktreeId,
+    WorkSandboxPolicy, WorkflowOperationRef, WorkflowStageClassV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracedecay_usecases::observability::{
+    ObservabilityProducerIdentityV1, RegisteredObservabilityPortV1,
+};
 
 /// argv the module maps onto each admitted `(backend, protocol)` pair. These
 /// literals live in `provider_arguments`; the spawn tests assert the child
@@ -758,6 +763,7 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
         &admitted_environment,
         Arc::new(Notify::new()),
         None,
+        None,
         AttemptAdmissionTimingV1::for_test(),
     )
     .await;
@@ -912,6 +918,7 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
         &admitted_environment,
         Arc::new(Notify::new()),
         None,
+        None,
         AttemptAdmissionTimingV1::for_test(),
     )
     .await;
@@ -983,6 +990,7 @@ async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success()
         ),
         &admitted_environment,
         Arc::new(Notify::new()),
+        None,
         None,
         AttemptAdmissionTimingV1::for_test(),
     )
@@ -1152,6 +1160,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
             &admitted_environment,
             Arc::clone(&cancel),
             None,
+            None,
             AttemptAdmissionTimingV1::for_test(),
         ) => {}
         _ = driver => unreachable!("the driver loops until execution settles"),
@@ -1176,6 +1185,152 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
     assert_eq!(
         fixture.sealed_evidence().outcome,
         WorkAttemptProviderOutcomeV1::Cancelled
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 3b. Wall exhaustion (Plan 26 no-progress terminal)
+// ---------------------------------------------------------------------------
+
+/// A provider that outlives its envelope deadline is killed and sealed as
+/// `TimedOut`, and the kill emits exactly one `operation.no_progress.terminal.v1`
+/// owner fact through the mounted producer: the pinned topology-policy digest,
+/// a positive armed budget, a measured stall at least that budget, a provably
+/// zero frontier, no remaining run budget, the kill escalation, and an unknown
+/// effect outcome. This test spends the real two-second wall on purpose — the
+/// stall must be a monotonic measurement, not a virtual-clock artifact.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_terminal() {
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let directory = tempfile::TempDir::new().unwrap();
+    let root = directory.path();
+    let runtime = crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        root,
+        id::<ProjectId>(PROJECT),
+    )
+    .await
+    .expect("registered runtime");
+    let database = runtime.project_database_arc().expect("project database");
+    let producer = tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+        database.clone(),
+        ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: PROJECT.to_owned(),
+            process_boot_id: "boot:work-attempt-exec-no-progress".to_owned(),
+            producer_revision: "producer.work-attempt-exec.v1".to_owned(),
+            configuration_revision: "configuration.work-attempt-exec.v1".to_owned(),
+            policy_revision: "policy.work-attempt-exec.v1".to_owned(),
+        },
+        8,
+    )
+    .expect("bounded producer");
+    let topology_policy_digest = tracedecay_domain::safe_work_topology_policy_v1()
+        .compute_digest()
+        .expect("topology policy digest");
+
+    let executable = fake_executable(
+        root,
+        "stalled-provider",
+        "#!/bin/sh\ncat > /dev/null\ni=0\nwhile [ $i -lt 300 ]; do sleep 1; i=$((i+1)); done\n",
+    );
+    // The fixture is built after the database mount so the two-second wall
+    // budget covers only the execution itself.
+    let deadline = deadline_in(2);
+    let fixture = leased_attempt(
+        root,
+        "Stall past the wall deadline.",
+        &SnapshotShape {
+            deadline,
+            ..SnapshotShape::default()
+        },
+    );
+    let admitted_environment =
+        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+    execute_provider_with_environment(
+        &fixture.attempts,
+        &fixture.context,
+        &fixture.attempt,
+        &preferred(
+            executable,
+            WorkProviderProtocol::ClaudeStreamJson,
+            &CLAUDE_STREAM_JSON_ARGV,
+            requested_route(WorkProviderBackendV1::ClaudeCodeCli),
+        ),
+        &admitted_environment,
+        Arc::new(Notify::new()),
+        Some(&producer),
+        Some(&topology_policy_digest),
+        AttemptAdmissionTimingV1::for_test(),
+    )
+    .await;
+
+    // The product path is unchanged by the emission: the kill still seals the
+    // typed timeout terminal.
+    assert_eq!(fixture.state(), WorkAttemptStateV1::TimedOut);
+    assert_eq!(
+        fixture.sealed_evidence().outcome,
+        WorkAttemptProviderOutcomeV1::TimedOut
+    );
+
+    producer.shutdown().await.expect("producer shutdown");
+    let page = RegisteredObservabilityPortV1::new(&database)
+        .query(ObservabilityQueryV1 {
+            authorized_scope_ref: PROJECT.to_owned(),
+            event_kinds: vec!["operation.no_progress.terminal.v1".to_owned()],
+            horizon: ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: current_micros().0.saturating_add(1_000_000),
+            },
+            after_watermark: None,
+            limit: 8,
+        })
+        .await
+        .expect("no-progress page");
+    assert_eq!(page.events.len(), 1, "exactly one no-progress terminal");
+    let envelope = &page.events[0];
+    assert_eq!(
+        envelope.terminal_result,
+        Some(ObservabilityTerminalResultV1::TimedOut)
+    );
+    let ObservabilityPayloadV1::NoProgress(observed) = &envelope.payload else {
+        panic!("expected a no-progress payload, got {:?}", envelope.payload);
+    };
+    let expected_deadline_ref = format!(
+        "work-run-deadline:{}",
+        canonical_sha256(&(
+            "tracedecay.work.run-deadline.v1",
+            TASK,
+            RUN,
+            "attempt.1",
+            deadline,
+        ))
+        .expect("run deadline digest")
+        .as_str()
+    );
+    assert_eq!(observed.run_deadline_ref, expected_deadline_ref);
+    assert_eq!(
+        observed.concurrency_policy_revision,
+        topology_policy_digest.0.as_str()
+    );
+    assert_eq!(observed.workflow_stage, WorkflowStageClassV1::Execute);
+    assert!(
+        observed.configured_timeout_micros > 0 && observed.configured_timeout_micros <= 2_000_000,
+        "the armed budget is the truthful remaining envelope budget, got {}",
+        observed.configured_timeout_micros
+    );
+    assert!(
+        observed.elapsed_stall_micros >= observed.configured_timeout_micros,
+        "the stall is measured, not asserted: {} < {}",
+        observed.elapsed_stall_micros,
+        observed.configured_timeout_micros
+    );
+    assert_eq!(observed.last_committed_frontier, 0);
+    assert_eq!(observed.remaining_run_budget_micros, 0);
+    assert_eq!(observed.escalation, NoProgressEscalationV1::Kill);
+    assert_eq!(
+        observed.effect_outcome,
+        EffectReconciliationOutcomeV1::Unknown
     );
 }
 
@@ -1336,6 +1491,7 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
         &selection,
         &admitted_environment,
         Arc::new(Notify::new()),
+        None,
         None,
         AttemptAdmissionTimingV1::for_test(),
     )
@@ -1620,6 +1776,7 @@ async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking
         ),
         &admitted_environment,
         Arc::new(Notify::new()),
+        None,
         None,
         AttemptAdmissionTimingV1::for_test(),
     )
