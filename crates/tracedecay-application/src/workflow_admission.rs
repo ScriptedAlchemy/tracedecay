@@ -81,7 +81,7 @@ impl std::error::Error for WorkflowCatalogAdmissionError {}
 /// catalog digest and every step operation resolves to an available
 /// executable binding in that catalog. The first violation is returned as a
 /// typed denial naming the offending step and operation.
-pub fn admit_workflow_definition_operations(
+pub(crate) fn admit_workflow_definition_operations(
     definition: &WorkflowDefinition,
 ) -> Result<(), WorkflowCatalogAdmissionError> {
     let registry = work_executable_binding_registry()
