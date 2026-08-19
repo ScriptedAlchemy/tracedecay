@@ -419,6 +419,9 @@ tracedecay-semantic = { path = "crates/tracedecay-semantic", version = "0.1.0", 
 tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 # Same policy for the extracted global-db harness the root test suite drives.
 tracedecay-global-db = { path = "crates/tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+# The root's cfg(test) host-admission support composes the dashboard test
+# authority, which lives behind the dashboard-api test-transport feature.
+tracedecay-dashboard-api = { path = "crates/tracedecay-dashboard-api", version = "0.1.0", features = ["test-transport"] }
 tracedecay-runtime-core = { path = "crates/tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "crates/tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-usecases = { path = "crates/tracedecay-usecases", version = "0.1.0", features = ["test-helpers"] }
