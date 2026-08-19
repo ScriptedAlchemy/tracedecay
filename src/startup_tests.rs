@@ -4,7 +4,7 @@ use super::{
     HostBundleComponentArg, MAX_ASYNC_WORKER_THREADS, MAX_BLOCKING_THREADS, PackageHookAction,
     ProfileStorageAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, SilentReinstallAction,
     StderrTracingDefault, async_worker_threads, daemon_cpu_threads_from, is_daemon_run,
-    is_extract_worker, is_local_install_command, should_skip_agent_install_maintenance,
+    is_local_install_command, should_skip_agent_install_maintenance,
     should_skip_startup_maintenance, silent_reinstall_action, stderr_tracing_default,
     validate_host_bundle_options,
 };
@@ -215,12 +215,6 @@ fn only_foreground_daemon_installs_the_global_cpu_pool() {
     assert!(is_daemon_run(Some(&daemon)));
     assert!(!is_daemon_run(Some(&Commands::Monitor)));
     assert!(!is_daemon_run(None));
-}
-
-#[test]
-fn extraction_workers_bypass_the_async_runtime() {
-    assert!(is_extract_worker(Some(&Commands::ExtractWorker)));
-    assert!(!is_extract_worker(None));
 }
 
 #[test]

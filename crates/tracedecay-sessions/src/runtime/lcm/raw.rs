@@ -802,6 +802,29 @@ fn safe_placeholder_metadata(value: &str) -> String {
 
 const MAX_PROVIDER_METADATA_BYTES: u64 = 1_048_576;
 
+/// Returns whether the current detector would change this provider metadata.
+///
+/// This is the at-rest rescan's change probe for the exact transformation
+/// ingest applies through [`protected_metadata_json`]: metadata persisted
+/// under older detector rules is dirty when re-sanitizing it under the
+/// current rules yields a different document. A document the sanitizer
+/// refuses to evaluate is a typed refusal, never implicitly clean.
+pub fn provider_metadata_requires_resanitization(
+    provider_metadata_json: &str,
+) -> Result<bool, LcmError> {
+    let original = serde_json::from_str::<JsonValue>(provider_metadata_json).map_err(|error| {
+        LcmError::SanitizationRefused {
+            reason: format!("stored LCM provider metadata is not valid JSON: {error}"),
+        }
+    })?;
+    let sanitized =
+        sanitize_provider_metadata_json(provider_metadata_json, MAX_PROVIDER_METADATA_BYTES)
+            .ok_or_else(|| LcmError::SanitizationRefused {
+                reason: "LCM metadata sanitization failed".to_owned(),
+            })?;
+    Ok(sanitized != original)
+}
+
 /// Pure function of the provider metadata bytes: every failure is a
 /// deterministic content refusal, never an environmental fault.
 fn protected_metadata_json(

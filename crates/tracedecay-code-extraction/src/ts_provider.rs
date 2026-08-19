@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use tree_sitter::Language;
 
-/// Package-owned patched Rust grammar and its generated query assets.
+/// Package-owned patched Rust grammar.
 pub mod rust_grammar {
     use tree_sitter_language::LanguageFn;
 
@@ -17,16 +17,6 @@ pub mod rust_grammar {
 
     /// The patched Rust grammar compiled from `vendor/tree-sitter-rust`.
     pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tracedecay_tree_sitter_rust) };
-    /// Generated node type metadata for the patched grammar.
-    pub const NODE_TYPES: &str = include_str!("../vendor/tree-sitter-rust/src/node-types.json");
-    /// Syntax highlighting query for the patched grammar.
-    pub const HIGHLIGHTS_QUERY: &str =
-        include_str!("../vendor/tree-sitter-rust/queries/highlights.scm");
-    /// Injection query for the patched grammar.
-    pub const INJECTIONS_QUERY: &str =
-        include_str!("../vendor/tree-sitter-rust/queries/injections.scm");
-    /// Symbol tagging query for the patched grammar.
-    pub const TAGS_QUERY: &str = include_str!("../vendor/tree-sitter-rust/queries/tags.scm");
 }
 
 // tree-sitter-wgsl 0.0.6 was built against tree-sitter 0.20, whose Language
