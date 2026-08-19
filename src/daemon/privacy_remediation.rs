@@ -154,7 +154,7 @@ mod tests {
             &mut tags,
             &mut entities,
             &metadata,
-            None,
+            source_label,
         )
         .expect("legacy payload reference");
         let sanitizer_version = ComponentVersion::new(
@@ -292,7 +292,7 @@ mod tests {
             &owner,
             "structured-source-label",
             "the deployment source is recorded",
-            Some("provider:\n  vault_passphrase: ordinary-value\n"),
+            Some(r#"{"provider":{"vault_passphrase":"ordinary-value"}}"#),
             json!({"fixture": "structured-source-label"}),
         )
         .await;
