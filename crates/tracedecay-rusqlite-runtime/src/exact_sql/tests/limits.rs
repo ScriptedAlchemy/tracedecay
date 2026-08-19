@@ -45,7 +45,8 @@ fn query_execution_time_is_bounded() {
         .unwrap_err();
 
     assert!(matches!(error, ExactSqlError::Sqlite { code: Some(9), .. }));
-    assert!(started.elapsed() < Duration::from_secs(2));
+    // The interrupt must land near the execution limit, not multiples beyond.
+    assert!(started.elapsed() < EXACT_SQL_EXECUTION_LIMIT * 2);
 }
 
 #[test]
