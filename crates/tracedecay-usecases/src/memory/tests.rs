@@ -181,6 +181,23 @@ impl FactStore for FakeAuthority {
 }
 
 impl ProjectMemoryFactStore for FakeAuthority {
+    async fn purge_project_memory_superseded_payloads(
+        &self,
+        owner: FactOwnerV1,
+        _after: Option<ProjectMemoryPrivacyPurgeCursorV1>,
+        _limit: usize,
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryPrivacyPurgeReceiptV1> {
+        self.authority_calls.lock().unwrap().push("privacy-purge");
+        ProjectMemoryPrivacyPurgeReceiptV1::new(
+            owner,
+            "test-detector-revision".to_owned(),
+            0,
+            0,
+            None,
+        )
+    }
+
     async fn list_project_memory_facts(
         &self,
         query: ProjectMemoryFactListQueryV1,

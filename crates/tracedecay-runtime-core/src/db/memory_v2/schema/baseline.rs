@@ -90,6 +90,27 @@ pub(super) const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_v2_f
             SELECT RAISE(ABORT, 'memory_v2 assertion payloads are immutable');
         END;
 
+        CREATE TABLE IF NOT EXISTS memory_v2_assertion_payload_purges (
+            assertion_id TEXT NOT NULL,
+            fact_id TEXT NOT NULL,
+            owner_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            payload_reference_json TEXT NOT NULL CHECK(json_valid(payload_reference_json)),
+            detector_revision TEXT NOT NULL CHECK(length(detector_revision) > 0),
+            purge_reason TEXT NOT NULL CHECK(purge_reason = 'detector_flagged'),
+            PRIMARY KEY(assertion_id, fact_id, owner_kind, project_id),
+            FOREIGN KEY(assertion_id, fact_id, owner_kind, project_id)
+                REFERENCES memory_v2_assertions(assertion_id, fact_id, owner_kind, project_id)
+        );
+        CREATE TRIGGER IF NOT EXISTS memory_v2_assertion_payload_purges_no_update
+        BEFORE UPDATE ON memory_v2_assertion_payload_purges BEGIN
+            SELECT RAISE(ABORT, 'memory_v2 assertion payload purge receipts are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS memory_v2_assertion_payload_purges_no_delete
+        BEFORE DELETE ON memory_v2_assertion_payload_purges BEGIN
+            SELECT RAISE(ABORT, 'memory_v2 assertion payload purge receipts are immutable');
+        END;
+
         CREATE TABLE IF NOT EXISTS memory_v2_evidence (
             evidence_id TEXT NOT NULL,
             fact_id TEXT NOT NULL,

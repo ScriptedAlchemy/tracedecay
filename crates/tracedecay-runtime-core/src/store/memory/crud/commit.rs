@@ -4,6 +4,9 @@ use super::super::primitives::{
     COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, row_exists, row_i64, row_optional_string,
     row_string, storage_error, storage_message, to_json,
 };
+use super::super::privacy_purge::{
+    assertion_payload_is_explicitly_purged_tx, purge_superseded_payloads_for_fact_tx,
+};
 use super::{
     CommitAttempt, ensure_event_references, ensure_fact_identity, event_exists, event_matches,
     insert_event, payload_is_purged_projection, publish_current_projection, receipt_outcome,
@@ -94,6 +97,15 @@ pub(super) async fn commit_fact_tx(
         insert_event(transaction, &owner, event).await?;
     }
     publish_current_projection(transaction, &owner, batch).await?;
+    if let Some(assertion) = batch.assertion() {
+        purge_superseded_payloads_for_fact_tx(
+            transaction,
+            &owner,
+            batch.fact_id(),
+            assertion.assertion_id(),
+        )
+        .await?;
+    }
 
     Ok(CommitAttempt {
         outcome: receipt_outcome(transaction, &owner, batch, false).await?,
@@ -612,26 +624,6 @@ async fn assertion_exists(
     .await
 }
 
-async fn assertion_is_superseded(
-    transaction: &Transaction<'_>,
-    owner: &OwnerKey,
-    assertion: &FactAssertionV1,
-) -> FactStoreResult<bool> {
-    row_exists(
-        transaction,
-        "SELECT 1 FROM memory_v2_assertion_supersession
-         WHERE superseded_assertion_id = ?1 AND fact_id = ?2
-           AND owner_kind = ?3 AND project_id = ?4",
-        params![
-            assertion.assertion_id().as_str(),
-            assertion.fact_id().as_str(),
-            owner.kind,
-            owner.project_id.as_str(),
-        ],
-    )
-    .await
-}
-
 async fn assertion_matches(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -731,12 +723,11 @@ async fn assertion_matches(
                 == to_json(assertion.payload(), "serialize assertion payload")?
                 && row_string(&row, 1, QUERY_OPERATION)? == assertion.payload().content()
         }
-        // A missing payload row is consistent with the immutable record when
-        // the fact reached a terminal access state, or when the assertion was
-        // superseded and its detector-flagged payload was purged at rest.
+        // A missing payload row is consistent only with a terminal fact-wide
+        // purge or an immutable assertion-specific detector purge receipt.
         None => {
             payload_is_purged_projection(transaction, owner, assertion.fact_id()).await?
-                || assertion_is_superseded(transaction, owner, assertion).await?
+                || assertion_payload_is_explicitly_purged_tx(transaction, owner, assertion).await?
         }
     };
     if !payload_matches {

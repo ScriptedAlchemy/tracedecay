@@ -5,6 +5,7 @@ use super::super::primitives::{
     payload_access_label, requires_payload_purge, row_exists, row_f64, row_i64,
     row_optional_string, row_string, storage_error, storage_message, to_json,
 };
+use super::super::privacy_purge::assertion_payload_exists_tx;
 use super::DEFAULT_TRUST;
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
@@ -65,6 +66,14 @@ pub(super) async fn ensure_event_references(
                 return Err(storage_message(
                     COMMIT_OPERATION,
                     "lineage assertion reference is missing",
+                ));
+            }
+            if !assertion_payload_exists_tx(transaction, owner, event.fact_id(), assertion_id)
+                .await?
+            {
+                return Err(storage_message(
+                    COMMIT_OPERATION,
+                    "assertion without an available payload cannot be activated",
                 ));
             }
         }

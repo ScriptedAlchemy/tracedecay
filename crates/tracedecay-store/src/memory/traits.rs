@@ -25,7 +25,8 @@ use super::{
     ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
     ProjectMemoryFactRetrievalOutcomeV1, ProjectMemoryFactSearchPageV1,
     ProjectMemoryFactSearchQuery, ProjectMemoryFactUpdateCommandV1,
-    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryMemoryStatusV1, RetrievalAnchorQuery,
+    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryMemoryStatusV1,
+    ProjectMemoryPrivacyPurgeCursorV1, ProjectMemoryPrivacyPurgeReceiptV1, RetrievalAnchorQuery,
     StoredFactV1,
 };
 
@@ -85,6 +86,17 @@ pub trait FactStore: Send + Sync {
 
 /// Single typed authority boundary for canonical project memory.
 pub trait ProjectMemoryFactStore: FactStore {
+    /// Re-evaluates every persisted superseded payload for one owner and
+    /// atomically records an immutable purge receipt before deleting each
+    /// detector-flagged payload and its FTS copy.
+    fn purge_project_memory_superseded_payloads(
+        &self,
+        owner: FactOwnerV1,
+        after: Option<ProjectMemoryPrivacyPurgeCursorV1>,
+        limit: usize,
+        write_control: &FactWriteControl,
+    ) -> impl Future<Output = FactStoreResult<ProjectMemoryPrivacyPurgeReceiptV1>> + Send;
+
     fn list_project_memory_facts(
         &self,
         query: ProjectMemoryFactListQueryV1,

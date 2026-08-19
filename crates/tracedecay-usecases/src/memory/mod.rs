@@ -61,7 +61,8 @@ use tracedecay_store::{
     ProjectMemoryFactRetrievalOutcomeV1, ProjectMemoryFactSearchGraphCoverageV1,
     ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
     ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
-    ProjectMemoryMemoryStatusV1, RetrievalAnchorQuery, StoredFactV1,
+    ProjectMemoryMemoryStatusV1, ProjectMemoryPrivacyPurgeCursorV1,
+    ProjectMemoryPrivacyPurgeReceiptV1, RetrievalAnchorQuery, StoredFactV1,
 };
 
 /// Maps a [`MemoryApplicationError`] onto the root/dashboard-facing

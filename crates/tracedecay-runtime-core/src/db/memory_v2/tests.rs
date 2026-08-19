@@ -56,6 +56,7 @@ async fn fresh_store_carries_only_the_final_memory_shape() {
         .await,
         [
             "memory_v2_assertion_evidence",
+            "memory_v2_assertion_payload_purges",
             "memory_v2_assertion_payloads",
             "memory_v2_assertion_payloads_fts",
             "memory_v2_assertion_payloads_fts_config",
