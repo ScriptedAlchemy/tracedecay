@@ -8,8 +8,8 @@ use thiserror::Error;
 
 use crate::{
     ManifestDigest, RunId, UtcMicros, WorkAttemptIdentityV1, WorkCommandId, WorkflowDefinition,
-    WorkflowOutputName, WorkflowPlacementReceipt,
-    WorkflowStepEffectOutcome, WorkflowStepEffectReceipt, WorkflowStepId,
+    WorkflowOutputName, WorkflowPlacementReceipt, WorkflowStepEffectOutcome,
+    WorkflowStepEffectReceipt, WorkflowStepId,
 };
 
 mod fan_out;
@@ -887,5 +887,4 @@ impl WorkflowRunProjection {
     pub fn step(&self, step_id: &WorkflowStepId) -> Option<&WorkflowStepRunProjection> {
         self.steps.get(step_id)
     }
-
 }

@@ -98,4 +98,3 @@ impl<'de> Deserialize<'de> for WorkflowStepOutput {
         Self::new(wire.output_name, wire.artifacts).map_err(serde::de::Error::custom)
     }
 }
-
