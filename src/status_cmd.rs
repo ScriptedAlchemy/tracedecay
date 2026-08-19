@@ -78,9 +78,12 @@ async fn daemon_tool_json_within(
     tool_name: &str,
     arguments: Value,
 ) -> tracedecay::errors::Result<Value> {
+    // The deadline rides inside the call so a warming project open is waited
+    // out on the caller's budget; the outer timeout is only a backstop against
+    // stages that cannot observe it.
     timeout_at(
         deadline,
-        commands::daemon_tool_json(Some(project_path), tool_name, arguments),
+        commands::daemon_tool_json_until(deadline, Some(project_path), tool_name, arguments),
     )
     .await
     .map_err(|_| tracedecay::errors::TraceDecayError::Config {
@@ -156,7 +159,12 @@ pub(crate) async fn handle_status_command(
     )
     .await
     .map_err(|_| tracedecay::errors::TraceDecayError::Config {
-        message: "timed out waiting for status before deadline".to_string(),
+        message: format!(
+            "status did not complete within {}s; the daemon may still be \
+             starting or opening this project — retry, or raise \
+             TRACEDECAY_STATUS_DEADLINE_MS",
+            status_command_deadline().as_secs()
+        ),
     })?
 }
 

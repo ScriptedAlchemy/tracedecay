@@ -545,8 +545,17 @@ async fn call_tool_with_project_open_retry(
         .await
         {
             Err(error) if is_project_open_retryable_error(&error) => {
-                let remaining = DaemonClientDeadline::until(deadline)?.remaining()?;
-                tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
+                // When the budget is spent, the daemon's own typed state (a
+                // warming project, a still-mounting authority) is the truthful
+                // answer; the client's deadline bookkeeping error is not.
+                let remaining = DaemonClientDeadline::until(deadline)
+                    .and_then(|client_deadline| client_deadline.remaining());
+                match remaining {
+                    Ok(remaining) => {
+                        tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
+                    }
+                    Err(_) => return Err(error),
+                }
             }
             result => return result,
         }
