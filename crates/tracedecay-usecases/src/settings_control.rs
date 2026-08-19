@@ -8,11 +8,12 @@
 use serde::Deserialize;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
-    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
-    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SettingKey,
-    TELEMETRY_TIMINGS_SETTING_KEY,
+    CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationLayerIdV1, ConfigurationRevisionId,
+    ConfigurationSnapshotV1, ConfigurationValueV1, ContextScoutConfigurationStateV1,
+    ContextScoutSettingsV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
+    INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 
 use tracedecay_application::{ProjectSettingsPatchInputV1, validate_project_settings_patch};
@@ -42,6 +43,27 @@ pub struct ProjectSettingsPatchV1 {
     pub telemetry: Option<TelemetrySettingsPatchV1>,
     #[serde(default)]
     pub sync: Option<SyncSettingsPatchV1>,
+    #[serde(default)]
+    pub context_scout: Option<bool>,
+}
+
+/// The effective Plan 20 Context Scout value in one configuration snapshot.
+/// The registry always resolves this key; a snapshot predating the key reads
+/// as the canonical stock state, which is disabled.
+pub fn effective_context_scout_settings(
+    snapshot: &ConfigurationSnapshotV1,
+) -> ContextScoutSettingsV1 {
+    SettingKey::new(CONTEXT_SCOUT_SETTINGS_SETTING_KEY)
+        .ok()
+        .and_then(|key| match snapshot.effective_values.get(&key) {
+            Some(ConfigurationValueV1::ContextScoutSettings(settings)) => Some(settings.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(ContextScoutSettingsV1::disabled)
+}
+
+pub fn context_scout_settings_are_enabled(settings: &ContextScoutSettingsV1) -> bool {
+    settings.state != ContextScoutConfigurationStateV1::Disabled
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -110,6 +132,7 @@ pub fn preview_project_settings(
     let layer = ConfigurationLayerIdV1::Project {
         project_id: project_id.clone(),
     };
+    let current_context_scout = effective_context_scout_settings(&current.snapshot);
     let expected_is_current = expected_revision == current.revision_id;
     let supplied_values_are_current = patch
         .include
@@ -142,6 +165,9 @@ pub fn preview_project_settings(
                 && sync
                     .auto_track_pr_poll_secs
                     .is_none_or(|value| value == current.config.sync.auto_track_pr_poll_secs)
+        })
+        && patch.context_scout.is_none_or(|value| {
+            value == context_scout_settings_are_enabled(&current_context_scout)
         });
     let mut mutations = Vec::new();
     push(
@@ -204,6 +230,22 @@ pub fn preview_project_settings(
                 .map(ConfigurationValueV1::Unsigned),
         )?;
     }
+    // The dashboard flag is only a state toggle: mode, limits, and model
+    // selection stay exactly as configured, and disabling never erases them.
+    push(
+        &mut mutations,
+        &layer,
+        CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
+        patch.context_scout.map(|enabled| {
+            let mut settings = current_context_scout.clone();
+            settings.state = if enabled {
+                ContextScoutConfigurationStateV1::Active
+            } else {
+                ContextScoutConfigurationStateV1::Disabled
+            };
+            ConfigurationValueV1::ContextScoutSettings(settings)
+        }),
+    )?;
     if mutations.is_empty() && !expected_is_current {
         return Err(ProjectSettingsPreviewErrorV1::RevisionConflict {
             expected: expected_revision.as_str().to_owned(),
@@ -302,5 +344,83 @@ mod tests {
         };
         assert_eq!(mutations.len(), 2);
         assert_eq!(current.config.max_file_size, 1_048_576);
+    }
+
+    #[test]
+    fn context_scout_flag_toggles_only_the_state_of_the_effective_value() {
+        let project_id = ProjectId::new("project.settings.scout").unwrap();
+        let revision = ConfigurationRevisionId::new("configuration.revision.scout").unwrap();
+        let snapshot = ConfigurationSnapshotV1::new(
+            BTreeMap::new(),
+            BTreeMap::<SettingKey, Vec<ConfigurationCandidateV1>>::new(),
+        )
+        .unwrap();
+        let current = PinnedRuntimeConfiguration {
+            target: crate::config::RuntimeConfigurationTarget {
+                project_id: project_id.clone(),
+                project_root: PathBuf::from("/project"),
+            },
+            revision_id: revision.clone(),
+            snapshot,
+            config: crate::config::TraceDecayConfig::default(),
+        };
+        // A snapshot without the key renders the canonical stock state: off.
+        let current_settings = effective_context_scout_settings(&current.snapshot);
+        assert_eq!(current_settings, ContextScoutSettingsV1::disabled());
+        assert!(!context_scout_settings_are_enabled(&current_settings));
+
+        // Re-submitting the current state plans no mutation.
+        let unchanged = preview_project_settings(
+            &project_id,
+            &current,
+            ProjectSettingsPatchV1 {
+                expected_revision_id: revision.as_str().to_owned(),
+                context_scout: Some(false),
+                ..ProjectSettingsPatchV1::default()
+            },
+        )
+        .unwrap();
+        assert!(!unchanged.changed);
+
+        let preview = preview_project_settings(
+            &project_id,
+            &current,
+            ProjectSettingsPatchV1 {
+                expected_revision_id: revision.as_str().to_owned(),
+                context_scout: Some(true),
+                ..ProjectSettingsPatchV1::default()
+            },
+        )
+        .unwrap();
+        assert!(preview.changed);
+        let DirectConfigurationMutation::Batch { mutations } = preview.mutation else {
+            panic!("project settings must be atomic")
+        };
+        let [DirectConfigurationMutation::Set { key, value, .. }] = mutations.as_slice() else {
+            panic!("the flag must plan exactly one typed Set")
+        };
+        assert_eq!(key.as_str(), CONTEXT_SCOUT_SETTINGS_SETTING_KEY);
+        let ConfigurationValueV1::ContextScoutSettings(settings) = value.as_ref() else {
+            panic!("the flag must write the typed Context Scout value")
+        };
+        assert_eq!(settings.state, ContextScoutConfigurationStateV1::Active);
+        // Only the state toggles; mode, limits, and model fields are kept.
+        assert_eq!(
+            (
+                settings.mode,
+                settings.limits,
+                settings.model_path,
+                settings.model_id.as_deref(),
+                settings.model_timeout_secs,
+            ),
+            (
+                ContextScoutSettingsV1::disabled().mode,
+                ContextScoutSettingsV1::disabled().limits,
+                None,
+                None,
+                None,
+            )
+        );
+        settings.validate().expect("planned value stays canonical");
     }
 }

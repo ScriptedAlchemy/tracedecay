@@ -28,6 +28,7 @@ mod test_support;
 pub(crate) use admission::{
     HookV2AdmissionOutcomeV1, admit_hook_v2_envelope, hook_v2_pending_work_envelopes,
 };
+pub(crate) use envelope::daemon_mint_hook_v2_file_id;
 pub(crate) use errors::structured_hook_error_data;
 pub(crate) use hermes::replay_projectless_hermes_host_admission;
 
