@@ -472,21 +472,21 @@ the commit as attribution evidence.
   CLI, and both SDKs. Prove the partial-effect committed receipt and reset-only
   legal action survive each boundary and physical daemon restart; unit mappers
   and synthetic SDK envelopes are necessary but not final journey evidence.
-  PARTIAL, updated 2026-08-15: both CLI legs are proven green in a clean
-  worktree at `d7c4a4c43` — PartialEffect (`e56fadeff` lineage) AND the
-  ResetRequired leg, which was un-`#[ignore]`d by `c962cd627` after the
-  project-open settling gap was fixed; the reset-only legal action survives
-  a physical restart via CLI. The HTTP/MCP/SDK legs are in flight in
-  `tests/typed_terminal_restart_acceptance/transport_boundaries.rs`
-  (checkpoint `29a591519`; module made resolvable by `2d63021e6`). First
-  full run of those WIP legs, 2026-08-15: both fail with actionable
-  reasons — `partial_effect_survives_http_mcp_and_rust_sdk_across_restart`
-  settles without ever reaching the durable commit boundary, and
-  `reset_required_survives_http_mcp_and_rust_sdk_across_restart` gets a raw
-  JSON-RPC `-32603` whose `data` carries
-  `kind:"reset_required"`/reason/retryable instead of the typed problem
-  envelope the assertion requires (the MCP surface is not wrapping the
-  reset terminal as a problem envelope).
+  DONE 2026-08-19: all four legs are green. The CLI legs were proven at
+  `d7c4a4c43` (PartialEffect via the `e56fadeff` lineage; ResetRequired
+  un-`#[ignore]`d by `c962cd627`). The HTTP/MCP/Rust-SDK legs in
+  `tests/typed_terminal_restart_acceptance/transport_boundaries.rs` pass
+  2/2 after two production fixes: a `tools/call` refused at project open
+  with `ResetRequired` now answers on the MCP tool surface with the
+  canonical problem envelope under the operation's own MCP result contract
+  (`mcp_project_open_reset_refusal`; previously a raw JSON-RPC `-32603`),
+  and the socket `DaemonInvocationClient` keeps reading an authoritative
+  effect over `DAEMON_TOOL_RESPONSE_GRACE` after cancel delivery instead of
+  fabricating `ResetRequired` at the two-second shutdown bound — a
+  post-cancel transport failure stays the typed indeterminate settlement,
+  mirroring `settle_in_process_invocation`. Both journeys prove the
+  partial-effect committed receipt and reset-only legal action across a
+  physical daemon restart.
 - DONE 2026-08-10 (verified 2026-08-13): the ten `schema_unavailable`
   application bindings were repaired in `d2b094ca7` — the primitive-surface
   read operations gained typed schemas in

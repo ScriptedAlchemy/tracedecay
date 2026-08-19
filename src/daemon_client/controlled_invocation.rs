@@ -55,14 +55,23 @@ impl DaemonInvocationClient {
                         Err(DaemonInvocationError::Cancelled { stage })
                     }
                     InvocationCancellationPolicy::AuthoritativeEffect => {
+                        // An authoritative effect settles itself; keep reading
+                        // over the same response grace the daemon's own
+                        // clients use so its real terminal (e.g. a
+                        // `PartialEffect` with a committed receipt) is the
+                        // one reported, exactly as `settle_in_process_invocation`
+                        // does. A transport failure after the cancel attempt
+                        // is the same indeterminate state as an unanswered
+                        // grace: the effect may have committed, so a
+                        // retry-inviting `Unavailable` would be untruthful.
                         match tokio::time::timeout(
-                            crate::daemon::DAEMON_TASK_ABORT_DEADLINE,
+                            crate::daemon::DAEMON_TOOL_RESPONSE_GRACE,
                             &mut invocation,
                         )
                         .await
                         {
-                            Ok(result) => result.map_err(|_| DaemonInvocationError::Unavailable),
-                            Err(_) => Ok(
+                            Ok(Ok(response)) => Ok(response),
+                            Ok(Err(_)) | Err(_) => Ok(
                                 crate::daemon_contract::DaemonInvocationResponse::problem(
                                     target_request_id,
                                     crate::daemon_contract::DaemonInvocationProblem::ResetRequired,

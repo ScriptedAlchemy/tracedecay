@@ -1010,7 +1010,13 @@ async fn serve_broker_socket_client(
             }
             Err(error) => {
                 drop(setup_activity);
-                write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                write_project_open_error(
+                    &mut transport,
+                    &first_request_line,
+                    &handshake.client_instance_id,
+                    &error,
+                )
+                .await?;
                 return Ok(());
             }
         }
@@ -1617,7 +1623,13 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             }
             Err(error) => {
                 drop(setup_activity);
-                write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                write_project_open_error(
+                    &mut transport,
+                    &first_request_line,
+                    &handshake.client_instance_id,
+                    &error,
+                )
+                .await?;
                 return Ok(());
             }
         };
