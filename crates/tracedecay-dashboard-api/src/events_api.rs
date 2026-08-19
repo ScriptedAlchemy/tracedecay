@@ -1002,7 +1002,7 @@ mod tests {
         .expect("registered profile database runtime");
         let (database, runtime, _retirement) = fixture.into_parts();
         drop(runtime);
-        tracedecay_global_db::RegisteredGlobalDbOwnerV1::migrate_and_attach(database)
+        tracedecay_global_db::RegisteredGlobalDbOwnerV1::admit_and_attach(database)
             .await
             .expect("registered dashboard fixture")
             .issue_lease()
