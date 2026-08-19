@@ -168,10 +168,8 @@ impl ObservabilityEnvelopeV1 {
                     return Err("absolute_deadline");
                 }
             }
-            ObservabilityPayloadV1::Activity(activity) => {
-                if !activity.is_valid() {
-                    return Err("activity");
-                }
+            ObservabilityPayloadV1::Activity(activity) if !activity.is_valid() => {
+                return Err("activity");
             }
             ObservabilityPayloadV1::McpDispatch(dispatch) => {
                 dispatch.validate(self.terminal_result)?;

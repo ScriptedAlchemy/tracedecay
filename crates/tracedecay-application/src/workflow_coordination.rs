@@ -841,7 +841,7 @@ impl TaskHandoffGrant {
 
     pub fn validate(&self) -> Result<(), TaskHandoffError> {
         self.scope.validate()?;
-        if !(self.issued_at < self.expires_at) {
+        if self.issued_at >= self.expires_at {
             return Err(TaskHandoffError::InvalidExpiry);
         }
         let Some(lifetime_micros) = self.expires_at.0.checked_sub(self.issued_at.0) else {

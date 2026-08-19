@@ -61,7 +61,7 @@ where
         .ok_or(RemoteRecoveryOperationErrorV1::StaleAuthority)?;
     let expected_matches = expected.matches_writer(&current.fence);
     let replacement_matches = replacement.is_some_and(|replacement| current.fence == *replacement);
-    if !expected_matches && !(promotion && replacement_matches) {
+    if !(expected_matches || (promotion && replacement_matches)) {
         return Err(RemoteRecoveryOperationErrorV1::StaleAuthority);
     }
     let pre_state_digest = retained_pre_state_digest.unwrap_or(

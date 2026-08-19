@@ -2394,13 +2394,13 @@ impl McpServer {
             McpMethod::InitializedAck | McpMethod::HookEvent => None,
             McpMethod::ToolsList => Some(self.handle_tools_list(id).await),
             McpMethod::ToolsCall => Some(
-                self.handle_tools_call(
+                Box::pin(self.handle_tools_call(
                     id,
                     request.params.as_ref(),
                     timings_enabled,
                     route_cache,
                     implicit_project_path,
-                )
+                ))
                 .await,
             ),
             McpMethod::ResourcesList => Some(Self::handle_resources_list(id)),
