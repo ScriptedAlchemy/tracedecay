@@ -195,9 +195,8 @@ fn map_projection_error(error: CodeGraphProjectionError) -> RetrievalPortError {
         CodeGraphProjectionError::Contract(message) => RetrievalPortError::Contract(message),
         CodeGraphProjectionError::GenerationMismatch => RetrievalPortError::GenerationMismatch,
         CodeGraphProjectionError::Cancelled => RetrievalPortError::Cancelled,
-        CodeGraphProjectionError::BudgetExhausted | CodeGraphProjectionError::DeadlineExceeded => {
-            RetrievalPortError::BudgetExceeded
-        }
+        CodeGraphProjectionError::BudgetExhausted { .. }
+        | CodeGraphProjectionError::DeadlineExceeded => RetrievalPortError::BudgetExceeded,
         CodeGraphProjectionError::ProjectionMismatch { .. } => {
             RetrievalPortError::AuthorityUnavailable(
                 "code graph projection is quarantined after recovery verification mismatch"

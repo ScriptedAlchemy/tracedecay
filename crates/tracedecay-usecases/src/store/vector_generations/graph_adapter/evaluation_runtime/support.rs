@@ -143,8 +143,11 @@ pub(super) fn map_code_graph_error(error: CodeGraphProjectionError) -> GraphDbEr
         CodeGraphProjectionError::Conflict | CodeGraphProjectionError::GenerationMismatch => {
             GraphDbError::Conflict
         }
-        CodeGraphProjectionError::BudgetExhausted => {
-            GraphDbError::budget_exhausted(GraphBudgetKind::Read, u64::MAX)
+        CodeGraphProjectionError::BudgetExhausted { budget, limit } => {
+            // Preserve budget identity; unrecognized names are
+            // projection-local budgets reported under the read class.
+            let kind = GraphBudgetKind::from_name(&budget).unwrap_or(GraphBudgetKind::Read);
+            GraphDbError::budget_exhausted(kind, limit)
         }
         CodeGraphProjectionError::ProjectionMismatch {
             namespace,

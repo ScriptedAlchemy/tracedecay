@@ -455,6 +455,20 @@ mod tests {
         assert_eq!(assembled, prior);
     }
 
+    /// Publishing a sealed generation re-encodes its content as one canonical
+    /// graph write batch, with record payloads JSON-escaped into string
+    /// properties (at most doubling the bytes). A batch bound below that
+    /// expansion turns sealed-admissible generations permanently
+    /// unpublishable: every activation retry exhausts the graph write budget.
+    #[test]
+    fn graph_batch_canonical_bound_covers_sealed_admissible_generations() {
+        assert!(
+            u64::try_from(tracedecay_graph_db::MAX_GRAPH_BATCH_CANONICAL_BYTES)
+                .expect("batch canonical bound fits u64")
+                >= MAX_SEALED_CODE_GENERATION_BYTES_V1.saturating_mul(2)
+        );
+    }
+
     /// Encode and decode share one admission bound, so publication can never
     /// seal a generation that every later load would refuse as corrupt.
     #[test]

@@ -352,11 +352,7 @@ impl DaemonInvocationService {
         project_root: &Path,
     ) -> Arc<tracedecay_usecases::native_integration::NativeIntegrationStatusBroadcastV1> {
         let mut broadcasts = self.native_integration_status_broadcasts.lock().await;
-        Arc::clone(
-            broadcasts
-                .entry(project_root.to_path_buf())
-                .or_default(),
-        )
+        Arc::clone(broadcasts.entry(project_root.to_path_buf()).or_default())
     }
 
     pub(crate) fn github_stack_coordinator(

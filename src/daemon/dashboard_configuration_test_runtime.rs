@@ -141,8 +141,9 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
         // invocation owner, which is deliberately absent here.
         Box::pin(async {
             Err(DashboardDaemonReadUnavailableV1 {
-                detail: "the dashboard configuration test runtime serves no multi-root scope-set reads"
-                    .to_owned(),
+                detail:
+                    "the dashboard configuration test runtime serves no multi-root scope-set reads"
+                        .to_owned(),
             })
         })
     }

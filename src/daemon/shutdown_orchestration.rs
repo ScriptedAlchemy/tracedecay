@@ -269,10 +269,10 @@ async fn run_daemon_shutdown(
         Some(receipt) => receipt,
         None => background_shutdown.await,
     };
-    let terminal = prepare_shutdown_owner_phases(plan.terminal_owner_phases)
-        .join(shutdown_deadline)
-        .await;
-    background.extend(terminal);
+    // Project servers hold session-database leases whose graph clients keep
+    // the session relation graph owners leased. The terminal owner drains and
+    // closes those graph runtimes, so it must run only after every server has
+    // dropped its leases.
     let project_servers = tokio::select! {
         biased;
         receipt = &mut plan.project_server_shutdown => receipt,
@@ -280,6 +280,10 @@ async fn run_daemon_shutdown(
             ShutdownTaskReceipt::timed_out("project_server_shutdown")
         }
     };
+    let terminal = prepare_shutdown_owner_phases(plan.terminal_owner_phases)
+        .join(shutdown_deadline)
+        .await;
+    background.extend(terminal);
     DaemonShutdownReceipt {
         in_flight,
         clients,

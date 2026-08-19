@@ -69,8 +69,8 @@ pub enum CodeGraphProjectionError {
     GenerationMismatch,
     #[error("code graph operation cancelled")]
     Cancelled,
-    #[error("code graph operation budget exhausted")]
-    BudgetExhausted,
+    #[error("code graph {budget} budget exhausted (limit {limit})")]
+    BudgetExhausted { budget: String, limit: u64 },
     #[error("code graph operation deadline exceeded")]
     DeadlineExceeded,
     #[error("code graph database conflict")]
@@ -110,7 +110,10 @@ impl From<GraphDbError> for CodeGraphProjectionError {
             GraphDbError::Cancelled => Self::Cancelled,
             GraphDbError::InvalidRequest { message } => Self::Contract(message),
             GraphDbError::Conflict => Self::Conflict,
-            GraphDbError::BudgetExhausted { .. } => Self::BudgetExhausted,
+            GraphDbError::BudgetExhausted { kind, limit } => Self::BudgetExhausted {
+                budget: kind.as_str().to_owned(),
+                limit,
+            },
             GraphDbError::DeadlineExceeded => Self::DeadlineExceeded,
             GraphDbError::ProjectionMismatch {
                 namespace,

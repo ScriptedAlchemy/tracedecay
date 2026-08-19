@@ -130,9 +130,14 @@ async fn moved_branch_label_still_opens_the_exact_checkouts_graph_read() {
 
     let retained_context = request_context(fixture.retained_scope.clone(), "retained-label");
     let retained_terminal = port
-        .open(CodeGraphReadRequest::from_context(&retained_context, UtcMicros(1)))
+        .open(CodeGraphReadRequest::from_context(
+            &retained_context,
+            UtcMicros(1),
+        ))
         .await
-        .expect_err("this fixture has no persistent activation, so even the retained scope stops there");
+        .expect_err(
+            "this fixture has no persistent activation, so even the retained scope stops there",
+        );
     assert!(
         !matches!(retained_terminal, CodeGraphReadError::Denied),
         "the retained scope must never be scope-denied: {retained_terminal:?}"

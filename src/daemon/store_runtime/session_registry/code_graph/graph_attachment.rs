@@ -70,14 +70,11 @@ pub(in crate::daemon::store_runtime::session_registry) async fn close_retained_f
     verified_locator: VerifiedStoreLocatorV1,
 ) -> Result<()> {
     let graph_registry = graph_registry.clone();
-    // KNOWN DEFECT, deliberately fast-failing: this close requires an
-    // unleased owner, but the retained memory-graph runtimes in the project
-    // owner map still hold their standing operation leases at this point in
-    // shutdown, so the close reports a typed Conflict on every shutdown and
-    // the reconciliation join is skipped (the receipt carries this exact
-    // detail). Retrying here only slows shutdown — the lease is structural,
-    // not a settling race. The fix is ordering: retire the retained runtimes
-    // (releasing their leases) before closing the session relation graphs.
+    // This close requires an unleased owner: the registry drain must already
+    // have dropped the retained map-owner attachments and every owner-issued
+    // graph client lease, and the reconciliation workers must already be
+    // joined. A lease that survives the drain is a live consumer, so the
+    // typed Conflict below is the correct terminal answer — never retry here.
     tokio::task::spawn_blocking(move || {
         graph_registry.close_retained_for_shutdown(&binding, &verified_locator)
     })
@@ -85,6 +82,19 @@ pub(in crate::daemon::store_runtime::session_registry) async fn close_retained_f
     .map_err(|error| session_registry_error("join graph shutdown close", error.to_string()))?
     .map(|_| ())
     .map_err(|error| session_registry_error("close graph runtime for shutdown", error.to_string()))
+}
+
+impl super::RetainedVerifiedGraphRuntimeV1 {
+    /// Exact store identity of the retained memory-graph runtime, captured
+    /// for the shutdown close after this owner has been drained and dropped.
+    pub(in crate::daemon::store_runtime::session_registry) fn graph_store_identity(
+        &self,
+    ) -> (StoreRuntimeBindingV1, VerifiedStoreLocatorV1) {
+        (
+            self.graph.binding().clone(),
+            self.graph.verified_locator().clone(),
+        )
+    }
 }
 
 fn registration(

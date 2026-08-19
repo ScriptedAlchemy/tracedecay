@@ -161,7 +161,7 @@ pub(in crate::primitives) fn ignored_dependency_candidate_failure(
             "application.symbol-graph.ignored-dependency-candidate-generation-stale",
             "ignored dependency candidates belong to a stale graph generation",
         ),
-        CodeGraphProjectionError::BudgetExhausted => failure(
+        CodeGraphProjectionError::BudgetExhausted { .. } => failure(
             PrimitiveFailureKind::Unavailable,
             "application.symbol-graph.ignored-dependency-candidate-read-budget-exhausted",
             "ignored dependency candidate reading exhausted its operation budget",

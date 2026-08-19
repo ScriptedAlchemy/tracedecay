@@ -687,21 +687,25 @@ impl DaemonSessionRuntimeRegistryV1 {
         databases
     }
 
-    /// Releases exclusive session-relation Grafeo handles while this registry
-    /// is still reachable. Close-then-reopen and harness restart must not wait
-    /// for every lingering `Arc` to drop; `GraphDb::close` frees the file lock
-    /// even if closed handles remain.
-    pub(crate) async fn close_mounted_session_relation_graphs(&self) -> Result<()> {
-        let databases = self.mounted_session_databases().await;
+    /// Releases exclusive Grafeo writers at daemon shutdown, after the
+    /// reconciliation workers have joined.
+    ///
+    /// The shutdown close requires every graph owner to be unleased, so this
+    /// first drains the retained owners out of the registry maps: dropping a
+    /// session owner releases its standing `GraphDbOwnerAttachmentV1`, and
+    /// dropping a memory owner releases the memory-graph attachment the
+    /// reconciliation runtime held. Only then can the captured runtimes close
+    /// without a structural Conflict. Callers must have joined the
+    /// reconciliation workers first; a graph client lease still held by a
+    /// live consumer surfaces as a typed Conflict, not a hang.
+    pub(crate) async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
+        let identities = self.drain_retained_graph_owners_for_shutdown();
         let mut first_error = None;
-        for database in databases {
-            let Ok((binding, locator)) = database.session_relation_graph_identity() else {
-                continue;
-            };
+        for (binding, locator) in identities {
             if let Err(error) = super::code_graph::graph_attachment::close_retained_for_shutdown(
                 &self.graph_registry,
-                binding.clone(),
-                locator.clone(),
+                binding,
+                locator,
             )
             .await
                 && first_error.is_none()
@@ -713,6 +717,59 @@ impl DaemonSessionRuntimeRegistryV1 {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    /// Takes every retained graph-owning runtime out of the registry maps and
+    /// returns the exact store identity of each graph runtime to close. The
+    /// owners drop here, releasing their `GraphDbOwnerAttachmentV1` map
+    /// attachments and owner-bound graph client leases; non-`Ready` project
+    /// states are retained untouched for typed recovery inspection.
+    fn drain_retained_graph_owners_for_shutdown(
+        &self,
+    ) -> Vec<(
+        tracedecay_store::StoreRuntimeBindingV1,
+        tracedecay_store::VerifiedStoreLocatorV1,
+    )> {
+        let mut identities = Vec::new();
+        if let Some(owner) = self
+            .profile_memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            identities.push(owner.graph_runtime.graph_store_identity());
+        }
+        if let Some(owner) = self
+            .profile_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            identities.push((
+                owner.relation_graph.graph.binding().clone(),
+                owner.relation_graph.graph.verified_locator().clone(),
+            ));
+        }
+        let mut projects = self
+            .project_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for state in projects.values_mut() {
+            let ProjectRuntimeOwnerStateV1::Ready(owners) = state else {
+                continue;
+            };
+            if let Some(memory) = owners.memory.take() {
+                identities.push(memory.graph_runtime.graph_store_identity());
+            }
+            if let Some(sessions) = owners.sessions.take() {
+                identities.push((
+                    sessions.relation_graph.graph.binding().clone(),
+                    sessions.relation_graph.graph.verified_locator().clone(),
+                ));
+            }
+        }
+        drop(projects);
+        identities
     }
 
     pub(crate) async fn mounted_project_sessions(

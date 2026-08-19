@@ -162,8 +162,7 @@ fn only_the_status_read_carries_a_dashboard_binding() {
         native_integration_surface_catalog_contribution().expect("catalog contribution");
     for (_, name) in JOURNEY {
         let declares_dashboard = contribution.bindings().iter().any(|binding| {
-            binding.operation().as_str() == name
-                && binding.surface() == BindingSurface::Dashboard
+            binding.operation().as_str() == name && binding.surface() == BindingSurface::Dashboard
         });
         assert_eq!(
             declares_dashboard,
