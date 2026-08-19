@@ -176,6 +176,7 @@ impl HostAdmissionTestRuntimeV1 {
             })
     }
 
+    #[cfg(feature = "test-transport")]
     #[doc(hidden)]
     pub fn dashboard_test_authority(
         self: &Arc<Self>,
