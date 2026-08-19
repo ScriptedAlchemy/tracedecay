@@ -576,7 +576,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             // to select the runnable entry step.
             WorkflowStep {
                 step_id: downstream_step_id.clone(),
-                operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+                operation: id::<WorkflowOperationRef>("operation.work.start_attempt"),
                 predecessors: BTreeSet::from([step_id.clone()]),
                 inputs: Vec::new(),
                 outputs: Vec::new(),
@@ -587,7 +587,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             },
             WorkflowStep {
                 step_id: step_id.clone(),
-                operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+                operation: id::<WorkflowOperationRef>("operation.work.start_attempt"),
                 predecessors: BTreeSet::new(),
                 inputs: Vec::new(),
                 outputs: vec![id::<WorkflowOutputName>("finding")],
@@ -604,6 +604,48 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             definition: definition.clone(),
         })
         .expect("mounted workflow definition registration");
+
+    // Catalog admission refuses an uncataloged step operation before the
+    // lifecycle transition is journaled (Plan 32).
+    let uncataloged_definition_id: WorkflowDefinitionId =
+        id("workflow.advanced-production-journey.uncataloged");
+    let uncataloged = WorkflowDefinition::new(
+        uncataloged_definition_id.clone(),
+        1,
+        project_id.clone(),
+        vec![WorkflowStep {
+            step_id: id("fan-out"),
+            operation: id::<WorkflowOperationRef>("operation.work.not_a_mounted_operation"),
+            predecessors: BTreeSet::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            fan_out: Some(WorkflowFanOut { max_width: 3 }),
+        }],
+        definition.pinned_policy_digest().clone(),
+        definition.pinned_configuration_digest().clone(),
+        definition.pinned_catalog_digest().clone(),
+    )
+    .expect("uncataloged workflow definition");
+    client
+        .execute::<WorkflowRegisterDefinition>(&WorkflowDefinitionRegisterRequest {
+            definition: uncataloged,
+        })
+        .expect("candidate registration stays lenient before activation");
+    let admission_denial = client
+        .execute::<WorkflowActivateDefinition>(&WorkflowDefinitionActivateRequest {
+            definition_id: uncataloged_definition_id,
+            definition_version: 1,
+            expected_revision: 1,
+        })
+        .expect_err("activation must refuse an operation the catalog does not mount");
+    assert!(
+        matches!(
+            admission_denial,
+            ClientError::Problem(ref problem) if problem.kind == "invalid_request"
+        ),
+        "catalog admission denial must be a typed refusal: {admission_denial}"
+    );
+
     client
         .execute::<WorkflowActivateDefinition>(&WorkflowDefinitionActivateRequest {
             definition_id: definition_id.clone(),

@@ -167,6 +167,7 @@ use engine::{
     ensure_context_scout_owner_before_advertising,
     ensure_git_index_transactions_for_mutation_owners,
 };
+mod adoption_observation;
 mod automation_observation;
 pub(crate) use automation_observation::{
     project_run_observation_producer as project_automation_observation_producer,

@@ -23,9 +23,69 @@ use crate::advisory::{
     GitHubCurrentBranchRemapper, GitHubReadOnlyAdmissionError, GitHubReadOnlyConnector,
     GitHubReadOnlyDescriptorSetV1, GitHubRestDescriptorV1,
 };
-use crate::stack_coordinator::DaemonGitHubStackCoordinatorV1;
+use crate::observability::{
+    BoundedObservabilityProducerV1, GitHubStackCapabilityObservationResultV1,
+    GitHubStackDriftObservationResultV1, GitHubStackProbeOwnerV1, record_github_stack_capability,
+    record_github_stack_drifts,
+};
+use crate::stack_coordinator::{
+    DaemonGitHubStackCoordinatorV1, GitHubStackObservationV1, GitHubStackProviderSourceBindingV1,
+};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::Database;
+
+/// Canonical Observatory mount for the coordinator observations this owner
+/// produces. Absent when the composition root could not mount the probe
+/// owner, producer, and observation database; refresh then keeps producing
+/// product anchors without canonical capability/drift receipts.
+#[derive(Clone)]
+pub struct GitHubStackObservabilityV1 {
+    pub probe_owner: GitHubStackProbeOwnerV1,
+    pub producer: Arc<BoundedObservabilityProducerV1>,
+    pub observation_db: RegisteredGlobalDbLeaseV1,
+}
+
+impl GitHubStackObservabilityV1 {
+    /// Offers one validated coordinator observation as a capability receipt
+    /// plus one receipt per exact drift interval. Telemetry refusal is
+    /// logged, never propagated to the refresh product path.
+    pub fn record(
+        &self,
+        source_binding: &GitHubStackProviderSourceBindingV1,
+        observation: &GitHubStackObservationV1,
+    ) {
+        let capability = record_github_stack_capability(
+            self.observation_db.as_ref(),
+            Some(self.producer.as_ref()),
+            &self.probe_owner,
+            source_binding,
+            observation,
+        );
+        if capability != GitHubStackCapabilityObservationResultV1::Enqueued {
+            tracing::warn!(
+                event = "github_stack_capability_observation_refused",
+                outcome = ?capability,
+                "GitHub stack capability receipt did not enter the canonical producer"
+            );
+        }
+        match record_github_stack_drifts(
+            self.observation_db.as_ref(),
+            Some(self.producer.as_ref()),
+            &self.probe_owner,
+            source_binding,
+            observation,
+        ) {
+            GitHubStackDriftObservationResultV1::Emitted { dropped: 0, .. } => {}
+            refused => {
+                tracing::warn!(
+                    event = "github_stack_drift_observation_refused",
+                    outcome = ?refused,
+                    "GitHub stack drift receipts did not fully enter the canonical producer"
+                );
+            }
+        }
+    }
+}
 
 pub struct GitHubReviewRuntimeOwnerConfigV1 {
     pub database: Database,
@@ -37,6 +97,7 @@ pub struct GitHubReviewRuntimeOwnerConfigV1 {
     pub identity: GitHubReviewProviderIdentityV1,
     pub stack_coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
     pub stack_anchor_db: RegisteredGlobalDbLeaseV1,
+    pub stack_observability: Option<GitHubStackObservabilityV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +130,7 @@ pub struct GitHubReviewRuntimeOwnerV1<R, A> {
     stack_provider: tracedecay_domain::ProviderId,
     stack_coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
     stack_anchors: super::ProjectGitHubStackAnchorAuthorityV1,
+    stack_observability: Option<GitHubStackObservabilityV1>,
 }
 
 impl<R, A> GitHubReviewRuntimeOwnerV1<R, A>
@@ -146,10 +208,16 @@ where
                     self.stack_scope.clone(),
                     self.stack_provider.clone(),
                     provider_outcome,
-                    source_binding,
+                    source_binding.clone(),
                     stack_observed_at,
                 ) {
                     Ok(observation) => {
+                        // Offered before anchor publication so a publication
+                        // refusal below cannot conceal the observation the
+                        // coordinator already made.
+                        if let Some(stack_observability) = &self.stack_observability {
+                            stack_observability.record(&source_binding, &observation);
+                        }
                         let anchor_publication = self
                             .stack_anchors
                             .publish(context, request, &observation, self.source_access.as_ref())
@@ -224,6 +292,7 @@ where
     let stack_scope = config.resolved_scope.clone();
     let stack_provider = config.identity.provider.clone();
     let stack_coordinator = Arc::clone(&config.stack_coordinator);
+    let stack_observability = config.stack_observability.clone();
     let stack_anchors = super::ProjectGitHubStackAnchorAuthorityV1::new(
         config.stack_anchor_db.clone(),
         config.feedback_scope.clone(),
@@ -252,6 +321,7 @@ where
         stack_provider,
         stack_coordinator,
         stack_anchors,
+        stack_observability,
     })
 }
 

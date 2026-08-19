@@ -155,6 +155,15 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --profile ci --locked
 
+      - name: Upload ${{ matrix.name }} nextest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-${{ matrix.name }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
   windows-build:
     name: Build Windows tests
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
@@ -281,6 +290,11 @@ jobs:
         run: |
           npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
           ast-grep --version
+
+      # The architecture tests exec `cargo metadata` at runtime; without an
+      # installed toolchain the rustup shim starts a mid-test component
+      # download that flakes. Install up front like the build job does.
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest

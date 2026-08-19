@@ -1,4 +1,8 @@
-import type { ExecutionTopologyViewV1, WorkAttemptListV1 } from '../../../contracts/index.ts';
+import type {
+  ExecutionTopologyMetricsV1,
+  ExecutionTopologyViewV1,
+  WorkAttemptListV1,
+} from '../../../contracts/index.ts';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Meter, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
@@ -20,9 +24,9 @@ import { ChannelAbsence, ViewCaption } from './WorkViewChannel.tsx';
  * Plan 26's execution-topology accounting, drawn on the landed topology lens.
  *
  * One ledger, twelve cards, and the same seven-facet footer under every one of
- * them. `workTopologyAccounting.ts` explains which three cards have a mounted
- * source and why the other nine cannot; this file's whole job is to render what
- * that structure holds and to be incapable of rendering anything else.
+ * them. `workTopologyAccounting.ts` explains which cards have a mounted source
+ * and why the rest stay stated absences; this file's whole job is to render
+ * what that structure holds and to be incapable of rendering anything else.
  *
  * Two rendering rules carry the plan's invariant, and both are structural
  * rather than stylistic:
@@ -47,12 +51,14 @@ export function WorkTopologyAccounting({
   attemptList,
   topology,
   graph,
+  metrics,
 }: {
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
   topology?: WorkResult<ExecutionTopologyViewV1> | undefined;
   graph: WorkGraphReading;
+  metrics?: WorkResult<ExecutionTopologyMetricsV1> | undefined;
 }) {
-  const reading = workTopologyAccounting(attemptList, graph, topology);
+  const reading = workTopologyAccounting(attemptList, graph, topology, metrics);
   return (
     <Panel legend="Execution-topology accounting" elevation="well">
       <div className="flex min-w-0 flex-col gap-3">

@@ -81,7 +81,7 @@ pub use network::{
 };
 pub use owner::{
     GitHubReviewRuntimeOwnerBuildErrorV1, GitHubReviewRuntimeOwnerConfigV1,
-    GitHubReviewRuntimeOwnerV1, build_github_review_runtime_owner_v1,
+    GitHubReviewRuntimeOwnerV1, GitHubStackObservabilityV1, build_github_review_runtime_owner_v1,
 };
 pub use read_requests::{GitHubGraphQlReadRequestV1, GitHubReadResumeV1, GitHubRestReadRequestV1};
 pub use releases::{

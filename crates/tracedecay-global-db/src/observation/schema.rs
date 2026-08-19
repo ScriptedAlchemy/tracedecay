@@ -109,7 +109,7 @@ fn canonical_column_set(columns: &[&str]) -> BTreeSet<String> {
 /// surfaces a typed `ResetRequired` naming this authority instead of
 /// rewriting data in place. Runs at schema installation for fresh stores and
 /// at the attach boundary for existing ones.
-pub(crate) async fn require_admitted_observation_shape(
+async fn require_admitted_observation_shape(
     conn: &impl QueryExecutor,
 ) -> tracedecay_runtime_core::errors::Result<()> {
     if observation_table_exists(conn).await? {

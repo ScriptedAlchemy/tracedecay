@@ -368,21 +368,14 @@ fn partial_effect_survives_physical_daemon_restart_via_cli() {
 
 /// The `ResetRequired` half of the same journey.
 ///
-/// Ignored because it currently fails on a *product* gap, not on the fixture:
-/// a project store whose relational shape this binary refuses never publishes
-/// a typed `ResetRequired` through the daemon's project-open path. The open
-/// never settles, so `wait_for_project_open_publication`
-/// (`src/daemon/project_open_orchestration.rs`) reports warming, callers retry
-/// the pre-admission `application.surface.unavailable` for their whole budget,
-/// and the terminal they finally see is their own `timed_out` — never the
-/// `reset` legal action that is the only thing that can actually fix the store.
-/// `project_open_problem` (`src/daemon/invocation_dispatch.rs`) now maps a
-/// reset-required open to the typed terminal for every operation rather than
-/// only the workflow application, which is necessary but not sufficient: the
-/// open has to settle with that error for the mapping to ever run.
-///
-/// The assertions below are the contract this journey must eventually prove and
-/// are deliberately left unweakened.
+/// A refused store's project open settles with the typed reset terminal:
+/// `wait_for_project_open_publication`
+/// (`src/daemon/project_open_orchestration.rs`) publishes the failed open
+/// instead of reporting warming forever, and `project_open_problem`
+/// (`src/daemon/invocation_dispatch.rs`) maps it to the `reset`-only legal
+/// action for every operation. This journey proves that settlement — and that
+/// a physical restart repeats it identically, because a restart is not a
+/// reset.
 #[test]
 fn reset_required_survives_physical_daemon_restart_via_cli() {
     let home = tempfile::TempDir::new().expect("isolated home");

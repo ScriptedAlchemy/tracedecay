@@ -1513,6 +1513,9 @@ async fn resolve_production_github_provider_config(
     } else {
         None
     };
+    let stack_observability =
+        resolve_github_stack_observability(invocation, project_root, state, &owner, &repository)
+            .await;
     let authorization_context =
         github_discovery_authorization_context(&state.access, feedback_scope);
     let discovery_request = github_discovery_source_access_request(feedback_scope);
@@ -1559,6 +1562,7 @@ async fn resolve_production_github_provider_config(
                     identity,
                     stack_coordinator: invocation.github_stack_coordinator(),
                     stack_anchor_db: state.session_db.clone(),
+                    stack_observability,
                 },
             )
         }
@@ -1568,6 +1572,67 @@ async fn resolve_production_github_provider_config(
         github,
         github_source_access: source_access,
         ci,
+    })
+}
+
+/// Mounts the canonical Observatory lane for GitHub stack observations.
+/// Telemetry mounting failure is logged and yields `None` — the review
+/// refresh owner keeps its product path either way.
+async fn resolve_github_stack_observability(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    state: &ProjectOpenDependentOwnerState,
+    github_owner: &str,
+    github_repository: &str,
+) -> Option<tracedecay_usecases::advisory::GitHubStackObservabilityV1> {
+    let unavailable = |reason: &str, detail: String| {
+        tracing::warn!(
+            event = "github_stack_observability_mount",
+            outcome = "unavailable",
+            reason,
+            detail,
+            project = %project_root.display(),
+            "GitHub stack observability lane is not mounted"
+        );
+    };
+    let topology_policy = match crate::config::topology::resolved_work_topology_policy(
+        &state.scout_configuration.snapshot,
+    ) {
+        Ok(policy) => policy.clone(),
+        Err(error) => {
+            unavailable("work_topology_policy", format!("{error:?}"));
+            return None;
+        }
+    };
+    // Mirrors the native-integration mount condition at project open: the
+    // standard pull-request fallback exists exactly when this project is an
+    // admitted Git worktree (project open fails earlier otherwise).
+    let native_git_fallback_mounted = crate::worktree::git_worktree_root(project_root).is_some();
+    let probe_owner = match tracedecay_usecases::observability::GitHubStackProbeOwnerV1::mount(
+        state.scope.clone(),
+        topology_policy,
+        github_owner,
+        github_repository,
+        native_git_fallback_mounted,
+    ) {
+        Ok(probe_owner) => probe_owner,
+        Err(error) => {
+            unavailable("probe_owner", format!("{error:?}"));
+            return None;
+        }
+    };
+    let Some(producer) = invocation
+        .service
+        .observability_producer(Some(project_root))
+        .await
+    else {
+        unavailable("producer_unmounted", String::new());
+        return None;
+    };
+    Some(tracedecay_usecases::advisory::GitHubStackObservabilityV1 {
+        probe_owner,
+        producer,
+        observation_db: state.session_db.clone(),
     })
 }
 

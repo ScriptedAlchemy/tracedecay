@@ -1086,6 +1086,20 @@ pub(super) async fn register_project_open_production_owners(
         delivery_settlements,
     );
 
+    // Once-per-project-open adoption-eligibility census over the composed
+    // capability catalog, recorded through the project-bound session
+    // authority. Fire-and-forget telemetry: project open never blocks or
+    // fails on observation storage.
+    let census_db = session_db.clone();
+    let census_project_root = project_root.to_path_buf();
+    tokio::spawn(async move {
+        super::adoption_observation::record_project_open_adoption_census(
+            census_db.as_ref(),
+            &census_project_root,
+        )
+        .await;
+    });
+
     // Semantic restore can decode a large durable generation. Keep that
     // capability-specific warm-up behind every independent production owner
     // so diagnostics, tests, feedback, and LSP reads remain available while

@@ -86,7 +86,11 @@ impl GraphDbRegistry {
         check_registration_request(&registration)?;
         let binding = registration.binding().clone();
         let verified_locator = registration.verified_locator().clone();
-        let canonical_path = registration.canonical_path().to_path_buf();
+        // `check` compares this against the registry entry, which stores the
+        // file's canonical name. Capture the same canonical form here so a
+        // lease that spells the identical file through a symlinked ancestor
+        // (macOS `/var` -> `/private/var`) is not refused as a conflict.
+        let canonical_path = canonical_graph_database_file(registration.canonical_path())?;
         let database = self.registered_database(&registration)?;
         Ok(RegisteredGraphDbOperationV1 {
             database,

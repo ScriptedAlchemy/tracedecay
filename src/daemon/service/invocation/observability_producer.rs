@@ -129,6 +129,23 @@ impl DaemonInvocationService {
             .await
     }
 
+    /// The mounted producer together with the exact project session database
+    /// it writes through, for owners that also record directly through the
+    /// registered observation authority.
+    pub(crate) async fn observability_producer_with_database(
+        &self,
+        project_root: Option<&Path>,
+    ) -> Option<(
+        crate::global_db::RegisteredGlobalDbLeaseV1,
+        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+    )> {
+        self.project_runtimes
+            .read::<RegisteredObservabilityProducerV1, _, _>(project_root?, |registered| {
+                (registered.database(), registered.producer())
+            })
+            .await
+    }
+
     pub(crate) fn observability_producer_for_project_root(
         &self,
         project_root: &Path,

@@ -555,6 +555,11 @@ where
             input.cursor.as_ref(),
         )
         .await?;
+    // Canonical Plan 26 retrieval-pipeline observation from the composition
+    // this query actually ran; an uninstalled lane records nothing.
+    if let Some(observability) = schedulers.index_observability_for_scope(scope).await {
+        observability.record_retrieval_composition(&authorized, &request.budget);
+    }
     Ok(ExecutedQuerySearchV1 {
         generation,
         authorized,

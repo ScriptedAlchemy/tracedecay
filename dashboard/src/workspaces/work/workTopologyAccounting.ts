@@ -1,4 +1,5 @@
 import type {
+  ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
   WorkAttemptListV1,
   WorkAttemptTopologyBindingV1,
@@ -14,6 +15,10 @@ import {
   duplicateEffectCard,
   rerunCard,
 } from './workAccountingCards.ts';
+import {
+  githubStackCapabilityCard,
+  integrationOutcomesCard,
+} from './workAccountingMetrics.ts';
 import {
   unavailableCard,
   type WorkAccountingCard,
@@ -42,19 +47,18 @@ import {
  *
  * WHERE THE NUMBERS COME FROM, AND WHERE THEY DO NOT
  *
- * Plan 26 owns eleven persisted execution-topology events and projects them
- * into `ExecutionTopologyMetricsV1`
- * (`crates/tracedecay-application/src/execution_topology_metrics.rs`, whose
- * `EXECUTION_TOPOLOGY_EVENT_KINDS_V1` is the exact list this module names in
- * its absences). That read model is NOT published to the dashboard: it has no
- * entry in `crates/tracedecay-dashboard-api/src/contract_schema.rs`, therefore
- * no schema in `contracts/generated.ts`, therefore no route this build could
- * call even if one were mounted. Nine of the twelve dimensions are fed by
- * nothing else, and they render as typed absences that name the event kind a
- * reviewer can grep for. None of them renders a zero.
+ * `ExecutionTopologyMetricsV1` is published at `operation.work.topology_metrics`
+ * (`/api/work/topology-metrics`), and this ledger consumes its integration and
+ * stack families through `workAccountingMetrics.ts`: the
+ * `work_merge_attempts_total` kind × outcome cells and the
+ * `github_stack_capability` reading, each cell decoded verbatim with the
+ * projector's own typed absences. The remaining event-fed dimensions render
+ * as typed absences naming the event kind a reviewer can grep for
+ * (`EXECUTION_TOPOLOGY_EVENT_KINDS_V1`): this lens does not decode their
+ * descriptors, and an absence stated is not a zero shown.
  *
- * Three dimensions have a real, mounted source, and those are the cards this
- * module adds to the landed lens:
+ * Three further dimensions have a real, mounted source on the attempt and
+ * graph reads, and those are the cards this module adds to the landed lens:
  *
  *   concurrency        `operation.work.views` →
  *                      `WorkWorkloadProjectionV1.requested_concurrency` and
@@ -113,6 +117,7 @@ export function workTopologyAccounting(
   result: WorkResult<WorkAttemptListV1> | undefined,
   graph: WorkGraphReading,
   topology?: WorkResult<ExecutionTopologyViewV1> | undefined,
+  metrics?: WorkResult<ExecutionTopologyMetricsV1> | undefined,
 ): WorkTopologyAccountingReading {
   const canonicalTopology = topologyBinding(topology);
   const boundAttempts = attemptsBoundToTopology(result, canonicalTopology);
@@ -141,23 +146,11 @@ export function workTopologyAccounting(
     unavailableCard('ready_to_integrated_latency', 'ready-to-integrated latency', [
       { key: 'latency_distribution', label: 'Latency distribution', measure: 'the ready-to-integrated latency distribution' },
     ], 'No read in this build carries a duration at all: an attempt records the instant it finished and never the instant it started.'),
-    unavailableCard('integration_outcomes', 'observed native fast-forward/merge/cherry-pick outcomes', [
-      { key: 'fast_forward', label: 'Fast-forward', measure: 'observed fast-forward outcomes' },
-      { key: 'merge', label: 'Merge commit', measure: 'observed merge outcomes' },
-      { key: 'cherry_pick', label: 'Cherry-pick', measure: 'observed cherry-pick outcomes' },
-    ], 'The landed lens reads the integration STRATEGY the policy pins; what an integration was observed to do is a different fact and is not read off the policy.'),
+    integrationOutcomesCard(metrics),
     unavailableCard('stale_stack_age', 'stale-stack age', [
       { key: 'stack_age', label: 'Stack age distribution', measure: 'the stale-stack age distribution' },
     ]),
-    unavailableCard(
-      'github_stack_capability',
-      'GitHub stack capability state and generic-fallback availability',
-      [
-        { key: 'capability_state', label: 'Capability state', measure: 'the GitHub stack capability state' },
-        { key: 'generic_fallback', label: 'Generic-fallback availability', measure: 'generic-fallback availability' },
-      ],
-      'WorkFallbackTopology on the execution snapshot is the provider-EXECUTABLE fallback (codex_cli or disabled) and is not the review-surface generic fallback; it is named here so it is never counted into this card.',
-    ),
+    githubStackCapabilityCard(metrics),
     blockedTimeCard(boundGraph),
     rerunCard(reading, page, census),
     duplicateEffectCard(reading, page, census),

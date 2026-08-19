@@ -2867,6 +2867,7 @@ mod git_tree_capture;
 mod graph_activation;
 pub(crate) mod identity;
 mod ignored_dependencies;
+pub(in crate::daemon) mod observability;
 mod privacy;
 pub(in crate::daemon) mod queries;
 pub(in crate::daemon) mod query_runtime;

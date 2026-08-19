@@ -245,12 +245,12 @@ impl PersistentGitGraph {
                 .expect("benchmark publication context is valid");
         let commit = self
             .registry
-            .publish_verified_manifest(
+            .publish_verified(
                 self.registration(),
                 &mut self.authority,
                 &publish_context,
                 &key,
-                manifest,
+                Some(manifest),
             )
             .expect("benchmark generation publishes and verifies");
         self.latest_head = Some(commit.head);

@@ -138,6 +138,25 @@ gate (run by SDK conformance CI) enforces this job isolation.
    checksummed GitHub Release assets, refreshes `server.json`, and publishes
    `@tracedecay/sdk` to npm once release verification passes.
 
+## Beta Channel
+
+The `codex/tracedecay-total-redesign-plan` branch runs its own release-please
+channel: `beta-release-please.yml` with `release-please-config-beta.json` and
+`.release-please-manifest-beta.json` (versioning strategy `prerelease`,
+prerelease type `beta`). Every push to the branch opens or updates a release
+PR; merging it tags `vX.Y.Z-beta.N` and publishes a GitHub prerelease, which
+triggers `release-beta.yml` to build, attest, and upload
+`tracedecay-beta-<tag>-<platform>` archives plus `SHA256SUMS`. Prereleases are
+never marked `latest`, and the CLI's beta upgrade channel
+(`src/cloud.rs::asset_name`) resolves exactly these asset names. Manual
+install (macOS arm64):
+
+```sh
+gh release download <tag> -p "tracedecay-beta-<tag>-aarch64-macos.tar.gz"
+tar xzf "tracedecay-beta-<tag>-aarch64-macos.tar.gz"
+install -m 755 tracedecay ~/.cargo/bin/tracedecay
+```
+
 ## Manual Recovery
 
 If the GitHub Release is created but the binary artifact workflow does not run,

@@ -504,12 +504,12 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
     assert_eq!(
         registered
             .registry
-            .publish_verified_manifest(
+            .publish_verified(
                 registration(registered.binding.clone(), temp.path()),
                 &mut authority,
                 &context,
                 &record.publication.key,
-                foreign,
+                Some(foreign),
             )
             .unwrap_err(),
         GraphDbError::Conflict
@@ -519,12 +519,12 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     let commit = registered
         .registry
-        .publish_verified_manifest(
+        .publish_verified(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
             &context,
             &record.publication.key,
-            sealed_manifest.clone(),
+            Some(sealed_manifest.clone()),
         )
         .expect("the exact supplied sealed projection manifest must publish");
     assert_eq!(commit.head.key, record.publication.key);
@@ -568,6 +568,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
             &mut authority,
             &context,
             &g1_record.publication.key,
+            None,
         )
         .unwrap();
     let g1_head = g1_commit.head.clone();
@@ -614,6 +615,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
             &mut authority,
             &context,
             &g2_record.publication.key,
+            None,
         )
         .unwrap();
     drop(g2_commit);
@@ -759,6 +761,7 @@ fn verified_generations_keep_old_reads_dependencies_and_leases_stable() {
             &mut authority,
             &context,
             &b1_record.publication.key,
+            None,
         )
         .unwrap();
 
@@ -803,6 +806,7 @@ fn verified_generations_keep_old_reads_dependencies_and_leases_stable() {
             &mut authority,
             &context,
             &a1_record.publication.key,
+            None,
         )
         .unwrap();
     let a1_snapshot = registered
@@ -856,6 +860,7 @@ fn verified_generations_keep_old_reads_dependencies_and_leases_stable() {
             &mut authority,
             &context,
             &b2_record.publication.key,
+            None,
         )
         .unwrap();
     assert_eq!(authority.cas_calls, 3);
@@ -893,6 +898,7 @@ fn verified_generations_keep_old_reads_dependencies_and_leases_stable() {
             &mut authority,
             &context,
             &a2_record.publication.key,
+            None,
         )
         .unwrap();
     drop(a1_snapshot);
@@ -922,6 +928,7 @@ fn restart_reverification_installs_once_and_steady_reads_need_no_authority() {
             &mut authority,
             &context,
             &record.publication.key,
+            None,
         )
         .unwrap();
     let first_head = first.head.clone();
@@ -942,6 +949,7 @@ fn restart_reverification_installs_once_and_steady_reads_need_no_authority() {
             &mut authority,
             &context,
             &g2_record.publication.key,
+            None,
         )
         .unwrap();
     assert!(registered.close().unwrap());
@@ -1035,6 +1043,7 @@ fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
             &mut authority,
             &context,
             &g1_record.publication.key,
+            None,
         )
         .unwrap();
     let calls_after_g1 = authority.cas_calls;
@@ -1045,6 +1054,7 @@ fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
             &mut authority,
             &context,
             &g1_record.publication.key,
+            None,
         )
         .unwrap();
     assert_eq!(exact.head, first.head);
@@ -1068,6 +1078,7 @@ fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
                 &mut authority,
                 &context,
                 &g2_record.publication.key,
+                None,
             )
             .unwrap_err(),
         tracedecay_graph_db::GraphDbError::Cancelled
@@ -1146,6 +1157,7 @@ fn labeled_byte_record_entities_reach_a_verified_head() {
             &mut authority,
             &context,
             &record.publication.key,
+            None,
         )
         .unwrap();
     assert_eq!(commit.head.key, record.publication.key);
@@ -1159,5 +1171,58 @@ fn labeled_byte_record_entities_reach_a_verified_head() {
     assert_eq!(
         snapshot.generation(),
         &GraphGenerationId::new(&generation).unwrap()
+    );
+}
+
+/// A registration may spell the database file through a symlinked ancestor
+/// (macOS reaches `/var` and `/tmp` through `/private/...`). The registry
+/// collapses every spelling to the file's one canonical name — while still
+/// refusing a store directory that is itself a symlink — so an operation
+/// whose lease carries the aliased spelling must publish rather than be
+/// refused as a foreign database.
+#[cfg(unix)]
+#[test]
+fn registration_spelled_through_symlinked_ancestor_publishes() {
+    let temp = TempDir::new().unwrap();
+    let real = temp.path().join("real");
+    std::fs::create_dir_all(real.join("store")).unwrap();
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let aliased_store = alias.join("store");
+    let registered = RegisteredGraph::new_mounted(&aliased_store).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("alias", "work");
+    let g1 = manifest(identity.clone(), "g1", "g1", vec![], vec![]);
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'e',
+    );
+    let commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), &aliased_store),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    assert_eq!(commit.head.key, g1_record.publication.key);
+    assert_eq!(
+        registered
+            .registry
+            .verified_snapshot(
+                registration(registered.binding.clone(), &aliased_store),
+                &identity,
+            )
+            .unwrap()
+            .generation(),
+        &GraphGenerationId::new("g1").unwrap()
     );
 }

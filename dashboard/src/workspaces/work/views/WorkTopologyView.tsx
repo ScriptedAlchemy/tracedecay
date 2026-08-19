@@ -1,4 +1,5 @@
 import type {
+  ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
   WorkAttemptListCoverageV1,
   WorkAttemptListV1,
@@ -55,6 +56,7 @@ export function WorkTopologyView({
   attemptList,
   topology,
   graph,
+  metrics,
   selected,
   onSelect,
 }: {
@@ -64,6 +66,7 @@ export function WorkTopologyView({
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
   topology: WorkResult<ExecutionTopologyViewV1> | undefined;
   graph: WorkGraphReading;
+  metrics: WorkResult<ExecutionTopologyMetricsV1> | undefined;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
@@ -87,7 +90,12 @@ export function WorkTopologyView({
         </div>
       </Panel>
 
-      <WorkTopologyAccounting attemptList={attemptList} topology={topology} graph={graph} />
+      <WorkTopologyAccounting
+        attemptList={attemptList}
+        topology={topology}
+        graph={graph}
+        metrics={metrics}
+      />
     </div>
   );
 }

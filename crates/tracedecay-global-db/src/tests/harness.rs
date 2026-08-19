@@ -55,7 +55,7 @@ impl RegisteredGlobalDbRetirementHarnessV1 {
         .await
         .expect("publish registered retirement test runtime");
         let (database, _runtime, retirement) = fixture.into_parts();
-        let database = RegisteredGlobalDbOwnerV1::migrate_and_attach(database)
+        let database = RegisteredGlobalDbOwnerV1::admit_and_attach(database)
             .await
             .expect("attach registered retirement test runtime");
         let registered = database
@@ -1219,7 +1219,7 @@ async fn open_registered_test_database_with(
     )
     .await?;
     let (database_owner, _runtime, _retirement) = fixture.into_parts();
-    let database = RegisteredGlobalDbOwnerV1::migrate_and_attach(database_owner).await?;
+    let database = RegisteredGlobalDbOwnerV1::admit_and_attach(database_owner).await?;
     // The physical fixture is already opened in the mode requested above.
     // Issuance preserves that capability; neither test branch manufactures a
     // second raw authority after publication.

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -16,6 +17,7 @@ use tracedecay_domain::{
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::{
+    advisory::GitHubStackObservabilityV1,
     observability::{
         BoundedObservabilityProducerV1, GitHubStackDriftObservationResultV1,
         GitHubStackDriftObservationUnavailableV1, GitHubStackProbeOwnerV1,
@@ -108,6 +110,96 @@ fn drift(
         },
     )
     .expect("canonical drift observation")
+}
+
+/// The review refresh owner's Observatory lane (`GitHubStackObservabilityV1::
+/// record`, invoked from `GitHubReviewRuntimeOwnerV1::refresh` after each
+/// coordinator observation) must persist one capability receipt plus one
+/// receipt per exact drift interval through the bounded producer.
+#[tokio::test]
+async fn review_owner_observability_lane_records_capability_and_drift_receipts() {
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let project = tempfile::tempdir().expect("project");
+    let scope = resolved_scope("owner-lane");
+    let runtime = RegisteredGlobalDbTestRuntime::project(
+        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        project.path(),
+        scope.project_id.clone(),
+    )
+    .await
+    .expect("registered runtime");
+    let database = runtime.project_database_arc().expect("project database");
+    let producer = Arc::new(
+        BoundedObservabilityProducerV1::start(
+            database.clone(),
+            producer_identity(&scope.project_id),
+            64,
+        )
+        .expect("producer"),
+    );
+    let lane = GitHubStackObservabilityV1 {
+        probe_owner: GitHubStackProbeOwnerV1::mount(
+            scope.clone(),
+            safe_work_topology_policy_v1(),
+            "octo-org",
+            "stack-repository",
+            true,
+        )
+        .expect("stack probe owner"),
+        producer: Arc::clone(&producer),
+        observation_db: database.clone(),
+    };
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    coordinator
+        .register_scope(&scope, GitHubStackedPullRequestPolicyV1::Disabled)
+        .expect("register scope");
+    let source_binding = source_binding(&scope);
+    let mut observation = coordinator
+        .observe_policy(
+            scope.clone(),
+            ProviderId::new("provider.github").expect("provider"),
+            source_binding.clone(),
+            UtcMicros(1_000),
+        )
+        .expect("policy observation");
+    let open = drift(&scope, 2_000, 2_000, IntervalStateV1::Open);
+    observation.observed_at = open.observed_at;
+    observation.drift_observations = vec![open];
+
+    lane.record(&source_binding, &observation);
+
+    producer.shutdown().await.expect("flush producer");
+    drop(lane);
+    drop(producer);
+    let port = RegisteredObservabilityPortV1::new(database.as_ref());
+    let query = |event_kind: &str| ObservabilityQueryV1 {
+        authorized_scope_ref: scope.project_id.as_str().to_owned(),
+        event_kinds: vec![event_kind.to_owned()],
+        horizon: ObservabilityHorizonV1 {
+            since_micros: 0,
+            until_micros: 10_000,
+        },
+        after_watermark: None,
+        limit: 16,
+    };
+    let capability_page = port
+        .query(query("work.github_stack_capability.observed.v1"))
+        .await
+        .expect("capability receipts");
+    assert_eq!(
+        capability_page.events.len(),
+        1,
+        "one coordinator observation produces exactly one capability receipt"
+    );
+    let drift_page = port
+        .query(query("work.stack_drift.observed.v1"))
+        .await
+        .expect("drift receipts");
+    assert_eq!(
+        drift_page.events.len(),
+        1,
+        "one open drift interval produces exactly one drift receipt"
+    );
 }
 
 #[tokio::test]

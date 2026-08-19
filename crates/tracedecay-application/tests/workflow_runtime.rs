@@ -151,7 +151,7 @@ fn request(inputs: &[&str], max_width: u32, max_parallel: u32) -> WorkflowFanOut
         id::<ProjectId>("project.workflow.runtime"),
         vec![WorkflowStep {
             step_id: id::<WorkflowStepId>("fan-out"),
-            operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+            operation: id::<WorkflowOperationRef>("operation.work.start_attempt"),
             predecessors: Default::default(),
             inputs: Vec::new(),
             outputs: vec![id::<WorkflowOutputName>("finding")],

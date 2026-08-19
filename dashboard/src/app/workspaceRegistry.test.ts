@@ -27,6 +27,7 @@ const CHANNEL_ORDER = [
   ['costs', 'Costs'],
   ['settings', 'Settings'],
   ['work', 'Work'],
+  ['workflows', 'Workflows'],
 ] as const;
 
 function descriptors(items: readonly { path: string; label: string }[]) {
@@ -34,7 +35,7 @@ function descriptors(items: readonly { path: string; label: string }[]) {
 }
 
 describe('workspace registry', () => {
-  it('routes the thirteen workspaces in their fixed channel order', () => {
+  it('routes the fourteen workspaces in their fixed channel order', () => {
     expect(descriptors(WORKSPACES)).toEqual(CHANNEL_ORDER);
   });
 

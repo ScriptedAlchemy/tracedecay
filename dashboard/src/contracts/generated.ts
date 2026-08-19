@@ -5066,6 +5066,15 @@ export const WorkAttemptV1Schema = z.object({
 });
 export type WorkAttemptV1 = z.infer<typeof WorkAttemptV1Schema>;
 
+export const WorkAuthoritySchema = z.object({
+  actor_id: z.lazy(() => ActorIdSchema),
+  policy_digest: z.lazy(() => ManifestDigestSchema),
+  project_id: z.lazy(() => ProjectIdSchema),
+  repository_id: z.lazy(() => RepositoryIdSchema),
+  worktree_id: z.lazy(() => WorktreeIdSchema),
+}).strict();
+export type WorkAuthority = z.infer<typeof WorkAuthoritySchema>;
+
 /** Calibrated sizing. Emitted ONLY when support >= floor. Every field named separately
 per Plan 06 :84-85; `support_floor` carries the governing floor into the record. */
 export const WorkCalibratedSizingV1Schema = z.object({
@@ -5537,13 +5546,279 @@ export type WorkFenceEpochV1 = z.infer<typeof WorkFenceEpochV1Schema>;
 export const WorkFilesystemPolicySchema = z.enum(["read_only", "workspace_write"]);
 export type WorkFilesystemPolicy = z.infer<typeof WorkFilesystemPolicySchema>;
 
+export const WorkflowDefinitionSchema = z.object({
+  definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
+  definition_version: z.number().int().safe().min(0),
+  pinned_catalog_digest: z.lazy(() => ManifestDigestSchema),
+  pinned_configuration_digest: z.lazy(() => ManifestDigestSchema),
+  pinned_policy_digest: z.lazy(() => ManifestDigestSchema),
+  project_id: z.lazy(() => ProjectIdSchema),
+  steps: z.array(z.lazy(() => WorkflowStepSchema)),
+}).strict();
+export type WorkflowDefinition = z.infer<typeof WorkflowDefinitionSchema>;
+
+/** Wire request for [`WorkflowDefinitionService::activate`]. */
+export const WorkflowDefinitionActivateRequestSchema = z.object({
+  definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
+  definition_version: z.number().int().safe().min(1),
+  expected_revision: z.number().int().safe().min(1),
+}).strict();
+export type WorkflowDefinitionActivateRequest = z.infer<typeof WorkflowDefinitionActivateRequestSchema>;
+
+/** Revisioned lifecycle disposition of one definition version. */
+export const WorkflowDefinitionDispositionSchema = z.object({
+  definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
+  definition_version: z.number().int().safe().min(1),
+  revision: z.number().int().safe().min(1),
+  state: z.lazy(() => WorkflowDefinitionLifecycleStateSchema),
+  transitioned_at: z.lazy(() => UtcMicrosSchema),
+}).strict();
+export type WorkflowDefinitionDisposition = z.infer<typeof WorkflowDefinitionDispositionSchema>;
+
+/** Wire request for [`WorkflowDefinitionService::get`]. */
+export const WorkflowDefinitionGetRequestSchema = z.object({
+  definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
+  definition_version: z.number().int().safe().min(1),
+}).strict();
+export type WorkflowDefinitionGetRequest = z.infer<typeof WorkflowDefinitionGetRequestSchema>;
+
+/** Wire request for [`WorkflowDefinitionService::history`]. */
+export const WorkflowDefinitionHistoryRequestSchema = z.object({
+  definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
+}).strict();
+export type WorkflowDefinitionHistoryRequest = z.infer<typeof WorkflowDefinitionHistoryRequestSchema>;
+
+/** Strongly typed canonical identity: `WorkflowDefinitionId`. */
+export const WorkflowDefinitionIdSchema = z.string();
+export type WorkflowDefinitionId = z.infer<typeof WorkflowDefinitionIdSchema>;
+
+/** Durable lifecycle disposition of one immutable workflow definition version.
+
+Plan 32 ("Typed workflow definitions"): "Lifecycle retains candidate,
+validate, activate, retire, reject, list, get, diff, and history operations
+through the same application surfaces." The definition payload itself stays
+immutable — "Editing creates a new version; admitted runs remain pinned" —
+so the disposition is a separate revisioned aggregate keyed by the same
+definition identity. */
+export const WorkflowDefinitionLifecycleStateSchema = z.enum(["active", "candidate", "rejected", "retired", "validated"]);
+export type WorkflowDefinitionLifecycleState = z.infer<typeof WorkflowDefinitionLifecycleStateSchema>;
+
+/** Wire request for [`WorkflowDefinitionService::list`]. */
+export const WorkflowDefinitionListRequestSchema = z.object({}).strict();
+export type WorkflowDefinitionListRequest = z.infer<typeof WorkflowDefinitionListRequestSchema>;
+
+/** Wire request for [`WorkflowDefinitionService::reject`]. */
+export const WorkflowDefinitionRejectRequestSchema = z.object({
+  definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
+  definition_version: z.number().int().safe().min(1),
+  expected_revision: z.number().int().safe().min(1),
+}).strict();
+export type WorkflowDefinitionRejectRequest = z.infer<typeof WorkflowDefinitionRejectRequestSchema>;
+
+/** Wire request for [`WorkflowDefinitionService::retire`]. */
+export const WorkflowDefinitionRetireRequestSchema = z.object({
+  definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
+  definition_version: z.number().int().safe().min(1),
+  expected_revision: z.number().int().safe().min(1),
+}).strict();
+export type WorkflowDefinitionRetireRequest = z.infer<typeof WorkflowDefinitionRetireRequestSchema>;
+
+export const WorkflowFanOutSchema = z.object({
+  max_width: z.number().int().min(0),
+}).strict();
+export type WorkflowFanOut = z.infer<typeof WorkflowFanOutSchema>;
+
+export const WorkflowFanOutChildPlanV1Schema = z.object({
+  admit_command_id: z.lazy(() => WorkCommandIdSchema),
+  attempt_identity: z.lazy(() => WorkAttemptIdentityV1Schema),
+  create_command_id: z.lazy(() => WorkCommandIdSchema),
+  initiative: z.lazy(() => WorkInitiativeV1Schema),
+  instructions: z.string(),
+  item: z.lazy(() => WorkItemV1Schema),
+  milestone: z.lazy(() => WorkMilestoneV1Schema),
+  plan: z.lazy(() => WorkPlanV1Schema),
+  proposal: z.lazy(() => WorkProposalV1Schema),
+  proposal_command_id: z.lazy(() => WorkCommandIdSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+}).strict();
+export type WorkflowFanOutChildPlanV1 = z.infer<typeof WorkflowFanOutChildPlanV1Schema>;
+
+export const WorkflowFanOutFailurePolicyV1Schema = z.discriminatedUnion("policy", [z.object({
+  policy: z.literal("collect"),
+}), z.object({
+  policy: z.literal("fail_fast"),
+}), z.object({
+  policy: z.literal("require_at_least"),
+  successes: z.number().int().min(1).max(65535),
+})]);
+export type WorkflowFanOutFailurePolicyV1 = z.infer<typeof WorkflowFanOutFailurePolicyV1Schema>;
+
+export const WorkflowFanOutPlanV1Schema = z.object({
+  admitted_at: z.lazy(() => UtcMicrosSchema),
+  authority: z.lazy(() => WorkAuthoritySchema),
+  children: z.array(z.lazy(() => WorkflowFanOutChildPlanV1Schema)),
+  commit: z.lazy(() => CommitIdSchema),
+  effect_state: z.lazy(() => WorkEffectStateV1Schema),
+  execution_snapshot: z.lazy(() => WorkExecutionSnapshotSchema),
+  failure_policy: z.lazy(() => WorkflowFanOutFailurePolicyV1Schema),
+  maximum_parallel: z.number().int().min(1).max(65535),
+  operation: z.lazy(() => WorkflowOperationRefSchema),
+  plan_digest: z.lazy(() => ManifestDigestSchema),
+  reference: z.union([z.lazy(() => RefIdSchema), z.null()]),
+  step_id: z.lazy(() => WorkflowStepIdSchema),
+}).strict();
+export type WorkflowFanOutPlanV1 = z.infer<typeof WorkflowFanOutPlanV1Schema>;
+
 /** Strongly typed canonical identity: `WorkflowOperationRef`. */
 export const WorkflowOperationRefSchema = z.string();
 export type WorkflowOperationRef = z.infer<typeof WorkflowOperationRefSchema>;
 
+export const WorkflowOutputArtifactSchema = z.object({
+  artifact: z.lazy(() => WorkArtifactRefV1Schema),
+  attempt_identity: z.lazy(() => WorkAttemptIdentityV1Schema),
+}).strict();
+export type WorkflowOutputArtifact = z.infer<typeof WorkflowOutputArtifactSchema>;
+
 /** Strongly typed canonical identity: `WorkflowOutputName`. */
 export const WorkflowOutputNameSchema = z.string();
 export type WorkflowOutputName = z.infer<typeof WorkflowOutputNameSchema>;
+
+export const WorkflowOutputReferenceSchema = z.object({
+  output_name: z.lazy(() => WorkflowOutputNameSchema),
+  producer_step_id: z.lazy(() => WorkflowStepIdSchema),
+}).strict();
+export type WorkflowOutputReference = z.infer<typeof WorkflowOutputReferenceSchema>;
+
+export const WorkflowPlacementReceiptSchema = z.object({
+  backend: z.lazy(() => WorkProviderBackendV1Schema),
+  configuration_digest: z.lazy(() => ManifestDigestSchema),
+  model: z.string(),
+  placement_digest: z.lazy(() => ManifestDigestSchema),
+  provider_registry_digest: z.lazy(() => ManifestDigestSchema),
+  route: z.lazy(() => WorkProviderRouteV1Schema),
+  run_id: z.lazy(() => RunIdSchema),
+  step_id: z.lazy(() => WorkflowStepIdSchema),
+  topology_digest: z.lazy(() => ManifestDigestSchema),
+  worktree_placement: z.lazy(() => WorktreePlacementModeV1Schema),
+}).strict();
+export type WorkflowPlacementReceipt = z.infer<typeof WorkflowPlacementReceiptSchema>;
+
+export const WorkflowRunEventSchema = z.object({
+  command_id: z.lazy(() => WorkCommandIdSchema),
+  event: z.lazy(() => WorkflowRunEventKindSchema),
+  input_digest: z.lazy(() => ManifestDigestSchema),
+  occurred_at: z.lazy(() => UtcMicrosSchema),
+  run_id: z.lazy(() => RunIdSchema),
+  sequence: z.number().int().safe().min(0),
+}).strict();
+export type WorkflowRunEvent = z.infer<typeof WorkflowRunEventSchema>;
+
+export const WorkflowRunEventKindSchema = z.discriminatedUnion("type", [z.object({
+  definition: z.lazy(() => WorkflowDefinitionSchema),
+  fan_out_plans: z.array(z.lazy(() => WorkflowFanOutPlanV1Schema)),
+  pinned_provider_registry_digest: z.lazy(() => ManifestDigestSchema),
+  pinned_topology_digest: z.lazy(() => ManifestDigestSchema),
+  type: z.literal("admitted"),
+}), z.object({
+  type: z.literal("cancellation_requested"),
+}), z.object({
+  type: z.literal("cancelled"),
+}), z.object({
+  attempts: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
+  step_id: z.lazy(() => WorkflowStepIdSchema),
+  type: z.literal("fan_out_children_released"),
+}), z.object({
+  attempts: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
+  step_id: z.lazy(() => WorkflowStepIdSchema),
+  type: z.literal("fan_out_children_settled"),
+}), z.object({
+  type: z.literal("paused"),
+}), z.object({
+  type: z.literal("resumed"),
+}), z.object({
+  effect_receipt: z.lazy(() => WorkflowStepEffectReceiptSchema),
+  outputs: z.array(z.lazy(() => WorkflowStepOutputSchema)),
+  step_id: z.lazy(() => WorkflowStepIdSchema),
+  type: z.literal("step_completed"),
+}), z.object({
+  effect_receipt: z.lazy(() => WorkflowStepEffectReceiptSchema),
+  outputs: z.array(z.lazy(() => WorkflowStepOutputSchema)),
+  step_id: z.lazy(() => WorkflowStepIdSchema),
+  type: z.literal("step_failed"),
+}), z.object({
+  placement: z.lazy(() => WorkflowPlacementReceiptSchema),
+  step_id: z.lazy(() => WorkflowStepIdSchema),
+  type: z.literal("step_started"),
+})]);
+export type WorkflowRunEventKind = z.infer<typeof WorkflowRunEventKindSchema>;
+
+export const WorkflowRunGetRequestSchema = z.object({
+  run_id: z.lazy(() => RunIdSchema),
+}).strict();
+export type WorkflowRunGetRequest = z.infer<typeof WorkflowRunGetRequestSchema>;
+
+export const WorkflowRunProjectionSchema = z.object({
+  definition: z.lazy(() => WorkflowDefinitionSchema),
+  fan_out_plans: z.record(z.lazy(() => WorkflowFanOutPlanV1Schema)),
+  history: z.array(z.lazy(() => WorkflowRunEventSchema)),
+  pinned_provider_registry_digest: z.lazy(() => ManifestDigestSchema),
+  pinned_topology_digest: z.lazy(() => ManifestDigestSchema),
+  released_fan_out_attempts: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
+  run_id: z.lazy(() => RunIdSchema),
+  sequence: z.number().int().safe().min(0),
+  settled_fan_out_attempts: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
+  status: z.lazy(() => WorkflowRunStatusSchema),
+  steps: z.record(z.lazy(() => WorkflowStepRunProjectionSchema)),
+}).strict();
+export type WorkflowRunProjection = z.infer<typeof WorkflowRunProjectionSchema>;
+
+export const WorkflowRunStatusSchema = z.enum(["cancelled", "cancelling", "completed", "failed", "paused", "running"]);
+export type WorkflowRunStatus = z.infer<typeof WorkflowRunStatusSchema>;
+
+export const WorkflowStepSchema = z.object({
+  fan_out: z.union([z.lazy(() => WorkflowFanOutSchema), z.null()]),
+  inputs: z.array(z.lazy(() => WorkflowOutputReferenceSchema)),
+  operation: z.lazy(() => WorkflowOperationRefSchema),
+  outputs: z.array(z.lazy(() => WorkflowOutputNameSchema)),
+  predecessors: z.array(z.lazy(() => WorkflowStepIdSchema)),
+  step_id: z.lazy(() => WorkflowStepIdSchema),
+}).strict();
+export type WorkflowStep = z.infer<typeof WorkflowStepSchema>;
+
+export const WorkflowStepEffectOutcomeSchema = z.enum(["cancelled", "completed", "failed", "timed_out", "unknown"]);
+export type WorkflowStepEffectOutcome = z.infer<typeof WorkflowStepEffectOutcomeSchema>;
+
+export const WorkflowStepEffectReceiptSchema = z.object({
+  effect_digest: z.lazy(() => ManifestDigestSchema),
+  outcome: z.lazy(() => WorkflowStepEffectOutcomeSchema),
+  output_set_digest: z.lazy(() => ManifestDigestSchema),
+  placement_digest: z.lazy(() => ManifestDigestSchema),
+  receipt_digest: z.lazy(() => ManifestDigestSchema),
+  run_id: z.lazy(() => RunIdSchema),
+  step_id: z.lazy(() => WorkflowStepIdSchema),
+}).strict();
+export type WorkflowStepEffectReceipt = z.infer<typeof WorkflowStepEffectReceiptSchema>;
+
+/** Strongly typed canonical identity: `WorkflowStepId`. */
+export const WorkflowStepIdSchema = z.string();
+export type WorkflowStepId = z.infer<typeof WorkflowStepIdSchema>;
+
+export const WorkflowStepOutputSchema = z.object({
+  artifacts: z.array(z.lazy(() => WorkflowOutputArtifactSchema)),
+  output_name: z.lazy(() => WorkflowOutputNameSchema),
+}).strict();
+export type WorkflowStepOutput = z.infer<typeof WorkflowStepOutputSchema>;
+
+export const WorkflowStepRunProjectionSchema = z.object({
+  effect_receipt: z.union([z.lazy(() => WorkflowStepEffectReceiptSchema), z.null()]),
+  outputs: z.record(z.lazy(() => WorkflowStepOutputSchema)),
+  placement_receipt: z.union([z.lazy(() => WorkflowPlacementReceiptSchema), z.null()]),
+  status: z.lazy(() => WorkflowStepStatusSchema),
+}).strict();
+export type WorkflowStepRunProjection = z.infer<typeof WorkflowStepRunProjectionSchema>;
+
+export const WorkflowStepStatusSchema = z.enum(["blocked", "cancelled", "failed", "ready", "running", "succeeded"]);
+export type WorkflowStepStatus = z.infer<typeof WorkflowStepStatusSchema>;
 
 /** A provider's claim that one artifact of a fan-out output synthesizes its
 sibling source artifacts. */
