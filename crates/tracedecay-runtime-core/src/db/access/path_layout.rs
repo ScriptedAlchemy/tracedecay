@@ -30,24 +30,23 @@ pub(super) fn database_profile_root(database_path: &Path, fallback_parent: &Path
 
 fn profile_project_root(database_path: &Path) -> Option<&Path> {
     let parent = database_path.parent()?;
-    // Branch graphs and staged consolidation inputs live one level below
-    // their project data root and share its profile authority scope.
-    let data_root = if parent
-        .file_name()
-        .is_some_and(|name| name == "branches" || name == ".consolidation-input")
-    {
-        parent.parent()?
-    } else if parent
+    // Branch graphs live one level below their project data root and share
+    // its profile authority scope. Consolidation staging shares it only for
+    // the two session snapshots consolidation itself creates; every other
+    // file under `.consolidation-input/` keeps its independent database
+    // identity rather than inheriting profile maintenance authority.
+    let staged_session_snapshot = parent
         .file_name()
         .is_some_and(|name| name == ".consolidation-input")
         && database_path
             .file_name()
-            .is_some_and(|name| name == "source-sessions.db" || name == "target-sessions.db")
-    {
-        parent.parent()?
-    } else {
-        parent
-    };
+            .is_some_and(|name| name == "source-sessions.db" || name == "target-sessions.db");
+    let data_root =
+        if staged_session_snapshot || parent.file_name().is_some_and(|name| name == "branches") {
+            parent.parent()?
+        } else {
+            parent
+        };
     let shard_root = data_root.parent()?;
     if shard_root
         .file_name()

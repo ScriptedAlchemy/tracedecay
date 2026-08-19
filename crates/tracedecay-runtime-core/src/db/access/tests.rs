@@ -161,6 +161,38 @@ fn legacy_profile_store_databases_share_the_profile_scope() {
 }
 
 #[test]
+fn consolidation_authority_is_reserved_for_the_session_snapshots() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().join("profile");
+    let staging = profile.join("projects/p1/.consolidation-input");
+    let unrelated_dir = profile.join("projects/p1/other-input");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&unrelated_dir).unwrap();
+    let profile_root = profile.canonicalize().unwrap();
+
+    for file_name in ["source-sessions.db", "target-sessions.db"] {
+        let identity = DatabaseIdentity::for_path(&staging.join(file_name)).unwrap();
+        assert_eq!(
+            identity.profile_root, profile_root,
+            "consolidation session snapshots must inherit the profile lifecycle fence"
+        );
+    }
+
+    // Any other staged file keeps its independent database identity rather
+    // than inheriting profile maintenance authority.
+    let arbitrary = DatabaseIdentity::for_path(&staging.join("arbitrary.db")).unwrap();
+    assert_ne!(
+        arbitrary.profile_root, profile_root,
+        "unowned consolidation inputs must not claim profile authority"
+    );
+    let unrelated = DatabaseIdentity::for_path(&unrelated_dir.join("source-sessions.db")).unwrap();
+    assert_ne!(
+        unrelated.profile_root, profile_root,
+        "session snapshots outside consolidation staging must not claim profile authority"
+    );
+}
+
+#[test]
 fn remote_node_databases_inherit_the_profile_scope() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
