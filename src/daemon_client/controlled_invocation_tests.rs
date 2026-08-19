@@ -213,14 +213,16 @@ async fn reset_then_reconnect_client(
             .expect("read cancellation request")
             .expect("cancellation request");
 
-        let second_stream = listener.accept().await.expect("accept second invocation");
-        let (second_reader, mut second_writer) = second_stream.into_split();
-        let mut second_lines = BufReader::new(second_reader).lines();
-        second_lines
-            .next_line()
-            .await
-            .expect("read second handshake")
-            .expect("second handshake");
+        // The response-grace read polls liveness with handshake-less probe
+        // connections; skip them like the real daemon's accept loop does.
+        let (mut second_lines, mut second_writer) = loop {
+            let second_stream = listener.accept().await.expect("accept second invocation");
+            let (second_reader, second_writer) = second_stream.into_split();
+            let mut second_lines = BufReader::new(second_reader).lines();
+            if let Ok(Some(_handshake)) = second_lines.next_line().await {
+                break (second_lines, second_writer);
+            }
+        };
         let second_line = second_lines
             .next_line()
             .await
@@ -447,8 +449,10 @@ async fn remote_effect_without_authoritative_settlement_returns_reset_required()
     });
     let deadline = deadline_after(Duration::from_secs(10));
 
+    // The unsettled server never answers, so the join bound must outlive the
+    // full authoritative response grace.
     let response = tokio::time::timeout(
-        crate::daemon::DAEMON_TASK_ABORT_DEADLINE + Duration::from_secs(1),
+        crate::daemon::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
         client.invoke_controlled(
             invocation_request(REQUEST_ID, deadline.clone()),
             deadline,
@@ -480,7 +484,7 @@ async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     let deadline = deadline_after(Duration::from_secs(10));
 
     let response = tokio::time::timeout(
-        crate::daemon::DAEMON_TASK_ABORT_DEADLINE + Duration::from_secs(1),
+        crate::daemon::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
         client.invoke_controlled(
             invocation_request(REQUEST_ID, deadline.clone()),
             deadline,

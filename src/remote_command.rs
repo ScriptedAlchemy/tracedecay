@@ -1,18 +1,24 @@
 //! CLI presentation for the Remote Brain operator plane.
 
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tracedecay_application::RemoteListenerReadV1;
+use tracedecay_application::remote::composition::{
+    PendingLocalEvidenceV1, PendingLocalUnavailableReasonV1, ShardCoverageStateV1,
+};
 use tracedecay_application::remote::protocol::{
     EnrollmentRequestV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
 };
+use tracedecay_application::remote::query::{RemoteExactObservationResultV1, RemoteQueryResultV1};
 use tracedecay_application::remote::status::{
     RemoteOperationalReadinessV1, RemoteOperationalStatusReadV1, RemoteOperationalStatusV1,
+    RemoteSpoolOperationalStatusV1,
 };
+use tracedecay_application::{ApplicationOutcome, RemoteListenerReadV1};
 use tracedecay_domain::CurrentRemoteAuthorityStateV1;
 use tracedecay_sdk::remote_client::{EnrolledRemoteClient, RemoteClientError};
 
@@ -39,6 +45,15 @@ pub enum RemoteCommand {
         args: RemoteProtocolArgs,
         enrollment_credential_file: PathBuf,
     },
+    Capture {
+        args: RemoteProtocolArgs,
+    },
+    Query {
+        args: RemoteProtocolArgs,
+    },
+    TransferFrame {
+        args: RemoteProtocolArgs,
+    },
     Replay {
         args: RemoteProtocolArgs,
     },
@@ -60,6 +75,36 @@ pub fn run(command: RemoteCommand) -> Result<()> {
             args,
             enrollment_credential_file,
         } => run_enroll(args, enrollment_credential_file),
+        RemoteCommand::Capture { args } => {
+            let request = read_protocol_request(&args.request_file)?;
+            let client = build_client(&args)?;
+            emit_protocol_response(
+                &client.capture(&request).map_err(map_remote_client_error)?,
+                args.json,
+            )
+        }
+        RemoteCommand::Query { args } => {
+            let request = read_protocol_request(&args.request_file)?;
+            let client = build_client(&args)?;
+            let response = client.query(&request).map_err(map_remote_client_error)?;
+            // `--json` emits exactly the canonical wire response.
+            let local_spool = if args.json {
+                None
+            } else {
+                caller_local_spool_evidence(&response)
+            };
+            emit_query_response(&response, local_spool.as_ref(), args.json)
+        }
+        RemoteCommand::TransferFrame { args } => {
+            let request = read_protocol_request(&args.request_file)?;
+            let client = build_client(&args)?;
+            emit_protocol_response(
+                &client
+                    .transfer_frame(&request)
+                    .map_err(map_remote_client_error)?,
+                args.json,
+            )
+        }
         RemoteCommand::Replay { args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
@@ -128,12 +173,24 @@ fn build_client(args: &RemoteProtocolArgs) -> Result<EnrolledRemoteClient> {
             message: "Remote Brain --timeout-secs must be greater than zero".to_owned(),
         });
     }
+    // A plaintext endpoint selects the local daemon's nested `/remote` mount;
+    // the SDK client fails closed on any non-loopback plaintext host.
+    let local_daemon_target = args.endpoint.starts_with("http://");
+    if local_daemon_target && args.trust_root_file.is_some() {
+        return Err(TraceDecayError::Config {
+            message: "Remote Brain --trust-root-file applies only to HTTPS endpoints".to_owned(),
+        });
+    }
     let credential =
         std::fs::read(&args.credential_file).map_err(|error| TraceDecayError::File {
             message: format!("failed to read Remote Brain credential file: {error}"),
             path: args.credential_file.display().to_string(),
         })?;
     let timeout = Duration::from_secs(args.timeout_secs);
+    if local_daemon_target {
+        return EnrolledRemoteClient::new_local_daemon(&args.endpoint, credential, timeout)
+            .map_err(map_remote_client_error);
+    }
     match &args.trust_root_file {
         Some(path) => {
             let pem = std::fs::read(path).map_err(|error| TraceDecayError::File {
@@ -180,6 +237,29 @@ fn emit_protocol_response<T: Serialize>(
     } else {
         print!("{}", render_protocol_response(response));
     }
+    protocol_exit_status(response)
+}
+
+/// Emits a query response with its coverage evidence, so a found/not-found
+/// answer is never read as complete while local captures have not replayed
+/// or the shard disclosed a degraded state.
+fn emit_query_response(
+    response: &RemoteProtocolResponseV1<RemoteQueryResultV1>,
+    local_spool: Option<&RemoteSpoolOperationalStatusV1>,
+    json: bool,
+) -> Result<()> {
+    if json {
+        print!("{}", canonical_json_line(response)?);
+    } else {
+        print!("{}", render_protocol_response(response));
+        if let Some(result) = query_payload(response) {
+            print!("{}", render_query_coverage(result, local_spool));
+        }
+    }
+    protocol_exit_status(response)
+}
+
+fn protocol_exit_status<T>(response: &RemoteProtocolResponseV1<T>) -> Result<()> {
     match &response.result {
         Ok(_) => Ok(()),
         Err(problem) => Err(TraceDecayError::Config {
@@ -188,6 +268,127 @@ fn emit_protocol_response<T: Serialize>(
                 response.request_id, problem.problem.code, problem.problem.message
             ),
         }),
+    }
+}
+
+/// The caller's own spool evidence for a query whose serving node answered
+/// `RequestingNodeSpoolNotSupplied`, read from that spool's owning authority:
+/// the local daemon's canonical operational status. Every other pending-local
+/// answer keeps the serving node's own evidence, and a local daemon that
+/// cannot answer leaves the wire's typed absence in place.
+fn caller_local_spool_evidence(
+    response: &RemoteProtocolResponseV1<RemoteQueryResultV1>,
+) -> Option<RemoteSpoolOperationalStatusV1> {
+    let payload = query_payload(response)?;
+    if !matches!(
+        payload.composition.pending_local,
+        PendingLocalEvidenceV1::Unavailable {
+            reason: PendingLocalUnavailableReasonV1::RequestingNodeSpoolNotSupplied,
+        }
+    ) {
+        return None;
+    }
+    match crate::daemon::live_remote_operational_status() {
+        Ok(RemoteOperationalStatusReadV1::Observed { status, .. }) => Some(status.spool),
+        Ok(
+            RemoteOperationalStatusReadV1::Unconfigured
+            | RemoteOperationalStatusReadV1::Unavailable,
+        )
+        | Err(_) => None,
+    }
+}
+
+fn query_payload(
+    response: &RemoteProtocolResponseV1<RemoteQueryResultV1>,
+) -> Option<&RemoteQueryResultV1> {
+    match &response.result {
+        Ok(envelope) => match &envelope.outcome {
+            ApplicationOutcome::Evidence(packet) => packet.payload.as_ref(),
+            ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => None,
+        },
+        Err(_) => None,
+    }
+}
+
+fn render_query_coverage(
+    result: &RemoteQueryResultV1,
+    local_spool: Option<&RemoteSpoolOperationalStatusV1>,
+) -> String {
+    let mut rendered = format!(
+        "Coverage: {}\n",
+        coverage_label(result.composition.coverage)
+    );
+    for contribution in &result.composition.contributions {
+        let _ = write!(
+            rendered,
+            "Remote shard {}@{}: {}",
+            contribution.manifest.shard_id,
+            contribution.manifest.generation_id,
+            coverage_label(contribution.coverage),
+        );
+        if let Some(reason) = &contribution.reason_code {
+            let _ = write!(rendered, " ({reason})");
+        }
+        rendered.push('\n');
+    }
+    match (&result.composition.pending_local, local_spool) {
+        (PendingLocalEvidenceV1::Available { evidence }, _) => {
+            let _ = write!(
+                rendered,
+                "Local pending captures: {}\nLocal sequence gap: {}\nLocal quarantined captures: {}\n",
+                evidence.count,
+                yes_no(evidence.has_sequence_gap),
+                yes_no(evidence.has_quarantined),
+            );
+        }
+        (
+            PendingLocalEvidenceV1::Unavailable {
+                reason: PendingLocalUnavailableReasonV1::RequestingNodeSpoolNotSupplied,
+            },
+            Some(spool),
+        ) => {
+            let _ = write!(
+                rendered,
+                "Local pending captures (local daemon spool): {}\n\
+Local sequence gap (local daemon spool): {}\n\
+Local quarantined captures (local daemon spool): {}\n",
+                spool.pending_count,
+                yes_no(spool.has_sequence_gap),
+                spool.quarantined_count,
+            );
+        }
+        (PendingLocalEvidenceV1::Unavailable { reason }, _) => {
+            let _ = writeln!(
+                rendered,
+                "Local pending captures: unavailable ({})",
+                pending_local_unavailable_label(*reason)
+            );
+        }
+    }
+    let observation = match &result.observation {
+        RemoteExactObservationResultV1::Found(_) => "found",
+        RemoteExactObservationResultV1::NotFound => "not_found",
+    };
+    let _ = writeln!(rendered, "Observation: {observation}");
+    rendered
+}
+
+fn coverage_label(coverage: ShardCoverageStateV1) -> &'static str {
+    match coverage {
+        ShardCoverageStateV1::Complete => "complete",
+        ShardCoverageStateV1::Stale => "stale",
+        ShardCoverageStateV1::Partial => "partial",
+        ShardCoverageStateV1::Unknown => "unknown",
+        ShardCoverageStateV1::Unavailable => "unavailable",
+    }
+}
+
+fn pending_local_unavailable_label(reason: PendingLocalUnavailableReasonV1) -> &'static str {
+    match reason {
+        PendingLocalUnavailableReasonV1::RequestingNodeSpoolNotSupplied => {
+            "requesting node spool not supplied"
+        }
+        PendingLocalUnavailableReasonV1::AuthorityUnavailable => "authority unavailable",
     }
 }
 
@@ -436,6 +637,161 @@ mod tests {
             TraceDecayError::Config { message } => {
                 assert!(message.contains("request.cli.remote.7"));
                 assert!(message.contains(&response.result.as_ref().unwrap_err().problem.code));
+            }
+            other => panic!("expected config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn query_human_render_surfaces_remote_and_local_coverage_honestly() {
+        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
+            serde_json::from_value(serde_json::json!({
+                "composition": {
+                    "contributions": [{
+                        "manifest": {
+                            "brain_id": "brain.query",
+                            "shard_id": "shard.project",
+                            "generation_id": "generation.7",
+                            "schema_digest": vec![1u8; 32],
+                            "watermark_sequence": 9,
+                            "placement_revision": 3,
+                            "authority_epoch": 4,
+                            "cache_age_millis": 10,
+                            "cache_lag_commits": 0
+                        },
+                        "integrity": "verified",
+                        "authenticity": "authenticated",
+                        "freshness": "current",
+                        "completeness": "complete",
+                        "authorization": "authorized",
+                        "coverage": "partial",
+                        "authority_receipt": null,
+                        "value": null,
+                        "reason_code": "authorization_receipt_unavailable"
+                    }],
+                    "pending_local": {
+                        "availability": "available",
+                        "evidence": {
+                            "count": 2,
+                            "oldest_age_millis": 50,
+                            "has_sequence_gap": true,
+                            "has_quarantined": false
+                        }
+                    },
+                    "coverage": "partial"
+                },
+                "observation": { "state": "not_found" }
+            }))
+            .expect("query result fixture");
+
+        let rendered = super::render_query_coverage(&result, None);
+        assert!(rendered.contains("Coverage: partial"));
+        assert!(rendered.contains(
+            "Remote shard shard.project@generation.7: partial (authorization_receipt_unavailable)"
+        ));
+        assert!(rendered.contains("Local pending captures: 2"));
+        assert!(rendered.contains("Local sequence gap: yes"));
+        assert!(rendered.contains("Local quarantined captures: no"));
+        assert!(rendered.contains("Observation: not_found"));
+    }
+
+    #[test]
+    fn query_human_render_names_an_unavailable_local_spool() {
+        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
+            serde_json::from_value(serde_json::json!({
+                "composition": {
+                    "contributions": [],
+                    "pending_local": {
+                        "availability": "unavailable",
+                        "reason": "requesting_node_spool_not_supplied"
+                    },
+                    "coverage": "unknown"
+                },
+                "observation": { "state": "not_found" }
+            }))
+            .expect("query result fixture");
+
+        let rendered = super::render_query_coverage(&result, None);
+        assert!(
+            rendered.contains(
+                "Local pending captures: unavailable (requesting node spool not supplied)"
+            )
+        );
+    }
+
+    #[test]
+    fn query_human_render_composes_the_callers_own_spool_when_not_supplied() {
+        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
+            serde_json::from_value(serde_json::json!({
+                "composition": {
+                    "contributions": [],
+                    "pending_local": {
+                        "availability": "unavailable",
+                        "reason": "requesting_node_spool_not_supplied"
+                    },
+                    "coverage": "unknown"
+                },
+                "observation": { "state": "not_found" }
+            }))
+            .expect("query result fixture");
+        let spool = tracedecay_application::remote::status::RemoteSpoolOperationalStatusV1 {
+            pending_count: 4,
+            quarantined_count: 1,
+            has_sequence_gap: true,
+        };
+
+        let rendered = super::render_query_coverage(&result, Some(&spool));
+        assert!(rendered.contains("Local pending captures (local daemon spool): 4"));
+        assert!(rendered.contains("Local sequence gap (local daemon spool): yes"));
+        assert!(rendered.contains("Local quarantined captures (local daemon spool): 1"));
+        assert!(
+            !rendered.contains("unavailable (requesting node spool not supplied)"),
+            "composed caller evidence must replace the not-supplied absence: {rendered}"
+        );
+    }
+
+    #[test]
+    fn query_human_render_keeps_other_absences_typed_even_with_local_evidence() {
+        let result: tracedecay_application::remote::query::RemoteQueryResultV1 =
+            serde_json::from_value(serde_json::json!({
+                "composition": {
+                    "contributions": [],
+                    "pending_local": {
+                        "availability": "unavailable",
+                        "reason": "authority_unavailable"
+                    },
+                    "coverage": "unknown"
+                },
+                "observation": { "state": "not_found" }
+            }))
+            .expect("query result fixture");
+        let spool = tracedecay_application::remote::status::RemoteSpoolOperationalStatusV1 {
+            pending_count: 4,
+            quarantined_count: 0,
+            has_sequence_gap: false,
+        };
+
+        let rendered = super::render_query_coverage(&result, Some(&spool));
+        assert!(
+            rendered.contains("Local pending captures: unavailable (authority unavailable)"),
+            "a serving node's own authority absence is not the caller's to hydrate: {rendered}"
+        );
+    }
+
+    #[test]
+    fn build_client_rejects_a_trust_root_for_a_local_daemon_endpoint() {
+        let error = build_client(&RemoteProtocolArgs {
+            endpoint: "http://127.0.0.1:39181/remote/".to_owned(),
+            credential_file: PathBuf::from("/this/file/must-not-be-read.bin"),
+            trust_root_file: Some(PathBuf::from("/this/file/must-not-be-read.pem")),
+            timeout_secs: 30,
+            request_file: PathBuf::from("request.json"),
+            json: false,
+        })
+        .expect_err("a trust root with a plaintext loopback endpoint must fail closed");
+        match error {
+            TraceDecayError::Config { message } => {
+                assert!(message.contains("--trust-root-file"));
             }
             other => panic!("expected config error, got {other:?}"),
         }
