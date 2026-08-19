@@ -52,6 +52,14 @@ fn map_postings_build_error(error: String) -> RetrievalPortError {
     }
 }
 
+fn check_projection_build_deadline(deadline: Instant) -> Result<(), RetrievalPortError> {
+    if Instant::now() >= deadline {
+        Err(RetrievalPortError::BudgetExceeded)
+    } else {
+        Ok(())
+    }
+}
+
 /// Generation and source metadata bound to one immutable lexical projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeLexicalProjectionMetadataV1 {
@@ -199,15 +207,14 @@ struct LexicalGenerationPostingsV1 {
 
 impl LexicalGenerationPostingsV1 {
     fn from_rows(rows: &[ProjectedChunkV1], deadline: Instant) -> Result<Self, RetrievalPortError> {
+        check_projection_build_deadline(deadline)?;
         let mut vocabulary = BTreeSet::new();
         let mut term_documents = BTreeMap::<LexicalFieldV1, BTreeMap<String, RoaringBitmap>>::new();
         let mut exact_documents = BTreeMap::<ExactFieldV1, BTreeMap<Vec<u8>, RoaringBitmap>>::new();
         let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
         let mut field_lengths = BTreeMap::<LexicalFieldV1, usize>::new();
         for (document, row) in rows.iter().enumerate() {
-            if Instant::now() >= deadline {
-                return Err(RetrievalPortError::BudgetExceeded);
-            }
+            check_projection_build_deadline(deadline)?;
             let document = document as u32;
             for (field, terms) in &row.fields {
                 *field_lengths.entry(*field).or_default() += terms.len();
@@ -253,6 +260,7 @@ impl LexicalGenerationPostingsV1 {
             .into_iter()
             .map(|(field, total)| (field, total.div_ceil(divisor).max(1)))
             .collect();
+        check_projection_build_deadline(deadline)?;
         let mut ngram_budget = ByteNgramBudget::new(BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1);
         let normalized_text = Arc::new(
             ByteNgramPostings::from_documents(
@@ -265,6 +273,7 @@ impl LexicalGenerationPostingsV1 {
         let raw_matches_normalized = rows.iter().all(|row| {
             row.chunk.sanitized_text.as_str().as_bytes() == row.normalized_text.as_bytes()
         });
+        check_projection_build_deadline(deadline)?;
         let raw_text = if raw_matches_normalized {
             Arc::clone(&normalized_text)
         } else {
@@ -278,13 +287,15 @@ impl LexicalGenerationPostingsV1 {
                 .map_err(map_postings_build_error)?,
             )
         };
+        let fuzzy_terms = FuzzyTermIndex::from_terms(vocabulary, Some(deadline))
+            .map_err(map_postings_build_error)?;
+        check_projection_build_deadline(deadline)?;
         Ok(Self {
             term_documents,
             exact_documents,
             normalized_text,
             raw_text,
-            fuzzy_terms: FuzzyTermIndex::from_terms(vocabulary)
-                .map_err(RetrievalPortError::Contract)?,
+            fuzzy_terms,
             document_frequencies,
             average_field_lengths,
         })
@@ -452,7 +463,11 @@ impl CodeLexicalProjectionAdapterV1 {
         extraction_admitted: bool,
         deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError> {
+        let deadline = Instant::now()
+            + Duration::from_micros(lexical_projection_build_deadline_micros(deadline_micros));
+        check_projection_build_deadline(deadline)?;
         metadata.validate()?;
+        check_projection_build_deadline(deadline)?;
         if chunks.len() > u32::MAX as usize {
             return Err(RetrievalPortError::Contract(
                 "lexical projection exceeds the posting document-id range".to_owned(),
@@ -461,6 +476,7 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut seen = BTreeSet::new();
         let mut rows = Vec::with_capacity(chunks.len());
         for chunk in chunks {
+            check_projection_build_deadline(deadline)?;
             chunk.validate().map_err(contract_error)?;
             if !extraction_admitted
                 && chunk
@@ -491,10 +507,10 @@ impl CodeLexicalProjectionAdapterV1 {
                     ))
                 })?;
             rows.push(ProjectedChunkV1::new(chunk, logical_path));
+            check_projection_build_deadline(deadline)?;
         }
         rows.sort_by(|left, right| left.chunk.id.cmp(&right.chunk.id));
-        let deadline = Instant::now()
-            + Duration::from_micros(lexical_projection_build_deadline_micros(deadline_micros));
+        check_projection_build_deadline(deadline)?;
         let postings = Arc::new(LexicalGenerationPostingsV1::from_rows(&rows, deadline)?);
         Ok(Self {
             metadata,

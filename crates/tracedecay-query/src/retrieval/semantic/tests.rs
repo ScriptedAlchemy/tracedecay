@@ -270,6 +270,7 @@ impl SemanticVectorReadPort for FakeVectorReadPort {
     fn scan_exact_flat(
         &self,
         request: SemanticVectorReadRequestV1<'_>,
+        examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
         visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
     ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
         self.scans.set(self.scans.get() + 1);
@@ -283,6 +284,7 @@ impl SemanticVectorReadPort for FakeVectorReadPort {
         );
         assert_eq!(request.search_kind, SemanticSearchKindV1::ExactFlat);
         for row in &self.rows {
+            examine()?;
             visit(row)?;
         }
         if let Some(cancelled) = &self.after_scan_cancel {
@@ -903,6 +905,45 @@ fn cancellation_and_deadline_are_checked_during_scan() {
         SemanticCodeRetriever::new(&expired_embedder, &expired_vectors, &expired_control)
             .retrieve_semantic(&request)
             .expect("typed deadline"),
+        RetrieverOutcome::BudgetExceeded(_)
+    ));
+}
+
+#[test]
+fn deadline_is_checked_while_the_store_examines_excluded_rows() {
+    struct ExcludedRows;
+
+    impl SemanticVectorReadPort for ExcludedRows {
+        fn scan_exact_flat(
+            &self,
+            _request: SemanticVectorReadRequestV1<'_>,
+            examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
+            _visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
+        ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
+            examine()?;
+            Ok(SemanticVectorScanSummaryV1 {
+                examined: 1,
+                eligible: 0,
+                excluded: 1,
+                unknown: 0,
+            })
+        }
+    }
+
+    let query_view = query_view();
+    let projection = projection();
+    let mut request = request(&query_view, &projection, 4);
+    request.budget.deadline_micros = Some(5);
+    let embedder = FakeQueryEmbedder::default();
+    let control = FixedExecutionControl {
+        expire_after_elapsed_checks: Some(2),
+        ..FixedExecutionControl::default()
+    };
+
+    assert!(matches!(
+        SemanticCodeRetriever::new(&embedder, &ExcludedRows, &control)
+            .retrieve_semantic(&request)
+            .expect("excluded-row scan must return a typed deadline outcome"),
         RetrieverOutcome::BudgetExceeded(_)
     ));
 }

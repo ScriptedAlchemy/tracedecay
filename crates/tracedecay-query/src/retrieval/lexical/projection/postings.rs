@@ -140,17 +140,26 @@ pub(super) struct FuzzySearchSlice {
 }
 
 impl FuzzyTermIndex {
-    pub(super) fn from_terms<I, S>(terms: I) -> Result<Self, String>
+    pub(super) fn from_terms<I, S>(terms: I, deadline: Option<Instant>) -> Result<Self, String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let terms = terms
-            .into_iter()
-            .map(|term| term.as_ref().to_owned())
-            .collect::<BTreeSet<_>>();
-        let terms = Set::from_iter(terms.into_iter().map(String::into_bytes))
+        let mut canonical_terms = BTreeSet::new();
+        for term in terms {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED.to_owned());
+            }
+            canonical_terms.insert(term.as_ref().to_owned());
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED.to_owned());
+        }
+        let terms = Set::from_iter(canonical_terms.into_iter().map(String::into_bytes))
             .map_err(|error| error.to_string())?;
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED.to_owned());
+        }
         Ok(Self { terms })
     }
 
@@ -260,9 +269,16 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_index_rejects_an_already_expired_build_deadline() {
+        let error = FuzzyTermIndex::from_terms(["alpha"], Some(Instant::now()))
+            .expect_err("expired deadline must cover fuzzy index construction");
+        assert_eq!(error, LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED);
+    }
+
+    #[test]
     fn fuzzy_enumeration_stops_at_the_remaining_budget() {
         let terms = ('!'..='~').map(|character| format!("aaaa{character}aaaaa"));
-        let index = FuzzyTermIndex::from_terms(terms).expect("valid FST");
+        let index = FuzzyTermIndex::from_terms(terms, None).expect("valid FST");
         let mut seen = BTreeSet::new();
         let slice = index
             .terms_at_distance("aaaaaaaaaa", 1, 3, &mut seen)
