@@ -12,10 +12,10 @@ pub const TRACEDECAY_NATIVE_INTEGRATION_STATUS_METHOD: &str =
     "tracedecay/nativeIntegrationStatus";
 
 /// The most recent status projections one session flush may forward.
-pub const MAX_NATIVE_INTEGRATION_STATUS_PER_POLL: usize = 16;
+pub(crate) const MAX_NATIVE_INTEGRATION_STATUS_PER_POLL: usize = 16;
 
 /// Bytes reserved on the outbound queue before a status flush runs.
-pub const MAX_NATIVE_INTEGRATION_STATUS_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_NATIVE_INTEGRATION_STATUS_BYTES: usize = 16 * 1024;
 
 /// Daemon-owned read of recently observed native-integration transaction
 /// statuses. Implementations return current bounded projections; each session

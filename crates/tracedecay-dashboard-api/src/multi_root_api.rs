@@ -1,13 +1,11 @@
 //! Named multi-root collection resolution for the dashboard.
 //!
-//! The dashboard resolves a named collection (a persisted scope set with a
-//! frozen revision and canonical member order) through the daemon application
-//! transport. Selection precedence is owned by the application resolver: a
-//! default collection can never outrank an explicit target. No default
-//! collection is currently configurable — the retired
-//! `query.default_collection.v1` setting fails closed in old stores and no
-//! replacement setting exists — so an unnamed resolution reports the typed
-//! no-collection state instead of guessing a scope set.
+//! The dashboard resolves a named collection through the daemon application
+//! transport; selection precedence and read mapping are owned by the
+//! application resolver. No default collection is currently configurable —
+//! the retired `query.default_collection.v1` setting fails closed in old
+//! stores and no replacement setting exists — so an unnamed resolution
+//! reports the typed no-collection state instead of guessing a scope set.
 
 use axum::Json;
 use axum::extract::{Extension, Query, State};

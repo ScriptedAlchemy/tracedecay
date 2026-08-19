@@ -3,9 +3,8 @@
 //! One bounded flush forwards the daemon's application status projections to a
 //! ready session as `tracedecay/nativeIntegrationStatus` notifications. The
 //! session dedupes per transaction, so a port re-returning an unchanged status
-//! never re-notifies. This path admits no client method: the gateway cannot
-//! start, approve, apply, or cancel a native integration, apply edits, or
-//! mutate Git from here.
+//! never re-notifies. See [`crate::native_integration`] for the gateway
+//! constraint: this path admits no client method.
 
 use tracedecay_application::NativeIntegrationStatusProjectionV1;
 use tracedecay_domain::NativeIntegrationTransactionId;

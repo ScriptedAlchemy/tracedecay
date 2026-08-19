@@ -179,9 +179,7 @@ where
     }
 
     /// Mounts the daemon-owned read of recently observed native-integration
-    /// transaction statuses. The session forwards them as server-to-client
-    /// notifications only; no client-callable native-integration method is
-    /// admitted through the gateway.
+    /// transaction statuses, forwarded as server-to-client notifications only.
     #[must_use]
     pub fn with_native_integration_status_port(
         mut self,

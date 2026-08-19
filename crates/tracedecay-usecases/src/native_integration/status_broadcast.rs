@@ -48,8 +48,11 @@ impl NativeIntegrationStatusBroadcastV1 {
         }
     }
 
+}
+
+impl NativeIntegrationStatusPort for NativeIntegrationStatusBroadcastV1 {
     /// The most recently updated projections, newest first.
-    pub fn recent(&self, maximum: usize) -> Vec<NativeIntegrationStatusProjectionV1> {
+    fn poll_status(&self, maximum: usize) -> Vec<NativeIntegrationStatusProjectionV1> {
         let Ok(statuses) = self.statuses.lock() else {
             return Vec::new();
         };
@@ -57,12 +60,6 @@ impl NativeIntegrationStatusBroadcastV1 {
         recent.sort_by_key(|status| std::cmp::Reverse(status.updated_at));
         recent.truncate(maximum);
         recent
-    }
-}
-
-impl NativeIntegrationStatusPort for NativeIntegrationStatusBroadcastV1 {
-    fn poll_status(&self, maximum: usize) -> Vec<NativeIntegrationStatusProjectionV1> {
-        self.recent(maximum)
     }
 }
 
@@ -101,7 +98,7 @@ mod tests {
         broadcast.publish(projection("transaction.broadcast.one", 3, 30));
         broadcast.publish(projection("transaction.broadcast.one", 2, 40));
 
-        let recent = broadcast.recent(8);
+        let recent = broadcast.poll_status(8);
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].phase_revision, 3);
         assert_eq!(recent[0].updated_at, UtcMicros(30));
@@ -118,7 +115,7 @@ mod tests {
             ));
         }
 
-        let recent = broadcast.recent(MAX_BROADCAST_TRANSACTIONS + 1);
+        let recent = broadcast.poll_status(MAX_BROADCAST_TRANSACTIONS + 1);
         assert_eq!(recent.len(), MAX_BROADCAST_TRANSACTIONS);
         assert!(
             !recent

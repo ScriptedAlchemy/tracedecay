@@ -98,7 +98,6 @@ pub use gateway::{
     strict_file_uri_path, strict_file_url, valid_raw_uri_path,
 };
 pub use native_integration::{
-    MAX_NATIVE_INTEGRATION_STATUS_BYTES, MAX_NATIVE_INTEGRATION_STATUS_PER_POLL,
     NativeIntegrationStatusPort, TRACEDECAY_NATIVE_INTEGRATION_STATUS_METHOD,
 };
 pub use overlay::{

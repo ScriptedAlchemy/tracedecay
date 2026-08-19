@@ -227,7 +227,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
 
 /// Resolves one native-integration status read over the catalog-bound
 /// dashboard surface, answering the same application result CLI and MCP
-/// project. Read-only: only the status operation carries a dashboard binding.
+/// project.
 pub(crate) async fn dashboard_native_integration_status(
     executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
     control: &crate::dashboard::DashboardHttpRequestControlV1,

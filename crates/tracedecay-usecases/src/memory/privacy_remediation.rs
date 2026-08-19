@@ -10,7 +10,7 @@
 //! scanner binary or touches the network, and no unsanitized payload is ever
 //! persisted back.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracedecay_domain::{Confidence, FactCategoryV1, UtcMicros};
 use tracedecay_runtime_core::privacy::{
@@ -29,8 +29,7 @@ use super::error::{MemoryApplicationError, MemoryMutationError};
 
 /// Why an at-rest rescan ran. Recorded on the receipt so operators can
 /// distinguish daemon-adopted maintenance from an explicit request.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivacyRemediationTriggerV1 {
     /// The daemon adopted the store under the current detector revision.
     DetectorRevisionAdoption,
@@ -41,7 +40,7 @@ pub enum PrivacyRemediationTriggerV1 {
 /// Truthful outcome of one at-rest rescan. `curation_receipt` is present
 /// exactly when the rescan remediated at least one fact; the durable receipt
 /// row is owned by the fact store's curation authority.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryPrivacyRemediationReceiptV1 {
     pub detector_revision: String,
     pub trigger: PrivacyRemediationTriggerV1,

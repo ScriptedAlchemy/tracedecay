@@ -123,9 +123,8 @@ pub trait DashboardApplicationRuntime: Send + Sync {
 
     /// Reads one native-integration transaction status through the daemon
     /// transport, answering the same application result the CLI and MCP
-    /// surfaces project. Read-only: the dashboard can observe a transaction
-    /// but never preflight, approve, apply, or cancel one, apply edits, or
-    /// mutate Git through this path.
+    /// surfaces project. Read-only: mutating operations carry no dashboard
+    /// binding.
     fn native_integration_status<'a>(
         &'a self,
         control: DashboardHttpRequestControlV1,

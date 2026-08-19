@@ -2429,9 +2429,8 @@ mod authority_tests {
         assert_eq!(scope_set_digest, expected_digest);
         assert_eq!(root_count, 1);
 
-        // The explicit target always outranks any default: the same explicit
-        // resolution against a runtime persisting a different collection is a
-        // typed not-persisted state, never a silent fallback.
+        // An explicit target naming an unpersisted collection is a typed
+        // not-persisted state, never a silent fallback to another scope set.
         let missing = multi_root_api::resolve_collection_capability(
             &state,
             Some(dashboard_lcm_test_control()),

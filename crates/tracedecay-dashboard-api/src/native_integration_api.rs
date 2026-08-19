@@ -4,8 +4,7 @@
 //! surfaces project (`NativeIntegrationSurfaceResultV1`), resolved through
 //! the daemon transport under the live request controls. No mutating
 //! native-integration operation is reachable here: the dashboard can observe
-//! a transaction but never preflight, approve, apply, or cancel one, apply
-//! edits, or mutate Git.
+//! a transaction but never advance one, apply edits, or mutate Git.
 
 use axum::Json;
 use axum::extract::{Extension, Query, State};

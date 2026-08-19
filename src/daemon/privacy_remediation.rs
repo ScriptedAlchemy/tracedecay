@@ -53,9 +53,7 @@ pub(crate) fn spawn_project_memory_privacy_remediation(graph: Arc<TraceDecay>) {
     });
 }
 
-/// Runs one at-rest rescan over the project's persisted memory facts. This is
-/// the production entry point shared by the daemon project-open background
-/// task and explicit operator paths.
+/// Runs one at-rest rescan over the project's persisted memory facts.
 pub(crate) async fn run_project_memory_privacy_remediation(
     graph: &TraceDecay,
     trigger: PrivacyRemediationTriggerV1,

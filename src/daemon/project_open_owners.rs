@@ -1086,10 +1086,8 @@ pub(super) async fn register_project_open_production_owners(
         delivery_settlements,
     );
 
-    // At-rest privacy remediation runs as bounded background work after
-    // fail-closed admission: rescan persisted project-memory facts under the
-    // current detector revision, quarantining hits through the canonical
-    // curation authority. It never blocks admission or retrieval.
+    // At-rest privacy remediation is bounded background work after fail-closed
+    // admission; it never blocks admission or retrieval.
     crate::daemon::privacy_remediation::spawn_project_memory_privacy_remediation(Arc::clone(
         &graph,
     ));

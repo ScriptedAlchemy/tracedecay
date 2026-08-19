@@ -124,9 +124,8 @@ impl DaemonLspOwnerRegistrar {
         let diagnostic_records = Arc::new(
             tracedecay_usecases::feedback::diagnostics::DatabaseDiagnosticStore::new(database),
         );
-        // Sessions from this factory forward the daemon-observed
-        // native-integration transaction statuses as read-only notifications;
-        // the invocation handler publishes into the same per-project fan-out.
+        // The invocation handler publishes into the same per-project fan-out
+        // that sessions from this factory forward as read-only notifications.
         let native_integration_status = self
             .service
             .native_integration_status_broadcast(&project_root)
