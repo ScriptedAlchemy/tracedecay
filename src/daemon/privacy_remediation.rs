@@ -47,7 +47,7 @@ pub(crate) fn spawn_at_rest_privacy_remediation(
             }
         }
         match session_db.lcm_privacy_rescan_raw_messages().await {
-            Ok(LcmPrivacyRescanOutcomeV1::AlreadyCurrent { .. }) => {}
+            Ok(LcmPrivacyRescanOutcomeV1::AlreadyCurrent) => {}
             Ok(LcmPrivacyRescanOutcomeV1::Completed(receipt)) => {
                 tracing::info!(
                     event = "lcm_privacy_remediation",

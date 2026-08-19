@@ -15,10 +15,8 @@ use tracedecay_sessions::runtime::SessionMessageRecord;
 use tracedecay_sessions::runtime::lcm::{payload, schema};
 
 use crate::LcmPrivacyRescanOutcomeV1;
+use crate::registered_lcm_privacy::LCM_PRIVACY_RESCAN_META_KEY;
 use crate::tests::harness::RegisteredGlobalDbHarness;
-
-/// The rescan watermark row this suite clears to force a repeat pass.
-const RESCAN_META_KEY: &str = "privacy_rescan_completed_revision";
 
 fn secret() -> String {
     ["sk-at-rest-rescan-secret-", "1234567890abcdef"].concat()
@@ -373,9 +371,7 @@ async fn at_rest_rescan_remediates_legacy_rows_and_settles_watermark() {
             .lcm_privacy_rescan_raw_messages()
             .await
             .expect("watermarked rescan"),
-        LcmPrivacyRescanOutcomeV1::AlreadyCurrent {
-            detector_revision: lcm_payload_detector_revision().to_owned(),
-        }
+        LcmPrivacyRescanOutcomeV1::AlreadyCurrent
     );
 
     // A forced repeat pass (rule-refresh simulation: watermark cleared) finds
@@ -385,7 +381,7 @@ async fn at_rest_rescan_remediates_legacy_rows_and_settles_watermark() {
         .begin_write_transaction()
         .await
         .expect("watermark transaction");
-    schema::clear_gc_meta(&transaction, RESCAN_META_KEY)
+    schema::clear_gc_meta(&transaction, LCM_PRIVACY_RESCAN_META_KEY)
         .await
         .expect("clear watermark");
     transaction.commit().await.expect("commit watermark clear");
