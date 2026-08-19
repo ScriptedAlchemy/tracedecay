@@ -316,22 +316,35 @@ impl DaemonEngine {
     }
 
     pub(super) async fn shutdown_automation_schedulers(&self) {
-        let scheduler_handles: Vec<JoinHandle<()>> = self
-            .store_administration
-            .with_writer(|| async {
+        self.shutdown_automation_schedulers_with_deadline(DAEMON_TASK_ABORT_DEADLINE)
+            .await;
+    }
+
+    pub(super) async fn shutdown_automation_schedulers_with_deadline(&self, deadline: Duration) {
+        let scheduler_handles: Vec<JoinHandle<()>> = match timeout(
+            deadline,
+            self.store_administration.with_writer(|| async {
                 let mut schedulers = self
                     .store_administration
                     .automation_schedulers()
                     .lock()
                     .await;
                 schedulers.drain().map(|(_, handle)| handle.task).collect()
-            })
-            .await;
+            }),
+        )
+        .await
+        {
+            Ok(handles) => handles,
+            Err(_) => {
+                log_daemon_event("daemon_shutdown", &[("outcome", "timeout".to_string())]);
+                return;
+            }
+        };
         let _child_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
         for handle in &scheduler_handles {
             handle.abort();
         }
-        let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
+        let _ = timeout(deadline, async {
             for handle in scheduler_handles {
                 let _ = handle.await;
             }

@@ -105,12 +105,35 @@ impl Database {
     /// Returns `(Self, migrated)` where `migrated` is `true` if schema
     /// migrations were applied during open.
     pub async fn open(db_path: &Path, authority: &DatabaseAuthority) -> Result<(Self, bool)> {
+        Self::open_inner(db_path, authority, false).await
+    }
+
+    /// Opens an existing database while revalidating a cached writable
+    /// connection before reuse. Dirty-store recovery uses this entry point so
+    /// an in-process handle cannot bypass validation of the on-disk recovery
+    /// set before its marker is cleared.
+    #[doc(hidden)]
+    pub async fn open_revalidating_cached(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+    ) -> Result<(Self, bool)> {
+        Self::open_inner(db_path, authority, true).await
+    }
+
+    async fn open_inner(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        revalidate_cached: bool,
+    ) -> Result<(Self, bool)> {
         let authority = authority.hold_for(db_path, "open")?;
         let slot = database_slot(authority.canonical_database_path());
         let mut open = slot.lock().await;
         if let Some(inner) = open.upgrade() {
             if !inner.writable {
                 return Err(integrity::read_only_upgrade_error(db_path, "open"));
+            }
+            if revalidate_cached {
+                integrity::validate_read_only(db_path).await?;
             }
             return Ok((Self { inner }, false));
         }
@@ -164,6 +187,30 @@ impl Database {
         db_path: &Path,
         authority: &DatabaseAuthority,
     ) -> Result<(Self, bool)> {
+        let database = Self::open_read_only_inner(db_path, authority, true).await?;
+        Ok((database, false))
+    }
+
+    /// Opens an existing database for a bounded read-only presence probe.
+    ///
+    /// This validates the SQLite header and applies read-only PRAGMAs, but it
+    /// deliberately does not run `PRAGMA quick_check`: callers must issue only
+    /// bounded queries such as `SELECT 1 ... LIMIT 1`. A subsequent serving
+    /// open still performs the normal full integrity validation and fails
+    /// closed before exposing data.
+    #[doc(hidden)]
+    pub async fn open_read_only_for_presence_probe(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+    ) -> Result<Self> {
+        Self::open_read_only_inner(db_path, authority, false).await
+    }
+
+    async fn open_read_only_inner(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        validate_integrity: bool,
+    ) -> Result<Self> {
         let authority = authority.hold_for(db_path, "open_read_only")?;
         integrity::validate_sqlite_header(db_path, "open_read_only", false)?;
         let db = Builder::new_local(db_path)
@@ -182,7 +229,9 @@ impl Database {
 
         let file_size = std::fs::metadata(db_path).map_or(0, |m| m.len());
         pragmas::apply_read_only(&conn, file_size).await?;
-        integrity::validate(&conn, "open_read_only").await?;
+        if validate_integrity {
+            integrity::validate(&conn, "open_read_only").await?;
+        }
 
         let inner = Arc::new(DatabaseInner {
             conn,
@@ -191,7 +240,7 @@ impl Database {
             _authority: authority,
             _slot: None,
         });
-        Ok((Self { inner }, false))
+        Ok(Self { inner })
     }
 
     /// Returns a reference to the underlying libsql connection.
@@ -534,6 +583,41 @@ mod tests {
         let effective = platform_safe_mmap_size(raw);
         assert_eq!(effective, 0);
         assert_eq!(platform_safe_mmap_size(0), 0);
+    }
+
+    #[tokio::test]
+    async fn presence_probe_open_is_read_only_without_full_integrity_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "presence probe").unwrap();
+        let (seed, _) = Database::initialize(&path, &authority).await.unwrap();
+        seed.conn()
+            .execute("CREATE TABLE probe_rows (id INTEGER)", ())
+            .await
+            .unwrap();
+        seed.conn()
+            .execute("INSERT INTO probe_rows (id) VALUES (1)", ())
+            .await
+            .unwrap();
+        drop(seed);
+
+        let probe = Database::open_read_only_for_presence_probe(&path, &authority)
+            .await
+            .unwrap();
+        let mut rows = probe
+            .conn()
+            .query("SELECT 1 FROM probe_rows LIMIT 1", ())
+            .await
+            .unwrap();
+        assert!(rows.next().await.unwrap().is_some());
+        assert!(
+            probe
+                .conn()
+                .execute("INSERT INTO probe_rows (id) VALUES (2)", ())
+                .await
+                .is_err(),
+            "presence probes must remain read-only"
+        );
     }
 
     #[tokio::test]

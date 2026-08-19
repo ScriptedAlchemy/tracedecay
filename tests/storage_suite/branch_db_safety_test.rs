@@ -87,6 +87,64 @@ async fn open_untracked_project() -> (IsolatedEnv, PathBuf, TraceDecay) {
 }
 
 #[tokio::test]
+async fn branch_sync_publishes_only_graph_local_dirty_marker() {
+    let (_env, project, feature) = open_untracked_project().await;
+    let active_dirty = PathBuf::from(format!("{}.dirty", feature.db_path().display()));
+    let legacy_root_dirty = feature.store_layout().dirty_path.clone();
+    let observed_active_marker = std::cell::Cell::new(false);
+
+    fs::write(
+        project.join("src/untracked_only.rs"),
+        "pub fn untracked_only_changed() {}\n",
+    )
+    .unwrap();
+    feature
+        .sync_with_progress_verbose(
+            |_, _, _| {
+                if active_dirty.exists() {
+                    observed_active_marker.set(true);
+                    assert!(
+                        !legacy_root_dirty.exists(),
+                        "branch sync must not publish the repository-wide legacy dirty marker"
+                    );
+                }
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        observed_active_marker.get(),
+        "test must observe the graph-local marker while the sync lease is active"
+    );
+    assert!(!active_dirty.exists());
+    assert!(!legacy_root_dirty.exists());
+}
+
+#[tokio::test]
+async fn branch_open_ignores_and_preserves_root_legacy_dirty_marker() {
+    let (_env, project, feature) = open_untracked_project().await;
+    let active_dirty = PathBuf::from(format!("{}.dirty", feature.db_path().display()));
+    let legacy_root_dirty = feature.store_layout().dirty_path.clone();
+    let legacy_bytes = b"interrupted root graph writer";
+    feature.close();
+
+    fs::write(&legacy_root_dirty, legacy_bytes).unwrap();
+    let reopened = TraceDecay::open(&project)
+        .await
+        .expect("an unrelated root marker must not force branch recovery");
+
+    assert!(!active_dirty.exists());
+    assert_eq!(
+        fs::read(&legacy_root_dirty).unwrap(),
+        legacy_bytes,
+        "branch open must preserve recovery evidence owned by the root graph"
+    );
+    reopened.close();
+}
+
+#[tokio::test]
 // Regression: init and reopen must use the same graph-scoped lock.
 async fn init_index_uses_graph_specific_sync_lock() {
     let (_env, project) = IsolatedEnv::acquire().await;
@@ -148,7 +206,11 @@ async fn corrupt_derived_branch_store_is_preserved_and_rebuilt_automatically() {
         "the rebuilt branch index must include branch-only working-tree symbols"
     );
     assert_eq!(fs::read(&layout.sessions_db_path).unwrap(), sessions_bytes);
-    assert!(!layout.dirty_path.exists());
+    assert_eq!(
+        fs::read(&layout.dirty_path).unwrap(),
+        dirty_bytes,
+        "derived-branch repair must preserve unrelated root-graph recovery evidence"
+    );
 
     let recovery_root = layout.data_root.join("recovery");
     let recovery_dirs = fs::read_dir(&recovery_root)
