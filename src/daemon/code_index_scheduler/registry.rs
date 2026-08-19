@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock, Weak,
+        Arc, Mutex, OnceLock, RwLock, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -380,6 +380,10 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     /// timestamp, and trigger so a cancelling query cannot erase a coalesced
     /// foreign wake between independent atomic updates.
     pending_wake: Arc<PendingWakeV1>,
+    /// Canonical Plan 26 observability lane, installed once after project open
+    /// mounts the project-bound producer. Empty means this worktree records no
+    /// canonical index or retrieval observations (never a fabricated zero).
+    index_observability: Arc<OnceLock<super::observability::CodeIndexObservabilityV1>>,
     shutting_down: Arc<AtomicBool>,
     /// Count of in-flight owner passes; nonzero means activation or reconcile
     /// work is running for this worktree.
@@ -1632,6 +1636,8 @@ impl CodeIndexSchedulerRegistryV1 {
         state.trigger = Self::pack_trigger(trigger);
     }
 
+    /// Returns the pass's service time so the caller can attach the same
+    /// measurement to the canonical index-lifecycle observation.
     fn record_reconcile_receipt(
         telemetry: &Mutex<CodeIndexCadenceTelemetryV1>,
         project_root: PathBuf,
@@ -1639,7 +1645,7 @@ impl CodeIndexSchedulerRegistryV1 {
         trigger: CodeIndexCadenceTriggerV1,
         started_micros: i64,
         outcome: &CodeIndexReconcileOutcomeV1,
-    ) {
+    ) -> u64 {
         let ready_micros = now_micros().0;
         let (cadence_outcome, overflow_reconciled) = match outcome {
             CodeIndexReconcileOutcomeV1::Published(evidence) => (
@@ -1698,6 +1704,9 @@ impl CodeIndexSchedulerRegistryV1 {
             overflow_reconciled = receipt.overflow_reconciled,
             "code-index reconcile reached a terminal outcome"
         );
+        // `service_micros` is clamped non-negative by construction, so the
+        // widening cast is exact.
+        let service_micros = receipt.service_micros().max(0) as u64;
         let mut telemetry = telemetry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1724,6 +1733,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index cadence percentile became eligible"
             );
         }
+        service_micros
     }
 
     /// Latest completed event-to-ready receipt for this registry, if any.
@@ -2035,6 +2045,9 @@ impl CodeIndexSchedulerRegistryV1 {
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
         let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
         let pending_wake = Arc::new(PendingWakeV1::default());
+        let index_observability =
+            Arc::new(OnceLock::<super::observability::CodeIndexObservabilityV1>::new());
+        let worker_index_observability = Arc::clone(&index_observability);
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
@@ -2365,7 +2378,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             evidence,
                         );
                     }
-                    Self::record_reconcile_receipt(
+                    let service_micros = Self::record_reconcile_receipt(
                         &worker_cadence_telemetry,
                         worker_project_root.clone(),
                         arrival,
@@ -2373,6 +2386,24 @@ impl CodeIndexSchedulerRegistryV1 {
                         started_micros,
                         outcome,
                     );
+                    if let Some(observability) = worker_index_observability.get() {
+                        // The pending slot coalesces at most one waiting wake,
+                        // so the queue behind this pass is empty or singular.
+                        let queue_depth_bucket = {
+                            let state = worker_pending_wake
+                                .state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if state.micros == 0 {
+                                tracedecay_domain::QueueDepthBucketV1::Zero
+                            } else {
+                                tracedecay_domain::QueueDepthBucketV1::OneToEight
+                            }
+                        };
+                        observability
+                            .record_reconcile_outcome(outcome, service_micros, queue_depth_bucket)
+                            .await;
+                    }
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.
                     match &result {
@@ -2421,6 +2452,7 @@ impl CodeIndexSchedulerRegistryV1 {
             wake: Arc::clone(&wake),
             epoch,
             pending_wake: Arc::clone(&pending_wake),
+            index_observability,
             shutting_down,
             reconcile_in_progress,
             _active_generation_encoded_bytes: active_generation_encoded_bytes,
@@ -2466,6 +2498,53 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         worktree.query_authority = Some((scope.scope_digest.clone(), authority));
         Ok(())
+    }
+
+    /// Install the canonical Plan 26 observability lane for one mounted
+    /// worktree. Installation is once per mount: a repeated install against
+    /// the same mounted worktree keeps the incumbent lane, and a worktree that
+    /// is not mounted is a typed error so the caller can log the absence.
+    pub(in crate::daemon) async fn install_index_observability(
+        &self,
+        project_root: &Path,
+        observability: super::observability::CodeIndexObservabilityV1,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        let project_root = project_root.canonicalize()?;
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root).ok_or_else(|| {
+            CodeIndexSchedulerErrorV1::Identity(
+                "cannot install index observability before its worktree".to_owned(),
+            )
+        })?;
+        // A remount creates a fresh empty slot, so an ignored second set here
+        // can only be a same-mount duplicate carrying the same project lane.
+        let _ = worktree.index_observability.set(observability);
+        Ok(())
+    }
+
+    /// The installed observability lane for one exact admitted scope, if the
+    /// worktree is mounted and the lane was installed.
+    pub(in crate::daemon) async fn index_observability_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<super::observability::CodeIndexObservabilityV1> {
+        let mounted = self.mounted.try_lock().ok()?;
+        let mut matched = None;
+        for worktree in mounted.values() {
+            if worktree.repository_id != scope.repository_id
+                || worktree.worktree_id != scope.worktree_id
+            {
+                continue;
+            }
+            let Some(observability) = worktree.index_observability.get() else {
+                continue;
+            };
+            if matched.is_some() {
+                return None;
+            }
+            matched = Some(observability.clone());
+        }
+        matched
     }
 
     /// Install the core and optional semantic query routes as one committed
