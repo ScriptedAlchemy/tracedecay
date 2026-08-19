@@ -291,24 +291,51 @@ async fn isolated_fixture_repo_embeds_and_indexes_without_activation() {
         assert_lane_complete(&core["coverage"], lane);
     }
 
-    let strict = answered(
-        &harness,
-        &project,
-        "tracedecay_search",
-        json!({
-            "query": PROBE_SYMBOL,
-            "limit": 10,
-            "format": "json",
-            "semantic_mode": "strict_semantic"
-        }),
+    // Strict-semantic requests fail closed before activation: the tool
+    // surfaces a typed failure, so decode its payload directly rather than
+    // through the success-path helper.
+    let strict_response = harness
+        .call_tool(
+            &project,
+            "tracedecay_search",
+            json!({
+                "query": PROBE_SYMBOL,
+                "limit": 10,
+                "format": "json",
+                "semantic_mode": "strict_semantic"
+            }),
+        )
+        .await
+        .expect("strict semantic search answers with a typed payload");
+    assert!(
+        strict_response.error.is_none(),
+        "strict semantic unavailability is a typed result, not a transport error: \
+         {strict_response:?}"
+    );
+    let strict_result = strict_response.result.as_ref().expect("strict tool result");
+    let strict: serde_json::Value = serde_json::from_str(
+        strict_result["content"][0]["text"]
+            .as_str()
+            .expect("strict tool text"),
     )
-    .await;
+    .expect("strict tool payload is JSON");
     assert_eq!(
         strict["status"],
         json!("unavailable"),
         "strict semantic must stay typed-unavailable without activation: {strict}"
     );
-    assert_ne!(strict["semantic"]["status"], json!("complete"));
+    assert_eq!(
+        strict["semantic"]["status"],
+        json!("unavailable"),
+        "the unactivated semantic lane must be typed-unavailable: {strict}"
+    );
+    // A current vector generation without an accepted calibration authority
+    // is exactly the "callable, not activated" state this check proves.
+    assert_eq!(
+        strict["semantic"]["reason"],
+        json!("calibration_unavailable"),
+        "strict unavailability must name the missing activation authority: {strict}"
+    );
 
     let lexical = answered(
         &harness,
