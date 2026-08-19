@@ -1465,7 +1465,7 @@ fn lcm_sensitive_redaction_rejects_duplicate_json_keys_before_materialization() 
 
     assert!(matches!(
         redact_lcm_sensitive_payload(raw, &policy),
-        Err(DetectionError::Receipt)
+        Err(DetectionError::StructuredQuarantine)
     ));
 }
 

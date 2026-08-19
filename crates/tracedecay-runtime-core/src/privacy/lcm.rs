@@ -6,7 +6,7 @@ use super::detect::DetectionError;
 use super::detector_kernel::{
     JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, visit_sensitive_json_mut,
 };
-use super::structured::parse_json_value;
+use super::structured::{JsonPreflightFailureV1, parse_json_value};
 use tracedecay_capture::ParseLimits;
 
 const REDACTED_ASSIGNMENT: &str = "[TraceDecay redacted: credential assignment]";
@@ -81,10 +81,17 @@ pub fn redact_lcm_sensitive_payload(
     }
     let mut patterns = Vec::new();
     let text = if raw.trim_start().starts_with(['{', '[']) {
-        let mut payload = parse_json_value(raw, limits.depth, limits.values)
-            .map_err(|_| DetectionError::Receipt)?;
+        let mut payload = match parse_json_value(raw, limits.depth, limits.values) {
+            Ok(payload) => payload,
+            Err(
+                JsonPreflightFailureV1::DepthExceeded | JsonPreflightFailureV1::ValueCountExceeded,
+            ) => return Err(DetectionError::ScanLimitExceeded),
+            Err(JsonPreflightFailureV1::DuplicateKey | JsonPreflightFailureV1::Malformed) => {
+                return Err(DetectionError::StructuredQuarantine);
+            }
+        };
         if !(payload.is_object() || payload.is_array()) {
-            return Err(DetectionError::Receipt);
+            return Err(DetectionError::StructuredQuarantine);
         }
         redact_structured(&mut payload, policy, &mut patterns);
         serde_json::to_string(&payload).map_err(|_| DetectionError::Receipt)?
