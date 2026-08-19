@@ -9,13 +9,16 @@ use axum::http::StatusCode;
 use serde_json::Value;
 use serde_json::json;
 use tracedecay_application::{
-    ApplicationContractError, ApplicationOutcome, ApplicationProblemEnvelope, RequestId,
+    ApplicationContractError, ApplicationOutcome, ApplicationProblemEnvelope, AuthorizedScopeSet,
+    RequestId,
 };
-use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
+use tracedecay_domain::{ProjectId, ScopeSetId};
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
+
+use crate::DashboardHttpRequestControlV1;
 
 pub struct DashboardApplicationRouters {
     pub http: Router,
@@ -71,6 +74,25 @@ pub(crate) fn configuration_apply_error(
     }
 }
 
+pub type DashboardScopeSetReadFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<
+                    Option<AuthorizedScopeSet>,
+                    DashboardScopeSetReadUnavailableV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// The daemon transport could not answer a persisted scope-set read. The
+/// detail is a safe diagnostic, never store paths or payload content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DashboardScopeSetReadUnavailableV1 {
+    pub detail: String,
+}
+
 pub trait DashboardApplicationRuntime: Send + Sync {
     /// Exact profile bound by the daemon handshake. A dashboard mounted
     /// without that identity cannot advertise or dispatch profile writes.
@@ -88,6 +110,16 @@ pub trait DashboardApplicationRuntime: Send + Sync {
         expected_revision: ConfigurationRevisionId,
         idempotency_key: ConfigurationIdempotencyKey,
     ) -> DashboardConfigurationApplyFuture<'a>;
+
+    /// Reads one persisted multi-root scope set (a named collection) through
+    /// the daemon transport under the live request controls. Read-only: the
+    /// daemon answers only the exact collection identity it was asked for and
+    /// never resolves paths or widens authority here.
+    fn read_multi_root_scope_set<'a>(
+        &'a self,
+        control: DashboardHttpRequestControlV1,
+        scope_set_id: ScopeSetId,
+    ) -> DashboardScopeSetReadFuture<'a>;
 }
 
 #[cfg(test)]

@@ -29,7 +29,8 @@ use super::support::generic_tool_result;
 use crate::dashboard::{
     AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
     DashboardApplicationRuntime, DashboardAutomationWriter, DashboardConfigurationApplyError,
-    DashboardConfigurationApplyFuture, DashboardStateCompositionV1, bind_dashboard,
+    DashboardConfigurationApplyFuture, DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
+    DashboardScopeSetReadUnavailableV1, DashboardStateCompositionV1, bind_dashboard,
     build_state_with_automation_reconciler, router, validate_dashboard_host,
 };
 
@@ -148,6 +149,66 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                         Err(DashboardConfigurationApplyError::ApplicationContractViolation(error))
                     }
                 },
+            }
+        })
+    }
+
+    fn read_multi_root_scope_set(
+        &self,
+        control: DashboardHttpRequestControlV1,
+        scope_set_id: tracedecay_domain::ScopeSetId,
+    ) -> DashboardScopeSetReadFuture<'_> {
+        let executor = Arc::clone(&self.executor);
+        Box::pin(async move {
+            let request = tracedecay_application::MultiRootScopeSetReadRequestV1::new(scope_set_id)
+                .map_err(|error| DashboardScopeSetReadUnavailableV1 {
+                    detail: error.to_string(),
+                })?;
+            let invocation = crate::daemon_contract::DaemonInvocationRequest::multi_root_scope_set_read(
+                control.request_id().as_str(),
+                request,
+                control.observed_at(),
+                control.deadline(),
+                control.cancellation().context(),
+            );
+            let response = executor
+                .invoke_controlled(
+                    invocation,
+                    control.deadline(),
+                    control.cancellation().clone(),
+                    crate::daemon_client::InvocationCancellationPolicy::ReadOnly,
+                )
+                .await
+                .map_err(|error| DashboardScopeSetReadUnavailableV1 {
+                    detail: format!("the daemon multi-root read transport failed: {error:?}"),
+                })?;
+            match response.outcome {
+                crate::daemon_contract::DaemonInvocationOutcome::MultiRootScopeSetRead {
+                    outcome: tracedecay_application::ApplicationOutcome::Evidence(packet),
+                    ..
+                } => packet
+                    .payload
+                    .ok_or_else(|| DashboardScopeSetReadUnavailableV1 {
+                        detail: "the daemon multi-root read returned no evidence payload"
+                            .to_owned(),
+                    }),
+                crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem {
+                    problem,
+                } => Err(DashboardScopeSetReadUnavailableV1 {
+                    detail: format!(
+                        "the daemon rejected the multi-root read: {}",
+                        problem.safe_message()
+                    ),
+                }),
+                crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
+                    Err(DashboardScopeSetReadUnavailableV1 {
+                        detail: format!("the daemon refused the multi-root read: {problem:?}"),
+                    })
+                }
+                _ => Err(DashboardScopeSetReadUnavailableV1 {
+                    detail: "the daemon multi-root read answered with a foreign outcome"
+                        .to_owned(),
+                }),
             }
         })
     }
