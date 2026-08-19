@@ -27,7 +27,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::framed_log::{
@@ -447,12 +446,10 @@ fn acquire_writer_lock(root: &Path) -> Result<fs::File, HookAdmissionLedgerError
         .write(true)
         .open(&path)
         .map_err(|_| HookAdmissionLedgerError::Io)?;
-    match file.try_lock_exclusive() {
+    match file.try_lock() {
         Ok(()) => Ok(file),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-            Err(HookAdmissionLedgerError::Busy)
-        }
-        Err(_) => Err(HookAdmissionLedgerError::Io),
+        Err(std::fs::TryLockError::WouldBlock) => Err(HookAdmissionLedgerError::Busy),
+        Err(std::fs::TryLockError::Error(_)) => Err(HookAdmissionLedgerError::Io),
     }
 }
 

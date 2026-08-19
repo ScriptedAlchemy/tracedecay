@@ -291,10 +291,16 @@ jobs:
           npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
           ast-grep --version
 
-      # The architecture tests exec `cargo metadata` at runtime; without an
-      # installed toolchain the rustup shim starts a mid-test component
-      # download that flakes. Install up front like the build job does.
-      - uses: dtolnay/rust-toolchain@stable
+      # The architecture tests exec `cargo metadata` at runtime, and they run
+      # concurrently under nextest: without the pinned toolchain installed,
+      # each test process's rustup shim races to self-install it and the
+      # concurrent downloads corrupt each other's partial files. Install the
+      # rust-toolchain.toml pin serially up front.
+      - name: Install pinned toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest

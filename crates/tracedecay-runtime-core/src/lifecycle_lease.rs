@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::db::is_lock_contended;
 use crate::errors::{Result, TraceDecayError};
 
 const LIFECYCLE_LOCK_FILENAME: &str = "lifecycle.lock";
@@ -499,30 +500,14 @@ fn open_lock_file(path: &Path) -> Result<File> {
         .map_err(|error| lock_error(path, "open", &error))
 }
 
-fn is_lock_contended(error: &std::io::Error) -> bool {
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        return true;
-    }
+fn read_owner(file: &mut File, _path: &Path) -> Option<String> {
     #[cfg(windows)]
-    {
-        // LockFileEx reports lock contention as ERROR_LOCK_VIOLATION, which
-        // std currently classifies as Uncategorized rather than WouldBlock.
-        error.raw_os_error() == Some(33)
-    }
-    #[cfg(not(windows))]
-    false
-}
-
-fn read_owner(file: &mut File, path: &Path) -> Option<String> {
-    #[cfg(windows)]
-    if let Ok(owner) = std::fs::read_to_string(owner_sidecar_path(path)) {
+    if let Ok(owner) = std::fs::read_to_string(owner_sidecar_path(_path)) {
         let owner = owner.trim();
         if !owner.is_empty() {
             return Some(owner.to_string());
         }
     }
-    #[cfg(not(windows))]
-    let _ = path;
     let mut owner = String::new();
     file.seek(SeekFrom::Start(0)).ok()?;
     file.read_to_string(&mut owner).ok()?;

@@ -35,16 +35,20 @@ const MAX_EXACT_SQL_ATTACHMENTS: i32 = 4;
 const EXACT_SQL_PROGRESS_INTERVAL_OPS: i32 = 1_000;
 #[cfg(not(test))]
 const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(30);
+// Test-mode limits keep the expiry paths exercisable in seconds. They must
+// still leave headroom for this crate's own near-cap payload tests (multiple
+// ~4 MiB replay-page statements per cleanup transaction) on hosted-runner
+// disks, where one such insert plus fsync can take most of a second.
 #[cfg(test)]
-const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_millis(250);
+const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
 const EXACT_SQL_TRANSACTION_IDLE_LIMIT: Duration = Duration::from_secs(30);
 #[cfg(test)]
-const EXACT_SQL_TRANSACTION_IDLE_LIMIT: Duration = Duration::from_millis(250);
+const EXACT_SQL_TRANSACTION_IDLE_LIMIT: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
 const EXACT_SQL_TRANSACTION_LIMIT: Duration = Duration::from_secs(120);
 #[cfg(test)]
-const EXACT_SQL_TRANSACTION_LIMIT: Duration = Duration::from_millis(500);
+const EXACT_SQL_TRANSACTION_LIMIT: Duration = Duration::from_secs(4);
 const ROW_ALLOCATION_OVERHEAD: usize =
     std::mem::size_of::<ExactSqlRow>() + std::mem::size_of::<Vec<ExactSqlValue>>();
 const CELL_ALLOCATION_OVERHEAD: usize = std::mem::size_of::<ExactSqlValue>();

@@ -2,6 +2,7 @@
 //! admission, fenced compare-and-swap transitions, authority isolation, and
 //! restart durability over the registered exact-SQL channel.
 
+mod common;
 mod work_registered_store;
 
 use std::{
@@ -40,6 +41,7 @@ use tracedecay_domain::{
     WorkflowOutputName, WorktreeId,
 };
 
+use common::fixture_abs_root;
 use work_registered_store::RegisteredWorkStore;
 
 fn id<T>(value: &str) -> T
