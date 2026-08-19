@@ -493,10 +493,7 @@ struct CargoSourceLayout {
 }
 
 fn cargo_source_layout(repository: &Path) -> Result<CargoSourceLayout, String> {
-    // env!("CARGO") pins the exact cargo that built this test: a bare PATH
-    // lookup goes through the rustup shim, which can start a toolchain
-    // re-sync mid-test on hosted runners and fail the metadata call.
-    let output = Command::new(env!("CARGO"))
+    let output = Command::new(cargo_binary())
         .current_dir(repository)
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .output()
@@ -573,6 +570,16 @@ fn parse_cargo_source_layout(
         target_roots,
         tracked_roots,
     })
+}
+
+/// The runtime `CARGO` (set when running under cargo) pins an exact binary
+/// and avoids the rustup shim, which can start a toolchain re-sync mid-test
+/// on hosted runners. Nextest archive runners execute outside cargo with no
+/// `CARGO` in the environment, so they fall back to the image's PATH cargo;
+/// a compile-time `env!("CARGO")` would bake in the build machine's path,
+/// which does not exist there.
+fn cargo_binary() -> std::ffi::OsString {
+    std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
 }
 
 fn metadata_path_relative(
@@ -1005,10 +1012,7 @@ struct ArchitectureDependency {
 #[test]
 fn workspace_architecture_contract() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
-    // env!("CARGO") pins the exact cargo that built this test: a bare PATH
-    // lookup goes through the rustup shim, which can start a toolchain
-    // re-sync mid-test on hosted runners and fail the metadata call.
-    let output = Command::new(env!("CARGO"))
+    let output = Command::new(cargo_binary())
         .current_dir(repository)
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .output()
