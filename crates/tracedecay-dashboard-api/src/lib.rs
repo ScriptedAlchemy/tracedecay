@@ -145,7 +145,7 @@ use axum::routing::{any, get, patch, post};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use tracedecay_api::WorkOperation;
+use tracedecay_api::{WorkOperation, WorkflowOperation};
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_agent_hosts::automation::backend;
@@ -1607,6 +1607,10 @@ async fn project_scoped_api_gateway(
                 (application.dashboard_feedback_router, "feedback/")
             }
             SelectedProjectApplicationRead::Work => (application.dashboard_work_router, "work/"),
+            // Workflow reads answer from the selected project's own canonical
+            // application router: stripping `application/` leaves the
+            // `/workflow/{operation}` path that router mounts.
+            SelectedProjectApplicationRead::Workflow => (application.http_router, "application/"),
         };
         let Some(operation) = tail.strip_prefix(family) else {
             return (
@@ -1675,6 +1679,7 @@ fn is_profile_owned_automation_skills_route(tail: &str) -> bool {
 enum SelectedProjectApplicationRead {
     Feedback,
     Work,
+    Workflow,
 }
 
 impl std::fmt::Display for SelectedProjectApplicationRead {
@@ -1682,6 +1687,7 @@ impl std::fmt::Display for SelectedProjectApplicationRead {
         formatter.write_str(match self {
             Self::Feedback => "feedback",
             Self::Work => "Work",
+            Self::Workflow => "Workflow",
         })
     }
 }
@@ -1697,11 +1703,20 @@ fn selected_project_application_read(
         "feedback/get" | "feedback/expand" | "feedback/list" => {
             Some(SelectedProjectApplicationRead::Feedback)
         }
-        _ => WorkOperation::ALL
-            .into_iter()
-            .filter(|operation| operation.is_read_only())
-            .any(|operation| tail.strip_prefix("work/") == Some(operation.route_segment()))
-            .then_some(SelectedProjectApplicationRead::Work),
+        _ => {
+            if let Some(segment) = tail.strip_prefix("application/workflow/") {
+                return WorkflowOperation::ALL
+                    .into_iter()
+                    .filter(|operation| operation.is_read_only())
+                    .any(|operation| operation.route_segment() == segment)
+                    .then_some(SelectedProjectApplicationRead::Workflow);
+            }
+            WorkOperation::ALL
+                .into_iter()
+                .filter(|operation| operation.is_read_only())
+                .any(|operation| tail.strip_prefix("work/") == Some(operation.route_segment()))
+                .then_some(SelectedProjectApplicationRead::Work)
+        }
     }
 }
 
@@ -2898,5 +2913,39 @@ mod authority_tests {
             selected_project_application_read(&Method::POST, "feedback/status"),
             None
         );
+
+        // `list-definitions` is the canonical Workflow read the Workflows
+        // workspace issues under a selected project; naming it keeps the
+        // intent legible beside the derived loop below.
+        assert_eq!(
+            selected_project_application_read(
+                &Method::POST,
+                "application/workflow/list-definitions"
+            ),
+            Some(SelectedProjectApplicationRead::Workflow)
+        );
+        for operation in WorkflowOperation::ALL {
+            let tail = operation
+                .application_route_path()
+                .strip_prefix("/")
+                .expect("a rooted application route path");
+            if operation.is_read_only() {
+                assert_eq!(
+                    selected_project_application_read(&Method::POST, tail),
+                    Some(SelectedProjectApplicationRead::Workflow),
+                    "{tail} is a read-only Workflow operation a selected project may read"
+                );
+                assert_eq!(selected_project_application_read(&Method::GET, tail), None);
+            } else {
+                // Lifecycle transitions, handoffs, and run control stay
+                // refused: a selected project is read-only through this
+                // gateway.
+                assert_eq!(
+                    selected_project_application_read(&Method::POST, tail),
+                    None,
+                    "{tail} must not be answerable for a selected project"
+                );
+            }
+        }
     }
 }
