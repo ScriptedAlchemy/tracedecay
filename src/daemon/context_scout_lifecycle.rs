@@ -305,7 +305,7 @@ pub(crate) enum ContextScoutLifecycleLookupFailureV1 {
 }
 
 impl ContextScoutLifecycleLookupFailureV1 {
-    pub(crate) const fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidProfileId => "invalid_profile_id",
             Self::InvalidProjectId => "invalid_project_id",
@@ -337,14 +337,14 @@ pub(crate) enum ContextScoutLifecycleLookupV1 {
 impl ContextScoutLifecycleLookupV1 {
     /// Collapses to the fail-closed `Option`, discarding the reason (which
     /// the lookup already emitted to tracing).
-    pub(crate) fn into_address(self) -> Option<ContextScoutLifecycleAddressV1> {
+    fn into_address(self) -> Option<ContextScoutLifecycleAddressV1> {
         match self {
             Self::Resolved(address) => Some(*address),
             Self::Unresolved(_) => None,
         }
     }
 
-    pub(crate) const fn is_resolved(&self) -> bool {
+    const fn is_resolved(&self) -> bool {
         matches!(self, Self::Resolved(_))
     }
 }
@@ -357,7 +357,7 @@ impl ContextScoutLifecycleLookupV1 {
 /// all bind the requested session. The newest complete tuple wins, so a later
 /// native tool call advances one session without making its prior turn
 /// ambiguous. Corrupt, released, or excessive evidence still fails closed.
-pub(crate) async fn lookup_context_scout_lifecycle(
+async fn lookup_context_scout_lifecycle(
     profile_id: &UserProfileId,
     project_id: &ProjectId,
     worktree_id: &WorktreeId,
