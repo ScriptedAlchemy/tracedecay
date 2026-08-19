@@ -219,9 +219,8 @@ async fn reset_then_reconnect_client(
             let second_stream = listener.accept().await.expect("accept second invocation");
             let (second_reader, second_writer) = second_stream.into_split();
             let mut second_lines = BufReader::new(second_reader).lines();
-            match second_lines.next_line().await {
-                Ok(Some(_handshake)) => break (second_lines, second_writer),
-                Ok(None) | Err(_) => continue,
+            if let Ok(Some(_handshake)) = second_lines.next_line().await {
+                break (second_lines, second_writer);
             }
         };
         let second_line = second_lines
