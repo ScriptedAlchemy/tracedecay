@@ -329,6 +329,12 @@ pub(super) fn workflow_coordination_problem(
         tracedecay_application::WorkflowCoordinationError::AuthorityUnavailable(_) => {
             DaemonInvocationProblem::Unavailable
         }
+        // A catalog that could not be composed is an unavailable authority,
+        // not a caller mistake; only a definition the live catalog actually
+        // refused is an invalid request.
+        tracedecay_application::WorkflowCoordinationError::CatalogAdmissionDenied(
+            tracedecay_application::WorkflowCatalogAdmissionError::CatalogUnavailable(_),
+        ) => DaemonInvocationProblem::Unavailable,
         tracedecay_application::WorkflowCoordinationError::DefinitionNotFound
         | tracedecay_application::WorkflowCoordinationError::ScopeMismatch => {
             DaemonInvocationProblem::NotFoundOrNotAuthorized
