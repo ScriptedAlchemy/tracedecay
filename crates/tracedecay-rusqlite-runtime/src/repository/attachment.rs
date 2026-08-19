@@ -16,8 +16,9 @@ use tracedecay_store::{
 };
 
 use crate::{
-    CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, MaintenanceCheckpointRequest,
-    OnlineBackupReceipt, PersistentWriter, RuntimeWriteAuthority, WriterStartError, WriterState,
+    CheckpointControlError, CheckpointOutcome, CheckpointRequest, ExistingWriterLocator,
+    MaintenanceCheckpointRequest, OnlineBackupReceipt, PersistentWriter, RuntimeWriteAuthority,
+    RuntimeWriteAuthorityStage, WriterStartError, WriterState,
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     exact_sql::{ExactSqlError, ExactSqlHandle},
     reader::{
@@ -527,6 +528,11 @@ impl RepositoryRuntimePhysicalAttachment {
     /// writer. Maintenance runs after admission has closed, so this does not
     /// require `admission_open`; a still-`Ready` writer is moved to
     /// `Draining` first. PASSIVE checkpoints stay on [`Self::run_checkpoint`].
+    ///
+    /// The permit binding and admission-stage authority are validated before
+    /// any lifecycle transition: draining is irreversible, so a misrouted
+    /// permit or revoked authority must leave admission open and the writer
+    /// `Ready`.
     pub async fn run_maintenance_checkpoint(
         &self,
         request: MaintenanceCheckpointRequest,
@@ -534,6 +540,24 @@ impl RepositoryRuntimePhysicalAttachment {
     ) -> Result<CheckpointOutcome, RepositoryDispatchError> {
         let checkpoint = {
             let mut state = self.lock_state();
+            if state.closed || state.writer.is_none() {
+                return Err(RepositoryDispatchError::Closed);
+            }
+            if request.permit().binding() != &state.binding {
+                return Err(RepositoryDispatchError::Checkpoint(
+                    CheckpointControlError::BindingMismatch,
+                ));
+            }
+            if authority
+                .verify(RuntimeWriteAuthorityStage::BeforeAdmission)
+                .is_err()
+            {
+                return Err(RepositoryDispatchError::Checkpoint(
+                    CheckpointControlError::AuthorityDenied {
+                        stage: RuntimeWriteAuthorityStage::BeforeAdmission,
+                    },
+                ));
+            }
             Self::begin_maintenance_drain_locked(&mut state)?;
             state
                 .writer
@@ -543,11 +567,11 @@ impl RepositoryRuntimePhysicalAttachment {
         };
         let ticket = checkpoint
             .trigger_maintenance_authorized(request, authority)
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
+            .map_err(RepositoryDispatchError::Checkpoint)?;
         ticket
             .wait()
             .await
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+            .map_err(RepositoryDispatchError::Checkpoint)
     }
 
     pub async fn snapshot_to(
@@ -731,6 +755,7 @@ impl Drop for RepositoryRuntimePhysicalAttachment {
 #[derive(Debug)]
 pub enum RepositoryDispatchError {
     Closed,
+    Checkpoint(CheckpointControlError),
     Reader(ReaderAcquireError),
     ReaderWorker(String),
     Writer(String),
@@ -740,6 +765,12 @@ impl fmt::Display for RepositoryDispatchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Closed => formatter.write_str("repository runtime is closed"),
+            Self::Checkpoint(error) => {
+                write!(
+                    formatter,
+                    "repository maintenance checkpoint failed: {error}"
+                )
+            }
             Self::Reader(error) => write!(formatter, "repository read failed: {error}"),
             Self::ReaderWorker(error) => write!(formatter, "repository snapshot failed: {error}"),
             Self::Writer(error) => write!(formatter, "repository write failed: {error}"),
@@ -750,6 +781,7 @@ impl fmt::Display for RepositoryDispatchError {
 impl Error for RepositoryDispatchError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Checkpoint(error) => Some(error),
             Self::Reader(error) => Some(error),
             Self::Closed | Self::ReaderWorker(_) | Self::Writer(_) => None,
         }
@@ -835,7 +867,6 @@ mod tests {
 
     use crate::{
         CheckpointBlockers, CheckpointKind, MaintenanceCheckpointMode, RuntimeWriteAuthorityError,
-        RuntimeWriteAuthorityStage,
         exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlValue},
         maintenance::{ExclusiveMaintenancePermit, MaintenanceOwnerId},
     };
@@ -850,6 +881,19 @@ mod tests {
             _stage: RuntimeWriteAuthorityStage,
         ) -> Result<(), RuntimeWriteAuthorityError> {
             Ok(())
+        }
+    }
+
+    struct DeniedAuthority;
+
+    impl RuntimeWriteAuthority for DeniedAuthority {
+        fn verify(
+            &self,
+            stage: RuntimeWriteAuthorityStage,
+        ) -> Result<(), RuntimeWriteAuthorityError> {
+            Err(RuntimeWriteAuthorityError::denied(format!(
+                "maintenance authority denied at {stage:?}"
+            )))
         }
     }
 
@@ -1113,6 +1157,138 @@ mod tests {
             attachment.binding(),
         );
         MaintenanceCheckpointRequest::new(mode, permit, CheckpointBlockers::default())
+    }
+
+    fn foreign_binding() -> StoreRuntimeBindingV1 {
+        serde_json::from_value(serde_json::json!({
+            "shard_id": {
+                "brain_id": "brain.repository-lifecycle",
+                "profile_id": "profile.repository-lifecycle",
+                "scope": {
+                    "kind": "project",
+                    "project_id": "project.other-shard"
+                }
+            },
+            "incarnation": 4,
+            "authority_epoch": 12
+        }))
+        .unwrap()
+    }
+
+    fn assert_admission_open_and_writer_ready(attachment: &RepositoryRuntimePhysicalAttachment) {
+        let state = attachment.lock_state();
+        assert!(state.admission_open, "admission must stay open");
+        assert!(!state.closed);
+        assert_eq!(
+            state
+                .writer
+                .as_ref()
+                .expect("writer stays attached")
+                .state(),
+            WriterState::Ready,
+            "writer must stay Ready"
+        );
+        assert!(state.readers.is_some());
+    }
+
+    #[test]
+    fn maintenance_checkpoint_rejects_foreign_permit_before_draining() {
+        let directory = TempDir::new().unwrap();
+        let attachment = attach_wal_database(&directory);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        let foreign_permit = ExclusiveMaintenancePermit::issue(
+            MaintenanceOwnerId::new(1).unwrap(),
+            foreign_binding(),
+        );
+        let request = MaintenanceCheckpointRequest::new(
+            MaintenanceCheckpointMode::Truncate,
+            foreign_permit,
+            CheckpointBlockers::default(),
+        );
+        let error = runtime
+            .block_on(
+                attachment.run_maintenance_checkpoint(request, Arc::new(UnrestrictedAuthority)),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RepositoryDispatchError::Checkpoint(CheckpointControlError::BindingMismatch)
+        ));
+
+        assert_admission_open_and_writer_ready(&attachment);
+        attachment
+            .exact_sql_handle()
+            .expect("a rejected foreign permit must not close exact-SQL admission");
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+    }
+
+    #[test]
+    fn maintenance_checkpoint_denied_authority_never_drains() {
+        let directory = TempDir::new().unwrap();
+        let attachment = attach_wal_database(&directory);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        let error = runtime
+            .block_on(attachment.run_maintenance_checkpoint(
+                maintenance_request(&attachment, MaintenanceCheckpointMode::Truncate),
+                Arc::new(DeniedAuthority),
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RepositoryDispatchError::Checkpoint(CheckpointControlError::AuthorityDenied {
+                stage: RuntimeWriteAuthorityStage::BeforeAdmission,
+            })
+        ));
+
+        assert_admission_open_and_writer_ready(&attachment);
+        attachment
+            .exact_sql_handle()
+            .expect("a denied authority must not close exact-SQL admission");
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+    }
+
+    #[test]
+    fn maintenance_checkpoint_preserves_typed_blocked_failure() {
+        let directory = TempDir::new().unwrap();
+        let attachment = attach_wal_database(&directory);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        let permit = ExclusiveMaintenancePermit::issue(
+            MaintenanceOwnerId::new(1).unwrap(),
+            attachment.binding(),
+        );
+        let blockers = CheckpointBlockers {
+            blockers: Vec::new(),
+            omitted: 1,
+        };
+        let request = MaintenanceCheckpointRequest::new(
+            MaintenanceCheckpointMode::Truncate,
+            permit,
+            blockers.clone(),
+        );
+        let error = runtime
+            .block_on(
+                attachment.run_maintenance_checkpoint(request, Arc::new(UnrestrictedAuthority)),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RepositoryDispatchError::Checkpoint(CheckpointControlError::Blocked(ref actual))
+                if *actual == blockers
+        ));
+
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
     }
 
     #[test]
