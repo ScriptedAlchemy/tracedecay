@@ -420,9 +420,8 @@ where
         }
     }
 
-    /// Validation is the preflight for activation and answers exactly what
-    /// activation would decide: structural shape plus tool-catalog semantic
-    /// admission of every step operation.
+    /// The preflight for activation: structural shape plus tool-catalog
+    /// semantic admission of every step operation.
     pub fn validate(
         &self,
         definition: WorkflowDefinition,
@@ -465,10 +464,9 @@ where
     }
 
     /// Admission every activation must clear before its lifecycle transition
-    /// is journaled: the stored payload is structurally revalidated and every
-    /// step operation is admitted against the tool catalog. This is the one
-    /// authority both activation paths — this service and the daemon's
-    /// journaled effect — run, so they cannot drift.
+    /// is journaled: structural revalidation plus tool-catalog admission of
+    /// every step operation. The one authority both activation paths — this
+    /// service and the daemon's journaled effect — run.
     pub fn admit_activation(
         &self,
         definition_id: &WorkflowDefinitionId,

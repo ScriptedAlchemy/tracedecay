@@ -56,8 +56,6 @@ export function WorkTopologyAccounting({
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
   topology?: WorkResult<ExecutionTopologyViewV1> | undefined;
   graph: WorkGraphReading;
-  /** The mounted `operation.work.topology_metrics` read behind the
-   * integration-outcome and stack-capability cards. */
   metrics?: WorkResult<ExecutionTopologyMetricsV1> | undefined;
 }) {
   const reading = workTopologyAccounting(attemptList, graph, topology, metrics);

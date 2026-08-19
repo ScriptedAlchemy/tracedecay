@@ -1,11 +1,6 @@
-/**
- * The Workflows page over the mounted `/application/workflow` routes.
- *
- * The invariant under test is the same one every workspace carries: a refusal
- * is never an empty registry, an empty registry is drawn only when the daemon
- * actually answered one, and every rendered figure is a decoded generated
- * contract rather than a browser-owned substitute.
- */
+/** The Workflows page over the mounted `/application/workflow` routes: a
+ * refusal is never an empty registry, and every rendered figure is a decoded
+ * generated contract. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -65,8 +60,7 @@ function envelope(payload: unknown) {
   };
 }
 
-/** Answers exactly the routes a test names and refuses anything else, so a
- * test that accidentally depends on another route fails loudly. */
+/** Answers exactly the routes a test names; anything else fails loudly. */
 function serve(handler: (url: string, init?: RequestInit) => { status: number; body: unknown }) {
   const calls: { url: string; body: unknown }[] = [];
   vi.stubGlobal(
@@ -184,6 +178,77 @@ describe('the Workflows page over mounted routes', () => {
       definition_version: 1,
       expected_revision: 1,
     });
+  });
+
+  it('resets the lifecycle controls when the operator switches definitions', async () => {
+    const second = { ...definition(2), definition_id: 'workflow.nightly-sweep' };
+    serve((url) => {
+      if (url.includes('/application/workflow/list-definitions')) {
+        return { status: 200, body: envelope([definition(), second]) };
+      }
+      if (url.includes('/application/workflow/activate-definition')) {
+        return {
+          status: 200,
+          body: envelope({
+            definition_id: 'workflow.release-train',
+            definition_version: 1,
+            state: 'active',
+            revision: 3,
+            transitioned_at: 10,
+          }),
+        };
+      }
+      return { status: 503, body: { kind: 'problem', value: { problem: {} } } };
+    });
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: /workflow\.release-train/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'activate' }));
+    expect(await screen.findByText(/disposition active · revision 3/)).toBeTruthy();
+
+    const draft = screen.getByLabelText('Expected revision');
+    await userEvent.clear(draft);
+    await userEvent.type(draft, '7');
+    await userEvent.click(await screen.findByRole('button', { name: /workflow\.nightly-sweep/ }));
+
+    expect(
+      await screen.findByRole('region', { name: 'Definition workflow.nightly-sweep · version 2' }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/disposition active · revision 3/)).toBeNull();
+    expect((screen.getByLabelText('Expected revision') as HTMLInputElement).value).toBe('1');
+  });
+
+  it('refuses a lifecycle command under a read-only scope without dispatching it', async () => {
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'proj_other',
+        label: 'Other project',
+        activation: 'selected',
+      },
+    });
+    const calls = serve((url) =>
+      url.includes('/application/workflow/list-definitions')
+        ? { status: 200, body: envelope([definition()]) }
+        : { status: 503, body: { kind: 'problem', value: { problem: {} } } },
+    );
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: /workflow\.release-train/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'activate' }));
+
+    // The scope authority's own reason, answered without a request: the
+    // gateway serves every non-active project read-only.
+    expect(await screen.findByText(/is not the active project/)).toBeTruthy();
+    expect(
+      calls.find((call) => call.url.includes('/application/workflow/activate-definition')),
+    ).toBeUndefined();
+    // The definitions read did dispatch, through the selected project's gateway.
+    expect(
+      calls.some((call) =>
+        call.url.startsWith('/api/projects/proj_other/application/workflow/list-definitions'),
+      ),
+    ).toBe(true);
   });
 
   it('renders a lifecycle conflict verbatim rather than pretending the transition landed', async () => {

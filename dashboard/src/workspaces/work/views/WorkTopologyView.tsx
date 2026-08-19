@@ -66,7 +66,6 @@ export function WorkTopologyView({
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
   topology: WorkResult<ExecutionTopologyViewV1> | undefined;
   graph: WorkGraphReading;
-  /** The bounded accounting read behind the integration and stack cards. */
   metrics: WorkResult<ExecutionTopologyMetricsV1> | undefined;
   selected: string | null;
   onSelect: (taskId: string) => void;

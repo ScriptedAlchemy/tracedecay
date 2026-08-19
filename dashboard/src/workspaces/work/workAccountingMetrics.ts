@@ -16,31 +16,20 @@ import {
 } from './workAccountingModel.ts';
 
 /**
- * The two Plan 24 integration/stack cards, fed from the mounted
+ * The Plan 24 integration/stack cards, fed from the mounted
  * `operation.work.topology_metrics` read.
  *
- * Work deliberately mounts no integration apply/review/stack mutation
- * operation: Plan 24 keeps accepted integration lowered only through the
- * Plan 36 native-integration family (typed preflight/approve/apply with
- * durable receipts on its own CLI/MCP surfaces). What the Work workspace owns
- * is the OBSERVED accounting of those receipts — the
- * `work.integration.transition.observed.v1` and
- * `work.github_stack_capability.observed.v1` events Plan 26 projects into
- * `ExecutionTopologyMetricsV1`. These builders decode that projection's own
- * cells and typed absences; nothing here derives a rate, sums a family, or
- * substitutes a policy-carried dimension for measured evidence.
- *
- * The metrics read is a horizon aggregate and is deliberately NOT bound to
- * the topology generation the structural cards join on: the Rust projector is
- * explicit that the two share a name family and nothing else, and joining
- * them would let a policy-carried dimension stand in for measured evidence.
+ * Work mounts no integration apply/review/stack mutation operation — Plan 24
+ * keeps accepted integration lowered only through the Plan 36
+ * native-integration family. These builders decode the observed accounting
+ * the projection publishes, cell by cell: nothing here derives a rate, sums a
+ * family, or joins the horizon aggregate to the topology generation.
  */
 
-/** The exact Plan 26 descriptor the integration-outcome cells carry. */
+/** The Plan 26 descriptor the integration-outcome cells carry. */
 export const MERGE_ATTEMPTS_METRIC = 'work_merge_attempts_total';
 
-/** The metrics read's own reason, phrased for a channel. Kept local so this
- * module never invents a state the read did not report. */
+/** The metrics read's own reason, phrased for a channel. */
 function metricsAbsence(
   metrics: WorkResult<ExecutionTopologyMetricsV1> | undefined,
   measure: string,
@@ -90,15 +79,20 @@ function horizonSentence(model: ExecutionTopologyMetricsV1): string {
   return `${stamp(model.horizon.since_micros)} → ${stamp(model.horizon.until_micros)} · watermark ${model.watermark}`;
 }
 
-function coverageSentence(coverage: MetricCoverageV1): string {
-  return `${coverage.state} coverage · ${coverage.observed} observed · ${coverage.completed} completed`;
-}
+const ANCHORS_ABSENCE: WorkChannel<never> = {
+  available: false,
+  state: 'redacted',
+  detail:
+    'the metrics read publishes registered observation cursors, not task/run/attempt identities; drill-down resolves them only through the authorized local observability boundary',
+};
 
-/** The seven facets, decoded from one metric envelope's own coverage. */
+/** The seven facets, decoded from one metric envelope's own coverage. The
+ * descriptor revision is a channel: a reading without one states the absence
+ * rather than inventing a revision. */
 function metricsProvenance(
   model: ExecutionTopologyMetricsV1,
   coverage: MetricCoverageV1,
-  descriptorRevision: string,
+  descriptorRevision: WorkAccountingProvenance['descriptorRevision'],
   population: string,
 ): WorkAccountingProvenance {
   return {
@@ -129,168 +123,32 @@ function metricsProvenance(
         note: 'censored and unknown counts are the projector\u2019s own, decoded from the metric envelope',
       },
     },
-    intervalCoverage: { available: true, value: coverageSentence(coverage) },
+    intervalCoverage: {
+      available: true,
+      value: `${coverage.state} coverage · ${coverage.observed} observed · ${coverage.completed} completed`,
+    },
     horizon: { available: true, value: horizonSentence(model) },
-    descriptorRevision: {
-      available: true,
-      value: { kind: 'metric_descriptor', value: descriptorRevision },
-    },
-    anchors: {
-      available: false,
-      state: 'redacted',
-      detail:
-        'the metrics read publishes registered observation cursors, not task/run/attempt identities; drill-down resolves them only through the authorized local observability boundary',
-    },
+    descriptorRevision,
+    anchors: ANCHORS_ABSENCE,
   };
 }
 
-const INTEGRATION_MANDATE = 'observed native fast-forward/merge/cherry-pick outcomes';
-
-/**
- * Observed integration outcomes, cell by cell.
- *
- * Every row is one `work_merge_attempts_total` cell grouped by the
- * projector's own integration kind × outcome dimensions. No cell is summed:
- * the headline states the family's observed and eligible counts off the
- * decoded coverage envelope, never a total this module added up.
- */
-export function integrationOutcomesCard(
-  metrics: WorkResult<ExecutionTopologyMetricsV1> | undefined,
-): WorkAccountingCard {
-  const dimension: WorkAccountingDimension = 'integration_outcomes';
-  const model = modelOf(metrics);
-  const absence = (measure: string) =>
-    model === null
-      ? metricsAbsence(metrics, measure)
-      : ({
-          available: false,
-          state: 'unknown',
-          detail: `the projection carried no ${measure}`,
-        } as const);
-
-  const cells =
-    model?.measurements.filter(
-      (measurement) => measurement.value.metric === MERGE_ATTEMPTS_METRIC,
-    ) ?? [];
-  const dimensionalCells = cells.filter((measurement) => measurement.dimensions.length > 0);
-  const coverage = cells[0]?.value.coverage;
-
-  const rows: WorkAccountingRow[] = dimensionalCells.map((measurement) => {
-    const label = measurement.dimensions
-      .map((cellDimension) => humanizeMetric(cellDimension.value))
-      .join(' · ');
-    const key = measurement.dimensions
-      .map((cellDimension) => String(cellDimension.value))
-      .join('_');
-    return {
-      key,
-      label,
-      channel:
-        measurement.value.value == null
-          ? cellAbsence(measurement)
-          : {
-              available: true,
-              value: {
-                value: measurement.value.value,
-                unit: 'cases',
-                note: 'observed native integrations with this kind and outcome, decoded from one projector cell',
-              },
-            },
-    };
-  });
-
-  const reading: WorkChannel<string> =
-    model === null || coverage === undefined
-      ? absence('integration-outcome cells')
-      : dimensionalCells.length === 0
-        ? (() => {
-            const empty = cells[0];
-            return empty === undefined
-              ? absence('integration-outcome cells')
-              : cellAbsence(empty);
-          })()
-        : {
-            available: true,
-            value: `${coverage.observed} observed native integrations across ${dimensionalCells.length} kind/outcome ${dimensionalCells.length === 1 ? 'cell' : 'cells'} — counts are the projector's own cells, never summed here`,
-          };
-
+/** Facets for a model whose every cell is a typed absence: suppression wipes
+ * a cell's value and coverage, so the counted facets carry the projector's
+ * reason while the untouched horizon and descriptor revision stay real. */
+function unreadableCellProvenance(
+  model: ExecutionTopologyMetricsV1,
+  reason: WorkChannel<never>,
+  descriptorRevision: WorkAccountingProvenance['descriptorRevision'],
+): WorkAccountingProvenance {
   return {
-    dimension,
-    title: accountingDimensionTitle(dimension),
-    mandate: INTEGRATION_MANDATE,
-    reading,
-    rows,
-    matrices: null,
-    contradictions: [],
-    provenance:
-      model === null || coverage === undefined
-        ? absentMetricsProvenance(metrics, 'observed native integrations')
-        : metricsProvenance(
-            model,
-            coverage,
-            cells[0]?.value.descriptor_revision ?? 'execution-topology-metrics.v1',
-            'observed native integrations',
-          ),
-  };
-}
-
-const STACK_CAPABILITY_MANDATE = 'GitHub stack capability state and generic-fallback availability';
-
-/**
- * The latest trustworthy GitHub stacked-PR capability observation.
- *
- * A typed operational state, not a count, so it lives in the headline rather
- * than a metered row. A null field is stated as unobserved — the projector's
- * `None` means no trustworthy observation exists in the horizon, which is a
- * different fact from a fallback that is off.
- *
- * `WorkFallbackTopology` on the execution snapshot is the provider-EXECUTABLE
- * fallback (codex_cli or disabled) and looks like the thing this card wants;
- * it is never read into it. The generic-fallback figures here are the
- * projection's own standard-git and other-forge observations.
- */
-export function githubStackCapabilityCard(
-  metrics: WorkResult<ExecutionTopologyMetricsV1> | undefined,
-): WorkAccountingCard {
-  const dimension: WorkAccountingDimension = 'github_stack_capability';
-  const model = modelOf(metrics);
-  const readingOf = (): WorkChannel<string> => {
-    if (model === null) return metricsAbsence(metrics, 'the capability observation');
-    const capability = model.github_stack_capability;
-    if (capability.capability == null) {
-      return {
-        available: false,
-        state: capability.unavailable === 'store_unavailable' ? 'unavailable' : 'unknown',
-        detail: `no trustworthy capability observation exists in the horizon: ${humanizeMetric(capability.unavailable ?? 'the projector published no reason')}`,
-      };
-    }
-    const fallback = (value: boolean | null, name: string) =>
-      value == null ? `${name} unobserved` : `${name} ${value ? 'available' : 'not available'}`;
-    return {
-      available: true,
-      value: `capability ${humanizeMetric(capability.capability)} · ${fallback(capability.standard_git_fallback_available, 'standard-git fallback')} · ${fallback(capability.other_forge_fallback_available, 'other-forge fallback')}`,
-    };
-  };
-
-  return {
-    dimension,
-    title: accountingDimensionTitle(dimension),
-    mandate: STACK_CAPABILITY_MANDATE,
-    reading: readingOf(),
-    // A capability state is not a countable figure, so this card carries no
-    // metered rows; the whole observation is the headline sentence above.
-    rows: [],
-    matrices: null,
-    contradictions: [],
-    provenance:
-      model === null
-        ? absentMetricsProvenance(metrics, 'capability observations')
-        : metricsProvenance(
-            model,
-            model.github_stack_capability.coverage,
-            'execution-topology-metrics.v1',
-            'capability observations',
-          ),
+    support: reason,
+    eligible: reason,
+    censoring: reason,
+    intervalCoverage: reason,
+    horizon: { available: true, value: horizonSentence(model) },
+    descriptorRevision,
+    anchors: ANCHORS_ABSENCE,
   };
 }
 
@@ -308,4 +166,181 @@ function absentMetricsProvenance(
     descriptorRevision: metricsAbsence(metrics, 'the descriptor revision'),
     anchors: metricsAbsence(metrics, 'safe drill anchors'),
   };
+}
+
+function card(
+  dimension: WorkAccountingDimension,
+  mandate: string,
+  reading: WorkChannel<string>,
+  rows: readonly WorkAccountingRow[],
+  provenance: WorkAccountingProvenance,
+): WorkAccountingCard {
+  return {
+    dimension,
+    title: accountingDimensionTitle(dimension),
+    mandate,
+    reading,
+    rows,
+    matrices: null,
+    contradictions: [],
+    provenance,
+  };
+}
+
+const INTEGRATION_MANDATE = 'observed native fast-forward/merge/cherry-pick outcomes';
+
+/**
+ * Observed integration outcomes: one row per `work_merge_attempts_total`
+ * kind × outcome cell. Suppressed cells (null value, wiped coverage) stay the
+ * projector's typed absences; only a readable cell may lend the card its
+ * headline and coverage authority, and no cell is ever summed.
+ */
+export function integrationOutcomesCard(
+  metrics: WorkResult<ExecutionTopologyMetricsV1> | undefined,
+): WorkAccountingCard {
+  const dimension: WorkAccountingDimension = 'integration_outcomes';
+  const model = modelOf(metrics);
+
+  const cells =
+    model?.measurements.filter(
+      (measurement) => measurement.value.metric === MERGE_ATTEMPTS_METRIC,
+    ) ?? [];
+  const dimensionalCells = cells.filter((measurement) => measurement.dimensions.length > 0);
+  const readableCells = dimensionalCells.filter((measurement) => measurement.value.value != null);
+  const authority = readableCells[0];
+
+  const rows: WorkAccountingRow[] = dimensionalCells.map((measurement) => ({
+    key: measurement.dimensions.map((cell) => String(cell.value)).join('_'),
+    label: measurement.dimensions.map((cell) => humanizeMetric(cell.value)).join(' · '),
+    channel:
+      measurement.value.value == null
+        ? cellAbsence(measurement)
+        : {
+            available: true,
+            value: {
+              value: measurement.value.value,
+              unit: 'cases',
+              note: 'observed native integrations with this kind and outcome, decoded from one projector cell',
+            },
+          },
+  }));
+
+  // Suppression never wipes a cell's descriptor revision, so it stays real
+  // whenever any cell exists.
+  const descriptorRevision: WorkAccountingProvenance['descriptorRevision'] =
+    cells[0] === undefined
+      ? {
+          available: false,
+          state: 'unknown',
+          detail: 'the projection carried no merge-attempt cell to read a descriptor revision from',
+        }
+      : {
+          available: true,
+          value: { kind: 'metric_descriptor', value: cells[0].value.descriptor_revision },
+        };
+
+  if (model === null) {
+    return card(
+      dimension,
+      INTEGRATION_MANDATE,
+      metricsAbsence(metrics, 'integration-outcome cells'),
+      rows,
+      absentMetricsProvenance(metrics, 'observed native integrations'),
+    );
+  }
+
+  if (authority === undefined) {
+    const first = dimensionalCells[0] ?? cells[0];
+    const reason: WorkChannel<never> =
+      first !== undefined
+        ? cellAbsence(first)
+        : {
+            available: false,
+            state: 'unknown',
+            detail: 'the projection carried no integration-outcome cells',
+          };
+    return card(
+      dimension,
+      INTEGRATION_MANDATE,
+      reason,
+      rows,
+      unreadableCellProvenance(model, reason, descriptorRevision),
+    );
+  }
+
+  const coverage = authority.value.coverage;
+  const suppressed = dimensionalCells.length - readableCells.length;
+  const suppressedNote =
+    suppressed === 0
+      ? ''
+      : ` · ${suppressed} ${suppressed === 1 ? 'cell stays a typed absence' : 'cells stay typed absences'}`;
+  return card(
+    dimension,
+    INTEGRATION_MANDATE,
+    {
+      available: true,
+      value: `${coverage.observed} observed native integrations across ${readableCells.length} readable kind/outcome ${readableCells.length === 1 ? 'cell' : 'cells'}${suppressedNote} — counts are the projector's own cells, never summed here`,
+    },
+    rows,
+    metricsProvenance(model, coverage, descriptorRevision, 'observed native integrations'),
+  );
+}
+
+const STACK_CAPABILITY_MANDATE = 'GitHub stack capability state and generic-fallback availability';
+
+/**
+ * The latest trustworthy GitHub stacked-PR capability observation: a typed
+ * operational state, not a count, so it is the headline and carries no
+ * metered rows. A null field is unobserved, never coerced to off or on.
+ * `WorkFallbackTopology` is the provider-executable fallback and is never
+ * read into this card.
+ */
+export function githubStackCapabilityCard(
+  metrics: WorkResult<ExecutionTopologyMetricsV1> | undefined,
+): WorkAccountingCard {
+  const dimension: WorkAccountingDimension = 'github_stack_capability';
+  const model = modelOf(metrics);
+
+  if (model === null) {
+    return card(
+      dimension,
+      STACK_CAPABILITY_MANDATE,
+      metricsAbsence(metrics, 'the capability observation'),
+      [],
+      absentMetricsProvenance(metrics, 'capability observations'),
+    );
+  }
+
+  const capability = model.github_stack_capability;
+  const fallback = (value: boolean | null, name: string) =>
+    value == null ? `${name} unobserved` : `${name} ${value ? 'available' : 'not available'}`;
+  const reading: WorkChannel<string> =
+    capability.capability == null
+      ? {
+          available: false,
+          state: capability.unavailable === 'store_unavailable' ? 'unavailable' : 'unknown',
+          detail: `no trustworthy capability observation exists in the horizon: ${humanizeMetric(capability.unavailable ?? 'the projector published no reason')}`,
+        }
+      : {
+          available: true,
+          value: `capability ${humanizeMetric(capability.capability)} · ${fallback(capability.standard_git_fallback_available, 'standard-git fallback')} · ${fallback(capability.other_forge_fallback_available, 'other-forge fallback')}`,
+        };
+
+  return card(
+    dimension,
+    STACK_CAPABILITY_MANDATE,
+    reading,
+    [],
+    metricsProvenance(
+      model,
+      capability.coverage,
+      {
+        available: false,
+        state: 'unknown',
+        detail:
+          'the GitHub stack capability reading is a model-level typed state and carries no metric descriptor revision',
+      },
+      'capability observations',
+    ),
+  );
 }

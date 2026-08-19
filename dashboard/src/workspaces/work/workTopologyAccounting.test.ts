@@ -622,30 +622,30 @@ describe('the conflict confusion matrices', () => {
 });
 
 describe('observed integration outcomes', () => {
+  const KNOWN = { eligible: 8, observed: 7, completed: 7, unknown: 1, state: 'known' };
+  const WIPED = { eligible: null, observed: 0, unknown: 1, state: 'unknown' };
+
+  /** One `work_merge_attempts_total` kind × outcome cell. A null value with a
+   * reason models projector suppression, which also wipes the coverage. */
+  function mergeCell(kind: string, outcome: string, value: number | null, unavailable?: string) {
+    return topologyMeasurement({
+      metric: 'work_merge_attempts_total',
+      value,
+      unit: 'events',
+      denominator: 'observed_native_integrations',
+      dimensions: [
+        { dimension: 'integration_kind', value: kind },
+        { dimension: 'integration_outcome', value: outcome },
+      ],
+      coverage: value == null ? WIPED : KNOWN,
+      unavailable,
+    });
+  }
+
   const MERGE_CELLS = metricsOf({
     measurements: [
-      topologyMeasurement({
-        metric: 'work_merge_attempts_total',
-        value: 6,
-        unit: 'events',
-        denominator: 'observed_native_integrations',
-        dimensions: [
-          { dimension: 'integration_kind', value: 'fast_forward' },
-          { dimension: 'integration_outcome', value: 'succeeded' },
-        ],
-        coverage: { eligible: 8, observed: 7, completed: 7, unknown: 1, state: 'known' },
-      }),
-      topologyMeasurement({
-        metric: 'work_merge_attempts_total',
-        value: 1,
-        unit: 'events',
-        denominator: 'observed_native_integrations',
-        dimensions: [
-          { dimension: 'integration_kind', value: 'cherry_pick' },
-          { dimension: 'integration_outcome', value: 'conflicted' },
-        ],
-        coverage: { eligible: 8, observed: 7, completed: 7, unknown: 1, state: 'known' },
-      }),
+      mergeCell('fast_forward', 'succeeded', 6),
+      mergeCell('cherry_pick', 'conflicted', 1),
       // A sibling descriptor this card must not decode into a count row.
       topologyMeasurement({
         metric: 'work_merge_success_ratio',
@@ -653,7 +653,7 @@ describe('observed integration outcomes', () => {
         unit: 'ratio',
         denominator: 'observed_native_integrations',
         dimensions: [{ dimension: 'integration_kind', value: 'fast_forward' }],
-        coverage: { eligible: 8, observed: 7, completed: 7, unknown: 1, state: 'known' },
+        coverage: KNOWN,
       }),
     ],
   });
@@ -683,6 +683,58 @@ describe('observed integration outcomes', () => {
     if (!revision.available) throw new Error('expected a metric descriptor revision');
     expect(revision.value.kind).toBe('metric_descriptor');
     expect(revision.value.value).toBe('execution-topology-metrics.v1');
+  });
+
+  it('propagates the typed absence when the support floor suppresses every cell', () => {
+    // A card over nothing but suppressed cells wears the projector's reason —
+    // never an available "0 observed" headline read off a wiped envelope.
+    const suppressed = metricsOf({
+      measurements: [
+        mergeCell('fast_forward', 'succeeded', null, 'support_floor_unmet'),
+        mergeCell('cherry_pick', 'conflicted', null, 'support_floor_unmet'),
+      ],
+    });
+    const card = cardOf(
+      workTopologyAccounting(listed([]), graphOf(), undefined, suppressed),
+      'integration_outcomes',
+    );
+
+    const stated = absence(card.reading);
+    expect(stated.detail).toContain('typed absence');
+    expect(stated.detail).toContain('support floor unmet');
+    expect(card.rows).toHaveLength(2);
+    for (const row of card.rows) {
+      expect(row.channel.available, row.key).toBe(false);
+    }
+    // Counted facets carry the same typed reason; the horizon and the
+    // untouched descriptor revision stay real.
+    expect(absence(card.provenance.support).detail).toContain('support floor unmet');
+    expect(absence(card.provenance.eligible).detail).toContain('support floor unmet');
+    expect(card.provenance.horizon.available).toBe(true);
+    const revision = card.provenance.descriptorRevision;
+    if (!revision.available) throw new Error('expected the cell descriptor revision');
+    expect(revision.value.value).toBe('execution-topology-metrics.v1');
+  });
+
+  it('states readable and suppressed cells separately when they coexist', () => {
+    const mixed = metricsOf({
+      measurements: [
+        mergeCell('fast_forward', 'succeeded', 6),
+        mergeCell('cherry_pick', 'conflicted', null, 'support_floor_unmet'),
+      ],
+    });
+    const card = cardOf(
+      workTopologyAccounting(listed([]), graphOf(), undefined, mixed),
+      'integration_outcomes',
+    );
+
+    expect(card.reading.available).toBe(true);
+    if (!card.reading.available) throw new Error('unreachable');
+    expect(card.reading.value).toContain('1 readable kind/outcome cell');
+    expect(card.reading.value).toContain('1 cell stays a typed absence');
+    // Headline coverage comes from a readable cell's envelope, never a
+    // suppressed one.
+    expect(figure(card.provenance.support).value).toBe(7);
   });
 
   it('carries the projector’s typed absence for an empty horizon rather than zero cells', () => {

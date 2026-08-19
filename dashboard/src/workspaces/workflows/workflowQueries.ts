@@ -4,7 +4,7 @@ import type {
   WorkflowDefinitionDisposition,
   WorkflowRunProjection,
 } from '../../contracts/index.ts';
-import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
+import { scopeKey, scopedUrl, scopeWritable, useScope } from '../../data/scope/store.ts';
 import { callWork, type WorkResult } from '../work/workApi.ts';
 import {
   WORKFLOW_ACTIVATE_DEFINITION_ROUTE,
@@ -15,13 +15,9 @@ import {
 } from './workflowRoutes.ts';
 
 /**
- * The reads and lifecycle commands behind the Workflows workspace.
- *
- * Every call goes through the same application envelope walker the Work
- * surface uses (`callWork`), so a Workflow refusal is reported in exactly the
- * words every other application refusal uses and an absent value can never
- * render as an empty success. Scoping matches Work: `scopedUrl` rewrites to
- * the project gateway when the scope bar names a project.
+ * The reads and lifecycle commands behind the Workflows workspace. Every call
+ * goes through the same application envelope walker the Work surface uses
+ * (`callWork`) and the same `scopedUrl` project-gateway rewrite.
  */
 
 function workflowQueryKey(scope: string, ...parts: readonly (string | number)[]) {
@@ -42,9 +38,7 @@ export function useWorkflowDefinitions() {
   });
 }
 
-/** One run's projection, read on demand for an operator-named run id. The
- * query is disabled until a run id is named, and a disabled query has no data
- * — which the view reports as unasked, not as a run that does not exist. */
+/** One run's projection, read on demand; disabled until a run id is named. */
 export function useWorkflowRun(runId: string | null) {
   const scope = useScope((state) => state.scope);
   const key = scopeKey(scope);
@@ -84,19 +78,27 @@ function lifecycleRoute(action: WorkflowLifecycleAction) {
   }
 }
 
-/**
- * One compare-and-swap lifecycle transition. The mutation resolves to the
- * daemon's own `WorkResult` — the returned disposition on success, or the
- * typed refusal (conflict, denial, catalog admission) verbatim — and the
- * definitions list is re-read afterwards so the panel never carries a state
- * the daemon did not answer.
- */
+/** The refusal a lifecycle command outside the writable scope reports without
+ * issuing a request — the same `locked` reading Work commands answer, because
+ * the gateway rule it repeats is the same one (`scopeWritable`). */
+function notWritable(reason: string): WorkResult<WorkflowDefinitionDisposition> {
+  return { outcome: 'refused', state: 'locked', detail: reason };
+}
+
+/** One compare-and-swap lifecycle transition; resolves to the daemon's own
+ * `WorkResult` and re-reads the definitions list afterwards. A scope the
+ * gateway serves read-only is refused here without dispatching, exactly as
+ * Work commands are. */
 export function useWorkflowLifecycle() {
   const scope = useScope((state) => state.scope);
   const key = scopeKey(scope);
   const client = useQueryClient();
+  const writability = scopeWritable(scope);
   return useMutation<WorkResult<WorkflowDefinitionDisposition>, never, WorkflowLifecycleCommand>({
     mutationFn: (command) => {
+      if (writability.state !== 'writable') {
+        return Promise.resolve(notWritable(writability.reason));
+      }
       const route = lifecycleRoute(command.action);
       return callWork(
         route,

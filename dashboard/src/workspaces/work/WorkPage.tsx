@@ -106,8 +106,6 @@ function WorkProjectionView({
    * reading deliberately does not restate. */
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
   topology: WorkResult<ExecutionTopologyViewV1> | undefined;
-  /** The bounded accounting read behind the topology lens's integration and
-   * stack cards. */
   topologyMetrics: WorkResult<ExecutionTopologyMetricsV1> | undefined;
   graph: WorkGraphReading;
   selected: string | null;
@@ -171,8 +169,8 @@ export function WorkPage() {
   // not on every visit to the page.
   const attempts = useWorkAttempts(projection === 'timeline' || projection === 'topology');
   const topology = useWorkTopology(projection === 'topology');
-  // The bounded accounting read behind the topology lens's integration and
-  // stack cards; issued only when that lens is the camera.
+  // The accounting read behind the topology lens's integration and stack
+  // cards; issued only when that lens is the camera.
   const topologyMetrics = useWorkTopologyMetrics(projection === 'topology');
   const attemptReading = workAttemptReading(attempts.data);
   // The graph hook bootstraps against profile ownership, then re-reads against

@@ -1,23 +1,13 @@
 //! Tool-catalog semantic admission for workflow definitions.
 //!
-//! Structural validation ([`tracedecay_domain::WorkflowDefinition::validate`])
-//! proves the DAG shape; it says nothing about whether a step's operation is
-//! real. Plan 32 requires that "unknown operations, cycles, dangling
-//! references, incompatible schemas, unbounded fan-out, privilege expansion,
-//! unsupported effects, or recursive generic execution reject before
-//! activation", so activation additionally admits every step operation
-//! against the canonical Work executable catalog — the registry whose
-//! operations workflow fan-out actually lowers steps into
-//! ([`crate::prepare_workflow_fan_out`] copies `step.operation` onto the
-//! durable plan, and the daemon starts the child Work attempts under it).
-//!
-//! The schema and capability halves of the check are carried by the catalog
-//! digest pin: [`crate::work_executable_catalog_digest`] hashes the complete
-//! registry, including every operation's capability manifest and request and
-//! result schema authorities, so a definition whose `pinned_catalog_digest`
-//! names the live digest was authored against exactly the schemas and
-//! capability contracts this build executes. A stale pin is a typed denial,
-//! never a silent re-pin.
+//! Plan 32: unknown operations and incompatible schemas reject before
+//! activation. Structural validation proves only the DAG shape, so activation
+//! additionally admits every step operation against the canonical Work
+//! executable catalog — the registry fan-out lowers steps into. The schema
+//! and capability halves of the check are the catalog digest pin:
+//! [`crate::work_executable_catalog_digest`] hashes every capability manifest
+//! and schema authority, so a stale `pinned_catalog_digest` is a typed
+//! denial, never a silent re-pin.
 
 use std::fmt::{self, Display};
 
@@ -75,12 +65,10 @@ impl Display for WorkflowCatalogAdmissionError {
 impl std::error::Error for WorkflowCatalogAdmissionError {}
 
 /// Admit every step operation of one workflow definition against the
-/// canonical Work executable catalog.
-///
-/// Admission holds exactly when the definition pins the live executable
-/// catalog digest and every step operation resolves to an available
-/// executable binding in that catalog. The first violation is returned as a
-/// typed denial naming the offending step and operation.
+/// canonical Work executable catalog: the definition must pin the live
+/// catalog digest and every step operation must resolve to an available
+/// executable binding. The first violation is a typed denial naming the
+/// offending step and operation.
 pub(crate) fn admit_workflow_definition_operations(
     definition: &WorkflowDefinition,
 ) -> Result<(), WorkflowCatalogAdmissionError> {

@@ -16,20 +16,11 @@ import {
 } from './workflowQueries.ts';
 
 /**
- * Workflows — channel fourteen.
- *
- * The definition/run consumer of the canonical `/application/workflow` routes:
- * registered definition versions off `list_definitions`, per-version step
- * tables, the three compare-and-swap lifecycle transitions, and run
- * projections off `get_run`. Everything rendered here is a decoded generated
- * contract; a refusal renders the daemon's own typed state, and the only
- * empty registry drawn is one the daemon actually answered as empty.
- *
- * What this page deliberately does not do: it never issues or redeems a task
- * handoff (the browser must not hold a bearer), and it never starts, pauses,
- * resumes, or cancels a run (the browser must not mint fences, command ids,
- * or provider admissions). Runs are observed here and controlled by their
- * owning surfaces.
+ * Workflows — channel fourteen: definitions, compare-and-swap lifecycle
+ * transitions, and run projections over the canonical `/application/workflow`
+ * routes. Everything rendered is a decoded generated contract; refusals wear
+ * the daemon's own typed state. Handoffs and run control are deliberately
+ * absent: the browser never holds a bearer or mints fences/command ids.
  */
 
 const INPUT_CLASS =
@@ -75,7 +66,8 @@ export function WorkflowsPage() {
           />
 
           {selectedDefinition === null ? null : (
-            <DefinitionDetail definition={selectedDefinition} />
+            // Keyed so lifecycle state resets when switching definitions.
+            <DefinitionDetail key={selected} definition={selectedDefinition} />
           )}
 
           <RunPanel />
@@ -104,15 +96,8 @@ function DefinitionsPanel({
         ) : result === undefined ? (
           <StateChip kind="unknown" detail="the definitions read returned no result" />
         ) : result.outcome === 'refused' ? (
-          <>
-            {/* The daemon's own reason. An unavailable registry and an empty
-              * registry are different facts and must never render alike. */}
-            <StateChip kind={result.state} detail={result.detail} />
-            <p className="text-3xs text-text-muted">
-              No definition list is drawn. This build reads the mounted Workflow routes and does
-              not infer their contents when they refuse.
-            </p>
-          </>
+          // A refused registry and an empty registry must never render alike.
+          <StateChip kind={result.state} detail={result.detail} />
         ) : result.value.length === 0 ? (
           <StateChip
             kind="complete_zero_findings"
@@ -179,8 +164,7 @@ function DefinitionDetail({ definition }: { definition: WorkflowDefinition }) {
         <div className="min-w-0 overflow-x-auto">
           <table className="w-full min-w-0 border-collapse text-3xs">
             <caption className="td-legend py-1 text-left text-text-secondary">
-              steps · every row is one decoded `WorkflowStep`; operations are catalog operation
-              ids and are admitted against the executable catalog on activation
+              steps · operations are catalog ids, admitted on activation
             </caption>
             <thead>
               <tr>
@@ -277,11 +261,8 @@ function LifecycleControls({ definition }: { definition: WorkflowDefinition }) {
   return (
     <div className="flex min-w-0 flex-col gap-2 border-t border-edge-subtle pt-2">
       <p className="text-3xs leading-snug text-text-muted">
-        Lifecycle transitions are compare-and-swaps against the disposition revision. No
-        disposition read is mounted, so the expected revision is entered here and the daemon
-        answers with the stored disposition or a typed conflict — a registered candidate starts
-        at revision 1. Activation additionally runs tool-catalog admission over every step
-        operation on the daemon.
+        Compare-and-swap against the disposition revision (a registered candidate starts at 1);
+        the daemon answers with the stored disposition or a typed conflict.
       </p>
       <div className="flex flex-wrap items-end gap-2">
         <label className="flex flex-col gap-0.5 text-2xs text-text-secondary">
@@ -318,11 +299,6 @@ function RunPanel() {
   return (
     <Panel legend="Workflow run" elevation="well">
       <div className="flex min-w-0 flex-col gap-2">
-        <p className="text-3xs leading-snug text-text-muted">
-          One run&apos;s projection off `get_run`: status, sequence, and per-step states rebuilt
-          from the run&apos;s own event journal. Runs are started and controlled by their owning
-          surfaces; this panel observes them.
-        </p>
         <form
           className="flex flex-wrap items-end gap-2"
           onSubmit={(event) => {
