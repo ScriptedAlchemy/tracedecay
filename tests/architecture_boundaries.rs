@@ -958,6 +958,7 @@ const ALLOWED_INTERNAL_EDGES: &[(&str, &str)] = &[
     ("tracedecay-dashboard-api", "tracedecay-usecases"),
     ("tracedecay-hooks", "tracedecay-application"),
     ("tracedecay-hooks", "tracedecay-domain"),
+    ("tracedecay-hooks", "tracedecay-private-fs"),
     ("tracedecay-host-integration", "tracedecay-domain"),
     ("tracedecay-migrate", "tracedecay-runtime-core"),
     ("tracedecay-migrate", "tracedecay-sessions"),
