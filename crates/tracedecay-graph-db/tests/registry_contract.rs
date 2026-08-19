@@ -103,6 +103,26 @@ impl GraphCancellation for CancelOnPoll {
     }
 }
 
+/// Parks the polling operation at one exact cancellation probe so a test can
+/// hold a registry entry in its in-flight state deterministically.
+#[derive(Debug)]
+struct GateOnPoll {
+    polls: AtomicUsize,
+    gate_on: usize,
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
+impl GraphCancellation for GateOnPoll {
+    fn is_cancelled(&self) -> bool {
+        if self.polls.fetch_add(1, Ordering::SeqCst) + 1 == self.gate_on {
+            self.entered.wait();
+            self.release.wait();
+        }
+        false
+    }
+}
+
 fn identity(profile: &str, project: &str) -> StoreRuntimeBindingV1 {
     StoreRuntimeBindingV1::new(
         StoreShardIdV1::project(
@@ -684,6 +704,82 @@ fn retirement_reservation_denies_new_resolves_and_drop_restores_ready_entry() {
         Some(GraphDbRegistryStatus::Ready)
     );
     assert!(registry.resolve(request).is_ok());
+}
+
+/// An in-flight close holds the registry entry in `Closing` only while the
+/// native close settles. The same owner's next attach and resolve must wait
+/// for that settlement (or observe their own typed deadline), never answer a
+/// hard `Conflict`: live activation looped `reconcile_failed` /
+/// `retained_seat_failed` on `code graph database conflict` because every
+/// publish racing an eviction was refused outright.
+#[test]
+fn same_owner_attach_waits_for_in_flight_close_instead_of_conflicting() {
+    let temporary = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    drop(
+        mount_and_resolve(
+            &registry,
+            registration(identity("profile-a", "project-a"), temporary.path()),
+        )
+        .unwrap(),
+    );
+
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    // `close` probes its cancellation once before reserving and once while
+    // the entry is `Closing`; the gate parks the closer at the second probe.
+    let mut gated = registration(identity("profile-a", "project-a"), temporary.path());
+    gated.cancellation = Arc::new(GateOnPoll {
+        polls: AtomicUsize::new(0),
+        gate_on: 2,
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let closer = {
+        let registry = registry.clone();
+        thread::spawn(move || registry.close(&gated))
+    };
+    entered.wait();
+
+    // A bounded waiter observes its own typed deadline, not a fabricated
+    // conflict, while the close is still in flight.
+    let mut bounded_attach = registration(identity("profile-a", "project-a"), temporary.path());
+    bounded_attach.deadline = std::time::Instant::now() + Duration::from_millis(200);
+    assert_eq!(
+        registry
+            .resolve_owner_attachment(owner_registration(bounded_attach))
+            .unwrap_err(),
+        GraphDbError::DeadlineExceeded
+    );
+    let mut bounded_resolve = registration(identity("profile-a", "project-a"), temporary.path());
+    bounded_resolve.deadline = std::time::Instant::now() + Duration::from_millis(200);
+    assert_eq!(
+        registry.resolve(bounded_resolve).unwrap_err(),
+        GraphDbError::DeadlineExceeded
+    );
+
+    let attacher = {
+        let registry = registry.clone();
+        let request = registration(identity("profile-a", "project-a"), temporary.path());
+        thread::spawn(move || registry.resolve_owner_attachment(owner_registration(request)))
+    };
+    // Let the attacher observe the in-flight close before releasing it.
+    thread::sleep(Duration::from_millis(50));
+    release.wait();
+    assert!(closer.join().unwrap().unwrap());
+    let attachment = attacher
+        .join()
+        .unwrap()
+        .expect("the same owner's next attach must remount after the close settles");
+    drop(attachment);
+    drop(
+        registry
+            .resolve(registration(
+                identity("profile-a", "project-a"),
+                temporary.path(),
+            ))
+            .unwrap(),
+    );
 }
 
 #[test]

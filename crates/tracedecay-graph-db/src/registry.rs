@@ -679,6 +679,11 @@ impl GraphDbRegistry {
                     drop(next);
                     continue;
                 }
+                // A `Closing` entry is always an in-flight close that settles
+                // within its owning call (entry removed, restored ready, or
+                // retained as a terminal fault). Wait for that settlement like
+                // an in-flight open instead of fabricating a conflict for the
+                // same owner's next operation.
                 Some(RegistryEntry::Closing {
                     binding: registered_binding,
                     verified_locator: registered_locator,
@@ -695,8 +700,20 @@ impl GraphDbRegistry {
                         ),
                         (&binding, &verified_locator, &path, expected_format),
                     )?;
-                    return Err(GraphDbError::Conflict);
+                    check_request(registration.cancellation.as_ref(), registration.deadline)?;
+                    let (next, _) = self
+                        .inner
+                        .changed
+                        .wait_timeout(state, OPEN_WAIT_POLL)
+                        .map_err(|_| {
+                            GraphDbError::unavailable("graph registry wait lock is poisoned")
+                        })?;
+                    drop(next);
+                    continue;
                 }
+                // A `Retiring` entry may be an armed pre-close retirement
+                // reservation held across calls; denying new resolution is its
+                // all-or-none contract, so it stays a typed conflict.
                 Some(RegistryEntry::Retiring {
                     binding: registered_binding,
                     verified_locator: registered_locator,
@@ -777,97 +794,117 @@ impl GraphDbRegistry {
         let shard_id = binding.shard_id.clone();
 
         {
-            let mut state = self.state_lock()?;
-            reject_path_alias(&state, &binding, &verified_locator, &path, expected_format)?;
-            match state.entries.get(&shard_id) {
-                None => {
-                    let eviction = reserve_capacity_eviction(
-                        &mut state,
-                        self.inner.config.max_open,
-                        &shard_id,
-                    )?;
-                    state.entries.insert(
-                        shard_id.clone(),
-                        RegistryEntry::Opening {
-                            authority_attachment,
-                            binding: binding.clone(),
-                            verified_locator: verified_locator.clone(),
-                            path: path.clone(),
-                            expected_format,
-                        },
-                    );
-                    drop(state);
-                    if let Some(eviction) = eviction
-                        && let Err(error) = self.finish_eviction(eviction)
-                    {
-                        self.remove_opening(
-                            &shard_id,
-                            &binding,
-                            &verified_locator,
-                            &path,
-                            expected_format,
+            let mut state = loop {
+                let state = self.state_lock()?;
+                reject_path_alias(&state, &binding, &verified_locator, &path, expected_format)?;
+                match state.entries.get(&shard_id) {
+                    None => break state,
+                    // An in-flight close settles within its owning call; wait
+                    // for it and remount instead of fabricating a conflict for
+                    // the same owner's next attach.
+                    Some(RegistryEntry::Closing {
+                        binding: registered_binding,
+                        verified_locator: registered_locator,
+                        path: registered_path,
+                        expected_format: registered_format,
+                        ..
+                    }) => {
+                        require_binding(
+                            (
+                                registered_binding,
+                                registered_locator,
+                                registered_path,
+                                *registered_format,
+                            ),
+                            (&binding, &verified_locator, &path, expected_format),
                         )?;
-                        return Err(error);
+                        check_request(operation.cancellation.as_ref(), operation.deadline)?;
+                        let (next, _) = self
+                            .inner
+                            .changed
+                            .wait_timeout(state, OPEN_WAIT_POLL)
+                            .map_err(|_| {
+                                GraphDbError::unavailable("graph registry wait lock is poisoned")
+                            })?;
+                        drop(next);
+                    }
+                    Some(RegistryEntry::Ready {
+                        binding: registered_binding,
+                        verified_locator: registered_locator,
+                        path: registered_path,
+                        expected_format: registered_format,
+                        ..
+                    })
+                    | Some(RegistryEntry::Opening {
+                        binding: registered_binding,
+                        verified_locator: registered_locator,
+                        path: registered_path,
+                        expected_format: registered_format,
+                        ..
+                    })
+                    | Some(RegistryEntry::Retiring {
+                        binding: registered_binding,
+                        verified_locator: registered_locator,
+                        path: registered_path,
+                        expected_format: registered_format,
+                        ..
+                    }) => {
+                        require_binding(
+                            (
+                                registered_binding,
+                                registered_locator,
+                                registered_path,
+                                *registered_format,
+                            ),
+                            (&binding, &verified_locator, &path, expected_format),
+                        )?;
+                        return Err(GraphDbError::Conflict);
+                    }
+                    Some(RegistryEntry::Faulted {
+                        binding: registered_binding,
+                        verified_locator: registered_locator,
+                        path: registered_path,
+                        expected_format: registered_format,
+                        error,
+                        ..
+                    }) => {
+                        require_binding(
+                            (
+                                registered_binding,
+                                registered_locator,
+                                registered_path,
+                                *registered_format,
+                            ),
+                            (&binding, &verified_locator, &path, expected_format),
+                        )?;
+                        return Err(error.clone());
                     }
                 }
-                Some(RegistryEntry::Ready {
-                    binding: registered_binding,
-                    verified_locator: registered_locator,
-                    path: registered_path,
-                    expected_format: registered_format,
-                    ..
-                })
-                | Some(RegistryEntry::Opening {
-                    binding: registered_binding,
-                    verified_locator: registered_locator,
-                    path: registered_path,
-                    expected_format: registered_format,
-                    ..
-                })
-                | Some(RegistryEntry::Closing {
-                    binding: registered_binding,
-                    verified_locator: registered_locator,
-                    path: registered_path,
-                    expected_format: registered_format,
-                    ..
-                })
-                | Some(RegistryEntry::Retiring {
-                    binding: registered_binding,
-                    verified_locator: registered_locator,
-                    path: registered_path,
-                    expected_format: registered_format,
-                    ..
-                }) => {
-                    require_binding(
-                        (
-                            registered_binding,
-                            registered_locator,
-                            registered_path,
-                            *registered_format,
-                        ),
-                        (&binding, &verified_locator, &path, expected_format),
-                    )?;
-                    return Err(GraphDbError::Conflict);
-                }
-                Some(RegistryEntry::Faulted {
-                    binding: registered_binding,
-                    verified_locator: registered_locator,
-                    path: registered_path,
-                    expected_format: registered_format,
-                    error,
-                    ..
-                }) => {
-                    require_binding(
-                        (
-                            registered_binding,
-                            registered_locator,
-                            registered_path,
-                            *registered_format,
-                        ),
-                        (&binding, &verified_locator, &path, expected_format),
-                    )?;
-                    return Err(error.clone());
-                }
+            };
+            let eviction =
+                reserve_capacity_eviction(&mut state, self.inner.config.max_open, &shard_id)?;
+            state.entries.insert(
+                shard_id.clone(),
+                RegistryEntry::Opening {
+                    authority_attachment,
+                    binding: binding.clone(),
+                    verified_locator: verified_locator.clone(),
+                    path: path.clone(),
+                    expected_format,
+                },
+            );
+            drop(state);
+            if let Some(eviction) = eviction
+                && let Err(error) = self.finish_eviction(eviction)
+            {
+                self.remove_opening(
+                    &shard_id,
+                    &binding,
+                    &verified_locator,
+                    &path,
+                    expected_format,
+                )?;
+                return Err(error);
             }
         }
 
@@ -2318,7 +2355,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_runtime_denies_resolution_without_waiting() {
+    fn closing_runtime_defers_resolution_until_the_close_settles() {
         let temporary = TempDir::new().unwrap();
         let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
         let registration = registration(temporary.path());
@@ -2339,11 +2376,16 @@ mod tests {
         else {
             panic!("ready runtime must enter closing for this test");
         };
+        // While the close is in flight, resolution waits and observes its own
+        // typed deadline, never a fabricated conflict for the same owner.
+        let mut bounded = registration.clone();
+        bounded.deadline = Instant::now() + Duration::from_millis(100);
         assert_eq!(
-            registry.resolve(registration.clone()).unwrap_err(),
-            GraphDbError::Conflict
+            registry.resolve(bounded).unwrap_err(),
+            GraphDbError::DeadlineExceeded
         );
         registry.restore_ready(*reservation).unwrap();
+        drop(registry.resolve(registration).unwrap());
     }
 
     #[test]

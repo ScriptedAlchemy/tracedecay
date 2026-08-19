@@ -86,14 +86,9 @@ mod tests {
         // bound sat below that and refused live ~1.6 GB / >1M-entity activations
         // as a write budget on every hydrate retry.
         const SEALED_BOUND: usize = 2usize << 30;
-        const FORMER_BOUND: usize = 1usize << 30;
-        assert!(
-            super::MAX_GRAPH_BATCH_CANONICAL_BYTES > SEALED_BOUND,
-            "canonical write budget must exceed the sealed-generation bound"
-        );
         assert_eq!(
             super::MAX_GRAPH_BATCH_CANONICAL_BYTES,
-            FORMER_BOUND * 2,
+            SEALED_BOUND * 2,
             "canonical write budget must admit JSON-escape expansion of a max sealed generation"
         );
     }
