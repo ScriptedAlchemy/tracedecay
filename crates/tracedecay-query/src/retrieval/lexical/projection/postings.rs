@@ -1,11 +1,14 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use fst::{IntoStreamer, Set, Streamer, automaton::Levenshtein};
 use roaring::RoaringBitmap;
 
 const NGRAM_KEY_ESTIMATED_BYTES: usize = 64;
 const NGRAM_DOCUMENT_POSTING_ESTIMATED_BYTES: usize = 8;
+pub(super) const LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED: &str =
+    "lexical projection exceeded its build deadline";
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct ByteNgramPostings {
@@ -16,9 +19,13 @@ impl ByteNgramPostings {
     pub(super) fn from_documents<'a>(
         documents: impl IntoIterator<Item = &'a [u8]>,
         budget: &mut ByteNgramBudget,
+        deadline: Option<Instant>,
     ) -> Result<Self, String> {
         let mut postings = BTreeMap::<u32, RoaringBitmap>::new();
         for (document, bytes) in documents.into_iter().enumerate() {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED.to_owned());
+            }
             let document = u32::try_from(document)
                 .map_err(|_| "posting document id exceeds u32".to_owned())?;
             for width in 1..=bytes.len().min(3) {
@@ -195,6 +202,7 @@ mod tests {
                 b"gamma request completed".as_slice(),
             ],
             &mut budget,
+            None,
         )
         .expect("bounded postings");
 
@@ -222,9 +230,21 @@ mod tests {
     #[test]
     fn ngram_postings_reject_over_budget_generations() {
         let mut budget = ByteNgramBudget::new(80);
-        let error = ByteNgramPostings::from_documents([b"abcdef".as_slice()], &mut budget)
+        let error = ByteNgramPostings::from_documents([b"abcdef".as_slice()], &mut budget, None)
             .expect_err("posting memory must be bounded");
         assert!(error.contains("n-gram posting memory budget"));
+    }
+
+    #[test]
+    fn ngram_postings_reject_an_already_expired_build_deadline() {
+        let mut budget = ByteNgramBudget::new(1024 * 1024);
+        let error = ByteNgramPostings::from_documents(
+            [b"abcdef".as_slice()],
+            &mut budget,
+            Some(Instant::now()),
+        )
+        .expect_err("expired deadline must fail closed");
+        assert_eq!(error, LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED);
     }
 
     #[test]

@@ -779,6 +779,30 @@ fn elapsed_deadline_before_scan_invokes_no_authority() {
 }
 
 #[test]
+fn omitted_request_deadline_uses_crate_exact_flat_default() {
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 4);
+    assert!(request.budget.deadline_micros.is_none());
+    assert!(request.base.budget.deadline_micros.is_none());
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(&request, Vec::new());
+    let control = FixedExecutionControl {
+        elapsed_micros: Rc::new(Cell::new(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1)),
+        ..FixedExecutionControl::default()
+    };
+
+    assert!(matches!(
+        SemanticCodeRetriever::new(&embedder, &vectors, &control)
+            .retrieve_semantic(&request)
+            .expect("typed budget outcome"),
+        RetrieverOutcome::BudgetExceeded(_)
+    ));
+    assert_eq!(embedder.calls.get(), 0);
+    assert_eq!(vectors.scans.get(), 0);
+}
+
+#[test]
 fn cancellation_and_deadline_are_checked_during_scan() {
     let query_view = query_view();
     let projection = projection();
