@@ -51,7 +51,9 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # Test-only helper surfaces this crate's test targets reach across crate
 # boundaries: engine fixtures, session normalizers, and temporal page requests.
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+# `test-transport` exposes the maintenance-authority fixture publisher this
+# crate's WAL reclaim tests need to prove exclusive-maintenance truncation.
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers", "test-transport"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 

@@ -558,6 +558,18 @@ impl RegisteredGlobalDb {
         }
     }
 
+    /// Wraps an already-published guarded database for WAL maintenance tests.
+    ///
+    /// The exclusive-maintenance truncation lane cannot be exercised through
+    /// the ordinary registered harness because the registered fixture
+    /// publisher mints only Test-role authority; this constructor lets a test
+    /// drive [`RegisteredGlobalDb::checkpoint_result`] over a
+    /// maintenance-scoped publication without bypassing the database facade.
+    #[cfg(test)]
+    pub(crate) fn from_database_for_wal_maintenance_test(database: Database) -> Self {
+        Self::from_database(database)
+    }
+
     pub fn read_connection(&self) -> DatabaseEngineReadConnection {
         self.database.read_connection()
     }
