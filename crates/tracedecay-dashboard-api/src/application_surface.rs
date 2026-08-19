@@ -9,13 +9,16 @@ use axum::http::StatusCode;
 use serde_json::Value;
 use serde_json::json;
 use tracedecay_application::{
-    ApplicationContractError, ApplicationOutcome, ApplicationProblemEnvelope, RequestId,
+    ApplicationContractError, ApplicationOutcome, ApplicationProblemEnvelope, AuthorizedScopeSet,
+    NativeIntegrationSurfaceResultV1, RequestId,
 };
-use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
+use tracedecay_domain::{NativeIntegrationTransactionId, ProjectId, ScopeSetId};
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
+
+use crate::DashboardHttpRequestControlV1;
 
 pub struct DashboardApplicationRouters {
     pub http: Router,
@@ -71,6 +74,37 @@ pub(crate) fn configuration_apply_error(
     }
 }
 
+pub type DashboardScopeSetReadFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<
+                    Option<AuthorizedScopeSet>,
+                    DashboardDaemonReadUnavailableV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+pub type DashboardNativeIntegrationStatusFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<
+                    NativeIntegrationSurfaceResultV1,
+                    DashboardDaemonReadUnavailableV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// The daemon transport could not answer a dashboard read. The detail is a
+/// safe diagnostic, never store paths or payload content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DashboardDaemonReadUnavailableV1 {
+    pub detail: String,
+}
+
 pub trait DashboardApplicationRuntime: Send + Sync {
     /// Exact profile bound by the daemon handshake. A dashboard mounted
     /// without that identity cannot advertise or dispatch profile writes.
@@ -88,6 +122,26 @@ pub trait DashboardApplicationRuntime: Send + Sync {
         expected_revision: ConfigurationRevisionId,
         idempotency_key: ConfigurationIdempotencyKey,
     ) -> DashboardConfigurationApplyFuture<'a>;
+
+    /// Reads one persisted multi-root scope set (a named collection) through
+    /// the daemon transport under the live request controls. Read-only: the
+    /// daemon answers only the exact collection identity it was asked for and
+    /// never resolves paths or widens authority here.
+    fn read_multi_root_scope_set<'a>(
+        &'a self,
+        control: DashboardHttpRequestControlV1,
+        scope_set_id: ScopeSetId,
+    ) -> DashboardScopeSetReadFuture<'a>;
+
+    /// Reads one native-integration transaction status through the daemon
+    /// transport, answering the same application result the CLI and MCP
+    /// surfaces project. Read-only: mutating operations carry no dashboard
+    /// binding.
+    fn native_integration_status<'a>(
+        &'a self,
+        control: DashboardHttpRequestControlV1,
+        transaction_id: NativeIntegrationTransactionId,
+    ) -> DashboardNativeIntegrationStatusFuture<'a>;
 }
 
 #[cfg(test)]

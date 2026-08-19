@@ -222,7 +222,8 @@ pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_hand
 pub use mcp_catalog::mcp_executable_binding_registry;
 pub use multi_root::{
     AuthorizedMultiRootQueryService, AuthorizedRoot, AuthorizedRootAdmission, AuthorizedScopeSet,
-    AuthorizedScopeSetAuthority, AuthorizedScopeSetError, MultiRootContinuationV1,
+    AuthorizedScopeSetAuthority, AuthorizedScopeSetError, MultiRootCollectionResolutionV1,
+    MultiRootCollectionSelectorV1, MultiRootCollectionUnavailableV1, MultiRootContinuationV1,
     MultiRootExecuteRequestV1, MultiRootOperationV1, MultiRootQueryError, MultiRootQueryPageV1,
     MultiRootQueryPort, MultiRootQueryRequestV1, MultiRootScopeSetCasRequestV1,
     MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,

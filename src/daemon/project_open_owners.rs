@@ -1100,6 +1100,12 @@ pub(super) async fn register_project_open_production_owners(
         .await;
     });
 
+    // At-rest privacy remediation is bounded background work after fail-closed
+    // admission; it never blocks admission or retrieval.
+    crate::daemon::privacy_remediation::spawn_project_memory_privacy_remediation(Arc::clone(
+        &graph,
+    ));
+
     // Semantic restore can decode a large durable generation. Keep that
     // capability-specific warm-up behind every independent production owner
     // so diagnostics, tests, feedback, and LSP reads remain available while
