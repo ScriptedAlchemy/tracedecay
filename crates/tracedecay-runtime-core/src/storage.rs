@@ -1074,7 +1074,9 @@ pub fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>
     let file = open_lock_file(lock_path, false)?;
     match file.try_lock_exclusive() {
         Ok(()) => Ok(Some(file)),
-        Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        // `is_lock_contended` covers Windows, where contention surfaces as
+        // ERROR_LOCK_VIOLATION rather than a `WouldBlock` error kind.
+        Err(err) if crate::db::is_lock_contended(&err) => Ok(None),
         Err(err) => Err(err),
     }
 }
