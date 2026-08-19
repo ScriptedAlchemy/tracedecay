@@ -106,14 +106,16 @@ async fn hook_orchestration_backpressures_without_waiting() {
         observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         completion_notification.notify_one();
     }));
-    // A distinct hook event at a distinct work address is real new work, so it
-    // must contend for the single permit rather than join or supersede the
-    // admitted boundary.
+    // A hook from a *different native session* is real new work at a distinct
+    // stable address, so it must contend for the single permit rather than
+    // join or supersede the admitted boundary. (A newer boundary in the same
+    // session supersedes instead; that path has its own coverage.)
     let mut other_envelope = hook_envelope(HookEventV2::SavedEdit {
         file_id: [8; 16],
         changed_range_count: 1,
     });
     other_envelope.event_id = [2; 16];
+    other_envelope.protected_session_id = [9; 32];
     let other_request = HookOrchestrationRequestV1::from_envelope(
         other_envelope,
         &hook_binding(),
@@ -504,8 +506,13 @@ async fn replayed_admission_after_retryable_failure_completes_a_fresh_cycle() {
     unregister_hook_orchestration_runtime([23; 16], [25; 16], &runtime);
 }
 
+/// Superseding a boundary whose provider work is wedged in nested blocking
+/// work must settle the superseded admission's own receipt terminal by
+/// dropping the cancelled work, never by polling it to completion: a wedged
+/// provider cannot hold the durable receipt hostage. The gate stays closed
+/// until after the terminal is observed, so the ordering is deterministic.
 #[tokio::test]
-async fn superseded_blocking_work_is_joined_before_its_receipt_terminal() {
+async fn superseded_blocking_work_settles_its_receipt_without_awaiting_cancelled_work() {
     let (blocking_started, blocking_started_receiver) = tokio::sync::oneshot::channel();
     let blocking_started = Arc::new(std::sync::Mutex::new(Some(blocking_started)));
     let blocking_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
@@ -550,9 +557,6 @@ async fn superseded_blocking_work_is_joined_before_its_receipt_terminal() {
     .unwrap();
     let first_terminal = Arc::new(tokio::sync::Notify::new());
     let observed_first_terminal = Arc::clone(&first_terminal);
-    let nested_finished_at_terminal = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let observed_nested_finished = Arc::clone(&nested_finished_at_terminal);
-    let completion_finished = Arc::clone(&blocking_finished);
     let mut first = HookOrchestrationRequestV1::from_envelope(
         hook_envelope(HookEventV2::SavedEdit {
             file_id: [7; 16],
@@ -565,10 +569,6 @@ async fn superseded_blocking_work_is_joined_before_its_receipt_terminal() {
     )
     .unwrap();
     first.completion = Some(Arc::new(move || {
-        observed_nested_finished.store(
-            completion_finished.load(std::sync::atomic::Ordering::Acquire),
-            std::sync::atomic::Ordering::Release,
-        );
         observed_first_terminal.notify_one();
     }));
     assert_eq!(runtime.admit(first), HookOrchestrationAdmissionV1::Enqueued);
@@ -592,25 +592,27 @@ async fn superseded_blocking_work_is_joined_before_its_receipt_terminal() {
         runtime.admit(successor),
         HookOrchestrationAdmissionV1::Enqueued
     );
+    // The gate is still closed: the terminal below can only come from the
+    // superseded operation dropping its cancelled work.
+    let terminal =
+        tokio::time::timeout(std::time::Duration::from_secs(1), first_terminal.notified()).await;
+    assert!(
+        terminal.is_ok(),
+        "the superseded operation must emit its own receipt terminal without awaiting cancelled work"
+    );
+    assert!(
+        !blocking_finished.load(std::sync::atomic::Ordering::Acquire),
+        "the gate is closed, so the nested blocking work cannot have finished"
+    );
+
+    // Release the wedged blocking work and the successor so shutdown joins
+    // every thread this test started.
     let (released, changed) = &*blocking_gate;
     *released
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
     changed.notify_all();
-    let terminal = tokio::time::timeout(
-        std::time::Duration::from_millis(250),
-        first_terminal.notified(),
-    )
-    .await;
     successor_release.notify_one();
-    assert!(
-        terminal.is_ok(),
-        "the superseded operation must emit its own receipt terminal"
-    );
-    assert!(
-        nested_finished_at_terminal.load(std::sync::atomic::Ordering::Acquire),
-        "the receipt terminal must follow settlement of nested blocking work"
-    );
 }
 
 #[tokio::test]
