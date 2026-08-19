@@ -229,11 +229,7 @@ impl TraceDecay {
         // stay behind the rare paths that actually compare stores. Resolving a
         // layout is on every open, including fail-closed clients that must not
         // touch the store at all.
-        let (
-            candidates,
-            selected_manifest_matches_exact_root,
-            candidates_match_exact_root,
-        ) =
+        let (candidates, selected_manifest_matches_exact_root, candidates_match_exact_root) =
             storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
         if selected.is_some()
             && !candidates.is_empty()
