@@ -163,6 +163,13 @@ impl EnrolledRemoteClient {
             HeaderValue::from_bytes([b"Bearer ".as_slice(), credential].concat().as_slice())
                 .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
         let mut builder = HttpClient::builder().timeout(timeout);
+        if endpoint.scheme() == "http" {
+            // The loopback-only plaintext admission above is void if a system
+            // proxy (`HTTP_PROXY`/`ALL_PROXY`) re-routes the request: the
+            // Bearer enrollment credential would leave the machine
+            // unencrypted. The loopback target never needs a proxy.
+            builder = builder.no_proxy();
+        }
         if let Some(pem) = root_certificate_pem {
             let mut certificates = reqwest::Certificate::from_pem_bundle(pem)
                 .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
