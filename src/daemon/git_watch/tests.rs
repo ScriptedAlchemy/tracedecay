@@ -977,6 +977,83 @@ async fn shutdown_cancels_and_joins_active_metadata_scan() {
     assert!(!state.has_retained_task());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_deadline_aborts_project_tasks_before_waiting_for_blocked_backstop() {
+    struct NotifyOnDrop(Option<oneshot::Sender<()>>);
+
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    let watcher = GitWatcher::new(fast_watch_config());
+    let project_path = PathBuf::from("/tmp/shutdown-deadline-project");
+    let (project_started_tx, project_started_rx) = oneshot::channel();
+    let (project_aborted_tx, project_aborted_rx) = oneshot::channel();
+    let project_task = tokio::spawn(async move {
+        let _notify_on_drop = NotifyOnDrop(Some(project_aborted_tx));
+        project_started_tx.send(()).expect("announce project task");
+        std::future::pending::<()>().await;
+    });
+    project_started_rx.await.expect("project task started");
+    let state = Arc::new(WatchState {
+        project_root: project_path.clone(),
+        dirty: Mutex::new(DirtySet::default()),
+        wake: Notify::new(),
+        health: ProjectHealth::default(),
+        task: Mutex::new(Some(project_task)),
+        entered_debounce: Notify::new(),
+        drained_plans: AtomicU64::new(0),
+        plan_drained: Notify::new(),
+    });
+    watcher
+        .inner
+        .projects
+        .lock()
+        .await
+        .insert(project_path, Arc::clone(&state));
+
+    let (backstop_started_tx, backstop_started_rx) = oneshot::channel();
+    let (release_backstop_tx, release_backstop_rx) = std::sync::mpsc::channel();
+    let (backstop_finished_tx, backstop_finished_rx) = oneshot::channel();
+    let backstop_task = tokio::task::spawn_blocking(move || {
+        backstop_started_tx
+            .send(())
+            .expect("announce blocked backstop");
+        release_backstop_rx
+            .recv()
+            .expect("release blocked backstop");
+        let _ = backstop_finished_tx.send(());
+    });
+    backstop_started_rx.await.expect("backstop task started");
+    *watcher.inner.backstop_task.lock().await = Some(backstop_task);
+
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        watcher.shutdown_with_deadline(Duration::from_millis(25)),
+    )
+    .await
+    .expect("shutdown must return by its deadline");
+    tokio::time::timeout(Duration::from_millis(100), project_aborted_rx)
+        .await
+        .expect("project task must be aborted before waiting on the blocked backstop")
+        .expect("project abort notification");
+
+    assert!(watcher.inner.projects.lock().await.is_empty());
+    assert!(state.task.lock().await.is_none());
+    assert!(watcher.inner.backstop_task.lock().await.is_none());
+
+    release_backstop_tx
+        .send(())
+        .expect("release blocked backstop");
+    backstop_finished_rx
+        .await
+        .expect("blocked backstop finished");
+}
+
 /// The safety-critical property that justifies this metadata watcher over the
 /// removed #80 working-tree watcher: a plain source-file edit (no git
 /// operation) must NOT trigger any scheduler freshness request. We drive the
