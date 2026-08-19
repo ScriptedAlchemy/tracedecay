@@ -177,14 +177,10 @@ pub(super) async fn write_project_open_error(
     write_json_rpc_response(transport, &response).await
 }
 
-/// A `tools/call` refused at project open still answers on the MCP tool
-/// surface when the refusal is an admitted application terminal.
-///
-/// Reset-required is the store's own typed answer for the exact operation the
-/// caller named. Reporting it as a JSON-RPC internal error hid the one legal
-/// action (`reset`) from MCP clients while CLI and HTTP callers of the same
-/// operation received the canonical problem envelope. Non-application tools
-/// and every other project-open failure keep the raw refusal shape.
+/// A `tools/call` refused at project open answers on the MCP tool surface
+/// when the refusal is the reset-required terminal, matching the canonical
+/// problem envelope CLI and HTTP callers receive for the same operation.
+/// Non-application tools and every other open failure keep the raw shape.
 fn tool_call_open_refusal_response(
     request: &JsonRpcRequest,
     connection_scope: &str,
