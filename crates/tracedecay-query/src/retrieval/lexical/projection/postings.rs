@@ -236,6 +236,18 @@ mod tests {
     }
 
     #[test]
+    fn lexical_projection_deadline_is_plan20_overridable() {
+        assert_eq!(
+            super::super::lexical_projection_build_deadline_micros(None),
+            super::super::LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1
+        );
+        assert_eq!(
+            super::super::lexical_projection_build_deadline_micros(Some(12)),
+            12
+        );
+    }
+
+    #[test]
     fn ngram_postings_reject_an_already_expired_build_deadline() {
         let mut budget = ByteNgramBudget::new(1024 * 1024);
         let error = ByteNgramPostings::from_documents(
