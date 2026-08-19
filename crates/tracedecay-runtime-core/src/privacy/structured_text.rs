@@ -172,7 +172,7 @@ pub(crate) fn sanitize_structured_text(
         }
     };
     validate_structured_text_limits(&parsed.value)
-        .map_err(|_| DetectionError::ScanLimitExceeded)?;
+        .map_err(detection_error_from_structured_sanitization)?;
 
     let mut quarantine_findings = Vec::new();
     let candidates = if parsed.fields.is_empty() {
@@ -771,7 +771,7 @@ fn detect_lcm_payload(raw: &str) -> Result<(String, Vec<SanitizationFindingV1>),
             policy.depth,
             policy.values,
         )
-        .map_err(|_| DetectionError::Receipt)?;
+        .map_err(detection_error_from_structured_sanitization)?;
         let sanitized = sanitize_structured_payload(raw.as_bytes(), limits)
             .map_err(detection_error_from_structured_sanitization)?;
         if !sanitized.was_structurally_parsed() {
@@ -789,6 +789,11 @@ fn detect_lcm_payload(raw: &str) -> Result<(String, Vec<SanitizationFindingV1>),
     Ok(detected.into_parts())
 }
 
+/// Maps the structured sanitizer's typed refusals onto detection errors
+/// without conflating classes: quarantines stay quarantines, limit overruns
+/// stay bounded-scan refusals, an unavailable or misconfigured detector is an
+/// initialization failure, and [`DetectionError::Receipt`] is reserved for
+/// actual receipt/canonical construction faults.
 fn detection_error_from_structured_sanitization(
     error: StructuredSanitizationError,
 ) -> DetectionError {
@@ -798,9 +803,13 @@ fn detection_error_from_structured_sanitization(
         | StructuredSanitizationError::NestingDepthExceeded
         | StructuredSanitizationError::ItemCountExceeded => DetectionError::ScanLimitExceeded,
         StructuredSanitizationError::UnsafeJsonStructure
-        | StructuredSanitizationError::InvalidEncoding => DetectionError::StructuredQuarantine,
+        | StructuredSanitizationError::InvalidEncoding
+        | StructuredSanitizationError::CredentialKeyQuarantine => {
+            DetectionError::StructuredQuarantine
+        }
         StructuredSanitizationError::InvalidLimits
-        | StructuredSanitizationError::SanitizerUnavailable => DetectionError::Receipt,
+        | StructuredSanitizationError::SanitizerUnavailable => DetectionError::Initialization,
+        StructuredSanitizationError::CanonicalEncoding => DetectionError::Receipt,
     }
 }
 
