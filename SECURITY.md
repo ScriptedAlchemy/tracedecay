@@ -136,10 +136,6 @@ recursive-write primitive.
 
 tracedecay installs **no background daemon, system service, or autostart process by default**. Users can explicitly opt in with `tracedecay daemon install-service`, which installs a per-user systemd service on Linux or a per-user LaunchAgent on macOS. The daemon runs with **standard user privileges** and never requests elevation. Index freshness still relies on on-demand staleness checks, catch-up syncs when MCP clients connect, and bounded hook notifications; the daemon provides shared MCP process/socket reuse and scheduled automation for projects that connect to it.
 
-### Subprocess-isolated extraction
-
-Tree-sitter grammars are compiled C/C++ and can crash the process in ways Rust cannot catch. Each file is parsed inside a short-lived worker subprocess (the hidden `extract-worker` subcommand). The worker authenticates against its parent with a 256-bit per-spawn token supplied via the `TRACEDECAY_WORKER_TOKEN` environment variable; a user invoking `tracedecay extract-worker` directly fails immediately. Opt out with `TRACEDECAY_DISABLE_SUBPROCESS=1`.
-
 ### Unsafe code
 
 The codebase contains minimal `unsafe`, used in two cross-platform places:
