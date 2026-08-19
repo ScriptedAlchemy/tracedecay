@@ -637,12 +637,16 @@ status (one project's statistics).";
 
 pub(crate) const REMOTE_LONG_ABOUT: &str = "\
 Operates the Remote Brain production journey from the shell: live mounted \
-status from the running daemon, plus enrolled enroll/replay/backup/restore/\
-failover against an authenticated authority endpoint. `status` never probes \
-local stores; it reads the daemon's in-memory remote mount. Protocol actions \
-take a typed `RemoteProtocolRequestV1` JSON body from `--request-file` \
-(`-` reads stdin) and send credentials only from files. `--json` emits one \
-canonical JSON line.";
+status from the running daemon, plus enrolled enroll/capture/query/\
+transfer-frame/replay/backup/restore/failover against an authenticated \
+authority endpoint. `status` never probes local stores; it reads the \
+daemon's in-memory remote mount. `capture` spools one observation on a node \
+whose authority is unreachable, `transfer-frame` moves one encrypted spool \
+frame to an enrolled node, and `query` reads one exact observation and \
+renders the honest remote shard coverage next to the caller's own pending \
+local spool. Protocol actions take a typed `RemoteProtocolRequestV1` JSON \
+body from `--request-file` (`-` reads stdin) and send credentials only from \
+files. `--json` emits one canonical JSON line.";
 
 pub(crate) const REMOTE_AFTER_HELP: &str = "\
 Examples:
@@ -651,6 +655,12 @@ Examples:
   tracedecay remote enroll --endpoint https://brain.example/remote/ \\
       --credential-file grant.bin --enrollment-credential-file enroll.bin \\
       --request-file enroll.json --json
+  tracedecay remote capture --endpoint https://node.example/remote/ \\
+      --credential-file cred.bin --request-file capture.json --json
+  tracedecay remote query --endpoint https://brain.example/remote/ \\
+      --credential-file cred.bin --request-file query.json
+  tracedecay remote transfer-frame --endpoint https://peer.example/remote/ \\
+      --credential-file cred.bin --request-file frame.json --json
   tracedecay remote replay --endpoint https://brain.example/remote/ \\
       --credential-file cred.bin --request-file replay.json
   tracedecay remote backup --endpoint https://brain.example/remote/ \\

@@ -22,14 +22,13 @@ use tracedecay_store::{
     GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1,
     GraphPublicationKeyV1, GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1,
     GraphPublicationStoreErrorV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
-    GraphVerifiedHeadV1, ProjectId,
-    RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
-    RuntimeRequestProbeV1, SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome,
-    SemanticVectorStageKey, SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
-    SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
-    SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, SemanticVectorStagingStore,
-    StoreShardIdV1,
+    GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, SemanticVectorStageBatchReceipt,
+    SemanticVectorStageCancelOutcome, SemanticVectorStageKey, SemanticVectorStagePlan,
+    SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublishOutcome,
+    SemanticVectorStagePublishSettlement, SemanticVectorStageRecord,
+    SemanticVectorStageResumeOutcome, SemanticVectorStagingStore, StoreShardIdV1,
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, SessionGraphOwnerV1, session_registry_error};
@@ -39,6 +38,8 @@ pub(super) use memory_runtime::{
     inline_graph_publication_input_digest, schedule_bound_memory_graph_reconciliation,
 };
 pub(super) mod graph_attachment;
+#[cfg(test)]
+mod sealed_publication_tests;
 mod seals;
 mod semantic_vector;
 use seals::{
@@ -160,6 +161,9 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     replay_root: std::path::PathBuf,
     sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest,
     lifecycle_cancelled: Arc<AtomicBool>,
+    /// Registry-owned per-shard gate; see
+    /// `DaemonSessionRuntimeRegistryV1::code_graph_publication_gates`.
+    publication_gate: Arc<std::sync::Mutex<()>>,
 }
 
 /// Memory-shard publication runtime for immutable non-code graph journeys.
@@ -656,6 +660,16 @@ impl RetainedCodeGraphRuntimeV1 {
         if generation.manifest().generation_id != self.generation_id {
             return Err(GraphDbError::Conflict);
         }
+        // One publisher per code shard at a time, across every retained
+        // runtime instance. The seat pass and the background reconcile both
+        // reach this path for the same sealed generation; the loser waits
+        // here (this runs inside spawn_blocking), then finds the verified
+        // head already advanced and takes the idempotent recovery arm below
+        // instead of racing the graph database into a Conflict.
+        let _publication = self
+            .publication_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let projection_deadline = sealed_projection_deadline(self.sealed_generation_bytes()?);
         let deadline_at = Instant::now() + projection_deadline;
         let graph_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
@@ -1212,6 +1226,13 @@ impl DaemonSessionRuntimeRegistryV1 {
         let replay_root = project_database
             .database_path()
             .with_extension("graph-replay");
+        let publication_gate = {
+            let mut gates = self
+                .code_graph_publication_gates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(gates.entry(code_shard.clone()).or_default())
+        };
         Ok(RetainedCodeGraphRuntimeV1 {
             graph_registry: self.graph_registry.clone(),
             graph_manifest_provider: Arc::clone(&self.graph_manifest_provider),
@@ -1226,6 +1247,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             replay_root,
             sealed_state_digest: replay_binding.sealed_state_digest,
             lifecycle_cancelled: Arc::clone(&self.graph_lifecycle_cancelled),
+            publication_gate,
         })
     }
 

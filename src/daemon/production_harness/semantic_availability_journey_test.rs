@@ -52,7 +52,7 @@ async fn called(
 /// local response handle. That is reversible transport framing, not a
 /// degraded lane, so resolve it through the public retrieve tool before
 /// comparing a response.
-async fn answered(
+pub(super) async fn answered(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     tool: &str,
@@ -245,7 +245,7 @@ fn seed_session_transcript(isolation_root: &Path, project: &Path) {
     .expect("session transcript");
 }
 
-fn assert_lane_complete(coverage: &Value, lane: &str) {
+pub(super) fn assert_lane_complete(coverage: &Value, lane: &str) {
     assert_eq!(
         coverage[lane],
         json!("complete"),
@@ -256,7 +256,7 @@ fn assert_lane_complete(coverage: &Value, lane: &str) {
 
 /// The whole point of the pending state: semantic is typed-unavailable with a
 /// machine-readable reason, and that verdict is confined to the semantic lane.
-fn assert_semantic_pending(payload: &Value) {
+pub(super) fn assert_semantic_pending(payload: &Value) {
     assert_eq!(
         payload["semantic"]["status"],
         json!("unavailable"),

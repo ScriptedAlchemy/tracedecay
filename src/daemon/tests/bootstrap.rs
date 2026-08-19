@@ -455,7 +455,7 @@ fn moved_nongit_open_options(
 /// After the working-tree enrollment file was removed, a moved non-git
 /// project cannot be found by path-derived id. Rebinding its registry row is
 /// an operator decision: ambient first-touch mints fresh, explicit init
-/// without flags refuses with the candidate, and `--yes` (AdoptUnique)
+/// without flags refuses with the candidate, and `--yes` (`AdoptUnique`)
 /// completes the remap with store data intact.
 #[cfg(unix)]
 #[tokio::test]

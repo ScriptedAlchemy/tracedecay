@@ -476,9 +476,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     /// Each worker connection keeps its own SQLite cache. Dispatching
     /// `PRAGMA shrink_memory` through the writer actor would shrink the
     /// wrong connection (or fail when no writer is attached).
-    pub(crate) fn release_connection_memory(
-        &self,
-    ) -> Result<MemoryReleaseOutcome, ExactSqlError> {
+    pub(crate) fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome, ExactSqlError> {
         let (lifecycle, clients) = {
             let state = self
                 .inner

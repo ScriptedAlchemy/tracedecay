@@ -399,8 +399,24 @@ the commit as attribution evidence.
   (`c5c0a7663`); LSP protocol sessions register a warming owner before a
   sealed census so initialize/shutdown/exit admit during warming
   (`5e222426e`); Windows getrandom mapping, `large_enum_variant` boxing,
-  and byte-identical consecutive dashboard builds (`28973da32`,
-  `fd5b1dfe8`, `66c69e034`) close the remaining CI job classes.
+    and byte-identical consecutive dashboard builds (`28973da32`,
+    `fd5b1dfe8`, `66c69e034`) close the remaining CI job classes.
+- The remaining Work/workflow product surface is mounted (2026-08-19, PR
+  branch `cursor/mount-workflow-product-surface-2353`). Workflow activation
+  runs tool-catalog semantic admission before the lifecycle transition is
+  journaled (`workflow_admission`: step operations must resolve in the Work
+  executable catalog and `pinned_catalog_digest` must name the live digest;
+  `WorkflowDefinitionService::admit_activation` is the one authority both
+  activation paths run, and the daemon journey asserts the mounted route
+  refuses an uncataloged candidate). The dashboard gained the fourteenth
+  workspace, Workflows — definitions, lifecycle compare-and-swaps, and
+  `get_run` projections over the mounted `/application/workflow` routes and
+  newly generated contracts; handoff and run-control wire types stay
+  uncontracted. A19 outcome: Work mounts no integration apply/review/stack
+  mutation operation and must not (Plan 36 owns apply/receipt); the Work
+  workspace's integration-outcome and stack-capability accounting cards now
+  decode the mounted `operation.work.topology_metrics` projection cell by
+  cell instead of wearing a stale "read model is not published" absence.
 
 ## Remaining work by lane
 
@@ -472,21 +488,21 @@ the commit as attribution evidence.
   CLI, and both SDKs. Prove the partial-effect committed receipt and reset-only
   legal action survive each boundary and physical daemon restart; unit mappers
   and synthetic SDK envelopes are necessary but not final journey evidence.
-  PARTIAL, updated 2026-08-15: both CLI legs are proven green in a clean
-  worktree at `d7c4a4c43` — PartialEffect (`e56fadeff` lineage) AND the
-  ResetRequired leg, which was un-`#[ignore]`d by `c962cd627` after the
-  project-open settling gap was fixed; the reset-only legal action survives
-  a physical restart via CLI. The HTTP/MCP/SDK legs are in flight in
-  `tests/typed_terminal_restart_acceptance/transport_boundaries.rs`
-  (checkpoint `29a591519`; module made resolvable by `2d63021e6`). First
-  full run of those WIP legs, 2026-08-15: both fail with actionable
-  reasons — `partial_effect_survives_http_mcp_and_rust_sdk_across_restart`
-  settles without ever reaching the durable commit boundary, and
-  `reset_required_survives_http_mcp_and_rust_sdk_across_restart` gets a raw
-  JSON-RPC `-32603` whose `data` carries
-  `kind:"reset_required"`/reason/retryable instead of the typed problem
-  envelope the assertion requires (the MCP surface is not wrapping the
-  reset terminal as a problem envelope).
+  DONE 2026-08-19: all four legs are green. The CLI legs were proven at
+  `d7c4a4c43` (PartialEffect via the `e56fadeff` lineage; ResetRequired
+  un-`#[ignore]`d by `c962cd627`). The HTTP/MCP/Rust-SDK legs in
+  `tests/typed_terminal_restart_acceptance/transport_boundaries.rs` pass
+  2/2 after two production fixes: a `tools/call` refused at project open
+  with `ResetRequired` now answers on the MCP tool surface with the
+  canonical problem envelope under the operation's own MCP result contract
+  (`mcp_project_open_reset_refusal`; previously a raw JSON-RPC `-32603`),
+  and the socket `DaemonInvocationClient` keeps reading an authoritative
+  effect over `DAEMON_TOOL_RESPONSE_GRACE` after cancel delivery instead of
+  fabricating `ResetRequired` at the two-second shutdown bound — a
+  post-cancel transport failure stays the typed indeterminate settlement,
+  mirroring `settle_in_process_invocation`. Both journeys prove the
+  partial-effect committed receipt and reset-only legal action across a
+  physical daemon restart.
 - DONE 2026-08-10 (verified 2026-08-13): the ten `schema_unavailable`
   application bindings were repaired in `d2b094ca7` — the primitive-surface
   read operations gained typed schemas in

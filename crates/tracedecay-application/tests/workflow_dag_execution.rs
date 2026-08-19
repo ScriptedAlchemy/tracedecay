@@ -68,7 +68,7 @@ fn definition() -> WorkflowDefinition {
         vec![
             WorkflowStep {
                 step_id: id::<WorkflowStepId>("prepare"),
-                operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+                operation: id::<WorkflowOperationRef>("operation.work.start_attempt"),
                 predecessors: BTreeSet::new(),
                 inputs: Vec::new(),
                 outputs: vec![id::<WorkflowOutputName>("context")],
@@ -76,7 +76,7 @@ fn definition() -> WorkflowDefinition {
             },
             WorkflowStep {
                 step_id: id::<WorkflowStepId>("review"),
-                operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+                operation: id::<WorkflowOperationRef>("operation.work.start_attempt"),
                 predecessors: BTreeSet::from([id::<WorkflowStepId>("prepare")]),
                 inputs: vec![WorkflowOutputReference {
                     producer_step_id: id::<WorkflowStepId>("prepare"),

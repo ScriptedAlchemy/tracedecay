@@ -234,8 +234,7 @@ pub async fn observatory_read_model(
     let (analytics_mode, comparison, mut plan_metrics) =
         project_plan26_read_models(&event_refs, &read_horizon, &watermark, event_state, unknown);
     metrics.append(&mut plan_metrics);
-    let rejected_arguments =
-        project_rejected_arguments(&event_refs, &watermark, complete, unknown);
+    let rejected_arguments = project_rejected_arguments(&event_refs, &watermark, complete, unknown);
     ObservatoryReadModelV1 {
         authorized_scope_ref: scope_ref.unwrap_or("all").to_string(),
         horizon: read_horizon,

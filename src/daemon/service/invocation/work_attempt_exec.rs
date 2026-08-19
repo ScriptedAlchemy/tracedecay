@@ -59,17 +59,19 @@ use tracedecay_application::{
     WorkAttemptEvidenceRecordV1, WorkAttemptProviderOutcomeV1, WorkProviderAvailabilityV1,
     WorkProviderFallbackRecordV1,
 };
+use tracedecay_domain::configuration::TopologyPolicyDigestV1;
 use tracedecay_domain::{
-    ObservationSourceIdentityV1, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
-    WorkAttemptV1, WorkExecutableReference, WorkFallbackTopology, WorkProviderBackendV1,
-    WorkProviderProtocol, WorkProviderRouteV1, WorktreeId,
+    ObservationSourceIdentityV1, UtcMicros, WorkArtifactId, WorkArtifactRefV1,
+    WorkAttemptIdentityV1, WorkAttemptV1, WorkExecutableReference, WorkFallbackTopology,
+    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteV1, WorktreeId,
 };
 use tracedecay_sessions::runtime::codex_app_server::{
     CodexAppServerCancellation, CodexAppServerLaunchReceipt, CodexAppServerSummaryConfig,
     CodexAppServerWorkExecution, run_work_with_codex_app_server,
 };
 use tracedecay_usecases::observability::{
-    BoundedObservabilityProducerV1, record_terminal_attempt_product_views,
+    BoundedObservabilityProducerV1, WorkNoProgressObservationV1, WorkOwnerObservationResultV1,
+    record_no_progress_observation, record_terminal_attempt_product_views,
     record_work_operation_resource,
 };
 
@@ -299,6 +301,20 @@ async fn run_attempt(
     };
     let attempts = services.attempts();
     let identity = attempt.identity().clone();
+    // The registration-pinned work topology policy carries the concurrency
+    // policy this attempt was admitted under; its canonical digest is the
+    // revision a Plan 26 no-progress terminal must name.
+    let topology_policy_digest = match registered.work_topology_policy.compute_digest() {
+        Ok(digest) => Some(digest),
+        Err(error) => {
+            tracing::warn!(
+                task = identity.task_id().as_str(),
+                ?error,
+                "work topology policy digest is unavailable; no-progress observations are skipped"
+            );
+            None
+        }
+    };
 
     match select_provider(&project_root, &attempt) {
         Ok(selection) => match selection.provider.protocol {
@@ -311,6 +327,7 @@ async fn run_attempt(
                     &admitted_environment,
                     cancel,
                     observability_producer.as_deref(),
+                    topology_policy_digest.as_ref(),
                     timing,
                 )
                 .await;
@@ -324,6 +341,7 @@ async fn run_attempt(
                     &admitted_environment,
                     cancel,
                     observability_producer.as_deref(),
+                    topology_policy_digest.as_ref(),
                     timing,
                 )
                 .await;
@@ -582,6 +600,7 @@ async fn execute_provider_with_environment<S>(
     admitted_environment: &BTreeMap<String, std::ffi::OsString>,
     cancel: Arc<Notify>,
     observability_producer: Option<&BoundedObservabilityProducerV1>,
+    topology_policy_digest: Option<&TopologyPolicyDigestV1>,
     timing: AttemptAdmissionTimingV1,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
@@ -672,8 +691,17 @@ async fn execute_provider_with_environment<S>(
             Err(_) => WorkAttemptProviderOutcomeV1::LaunchFailed,
         },
         () = tokio::time::sleep(wall) => {
+            let stalled_for = started.elapsed();
             terminate(&mut child, TerminationSignal::Kill);
             let _ = child.wait().await;
+            offer_no_progress_observation(
+                observability_producer,
+                &identity,
+                envelope.deadline(),
+                topology_policy_digest,
+                deadline_micros,
+                stalled_for,
+            );
             WorkAttemptProviderOutcomeV1::TimedOut
         }
         () = cancel.notified() => {
@@ -787,6 +815,7 @@ async fn execute_app_server<S>(
     admitted_environment: &BTreeMap<String, std::ffi::OsString>,
     cancel: Arc<Notify>,
     observability_producer: Option<&BoundedObservabilityProducerV1>,
+    topology_policy_digest: Option<&TopologyPolicyDigestV1>,
     timing: AttemptAdmissionTimingV1,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
@@ -809,6 +838,7 @@ async fn execute_app_server<S>(
             return;
         }
     };
+    let attempt_started = std::time::Instant::now();
     let deadline_micros =
         u64::try_from(envelope.deadline().0.saturating_sub(current_micros().0)).unwrap_or(0);
     let wall = std::time::Duration::from_micros(deadline_micros);
@@ -870,7 +900,19 @@ async fn execute_app_server<S>(
     let ending = tokio::select! {
         joined = &mut session => AppServerEnding::Session(joined),
         () = tokio::time::sleep(wall) => {
+            let stalled_for = attempt_started.elapsed();
+            // Cancelling the app-server session SIGKILLs its whole process
+            // tree; the escalation observed here is the same kill rung as the
+            // stdio path.
             cancellation.cancel();
+            offer_no_progress_observation(
+                observability_producer,
+                &identity,
+                envelope.deadline(),
+                topology_policy_digest,
+                deadline_micros,
+                stalled_for,
+            );
             AppServerEnding::TimedOut
         }
         () = cancel.notified() => {
@@ -965,6 +1007,46 @@ async fn execute_app_server<S>(
                 "work attempt terminal evidence could not be sealed"
             );
         }
+    }
+}
+
+/// Offers Plan 26's no-progress terminal for one wall-exhausted attempt. The
+/// stall is the monotonic elapsed time from attempt start to the deadline arm
+/// firing; a zero armed budget is refused by the payload contract, and
+/// emission never alters the timed-out product handling.
+fn offer_no_progress_observation(
+    observability_producer: Option<&BoundedObservabilityProducerV1>,
+    identity: &WorkAttemptIdentityV1,
+    run_deadline: UtcMicros,
+    topology_policy_digest: Option<&TopologyPolicyDigestV1>,
+    configured_timeout_micros: u64,
+    stalled_for: std::time::Duration,
+) {
+    let Some(topology_policy_digest) = topology_policy_digest else {
+        tracing::debug!(
+            task = identity.task_id().as_str(),
+            "work attempt no-progress observation skipped: topology policy digest unavailable"
+        );
+        return;
+    };
+    let elapsed_stall_micros = u64::try_from(stalled_for.as_micros()).unwrap_or(u64::MAX);
+    let result = record_no_progress_observation(
+        observability_producer,
+        &WorkNoProgressObservationV1 {
+            attempt: identity,
+            run_deadline,
+            concurrency_policy_revision: topology_policy_digest.0.as_str(),
+            configured_timeout_micros,
+            elapsed_stall_micros,
+            observed_at: current_micros(),
+        },
+    );
+    if result != WorkOwnerObservationResultV1::Enqueued {
+        tracing::debug!(
+            task = identity.task_id().as_str(),
+            ?result,
+            "work attempt no-progress observation was not enqueued"
+        );
     }
 }
 

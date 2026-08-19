@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.74...v0.1.0-beta) (2026-08-19)
+
+
+### Features
+
+* **observability:** mount adoption census and outcome funnel ([5faa6fe](https://github.com/ScriptedAlchemy/tracedecay/commit/5faa6fe270e2ced270fbc50e275fc22a57c7c0fd))
+* **observability:** mount github stack capability and drift receipts ([04b1dad](https://github.com/ScriptedAlchemy/tracedecay/commit/04b1dad4f912b6bec603731796c31ed592e300c0))
+* **observability:** mount index lifecycle and retrieval-pipeline lanes ([f176b81](https://github.com/ScriptedAlchemy/tracedecay/commit/f176b819f0d3b7416f79b56c0b196b5dff639186))
+* **observability:** mount no-progress terminals for wall-exhausted work ([f6d5c55](https://github.com/ScriptedAlchemy/tracedecay/commit/f6d5c55dda76fb93dd964c426395888572bb319b))
+* **observability:** mount unmounted emitters and generation-bound joins ([ac471d7](https://github.com/ScriptedAlchemy/tracedecay/commit/ac471d7eb4014e2d7ffdb121805f200bd21f914f))
+* **observability:** mount work-conflict prediction and outcome receipts ([fc7e248](https://github.com/ScriptedAlchemy/tracedecay/commit/fc7e248fd19236fbb9ab502ca2666bf33a209167))
+* **workflow:** mount the remaining Work/workflow product surface ([3cfccec](https://github.com/ScriptedAlchemy/tracedecay/commit/3cfccec036a6e359918120133fccd8fad0673eb2))
+
+
+### Bug Fixes
+
+* **cli:** compose the caller's own spool evidence for remote query ([d1973f4](https://github.com/ScriptedAlchemy/tracedecay/commit/d1973f4c2852a2fb6636507959461491ae921561))
+* **daemon-client:** type post-cancel transport failures as indeterminate ([f0dacc1](https://github.com/ScriptedAlchemy/tracedecay/commit/f0dacc1816055c024b66cb8f83e75398e2d9df1c))
+* **daemon:** report an uncomposable catalog as unavailable on activate ([997d897](https://github.com/ScriptedAlchemy/tracedecay/commit/997d897342643aad0e780f68638f89e26c07304c))
+* **dashboard-api:** serve selected-project workflow reads ([e4c8b51](https://github.com/ScriptedAlchemy/tracedecay/commit/e4c8b516909719e7a68c6c7732ba03806f1e215d))
+* **dashboard:** refuse workflow lifecycle writes in read-only scope ([e27d3c6](https://github.com/ScriptedAlchemy/tracedecay/commit/e27d3c6701790a80d3d8930c6014e042bf34e308))
+* **dashboard:** require a readable cell before an integration headline ([ed852d4](https://github.com/ScriptedAlchemy/tracedecay/commit/ed852d4c5acc5c49a1748ff1d23d494fff9c242f))
+* **dashboard:** reset workflow lifecycle controls per definition ([fe230de](https://github.com/ScriptedAlchemy/tracedecay/commit/fe230dea09571b919662d409fe11b5cf3ad94d3e))
+* **db:** restore the consolidation authority restriction lost in merge ([812fff4](https://github.com/ScriptedAlchemy/tracedecay/commit/812fff47fd44fbebf654b124792fdfcf2742a072))
+* **graph-db:** size generation capacity for real repository scale ([273b1ef](https://github.com/ScriptedAlchemy/tracedecay/commit/273b1ef33861ef777c909f34dc0568eaab62840f))
+* **hooks:** keep contended ledger locks typed as busy on windows ([2ef0488](https://github.com/ScriptedAlchemy/tracedecay/commit/2ef0488044c096ef0e270d3b36abd8437e91b6a8))
+* **hooks:** keep transient spool validation failures typed as io ([02ccf17](https://github.com/ScriptedAlchemy/tracedecay/commit/02ccf178c95e279299593be20c9e8c986e0ea7f2))
+* **hooks:** refuse non-private existing spool roots ([aaed3b2](https://github.com/ScriptedAlchemy/tracedecay/commit/aaed3b2e87f593e9d738155368b2e01ee0c67b77))
+* **lint:** clear pedantic debt in merged daemon and migrate paths ([e814221](https://github.com/ScriptedAlchemy/tracedecay/commit/e814221e1e185489e8da873356424531629e5f29))
+* **release:** align server.json with release 0.0.74 ([ad257ba](https://github.com/ScriptedAlchemy/tracedecay/commit/ad257babf7694688ad252595d2b13ddd1d773cec))
+* **sdk:** never proxy loopback remote daemon requests ([bd1e080](https://github.com/ScriptedAlchemy/tracedecay/commit/bd1e0801d7e06b9185a30d3205bd5841f79ca9a5))
+* **sdk:** never route the loopback remote target through a proxy ([3c0f269](https://github.com/ScriptedAlchemy/tracedecay/commit/3c0f269d4dc9f0f67e1a54024bf53f7dfbfed62f))
+* **storage:** conflict only on populated exact-root duplicates ([b3f5c11](https://github.com/ScriptedAlchemy/tracedecay/commit/b3f5c11ef65a700e543f36d18ddf61035d79d92d))
+* **storage:** surface split identity when candidates name the exact root ([f7040ae](https://github.com/ScriptedAlchemy/tracedecay/commit/f7040aecc4b4f19aae93167ce95a6d9a72892e15))
+* **storage:** type windows sidecar lock contention as contended ([159caae](https://github.com/ScriptedAlchemy/tracedecay/commit/159caaee501757261ca2b39e271a1b1302a70a4c))
+* **test:** align windows file-semantics tests with pin contracts ([2bf81d9](https://github.com/ScriptedAlchemy/tracedecay/commit/2bf81d9ca886d9fc5a8d66f42c7af68367a157f3))
+* **test:** calibrate exact-sql test budgets for hosted-runner disks ([34ccacc](https://github.com/ScriptedAlchemy/tracedecay/commit/34ccacce07bd26cf40f498369db6f85be9fdd77a))
+* **test:** platform roots for run-control and leak-adjudication suites ([12352b5](https://github.com/ScriptedAlchemy/tracedecay/commit/12352b59d0e5a00722c040fd1346b0f5ce22519f))
+* **test:** widen exact-sql test budgets for linux runner cleanup ([a91754d](https://github.com/ScriptedAlchemy/tracedecay/commit/a91754d3621e2fa1aaa0c1720c843682e8db5285))
+* **windows:** gate unix-only tests and expose portable inventory seams ([9b8599f](https://github.com/ScriptedAlchemy/tracedecay/commit/9b8599f73282536885af6bfee57f461c09b005b5))
+
+## [0.0.74](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.73...v0.0.74) (2026-08-19)
+
+
+### Bug Fixes
+
+* **daemon:** abort watchers before joins ([fa93535](https://github.com/ScriptedAlchemy/tracedecay/commit/fa935352e75c9cdb9b22ea3f513ac247c002eaae))
+* **daemon:** bound maintenance shutdown ([caba6eb](https://github.com/ScriptedAlchemy/tracedecay/commit/caba6eba7ae2a41bcd9c8827230a39db101331b0))
+* **db:** restrict consolidation authority ([a556506](https://github.com/ScriptedAlchemy/tracedecay/commit/a556506d2eaf460fc62fb6f74603c17dc043e5fc))
+* **migrate:** authorize staged databases ([850414b](https://github.com/ScriptedAlchemy/tracedecay/commit/850414bb1a91a3ee3ea89470a14de455332a9054))
+* **storage:** fail closed on unreadable inventory ([6e92ed4](https://github.com/ScriptedAlchemy/tracedecay/commit/6e92ed4f3d5501700a666b3b103119413b70d6d1))
+* **storage:** harden project store authority and resolution ([3050018](https://github.com/ScriptedAlchemy/tracedecay/commit/30500186caa9375d3daa145aee0f88803e51792f))
+* **storage:** harden recovery validation ([71b19fc](https://github.com/ScriptedAlchemy/tracedecay/commit/71b19fc1f9ed03e8a5be7507d7d241b3dffd18aa))
+* **storage:** honor aliases with repository markers ([91944bc](https://github.com/ScriptedAlchemy/tracedecay/commit/91944bc6ce0828e9556411de45be135249a2a677))
+* **storage:** isolate branch recovery markers ([82876ea](https://github.com/ScriptedAlchemy/tracedecay/commit/82876ea591988eb0e3d242f1e3d727a18991d81d))
+* **storage:** preserve exact-root precedence ([df96e9b](https://github.com/ScriptedAlchemy/tracedecay/commit/df96e9b5c2ba3aba162ab47c91777567d17ae181))
+* **storage:** reject empty recovery stores ([043a047](https://github.com/ScriptedAlchemy/tracedecay/commit/043a047e03b87cdeb0bf77241a852ec2bf0f80d7))
+* **storage:** trust exact worktree registry aliases ([a79f70c](https://github.com/ScriptedAlchemy/tracedecay/commit/a79f70cc3bb4b307ff17444a3adafaae8b52f670))
+* **storage:** validate auxiliary health first ([a818fcd](https://github.com/ScriptedAlchemy/tracedecay/commit/a818fcdcbc8f90e00fbf95437f43dd05e41001e3))
+
+
+### Performance Improvements
+
+* **mcp:** reuse active selected project ([726ce54](https://github.com/ScriptedAlchemy/tracedecay/commit/726ce54d4a2578efa8bf4774e898f4364d25bcdf))
+* **session:** bound correlation presence checks ([25b67d1](https://github.com/ScriptedAlchemy/tracedecay/commit/25b67d1f526f116398701d47753e877e85cd4c56))
+* **storage:** avoid duplicate recovery scans ([2467ff9](https://github.com/ScriptedAlchemy/tracedecay/commit/2467ff9dc5609916a28304384f0b1341639e3050))
+* **storage:** avoid full counts on exact roots ([ab7be60](https://github.com/ScriptedAlchemy/tracedecay/commit/ab7be60b9164afe6b2100b51bdaabe94c1380b09))
+* **storage:** bound conflict inventory ([a299410](https://github.com/ScriptedAlchemy/tracedecay/commit/a2994101fb83565eae98151308fabb68682ce2e3))
+* **storage:** check the serving branch graph ([ac0b0c9](https://github.com/ScriptedAlchemy/tracedecay/commit/ac0b0c91b45117069629b29adf1fb5300dfbef4f))
+* **storage:** trust healthy exact root among duplicates ([133ca5c](https://github.com/ScriptedAlchemy/tracedecay/commit/133ca5c48bac9ecfb054f9ea59e6435feeca0e94))
+
 ## [0.0.73](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.72...v0.0.73) (2026-08-04)
 
 
