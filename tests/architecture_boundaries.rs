@@ -365,7 +365,13 @@ fn resolve_reachable_sources(
                             .map_or_else(PathBuf::new, Path::to_path_buf);
                         base.extend(inline_modules);
                         let target = normalize_relative(&base.join(path))?;
-                        enqueue_if_file(repository, &mut pending, target, None)?;
+                        // A module loaded through an explicit `#[path]`
+                        // attribute owns the directory containing the loaded
+                        // file: rustc resolves its children as siblings
+                        // (mod-rs semantics), not under `<stem>/`.
+                        let child_module_dir =
+                            target.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+                        enqueue_if_file(repository, &mut pending, target, Some(child_module_dir))?;
                     } else {
                         let mut module_dir = context.module_dir.clone();
                         module_dir.extend(inline_modules);
@@ -852,39 +858,68 @@ fn resolver_exposes_a_forgotten_decomposed_test_scenario() {
     assert!(!reachable.contains(Path::new("tests/suite/forgotten_scenario.rs")));
 }
 
+#[test]
+fn resolver_gives_path_attribute_modules_mod_rs_child_semantics() {
+    let temporary = tempfile::tempdir().expect("create resolver fixture");
+    let repository = temporary.path();
+    fs::create_dir_all(repository.join("src/results")).unwrap();
+    fs::write(repository.join("src/lib.rs"), "mod results;\n").unwrap();
+    fs::write(
+        repository.join("src/results.rs"),
+        "#[path = \"results/cases.rs\"]\nmod cases;\n",
+    )
+    .unwrap();
+    // `cases.rs` is loaded via `#[path]`, so rustc resolves its children as
+    // siblings inside `src/results/`, not inside `src/results/cases/`.
+    fs::write(repository.join("src/results/cases.rs"), "mod sibling;\n").unwrap();
+    fs::write(
+        repository.join("src/results/sibling.rs"),
+        "pub fn sibling() {}\n",
+    )
+    .unwrap();
+
+    let roots = [PathBuf::from("src/lib.rs")].into_iter().collect();
+    let reachable = resolve_reachable_sources(repository, &roots).unwrap();
+
+    assert!(reachable.contains(Path::new("src/results/cases.rs")));
+    assert!(reachable.contains(Path::new("src/results/sibling.rs")));
+}
+
 const INTERNAL_CRATES: &[&str] = &[
     "tracedecay-agent-hosts",
+    "tracedecay-api",
+    "tracedecay-application",
     "tracedecay-automation",
     "tracedecay-capture",
     "tracedecay-code-extraction",
     "tracedecay-code-index",
     "tracedecay-dashboard-api",
     "tracedecay-domain",
+    "tracedecay-host-integration",
+    "tracedecay-hooks",
     "tracedecay-jsonrpc",
     "tracedecay-lsp",
     "tracedecay-migrate",
-    "tracedecay-runtime-core",
-    "tracedecay-sessions",
-    "tracedecay-usecases",
-];
-
-const OMITTED_PR421_CRATES: &[&str] = &[
-    "tracedecay-api",
-    "tracedecay-application",
-    "tracedecay-global-db",
-    "tracedecay-host-integration",
-    "tracedecay-hooks",
     "tracedecay-policy",
-    "tracedecay-query",
-    "tracedecay-rusqlite-parity",
+    "tracedecay-private-fs",
+    "tracedecay-runtime-core",
     "tracedecay-rusqlite-runtime",
-    "tracedecay-sdk",
-    "tracedecay-search-eval",
-    "tracedecay-semantic",
-    "tracedecay-sqlite-parity-protocol",
+    "tracedecay-sessions",
     "tracedecay-store",
     "tracedecay-temporal-query",
     "tracedecay-tool-catalog",
+    "tracedecay-usecases",
+];
+
+/// V2 delivery crates that arrive with the stacked branch and must stay
+/// absent until their production consumers land with it.
+const OMITTED_STACKED_DELIVERY_CRATES: &[&str] = &[
+    "tracedecay-global-db",
+    "tracedecay-graph-db",
+    "tracedecay-query",
+    "tracedecay-sdk",
+    "tracedecay-search-eval",
+    "tracedecay-semantic",
 ];
 
 const ALLOWED_INTERNAL_EDGES: &[(&str, &str)] = &[
@@ -905,6 +940,12 @@ const ALLOWED_INTERNAL_EDGES: &[(&str, &str)] = &[
     ("tracedecay-agent-hosts", "tracedecay-lsp"),
     ("tracedecay-agent-hosts", "tracedecay-runtime-core"),
     ("tracedecay-agent-hosts", "tracedecay-sessions"),
+    ("tracedecay-api", "tracedecay-application"),
+    ("tracedecay-api", "tracedecay-domain"),
+    ("tracedecay-api", "tracedecay-tool-catalog"),
+    ("tracedecay-application", "tracedecay-domain"),
+    ("tracedecay-application", "tracedecay-policy"),
+    ("tracedecay-application", "tracedecay-tool-catalog"),
     ("tracedecay-code-extraction", "tracedecay-domain"),
     ("tracedecay-code-index", "tracedecay-code-extraction"),
     ("tracedecay-dashboard-api", "tracedecay-agent-hosts"),
@@ -915,13 +956,23 @@ const ALLOWED_INTERNAL_EDGES: &[(&str, &str)] = &[
     ("tracedecay-dashboard-api", "tracedecay-runtime-core"),
     ("tracedecay-dashboard-api", "tracedecay-sessions"),
     ("tracedecay-dashboard-api", "tracedecay-usecases"),
+    ("tracedecay-hooks", "tracedecay-application"),
+    ("tracedecay-hooks", "tracedecay-domain"),
+    ("tracedecay-host-integration", "tracedecay-domain"),
     ("tracedecay-migrate", "tracedecay-runtime-core"),
     ("tracedecay-migrate", "tracedecay-sessions"),
+    ("tracedecay-policy", "tracedecay-domain"),
     ("tracedecay-runtime-core", "tracedecay-automation"),
     ("tracedecay-runtime-core", "tracedecay-capture"),
     ("tracedecay-runtime-core", "tracedecay-domain"),
     ("tracedecay-runtime-core", "tracedecay-lsp"),
+    ("tracedecay-rusqlite-runtime", "tracedecay-application"),
+    ("tracedecay-rusqlite-runtime", "tracedecay-domain"),
+    ("tracedecay-rusqlite-runtime", "tracedecay-store"),
     ("tracedecay-sessions", "tracedecay-runtime-core"),
+    ("tracedecay-store", "tracedecay-domain"),
+    ("tracedecay-store", "tracedecay-temporal-query"),
+    ("tracedecay-temporal-query", "tracedecay-domain"),
     ("tracedecay-usecases", "tracedecay-automation"),
     ("tracedecay-usecases", "tracedecay-runtime-core"),
 ];
@@ -986,7 +1037,7 @@ fn workspace_architecture_contract() {
         .collect();
     assert_eq!(
         names, expected,
-        "workspace must contain the root plus 13 crates"
+        "workspace must contain the root plus 23 crates"
     );
 
     for package in &workspace {
@@ -1002,10 +1053,10 @@ fn workspace_architecture_contract() {
             );
         }
     }
-    for omitted in OMITTED_PR421_CRATES {
+    for omitted in OMITTED_STACKED_DELIVERY_CRATES {
         assert!(
             !names.contains(omitted),
-            "omitted PR #421 crate is present: {omitted}"
+            "omitted stacked-delivery crate is present: {omitted}"
         );
     }
 
@@ -1028,6 +1079,11 @@ fn workspace_architecture_contract() {
                 "internal crate has a root backedge: {}",
                 package.name
             );
+        }
+        // `tracedecay-rusqlite-runtime` is the one sanctioned boundary around
+        // the bundled SQLite engine; every other crate must stay rusqlite-free.
+        if package.name == "tracedecay-rusqlite-runtime" {
+            continue;
         }
         for dependency in &package.dependencies {
             let dependency_alias = dependency.rename.as_deref().unwrap_or_default();
