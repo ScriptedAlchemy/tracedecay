@@ -216,11 +216,13 @@ pub struct SemanticVectorScanSummaryV1 {
 
 /// Read-only port over one immutable, fully published vector generation.
 /// The callback shape lets the lane scan without retaining or copying the
-/// complete vector set.
+/// complete vector set. Implementations must invoke `examine` before every
+/// row they inspect, including rows they exclude before invoking `visit`.
 pub trait SemanticVectorReadPort {
     fn scan_exact_flat(
         &self,
         request: SemanticVectorReadRequestV1<'_>,
+        examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
         visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
     ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError>;
 }
@@ -407,23 +409,29 @@ where
             capability_manifest_digest: &request.capability_manifest_digest,
             search_kind: SemanticSearchKindV1::ExactFlat,
         };
-        let scan = self.vectors.scan_exact_flat(scan_request, &mut |record| {
+        let mut examine = || {
             if self.control.is_cancelled() {
                 return Err(RetrievalPortError::Cancelled);
             }
             if deadline_exhausted(request, self.control) {
                 return Err(RetrievalPortError::BudgetExceeded);
             }
-            let distance = Self::score_record(request, record, query)?;
-            if !seen_occurrences.insert(record.candidate.source_occurrence_id.clone()) {
-                return Err(RetrievalPortError::Contract(
-                    "semantic vector generation contains duplicate source occurrences".to_owned(),
-                ));
-            }
-            eligible_count += 1;
-            Self::retain_scored_record(request, record, distance, cap, &mut ranked);
             Ok(())
-        });
+        };
+        let scan = self
+            .vectors
+            .scan_exact_flat(scan_request, &mut examine, &mut |record| {
+                let distance = Self::score_record(request, record, query)?;
+                if !seen_occurrences.insert(record.candidate.source_occurrence_id.clone()) {
+                    return Err(RetrievalPortError::Contract(
+                        "semantic vector generation contains duplicate source occurrences"
+                            .to_owned(),
+                    ));
+                }
+                eligible_count += 1;
+                Self::retain_scored_record(request, record, distance, cap, &mut ranked);
+                Ok(())
+            });
         let summary = match scan {
             Ok(summary) => summary,
             Err(error) => {
