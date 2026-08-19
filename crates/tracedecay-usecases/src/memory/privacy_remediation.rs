@@ -42,6 +42,8 @@ pub enum PrivacyRemediationTriggerV1 {
 pub struct ProjectMemoryPrivacyRemediationReceiptV1 {
     pub detector_revision: String,
     pub trigger: PrivacyRemediationTriggerV1,
+    pub superseded_payloads_scanned: u64,
+    pub superseded_payloads_purged: u64,
     pub scanned_facts: u64,
     pub clean_facts: u64,
     pub quarantined_facts: u64,
@@ -69,6 +71,50 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         write_control: &FactWriteControl,
     ) -> Result<ProjectMemoryPrivacyRemediationReceiptV1, MemoryApplicationError> {
         let confidence = remediation_confidence()?;
+        let mut superseded_payloads_scanned = 0_u64;
+        let mut superseded_payloads_purged = 0_u64;
+        let mut purge_after = None;
+        loop {
+            let requested_after = purge_after.take();
+            let purge = self
+                .authority
+                .purge_project_memory_superseded_payloads(
+                    self.owner.clone(),
+                    requested_after.clone(),
+                    RESCAN_PAGE_LIMIT,
+                    write_control,
+                )
+                .await?;
+            if purge.owner() != &self.owner
+                || purge.detector_revision() != MEMORY_FACT_SANITIZER_VERSION_V1
+            {
+                return Err(MemoryApplicationError::InvalidAuthorityResult {
+                    invariant: "privacy purge receipt binding",
+                });
+            }
+            superseded_payloads_scanned = superseded_payloads_scanned
+                .checked_add(purge.scanned_payloads())
+                .ok_or(MemoryApplicationError::InvalidAuthorityResult {
+                    invariant: "privacy purge scanned count range",
+                })?;
+            superseded_payloads_purged = superseded_payloads_purged
+                .checked_add(purge.purged_payloads())
+                .ok_or(MemoryApplicationError::InvalidAuthorityResult {
+                    invariant: "privacy purge purged count range",
+                })?;
+            let Some(next) = purge.next_after() else {
+                break;
+            };
+            if requested_after.as_ref().is_some_and(|previous| {
+                (next.fact_id(), next.assertion_id())
+                    <= (previous.fact_id(), previous.assertion_id())
+            }) {
+                return Err(MemoryApplicationError::InvalidAuthorityResult {
+                    invariant: "privacy purge cursor advancement",
+                });
+            }
+            purge_after = Some(next.clone());
+        }
         let mut scanned_facts = 0_u64;
         let mut clean_facts = 0_u64;
         let mut quarantined_facts = 0_u64;
@@ -139,6 +185,8 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(ProjectMemoryPrivacyRemediationReceiptV1 {
             detector_revision: MEMORY_FACT_SANITIZER_VERSION_V1.to_owned(),
             trigger,
+            superseded_payloads_scanned,
+            superseded_payloads_purged,
             scanned_facts,
             clean_facts,
             quarantined_facts,

@@ -29,7 +29,8 @@ use tracedecay_store::{
     ProjectMemoryFactRetrievalOutcomeV1, ProjectMemoryFactSearchPageV1,
     ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
-    ProjectMemoryGraphStore, ProjectMemoryMemoryStatusV1, RetrievalAnchorQuery, StoredFactV1,
+    ProjectMemoryGraphStore, ProjectMemoryMemoryStatusV1, ProjectMemoryPrivacyPurgeCursorV1,
+    ProjectMemoryPrivacyPurgeReceiptV1, RetrievalAnchorQuery, StoredFactV1,
 };
 
 use automatic_facts::{
@@ -56,6 +57,7 @@ use envelope::finish_read_snapshot;
 use primitives::{
     COMMIT_OPERATION, QUERY_OPERATION, ensure_project_memory_read_active, storage_error,
 };
+use privacy_purge::purge_superseded_payloads_for_owner_tx;
 use search::{
     find_project_memory_contradictions_tx, probe_project_memory_facts_tx,
     reason_project_memory_facts_tx, record_project_memory_fact_retrieval_tx,
@@ -81,6 +83,7 @@ mod graph_reconciliation_tests;
 #[cfg(test)]
 mod graph_tests;
 mod primitives;
+mod privacy_purge;
 mod projection;
 mod runtime;
 mod scoring;
@@ -309,6 +312,31 @@ impl FactStore for DatabaseFactStore<'_> {
 }
 
 impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
+    async fn purge_project_memory_superseded_payloads(
+        &self,
+        owner: FactOwnerV1,
+        after: Option<ProjectMemoryPrivacyPurgeCursorV1>,
+        limit: usize,
+        write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryPrivacyPurgeReceiptV1> {
+        self.project_memory_write(
+            write_control,
+            |_| false,
+            move |transaction| {
+                Box::pin(async move {
+                    purge_superseded_payloads_for_owner_tx(
+                        transaction,
+                        &owner,
+                        after.as_ref(),
+                        limit,
+                    )
+                    .await
+                })
+            },
+        )
+        .await
+    }
+
     async fn list_project_memory_facts(
         &self,
         query: ProjectMemoryFactListQueryV1,
@@ -863,6 +891,12 @@ impl FactStore for ProjectFactStore<'_> {
 
 impl ProjectMemoryFactStore for ProjectFactStore<'_> {
     delegate_fact_store_methods! {
+        fn purge_project_memory_superseded_payloads(
+            owner: FactOwnerV1,
+            after: Option<ProjectMemoryPrivacyPurgeCursorV1>,
+            limit: usize,
+            write_control: &FactWriteControl,
+        ) -> FactStoreResult<ProjectMemoryPrivacyPurgeReceiptV1>;
         fn list_project_memory_facts(
             query: ProjectMemoryFactListQueryV1,
             read_control: &FactReadControl,

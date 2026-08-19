@@ -310,6 +310,106 @@ pub struct ProjectMemoryFactHistoryV1 {
     next_after: Option<FactLineageCursor>,
 }
 
+/// Durable result of one owner-scoped sweep over superseded assertion
+/// payloads under the active privacy detector.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectMemoryPrivacyPurgeReceiptV1 {
+    owner: FactOwnerV1,
+    detector_revision: String,
+    scanned_payloads: u64,
+    purged_payloads: u64,
+    next_after: Option<ProjectMemoryPrivacyPurgeCursorV1>,
+}
+
+pub const MAX_PROJECT_MEMORY_PRIVACY_PURGE_PAYLOADS: usize = 256;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectMemoryPrivacyPurgeCursorV1 {
+    owner: FactOwnerV1,
+    fact_id: FactId,
+    assertion_id: FactAssertionId,
+}
+
+impl ProjectMemoryPrivacyPurgeCursorV1 {
+    pub fn new(
+        owner: FactOwnerV1,
+        fact_id: FactId,
+        assertion_id: FactAssertionId,
+    ) -> FactStoreResult<Self> {
+        owner.validate()?;
+        validate_owned_fact_id(&fact_id, &owner)?;
+        assertion_id.validate()?;
+        Ok(Self {
+            owner,
+            fact_id,
+            assertion_id,
+        })
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
+
+    pub fn fact_id(&self) -> &FactId {
+        &self.fact_id
+    }
+
+    pub fn assertion_id(&self) -> &FactAssertionId {
+        &self.assertion_id
+    }
+}
+
+impl ProjectMemoryPrivacyPurgeReceiptV1 {
+    pub fn new(
+        owner: FactOwnerV1,
+        detector_revision: String,
+        scanned_payloads: u64,
+        purged_payloads: u64,
+        next_after: Option<ProjectMemoryPrivacyPurgeCursorV1>,
+    ) -> FactStoreResult<Self> {
+        owner.validate()?;
+        validate_project_memory_text(&detector_revision, "privacy detector revision")?;
+        if purged_payloads > scanned_payloads {
+            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                field: "privacy purge counts",
+            }));
+        }
+        if next_after
+            .as_ref()
+            .is_some_and(|cursor| cursor.owner() != &owner)
+        {
+            return Err(FactStoreError::OwnerMismatch);
+        }
+        Ok(Self {
+            owner,
+            detector_revision,
+            scanned_payloads,
+            purged_payloads,
+            next_after,
+        })
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
+
+    pub fn detector_revision(&self) -> &str {
+        &self.detector_revision
+    }
+
+    pub fn scanned_payloads(&self) -> u64 {
+        self.scanned_payloads
+    }
+
+    pub fn purged_payloads(&self) -> u64 {
+        self.purged_payloads
+    }
+
+    pub fn next_after(&self) -> Option<&ProjectMemoryPrivacyPurgeCursorV1> {
+        self.next_after.as_ref()
+    }
+}
+
 impl ProjectMemoryFactHistoryV1 {
     pub fn new(
         owner: FactOwnerV1,

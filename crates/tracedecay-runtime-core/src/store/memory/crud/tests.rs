@@ -7,10 +7,11 @@ use crate::store::memory::{DatabaseFactStore, FactWriteControl};
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 use tracedecay_domain::{
-    Confidence, DomainError, FactCategoryV1, FactEventId, FactOwnerV1, LocatorDigest, ProvenanceId,
+    Confidence, DomainError, FactCategoryV1, FactEventId, FactLineageEventKindV1,
+    FactLineageEventV1, FactOwnerV1, LocatorDigest, ProvenanceId, UtcMicros,
 };
 use tracedecay_store::{
-    FactReadControl, FactStoreError, ProjectMemoryFactAddCommandV1,
+    FactReadControl, FactStore, FactStoreError, FactWriteBatch, ProjectMemoryFactAddCommandV1,
     ProjectMemoryFactAddDispositionV1, ProjectMemoryFactAddMaterialV1,
     ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactContentDigestQueryV1,
     ProjectMemoryFactFeedbackActionV1, ProjectMemoryFactFeedbackCommandV1,
@@ -184,6 +185,141 @@ async fn exact_update_replay_returns_the_same_fact_delta_and_commit_receipt() {
         replayed.trust_delta_millionths()
     );
     assert_eq!(committed.commit_receipt(), replayed.commit_receipt());
+}
+
+/// The correction-time payload purge is scoped to detector findings: a clean
+/// superseded payload row must survive an ordinary update so as-of reads keep
+/// serving the fact's history.
+#[tokio::test]
+async fn update_retains_clean_superseded_payload_rows_for_as_of_reads() {
+    let (_directory, database) = database().await;
+    let store = DatabaseFactStore::new(&database);
+    let control = write_control();
+    let target = added_target(&store, &control).await;
+
+    store
+        .update_project_memory_fact(
+            update_command(
+                target.clone(),
+                "operation.crud-clean-supersede",
+                "The canonical update keeps clean history readable.",
+                0.8,
+            ),
+            &control,
+        )
+        .await
+        .expect("commit clean canonical update");
+
+    let mut rows = database
+        .read_connection()
+        .query(
+            "SELECT COUNT(*) FROM memory_v2_assertion_payloads WHERE fact_id = ?1",
+            [target.fact_id().as_str()],
+        )
+        .await
+        .expect("count at-rest payload rows");
+    let retained: i64 = rows
+        .next()
+        .await
+        .expect("read payload row count")
+        .expect("payload row count is present")
+        .get(0)
+        .expect("payload row count is an integer");
+    assert_eq!(
+        retained, 2,
+        "a clean superseded payload row must stay readable for as-of history"
+    );
+}
+
+#[tokio::test]
+async fn missing_superseded_payload_without_purge_receipt_cannot_be_reactivated() {
+    let (_directory, database) = database().await;
+    let store = DatabaseFactStore::new(&database);
+    let control = write_control();
+    let target = added_target(&store, &control).await;
+    let ProjectMemoryFactProjectionV1::Available(original) = store
+        .get_project_memory_fact(target.clone(), &read_control())
+        .await
+        .expect("load original fact")
+        .expect("original fact exists")
+    else {
+        panic!("original fact must be available");
+    };
+    let original_assertion_id = original.active_assertion_id().clone();
+
+    let updated = store
+        .update_project_memory_fact(
+            update_command(
+                target.clone(),
+                "operation.crud-missing-payload-supersede",
+                "The active assertion remains clean and available.",
+                0.8,
+            ),
+            &control,
+        )
+        .await
+        .expect("commit clean successor");
+    let ProjectMemoryFactProjectionV1::Available(current) = updated.fact() else {
+        panic!("clean successor must be available");
+    };
+
+    database
+        .writer_connection("simulate missing superseded payload")
+        .await
+        .expect("database writer")
+        .execute(
+            "DELETE FROM memory_v2_assertion_payloads
+             WHERE assertion_id = ?1 AND fact_id = ?2",
+            params![original_assertion_id.as_str(), target.fact_id().as_str()],
+        )
+        .await
+        .expect("simulate a corrupt missing clean historical payload");
+
+    let reactivation_time = UtcMicros(
+        current
+            .projected_as_of()
+            .0
+            .checked_add(1)
+            .expect("reactivation time"),
+    );
+    let event = FactLineageEventV1::new(
+        target.fact_id().clone(),
+        target.owner().clone(),
+        FactLineageEventKindV1::AssertionRecorded {
+            assertion_id: original_assertion_id,
+        },
+        reactivation_time,
+        None,
+    )
+    .expect("reactivation event");
+    let batch = FactWriteBatch::new(
+        target.fact_id().clone(),
+        target.owner().clone(),
+        None,
+        vec![event],
+        Vec::new(),
+        Vec::new(),
+        Some(current.last_event_id().clone()),
+    )
+    .expect("reactivation batch");
+    let error = store
+        .commit_fact(batch, &control)
+        .await
+        .expect_err("an assertion with a missing payload must not reactivate");
+    assert!(
+        matches!(error, FactStoreError::Storage { .. }),
+        "unexpected refusal: {error}"
+    );
+
+    let ProjectMemoryFactProjectionV1::Available(after) = store
+        .get_project_memory_fact(target, &read_control())
+        .await
+        .expect("reload current fact")
+        .expect("current fact exists")
+    else {
+        panic!("clean successor must remain available");
+    };
+    assert_eq!(after.active_assertion_id(), current.active_assertion_id());
 }
 
 #[tokio::test]

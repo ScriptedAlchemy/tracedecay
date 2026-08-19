@@ -41,7 +41,7 @@ use self::project::active_fact_count_tx;
 pub(super) use self::project::{
     commit_batch_tx, find_project_memory_fact_by_content_digest_controlled_tx,
     find_project_memory_fact_by_content_digest_tx, get_project_memory_fact_controlled_tx,
-    initial_batch, list_project_memory_facts_controlled_tx, payload_metadata,
+    initial_batch, list_project_memory_facts_controlled_tx, payload_material, payload_metadata,
     project_memory_fact_history_controlled_tx, sanitize_payload, verified_payload,
 };
 pub(super) use self::queries::{
