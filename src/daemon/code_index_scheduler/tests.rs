@@ -1346,6 +1346,75 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     assert_ne!(changed.generation_id, initial.generation_id);
 }
 
+/// The generation-publication broadcast carries only verified publishes —
+/// generations that crossed the durable publication compare-and-swap, the
+/// verified graph snapshot publish, and the serving swap. A restart that
+/// restores a retained generation is a `Noop` apply and must reach the
+/// serving slot silently: the post-mount query-authority waiter re-reads the
+/// serving slot for restores and trusts this bus only for verified publishes.
+#[tokio::test]
+async fn restart_remount_serves_the_retained_generation_without_republishing() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let first = CodeIndexSchedulerRegistryV1::new(1);
+    first
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let sealed = wait_for_initial_generation(&first, fixture.path()).await;
+    first.shutdown().await;
+
+    let restarted = CodeIndexSchedulerRegistryV1::new(1);
+    // Subscribed before the remount. The per-worktree worker is serial, so a
+    // broadcast wrongly emitted by the restore-era passes would sit in this
+    // receiver ahead of the edit-triggered publication received below.
+    let mut publications = restarted.subscribe_generation_publications();
+    restarted
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("remount worktree over the retained store");
+    let restored = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(generation) = restarted.latest_generation_id(fixture.path()).await {
+                break generation;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("restart serves a generation");
+    assert_eq!(
+        restored, sealed,
+        "the restart serves the retained generation, not a rebuilt one"
+    );
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        restarted
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await
+    );
+    let first_broadcast = tokio::time::timeout(Duration::from_secs(5), publications.recv())
+        .await
+        .expect("post-restart publication timeout")
+        .expect("post-restart publication event");
+    assert_ne!(
+        first_broadcast.generation_id, sealed,
+        "the retained restore stays silent; the first broadcast is the rebuilt generation"
+    );
+    restarted.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
