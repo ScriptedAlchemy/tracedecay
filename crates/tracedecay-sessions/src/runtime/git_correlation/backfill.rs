@@ -227,7 +227,6 @@ pub enum BackfillSkipReason {
     GitError,
 }
 
-
 /// Tunables for [`run_backfill`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackfillOptions {

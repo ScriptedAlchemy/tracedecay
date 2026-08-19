@@ -111,11 +111,7 @@ impl TraceDecay {
             .project_registry_context_by_alias(&new_root)
             .await?
         {
-            return refuse_if_adoption_conflicts(
-                adoption,
-                &existing.project.project_id,
-                &new_root,
-            );
+            return refuse_if_adoption_conflicts(adoption, &existing.project.project_id, &new_root);
         }
 
         let candidates =
@@ -143,8 +139,7 @@ impl TraceDecay {
                     }
                 }
             }
-            MovedStoreAdoption::AdoptUnique => match (resuming.as_slice(), candidates.as_slice())
-            {
+            MovedStoreAdoption::AdoptUnique => match (resuming.as_slice(), candidates.as_slice()) {
                 (_, []) => return Ok(None),
                 // A store whose manifest already records this exact root is
                 // positive linkage; it outranks unlinked stale rows.
@@ -163,28 +158,29 @@ impl TraceDecay {
                     });
                 }
             },
-            MovedStoreAdoption::OfferCandidates => match (resuming.as_slice(), candidates.as_slice())
-            {
-                (_, []) => return Ok(None),
-                // Resuming an interrupted remap needs no flag: the store's
-                // manifest recording this root was written under a previous
-                // explicit adoption and is the journal record to replay.
-                ([resumable], _) => *resumable,
-                _ => {
-                    return Err(TraceDecayError::Config {
-                        message: format!(
-                            "a moved non-git store may belong at '{}' (candidates: {}); \
+            MovedStoreAdoption::OfferCandidates => {
+                match (resuming.as_slice(), candidates.as_slice()) {
+                    (_, []) => return Ok(None),
+                    // Resuming an interrupted remap needs no flag: the store's
+                    // manifest recording this root was written under a previous
+                    // explicit adoption and is the journal record to replay.
+                    ([resumable], _) => *resumable,
+                    _ => {
+                        return Err(TraceDecayError::Config {
+                            message: format!(
+                                "a moved non-git store may belong at '{}' (candidates: {}); \
                              adoption rebinds a registered project identity and needs an \
                              explicit choice: re-run `tracedecay init` with \
                              --adopt-project <proj_id> (or --yes when exactly one \
                              candidate exists), or with --fresh to mint a new project \
                              identity here",
-                            new_root.display(),
-                            candidate_ids(&candidates)
-                        ),
-                    });
+                                new_root.display(),
+                                candidate_ids(&candidates)
+                            ),
+                        });
+                    }
                 }
-            },
+            }
         };
 
         remap_moved_nongit_project(&new_root, profile_root, registry, selected).await

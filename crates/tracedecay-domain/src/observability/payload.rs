@@ -11,12 +11,12 @@ use super::{
     ProviderReliabilityObservedV1, RejectedArgumentObservedV1, RemoteCoverageObservedV1,
     RetrievalAblationObservedV1, RetrievalPlannerObservedV1, RetrievalQueryObservedV1,
     RetrievalSourceObservedV1, RetrievalSynthesisObservedV1, RetrieverObservedV1,
-    StorageObservedV1,
-    TaskIntelligenceDecisionObservedV1, TaskIntelligenceOutcomeObservedV1, TelemetryDropObservedV1,
-    WorkBlockedIntervalObservedV1, WorkConflictOutcomeLinkedV1, WorkConflictPredictionObservedV1,
-    WorkDeliveryFanoutObservedV1, WorkDuplicateEffortObservedV1, WorkExecutionLeakObservedV1,
-    WorkIntegrationTransitionObservedV1, WorkRerunObservedV1, WorkStackDriftObservedV1,
-    WorkflowLifecycleObservedV1, WorkflowOutcomeObservedV1, WorkflowResourceObservedV1,
+    StorageObservedV1, TaskIntelligenceDecisionObservedV1, TaskIntelligenceOutcomeObservedV1,
+    TelemetryDropObservedV1, WorkBlockedIntervalObservedV1, WorkConflictOutcomeLinkedV1,
+    WorkConflictPredictionObservedV1, WorkDeliveryFanoutObservedV1, WorkDuplicateEffortObservedV1,
+    WorkExecutionLeakObservedV1, WorkIntegrationTransitionObservedV1, WorkRerunObservedV1,
+    WorkStackDriftObservedV1, WorkflowLifecycleObservedV1, WorkflowOutcomeObservedV1,
+    WorkflowResourceObservedV1,
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

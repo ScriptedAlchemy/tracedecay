@@ -977,6 +977,13 @@ async fn shutdown_cancels_and_joins_active_metadata_scan() {
     assert!(!state.has_retained_task());
 }
 
+// Master's `shutdown_deadline_aborts_project_tasks_before_waiting_for_blocked
+// _backstop` test (PR #506) was superseded here: this branch's watcher
+// shutdown is cooperative cancellation reaching every blocking scan plus one
+// shared typed-outcome join (`GitWatcherShutdownOutcome`), proven by the
+// phase-one cancellation test above, so the abort-with-deadline mechanism and
+// the WatchState shape that test constructed no longer exist.
+
 /// The safety-critical property that justifies this metadata watcher over the
 /// removed #80 working-tree watcher: a plain source-file edit (no git
 /// operation) must NOT trigger any scheduler freshness request. We drive the

@@ -377,9 +377,9 @@ pub use service::{
     default_socket_path, install_service, install_service_under_lease,
     installed_service_socket_path, prepare_scoop_package_service,
     quiesce_installed_service_before_lease, refresh_installed_service_under_lease_with_state,
-    restore_installed_service_after_update, restore_scoop_package_service,
-    service_spec, service_spec_with_remote_tls, service_status, socket_path_or_default,
-    start_service, stop_service, uninstall_service, verify_installed_service_quiesced_under_lease,
+    restore_installed_service_after_update, restore_scoop_package_service, service_spec,
+    service_spec_with_remote_tls, service_status, socket_path_or_default, start_service,
+    stop_service, uninstall_service, verify_installed_service_quiesced_under_lease,
     wait_for_installed_service_state, with_exclusive_maintenance_window,
     with_quiesced_installed_service,
 };
