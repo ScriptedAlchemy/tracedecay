@@ -9,6 +9,7 @@ mod emit;
 mod execution_emit;
 mod export;
 mod github_stack_emit;
+mod no_progress_emit;
 mod producer;
 mod product_view_emit;
 mod read;
@@ -52,6 +53,7 @@ pub use github_stack_emit::{
     GitHubStackDriftRecoveryErrorV1, GitHubStackProbeOwnerMountErrorV1, GitHubStackProbeOwnerV1,
     record_github_stack_capability, record_github_stack_drifts, recover_open_github_stack_drifts,
 };
+pub use no_progress_emit::{WorkNoProgressObservationV1, record_no_progress_observation};
 pub use producer::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
     ObservabilityOwnerEmissionOutcomeV1, ObservabilityProducerDeadlinesV1,
