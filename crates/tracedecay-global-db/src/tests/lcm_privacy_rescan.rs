@@ -30,8 +30,8 @@ fn secret() -> String {
 fn legacy_receipt(content: &str) -> SanitizationReceiptV1 {
     let payload_reference = PayloadReferenceV1::for_payload(&Value::String(content.to_owned()))
         .expect("legacy payload reference");
-    let sanitizer_version = ComponentVersion::new(LCM_PAYLOAD_SANITIZER_VERSION_V1)
-        .expect("pinned sanitizer contract");
+    let sanitizer_version =
+        ComponentVersion::new(LCM_PAYLOAD_SANITIZER_VERSION_V1).expect("pinned sanitizer contract");
     let receipt_id = SanitizationReceiptId::new(format!(
         "privacy.lcm-payload.v1.{}",
         payload_reference.digest().as_str()
@@ -244,9 +244,7 @@ fn payload_dir_holds(storage_root: &std::path::Path, needle: &str) -> bool {
     };
     entries.filter_map(Result::ok).any(|entry| {
         std::fs::read(entry.path())
-            .map(|bytes| {
-                String::from_utf8_lossy(&bytes).contains(needle)
-            })
+            .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
             .unwrap_or(false)
     })
 }
@@ -287,7 +285,10 @@ async fn at_rest_rescan_remediates_legacy_rows_and_settles_watermark() {
         .await
         .expect("ingest clean message");
 
-    let inline_content = format!("the deploy pipeline authenticates with api_key={}", secret());
+    let inline_content = format!(
+        "the deploy pipeline authenticates with api_key={}",
+        secret()
+    );
     let inline_sanitized = sanitize_lcm_payload_text(&inline_content).expect("evaluate fixture");
     assert_ne!(
         inline_sanitized.sanitized_text(),
@@ -333,7 +334,10 @@ async fn at_rest_rescan_remediates_legacy_rows_and_settles_watermark() {
     // is deleted, not merely superseded).
     assert_eq!(count_rows_holding(&harness, &secret()).await, 0);
     assert!(!payload_dir_holds(&storage_root, &secret()));
-    assert!(!old_payload_path.exists(), "replaced payload must be deleted");
+    assert!(
+        !old_payload_path.exists(),
+        "replaced payload must be deleted"
+    );
 
     // The remediated inline row still serves through the verified raw-read
     // authority, with a fresh receipt and its provider metadata retained.
@@ -342,12 +346,15 @@ async fn at_rest_rescan_remediates_legacy_rows_and_settles_watermark() {
         .await
         .expect("verified load of remediated row")
         .expect("remediated row still serves");
-    assert!(remediated.content.contains("the deploy pipeline authenticates"));
+    assert!(
+        remediated
+            .content
+            .contains("the deploy pipeline authenticates")
+    );
     assert!(!remediated.content.contains(&secret()));
-    let metadata: Value = serde_json::from_str(
-        remediated.metadata_json.as_deref().expect("metadata"),
-    )
-    .expect("metadata JSON");
+    let metadata: Value =
+        serde_json::from_str(remediated.metadata_json.as_deref().expect("metadata"))
+            .expect("metadata JSON");
     assert_eq!(metadata["fixture"], json!("legacy-inline"));
     assert_eq!(metadata["ingest_protection"]["redacted"], json!(true));
 
