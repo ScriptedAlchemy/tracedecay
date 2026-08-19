@@ -449,7 +449,13 @@ fn acquire_writer_lock(root: &Path) -> Result<fs::File, HookAdmissionLedgerError
         .map_err(|_| HookAdmissionLedgerError::Io)?;
     match file.try_lock_exclusive() {
         Ok(()) => Ok(file),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+        // Contention is EWOULDBLOCK on Unix but ERROR_LOCK_VIOLATION on
+        // Windows, which std does not map to `WouldBlock`; compare against
+        // fs2's canonical contended error so Busy stays typed on every host.
+        Err(error)
+            if error.kind() == io::ErrorKind::WouldBlock
+                || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+        {
             Err(HookAdmissionLedgerError::Busy)
         }
         Err(_) => Err(HookAdmissionLedgerError::Io),
