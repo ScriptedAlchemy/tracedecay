@@ -2,31 +2,28 @@
 //!
 //! Ingest sanitizes every raw message before persistence, but rows written
 //! under older detector rules can hold values the current detector would
-//! redact or refuse. This owner re-runs the current in-process detector over
-//! every at-rest raw-message body — inline `content` and whole-message
-//! external payload bytes — and re-ingests each hit through the exact staging
-//! and commit path new ingest uses, so redaction, externalization,
-//! quarantine, receipts, and FTS maintenance all follow the one canonical
-//! sanitizer. The `session_messages` projection twin is resynchronized from
-//! the re-ingest's projection output, and a replaced external payload file is
+//! redact or refuse. This owner re-evaluates every at-rest raw-message body —
+//! inline `content` and whole-message external payload bytes — and re-ingests
+//! each hit through the same staging and commit path new ingest uses, so
+//! redaction, externalization, quarantine, receipts, and FTS maintenance all
+//! follow the one canonical sanitizer. A replaced external payload file is
 //! deleted through the payload tombstone machinery so the superseded bytes do
 //! not survive on disk.
 //!
-//! One completed pass settles a per-store watermark keyed by the effective
-//! detector revision (sanitizer contract + compiled rule-document digest), so
-//! the sweep runs once per rule refresh instead of on every project open. An
-//! interrupted pass leaves the watermark unset and reruns from the start;
-//! sanitization is idempotent, so the rerun settles nothing it already fixed.
-//! Rows the sanitizer cannot re-evaluate fail the run with a typed error —
-//! never a silent skip — and the watermark stays unset until a pass covers
-//! every row.
+//! One completed pass settles a per-store watermark keyed by
+//! [`lcm_payload_detector_revision`], so the sweep runs once per rule refresh
+//! instead of on every project open. An interrupted pass leaves the watermark
+//! unset and reruns from the start; sanitization is idempotent. A row the
+//! sanitizer cannot re-evaluate fails the run with a typed error — never a
+//! silent skip — and the watermark stays unset until a pass covers every row.
 //!
-//! Boundary: media-span payload files are byte ranges the ingest scan already
-//! evaluated inside their owning message text before externalizing them; the
-//! rescan re-evaluates every message body (where those placeholders live),
-//! not the extracted media bytes themselves. Unreceipted rows are first
-//! protected through the existing [`RegisteredGlobalDb::lcm_protect_session_raw_messages`]
-//! pass rather than a duplicate path.
+//! Media-span payload files are byte ranges the ingest scan already evaluated
+//! inside their owning message text before externalizing them; the rescan
+//! re-evaluates message bodies (where those placeholders live), not the
+//! extracted media bytes. Unreceipted rows are first protected through the
+//! existing [`RegisteredGlobalDb::lcm_protect_session_raw_messages`] pass.
+
+use std::path::Path;
 
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::privacy::{lcm_payload_detector_revision, sanitize_lcm_payload_text};
@@ -41,19 +38,19 @@ use tracedecay_sessions::runtime::{
 
 use super::RegisteredGlobalDb;
 
-/// Watermark row in `lcm_gc_meta`: the effective detector revision whose
-/// rescan last completed over this store.
-const LCM_PRIVACY_RESCAN_META_KEY: &str = "privacy_rescan_completed_revision";
+/// Watermark row in `lcm_gc_meta`: the detector revision whose rescan last
+/// completed over this store.
+pub(crate) const LCM_PRIVACY_RESCAN_META_KEY: &str = "privacy_rescan_completed_revision";
 
 /// One page of raw rows per authority read.
-const RESCAN_PAGE_LIMIT: usize = 64;
+const RESCAN_PAGE_LIMIT: i64 = 64;
 
 /// Truthful outcome of one at-rest LCM privacy rescan request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LcmPrivacyRescanOutcomeV1 {
-    /// The store already completed a rescan under the current effective
-    /// detector revision; nothing was scanned.
-    AlreadyCurrent { detector_revision: String },
+    /// The store already completed a rescan under the current detector
+    /// revision; nothing was scanned.
+    AlreadyCurrent,
     /// A full pass ran to completion and settled the watermark.
     Completed(LcmPrivacyRescanReceiptV1),
 }
@@ -73,8 +70,8 @@ pub struct LcmPrivacyRescanReceiptV1 {
     /// before the scan.
     pub protected_rows: u64,
     /// External rows whose payload bytes are no longer at rest (offloaded or
-    /// collected); they serve only a placeholder, so there is nothing left to
-    /// rescan or disclose.
+    /// collected); only their placeholder remains, so there is nothing left
+    /// to rescan or disclose.
     pub unavailable_payload_rows: u64,
 }
 
@@ -91,7 +88,6 @@ struct RescanRow {
     storage_kind: LcmStorageKind,
     payload_ref: Option<String>,
     metadata_json: Option<String>,
-    has_projection: bool,
     projection_kind: Option<String>,
     projection_model: Option<String>,
     projection_tool_names: Option<String>,
@@ -112,8 +108,8 @@ enum RescanInput {
 
 impl RegisteredGlobalDb {
     /// Rescans every persisted LCM raw-message body under the current
-    /// effective detector revision, remediating hits through the canonical
-    /// ingest path. Runs at most once per store per detector revision.
+    /// detector revision, remediating hits through the canonical ingest path.
+    /// Runs at most once per store per detector revision.
     pub async fn lcm_privacy_rescan_raw_messages(
         &self,
     ) -> Result<LcmPrivacyRescanOutcomeV1, LcmError> {
@@ -125,9 +121,7 @@ impl RegisteredGlobalDb {
                 .as_deref()
                 == Some(detector_revision)
             {
-                return Ok(LcmPrivacyRescanOutcomeV1::AlreadyCurrent {
-                    detector_revision: detector_revision.to_owned(),
-                });
+                return Ok(LcmPrivacyRescanOutcomeV1::AlreadyCurrent);
             }
         }
 
@@ -153,18 +147,25 @@ impl RegisteredGlobalDb {
                             replaced_payload_ref,
                         } => (text, replaced_payload_ref),
                         RescanInput::PayloadUnavailable => {
-                            unavailable_payload_rows = unavailable_payload_rows.saturating_add(1);
+                            unavailable_payload_rows += 1;
                             continue;
                         }
                     };
-                scanned_rows = scanned_rows.saturating_add(1);
-                if !row_requires_remediation(&row, &text)? {
-                    clean_rows = clean_rows.saturating_add(1);
+                scanned_rows += 1;
+                let provider_metadata = stored_provider_metadata(&row)?;
+                if !requires_remediation(&text, provider_metadata.as_deref())? {
+                    clean_rows += 1;
                     continue;
                 }
-                self.remediate_row(&storage_root, &row, text, replaced_payload_ref)
-                    .await?;
-                remediated_rows = remediated_rows.saturating_add(1);
+                self.remediate_row(
+                    &storage_root,
+                    &row,
+                    text,
+                    provider_metadata,
+                    replaced_payload_ref,
+                )
+                .await?;
+                remediated_rows += 1;
             }
         }
 
@@ -212,24 +213,20 @@ impl RegisteredGlobalDb {
         };
         let mut protected_rows = 0_u64;
         for (provider, session_id) in sessions {
-            protected_rows = protected_rows.saturating_add(
-                self.lcm_protect_session_raw_messages(&provider, &session_id)
-                    .await?,
-            );
+            protected_rows += self
+                .lcm_protect_session_raw_messages(&provider, &session_id)
+                .await?;
         }
         Ok(protected_rows)
     }
 
     async fn load_rescan_page(&self, after_store_id: i64) -> Result<Vec<RescanRow>, LcmError> {
         let snapshot = self.lcm_read_snapshot().await?;
-        let limit = i64::try_from(RESCAN_PAGE_LIMIT)
-            .map_err(|error| LcmError::Db(format!("invalid rescan page limit: {error}")))?;
         let mut rows = snapshot
             .query(
                 "SELECT raw.store_id, raw.provider, raw.message_id, raw.session_id,
                         raw.role, raw.ordinal, raw.timestamp, raw.content,
                         raw.storage_kind, raw.payload_ref, raw.metadata_json,
-                        message.message_id IS NOT NULL,
                         message.kind, message.model, message.tool_names,
                         message.source_path, message.source_offset
                  FROM lcm_raw_messages AS raw
@@ -239,7 +236,7 @@ impl RegisteredGlobalDb {
                  WHERE raw.store_id > ?1
                  ORDER BY raw.store_id
                  LIMIT ?2",
-                params![after_store_id, limit],
+                params![after_store_id, RESCAN_PAGE_LIMIT],
             )
             .await?;
         let mut page = Vec::new();
@@ -260,12 +257,11 @@ impl RegisteredGlobalDb {
                 storage_kind,
                 payload_ref: row.get(9)?,
                 metadata_json: row.get(10)?,
-                has_projection: row.get::<i64>(11)? != 0,
-                projection_kind: row.get(12)?,
-                projection_model: row.get(13)?,
-                projection_tool_names: row.get(14)?,
-                projection_source_path: row.get(15)?,
-                projection_source_offset: row.get(16)?,
+                projection_kind: row.get(11)?,
+                projection_model: row.get(12)?,
+                projection_tool_names: row.get(13)?,
+                projection_source_path: row.get(14)?,
+                projection_source_offset: row.get(15)?,
             });
         }
         Ok(page)
@@ -275,7 +271,7 @@ impl RegisteredGlobalDb {
     /// the verified external payload bytes.
     async fn rescan_input(
         &self,
-        storage_root: &std::path::Path,
+        storage_root: &Path,
         row: &RescanRow,
     ) -> Result<RescanInput, LcmError> {
         match row.storage_kind {
@@ -332,9 +328,10 @@ impl RegisteredGlobalDb {
     /// external payload so the superseded bytes leave the disk.
     async fn remediate_row(
         &self,
-        storage_root: &std::path::Path,
+        storage_root: &Path,
         row: &RescanRow,
         text: String,
+        provider_metadata_json: Option<String>,
         replaced_payload_ref: Option<String>,
     ) -> Result<(), LcmError> {
         let record = SessionMessageRecord {
@@ -350,7 +347,7 @@ impl RegisteredGlobalDb {
             tool_names: row.projection_tool_names.clone(),
             source_path: row.projection_source_path.clone(),
             source_offset: row.projection_source_offset,
-            metadata_json: stored_provider_metadata(row)?,
+            metadata_json: provider_metadata_json,
         };
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
@@ -364,64 +361,42 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
         let upsert = raw::commit_staged_raw_message(&transaction, &record, staged).await?;
-        if row.has_projection {
-            transaction
-                .execute(
-                    "UPDATE session_messages SET text = ?3, metadata_json = ?4
-                     WHERE provider = ?1 AND message_id = ?2",
-                    params![
-                        record.provider.as_str(),
-                        record.message_id.as_str(),
-                        upsert.projection_text.as_str(),
-                        upsert.projection_metadata_json.as_deref(),
-                    ],
-                )
-                .await?;
+        transaction
+            .execute(
+                "UPDATE session_messages SET text = ?3, metadata_json = ?4
+                 WHERE provider = ?1 AND message_id = ?2",
+                params![
+                    record.provider.as_str(),
+                    record.message_id.as_str(),
+                    upsert.projection_text.as_str(),
+                    upsert.projection_metadata_json.as_deref(),
+                ],
+            )
+            .await?;
+        // An external row remediates only when its body changed, and payload
+        // refs are content-addressed, so the re-ingest can never reuse the
+        // replaced ref: the superseded payload is always safe to delete.
+        if let Some(old_ref) = replaced_payload_ref.as_deref() {
+            payload::delete_external_payload_in_transaction(
+                &transaction,
+                storage_root,
+                old_ref,
+                &DeleteOpts {
+                    rewrite_placeholders: false,
+                    remove_file: true,
+                    verify_hash: false,
+                },
+            )
+            .await?;
         }
-        let replaced = match replaced_payload_ref {
-            Some(old_ref) => {
-                let mut rows = transaction
-                    .query(
-                        "SELECT payload_ref FROM lcm_raw_messages
-                         WHERE provider = ?1 AND message_id = ?2",
-                        params![record.provider.as_str(), record.message_id.as_str()],
-                    )
-                    .await?;
-                let current: Option<String> = rows
-                    .next()
-                    .await?
-                    .ok_or_else(|| {
-                        LcmError::Db("remediated raw message disappeared mid-commit".to_owned())
-                    })?
-                    .get(0)?;
-                drop(rows);
-                if current.as_deref() == Some(old_ref.as_str()) {
-                    None
-                } else {
-                    payload::delete_external_payload_in_transaction(
-                        &transaction,
-                        storage_root,
-                        &old_ref,
-                        &DeleteOpts {
-                            rewrite_placeholders: false,
-                            remove_file: true,
-                            verify_hash: false,
-                        },
-                    )
-                    .await?;
-                    Some(old_ref)
-                }
-            }
-            None => None,
-        };
         transaction.commit().await?;
         payload_rollback.disarm();
-        if let Some(old_ref) = replaced {
+        if let Some(old_ref) = replaced_payload_ref.as_deref() {
             let transaction = self
                 .begin_write_transaction()
                 .await
                 .map_err(|error| LcmError::Db(error.to_string()))?;
-            gc::drain_pending_payload_delete_in_transaction(&transaction, storage_root, &old_ref)
+            gc::drain_pending_payload_delete_in_transaction(&transaction, storage_root, old_ref)
                 .await?;
             transaction.commit().await?;
         }
@@ -430,19 +405,18 @@ impl RegisteredGlobalDb {
 }
 
 /// Returns whether the current detector would change this row's served body
-/// or provider metadata. A body or metadata the detector refuses to
-/// re-evaluate fails the rescan with a typed error instead of passing as
-/// clean.
-fn row_requires_remediation(row: &RescanRow, text: &str) -> Result<bool, LcmError> {
+/// or provider metadata. A payload the detector refuses to re-evaluate fails
+/// the rescan with a typed error instead of passing as clean.
+fn requires_remediation(text: &str, provider_metadata: Option<&str>) -> Result<bool, LcmError> {
     let sanitization =
         sanitize_lcm_payload_text(text).map_err(|error| LcmError::SanitizationRefused {
             reason: format!("at-rest LCM privacy rescan refused a stored payload: {error}"),
         })?;
-    if !sanitization.findings().is_empty() || sanitization.sanitized_text() != text {
+    if sanitization.sanitized_text() != text {
         return Ok(true);
     }
-    match stored_provider_metadata(row)? {
-        Some(metadata) => raw::provider_metadata_requires_resanitization(&metadata),
+    match provider_metadata {
+        Some(metadata) => raw::provider_metadata_requires_resanitization(metadata),
         None => Ok(false),
     }
 }
