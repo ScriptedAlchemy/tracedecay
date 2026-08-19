@@ -46,15 +46,14 @@ pub(super) fn database_lock_root(database_path: &Path, fallback_parent: &Path) -
 
 fn profile_project_root(database_path: &Path) -> Option<&Path> {
     let parent = database_path.parent()?;
-    let data_root = if parent.file_name().is_some_and(|name| name == "branches") {
-        parent.parent()?
-    } else if parent
-        .file_name()
-        .is_some_and(|name| name == ".consolidation-input")
-        && database_path
+    let nested_store_dir = parent.file_name().is_some_and(|name| name == "branches")
+        || (parent
             .file_name()
-            .is_some_and(|name| name == "source-sessions.db" || name == "target-sessions.db")
-    {
+            .is_some_and(|name| name == ".consolidation-input")
+            && database_path
+                .file_name()
+                .is_some_and(|name| name == "source-sessions.db" || name == "target-sessions.db"));
+    let data_root = if nested_store_dir {
         parent.parent()?
     } else {
         parent
