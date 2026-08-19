@@ -265,6 +265,8 @@ pub fn is_lock_contended(error: &std::io::Error) -> bool {
     }
     #[cfg(windows)]
     {
+        // LockFileEx reports lock contention as ERROR_LOCK_VIOLATION, which
+        // std currently classifies as Uncategorized rather than WouldBlock.
         return error.raw_os_error() == Some(33);
     }
     #[cfg(not(windows))]

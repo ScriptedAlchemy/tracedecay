@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::db::is_lock_contended;
 use crate::errors::{Result, TraceDecayError};
 
 const LIFECYCLE_LOCK_FILENAME: &str = "lifecycle.lock";
@@ -418,20 +419,6 @@ fn open_lock_file(path: &Path) -> Result<File> {
     options
         .open(path)
         .map_err(|error| lock_error(path, "open", &error))
-}
-
-fn is_lock_contended(error: &std::io::Error) -> bool {
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        // LockFileEx reports lock contention as ERROR_LOCK_VIOLATION, which
-        // std currently classifies as Uncategorized rather than WouldBlock.
-        return error.raw_os_error() == Some(33);
-    }
-    #[cfg(not(windows))]
-    false
 }
 
 fn read_owner(file: &mut File, _path: &Path) -> Option<String> {
