@@ -397,6 +397,34 @@ fn activity_tool_names(row: &SessionActivityRow) -> Result<Vec<String>, HintOutc
     Ok(tools)
 }
 
+fn outcome_event(outcome: &HintOutcomeObservation) -> AnalyticsEventInsert {
+    let (disposition, tool_name) = match &outcome.resolution {
+        HintOutcomeResolution::Acted { tool_name } => ("acted", Some(tool_name.clone())),
+        HintOutcomeResolution::Ignored => ("ignored", None),
+    };
+    AnalyticsEventInsert {
+        provider: outcome.emission.provider.clone(),
+        project_id: outcome.emission.project_id.clone(),
+        session_id: Some(outcome.emission.session_id.clone()),
+        timestamp: outcome.observed_at_secs,
+        event_kind: "hint_outcome".to_owned(),
+        hook_name: None,
+        tool_name,
+        tool_category: None,
+        skill_name: None,
+        hint_category: Some(outcome.emission.category.clone()),
+        hint_id: Some(outcome.emission.hint_id.clone()),
+        outcome: Some(disposition.to_owned()),
+        metadata_json: Some(
+            json!({
+                "source": "hint_outcome_correlator",
+                "hint_ts": outcome.emission.timestamp,
+            })
+            .to_string(),
+        ),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -695,33 +723,5 @@ mod tests {
             CoverageStateV1::Known,
             "a pass that settled every scanned hint is a complete census"
         );
-    }
-}
-
-fn outcome_event(outcome: &HintOutcomeObservation) -> AnalyticsEventInsert {
-    let (disposition, tool_name) = match &outcome.resolution {
-        HintOutcomeResolution::Acted { tool_name } => ("acted", Some(tool_name.clone())),
-        HintOutcomeResolution::Ignored => ("ignored", None),
-    };
-    AnalyticsEventInsert {
-        provider: outcome.emission.provider.clone(),
-        project_id: outcome.emission.project_id.clone(),
-        session_id: Some(outcome.emission.session_id.clone()),
-        timestamp: outcome.observed_at_secs,
-        event_kind: "hint_outcome".to_owned(),
-        hook_name: None,
-        tool_name,
-        tool_category: None,
-        skill_name: None,
-        hint_category: Some(outcome.emission.category.clone()),
-        hint_id: Some(outcome.emission.hint_id.clone()),
-        outcome: Some(disposition.to_owned()),
-        metadata_json: Some(
-            json!({
-                "source": "hint_outcome_correlator",
-                "hint_ts": outcome.emission.timestamp,
-            })
-            .to_string(),
-        ),
     }
 }
