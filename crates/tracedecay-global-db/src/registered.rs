@@ -532,6 +532,22 @@ impl RegisteredGlobalDb {
         self.database.checkpoint().await
     }
 
+    /// The write-authority role retained by this client's guarded database.
+    /// WAL file truncation is authorized by the runtime only for the
+    /// exclusive maintenance role.
+    pub(crate) fn write_authority_role(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<tracedecay_runtime_core::db::DatabaseAuthorityRole>
+    {
+        Ok(self.database.write_authority()?.role())
+    }
+
+    /// Truncates the drained WAL file through the runtime's exclusive
+    /// maintenance facade.
+    pub(crate) async fn truncate_database_wal(&self) -> tracedecay_runtime_core::errors::Result<()> {
+        self.database.truncate_wal_for_offline_maintenance().await
+    }
+
     fn from_database(database: Database) -> Self {
         Self {
             database,
