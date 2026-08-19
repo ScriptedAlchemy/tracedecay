@@ -70,7 +70,7 @@ impl Executor for RegisteredGlobalDbWriterConnection<'_> {
 }
 
 impl RegisteredGlobalDb {
-    async fn lcm_read_snapshot(
+    pub(super) async fn lcm_read_snapshot(
         &self,
     ) -> Result<tracedecay_runtime_core::db::DatabaseEngineReadSnapshot, LcmError> {
         self.read_snapshot()
@@ -78,7 +78,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| LcmError::Db(error.to_string()))
     }
 
-    fn lcm_storage_root(&self) -> Result<&Path, LcmError> {
+    pub(super) fn lcm_storage_root(&self) -> Result<&Path, LcmError> {
         self.db_path()
             .parent()
             .ok_or_else(|| LcmError::Db("registered session database has no parent".to_string()))
