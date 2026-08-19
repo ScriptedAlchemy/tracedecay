@@ -3,13 +3,11 @@
 //! Project-open spawns one bounded background rescan per adopted project
 //! store after fail-closed admission has finished; it never blocks admission
 //! or retrieval. The rescan re-runs the current in-process detector over
-//! persisted project-memory facts, redacts what the detector can make safe,
-//! quarantines what it cannot, and settles every mutation through the
-//! canonical curation authority so a durable curation receipt records what
-//! changed. No scanner binary runs and no unsanitized payload is persisted.
+//! persisted project-memory facts, quarantines detector hits, and settles
+//! every mutation through the canonical curation authority so durable
+//! curation receipts record what changed. No scanner binary runs.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_store::{FactReadControl, FactWriteControl};
 use tracedecay_usecases::memory::{
@@ -31,8 +29,8 @@ pub(crate) fn spawn_project_memory_privacy_remediation(graph: Arc<TraceDecay>) {
                     detector_revision = %receipt.detector_revision,
                     scanned_facts = receipt.scanned_facts,
                     clean_facts = receipt.clean_facts,
-                    redacted_facts = receipt.redacted_facts,
                     quarantined_facts = receipt.quarantined_facts,
+                    curation_batches = receipt.curation_receipts.len(),
                 );
             }
             Err(error) => {
@@ -64,18 +62,10 @@ fn remediation_read_control() -> FactReadControl {
     FactReadControl::new(Arc::new(|| false))
 }
 
-/// One-shot commit gate: the rescan settles exactly one curation batch, and a
-/// second commit attempt under the same control is refused.
+/// The owner bounds every commit to one read page; the control admits each
+/// canonical page receipt until that finite scan completes.
 fn remediation_write_control() -> FactWriteControl {
-    let granted = Arc::new(AtomicBool::new(false));
-    FactWriteControl::new(
-        Arc::new(|| false),
-        Arc::new(move || {
-            granted
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        }),
-    )
+    FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
 }
 
 #[cfg(test)]
@@ -232,12 +222,27 @@ mod tests {
             .collect()
     }
 
+    async fn persisted_payload_rows_containing(
+        database: &crate::db::Database,
+        marker: &str,
+    ) -> i64 {
+        database
+            .query_scalar_i64_with_text(
+                "inspect at-rest privacy remediation payloads",
+                "SELECT COUNT(*) FROM memory_v2_assertion_payloads
+                 WHERE payload_json LIKE '%' || ?1 || '%'
+                    OR content LIKE '%' || ?1 || '%'",
+                marker,
+            )
+            .await
+            .expect("inspect persisted memory payloads")
+    }
+
     #[tokio::test]
-    async fn at_rest_rescan_quarantines_and_redacts_legacy_detector_hits() {
+    async fn at_rest_rescan_quarantines_and_erases_legacy_detector_hits() {
         let temp = TempDir::new().expect("privacy remediation fixture root");
         let profile_root = temp.path().join("profile");
-        let project_id =
-            ProjectId::new("project.privacy-remediation.fixture").expect("project id");
+        let project_id = ProjectId::new("project.privacy-remediation.fixture").expect("project id");
         let project_root = enrolled_root(temp.path(), &project_id);
         let _database_scope =
             crate::db::enter_daemon_database_scope(&profile_root, 43, "privacy remediation test")
@@ -296,28 +301,25 @@ mod tests {
         );
         assert_eq!(receipt.scanned_facts, 3);
         assert_eq!(receipt.clean_facts, 1);
-        assert_eq!(receipt.redacted_facts, 1);
-        assert_eq!(receipt.quarantined_facts, 1);
+        assert_eq!(receipt.quarantined_facts, 2);
         let curation = receipt
-            .curation_receipt
-            .as_ref()
+            .curation_receipts
+            .first()
             .expect("remediation hits settle one durable curation receipt");
-        assert_eq!(curation.facts_updated(), 1);
-        assert_eq!(curation.facts_removed(), 1);
+        assert_eq!(curation.facts_updated(), 0);
+        assert_eq!(curation.facts_removed(), 2);
 
-        // Served content no longer carries the secret anywhere, and the
-        // quarantined fact stopped being served entirely.
+        // Detector-hit facts stopped being served entirely.
         let served = served_contents(&memory, &owner).await;
-        assert_eq!(served.len(), 2, "the quarantined fact must not serve");
+        assert_eq!(served.len(), 1, "quarantined facts must not serve");
         assert!(
             served.iter().all(|content| !content.contains(&secret())),
             "no served fact may retain the detector hit"
         );
-        assert!(
-            served
-                .iter()
-                .any(|content| content.contains("deploys authenticate with the token")),
-            "the redactable fact must stay served with sanitized content"
+        assert_eq!(
+            persisted_payload_rows_containing(&database, &secret()).await,
+            0,
+            "detector hits must be physically absent from every assertion payload row"
         );
 
         // A second pass over the remediated store is clean and settles no
@@ -330,10 +332,65 @@ mod tests {
             )
             .await
             .expect("idempotent rescan");
-        assert_eq!(second.scanned_facts, 2);
-        assert_eq!(second.clean_facts, 2);
-        assert_eq!(second.redacted_facts, 0);
+        assert_eq!(second.scanned_facts, 1);
+        assert_eq!(second.clean_facts, 1);
         assert_eq!(second.quarantined_facts, 0);
-        assert!(second.curation_receipt.is_none());
+        assert!(second.curation_receipts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remediation_commits_more_than_one_curation_batch_without_leaving_secret_bytes() {
+        let home = TempDir::new().expect("isolated home");
+        let profile_root = home.path().join("profile");
+        let project_id = ProjectId::new("project.privacy-remediation-many").expect("project id");
+        let project_root = enrolled_root(home.path(), &project_id);
+        let _database_scope = crate::db::enter_daemon_database_scope(
+            &profile_root,
+            43,
+            "privacy remediation batch test",
+        )
+        .expect("daemon database scope");
+        let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("daemon registry");
+        let database = registry
+            .project_memory(project_id.clone(), [project_root])
+            .await
+            .expect("project memory authority");
+        let owner = FactOwnerV1::Project {
+            project_id: project_id.clone(),
+        };
+        for index in 0..257_u16 {
+            seed_legacy_fact(
+                &database,
+                &owner,
+                &format!("dirty-{index}"),
+                &format!("credential {index} is {}", secret()),
+                json!({"fixture": "many-dirty", "index": index}),
+            )
+            .await;
+        }
+
+        let memory = MemoryApplication::new(owner, DatabaseFactStore::new(&database))
+            .expect("owner-bound memory application");
+        let receipt = memory
+            .privacy_remediation_rescan(
+                PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
+                &remediation_read_control(),
+                &remediation_write_control(),
+            )
+            .await
+            .expect("every bounded remediation batch commits");
+
+        assert_eq!(receipt.scanned_facts, 257);
+        assert_eq!(receipt.clean_facts, 0);
+        assert_eq!(receipt.quarantined_facts, 257);
+        assert_eq!(receipt.curation_receipts.len(), 5);
+        assert_eq!(
+            persisted_payload_rows_containing(&database, &secret()).await,
+            0,
+            "no batch may leave secret-bearing assertion payloads behind"
+        );
     }
 }

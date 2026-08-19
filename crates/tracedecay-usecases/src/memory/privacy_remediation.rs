@@ -3,12 +3,12 @@
 //! Ingest sanitizes before persistence, but rows written under an older
 //! detector revision (or under legacy paths that predate the hard cut) can
 //! hold values the current detector would refuse. This owner re-runs the
-//! current in-process detector over every currently served fact, redacts what
-//! the detector can make safe, quarantines what it cannot, and settles every
-//! mutation through the one canonical curation authority so the durable
-//! curation receipt records exactly what changed. Nothing here executes a
-//! scanner binary or touches the network, and no unsanitized payload is ever
-//! persisted back.
+//! current in-process detector over every currently served fact, quarantines
+//! every detector hit, and settles every mutation through the one canonical
+//! curation authority so durable curation receipts record exactly what
+//! changed. Quarantine is intentionally terminal: updating only the current
+//! projection would leave superseded assertion payloads at rest. Nothing here
+//! executes a scanner binary or touches the network.
 
 use tracedecay_domain::Confidence;
 use tracedecay_runtime_core::privacy::{
@@ -17,14 +17,14 @@ use tracedecay_runtime_core::privacy::{
 use tracedecay_store::{
     FactReadControl, FactWriteControl, ProjectMemoryFactCurationReceiptV1,
     ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
-    ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
+    ProjectMemoryFactV1,
 };
 
 use super::MemoryApplication;
 use super::context::MemoryOperationContext;
 use super::curation::{ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation};
 use super::error::{MemoryApplicationError, MemoryMutationError};
-use super::sanitize::{SanitizedFactPayloadWire, fact_payload_wire};
+use super::sanitize::fact_payload_wire;
 
 /// Why an at-rest rescan ran. Recorded on the receipt so operators can see
 /// which journey produced it; daemon store adoption is currently the only
@@ -35,18 +35,17 @@ pub enum PrivacyRemediationTriggerV1 {
     DetectorRevisionAdoption,
 }
 
-/// Truthful outcome of one at-rest rescan. `curation_receipt` is present
-/// exactly when the rescan remediated at least one fact; the durable receipt
-/// row is owned by the fact store's curation authority.
+/// Truthful outcome of one at-rest rescan. One durable curation receipt is
+/// returned for each bounded page that remediated at least one fact; receipt
+/// rows are owned by the fact store's curation authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryPrivacyRemediationReceiptV1 {
     pub detector_revision: String,
     pub trigger: PrivacyRemediationTriggerV1,
     pub scanned_facts: u64,
     pub clean_facts: u64,
-    pub redacted_facts: u64,
     pub quarantined_facts: u64,
-    pub curation_receipt: Option<ProjectMemoryFactCurationReceiptV1>,
+    pub curation_receipts: Vec<ProjectMemoryFactCurationReceiptV1>,
 }
 
 /// One page of currently served facts per authority read.
@@ -54,7 +53,6 @@ const RESCAN_PAGE_LIMIT: usize = 64;
 
 enum FactRescanDispositionV1 {
     Clean,
-    Redact(ProjectMemoryFactUpdatePatchV1),
     Quarantine,
 }
 
@@ -73,9 +71,8 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         let confidence = remediation_confidence()?;
         let mut scanned_facts = 0_u64;
         let mut clean_facts = 0_u64;
-        let mut operations = Vec::new();
-        let mut redacted_facts = 0_u64;
         let mut quarantined_facts = 0_u64;
+        let mut curation_receipts = Vec::new();
         let mut after_fact_id = None;
         loop {
             let query = ProjectMemoryFactListQueryV1::new(
@@ -86,6 +83,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 RESCAN_PAGE_LIMIT,
             )?;
             let page = self.list_project_memory_facts(query, read_control).await?;
+            let mut operations = Vec::new();
             for projection in page.facts() {
                 let ProjectMemoryFactProjectionV1::Available(fact) = projection else {
                     // A withheld projection serves no payload, so there is
@@ -101,16 +99,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                     FactRescanDispositionV1::Clean => {
                         clean_facts = clean_facts.saturating_add(1);
                     }
-                    FactRescanDispositionV1::Redact(patch) => {
-                        redacted_facts = redacted_facts.saturating_add(1);
-                        operations.push(ProjectMemoryCurationOperation::Update {
-                            target: target.clone(),
-                            patch,
-                            evidence_facts: vec![target],
-                            confidence,
-                            reason: "at-rest privacy rescan redacted detector findings".to_owned(),
-                        });
-                    }
                     FactRescanDispositionV1::Quarantine => {
                         quarantined_facts = quarantined_facts.saturating_add(1);
                         operations.push(ProjectMemoryCurationOperation::Remove {
@@ -122,33 +110,39 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                     }
                 }
             }
+            if !operations.is_empty() {
+                let context = MemoryOperationContext::generated(
+                    &self.owner,
+                    "privacy_remediation_rescan",
+                    None,
+                )?;
+                let receipt = self
+                    .apply_project_memory_curation(
+                        operations,
+                        confidence,
+                        context,
+                        None,
+                        write_control,
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        MemoryMutationError::Application(error) => error,
+                        MemoryMutationError::InvalidAuthorityResult { error, .. } => error,
+                    })?;
+                curation_receipts.push(receipt);
+            }
             match page.next_after_fact_id() {
                 Some(next) => after_fact_id = Some(next.clone()),
                 None => break,
             }
         }
-        let curation_receipt = if operations.is_empty() {
-            None
-        } else {
-            let context =
-                MemoryOperationContext::generated(&self.owner, "privacy_remediation_rescan", None)?;
-            let receipt = self
-                .apply_project_memory_curation(operations, confidence, context, None, write_control)
-                .await
-                .map_err(|error| match error {
-                    MemoryMutationError::Application(error) => error,
-                    MemoryMutationError::InvalidAuthorityResult { error, .. } => error,
-                })?;
-            Some(receipt)
-        };
         Ok(ProjectMemoryPrivacyRemediationReceiptV1 {
             detector_revision: MEMORY_FACT_SANITIZER_VERSION_V1.to_owned(),
             trigger,
             scanned_facts,
             clean_facts,
-            redacted_facts,
             quarantined_facts,
-            curation_receipt,
+            curation_receipts,
         })
     }
 }
@@ -184,19 +178,5 @@ fn rescan_fact(
     if payload == wire {
         return Ok(FactRescanDispositionV1::Clean);
     }
-    let sanitized = serde_json::from_value::<SanitizedFactPayloadWire>(payload).map_err(|_| {
-        MemoryApplicationError::InvalidInput {
-            invariant: "at-rest privacy rescan sanitized payload",
-        }
-    })?;
-    let patch = ProjectMemoryFactUpdatePatchV1::new(
-        Some(sanitized.content),
-        Some(sanitized.category),
-        Some(sanitized.source_label),
-        Some(sanitized.tags),
-        Some(sanitized.entities),
-        Some(sanitized.metadata),
-        None,
-    )?;
-    Ok(FactRescanDispositionV1::Redact(patch))
+    Ok(FactRescanDispositionV1::Quarantine)
 }

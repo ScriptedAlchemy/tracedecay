@@ -7,7 +7,7 @@
 //! constraint: this path admits no client method.
 
 use tracedecay_application::NativeIntegrationStatusProjectionV1;
-use tracedecay_domain::NativeIntegrationTransactionId;
+use tracedecay_domain::{NativeIntegrationTransactionId, RepositoryId};
 
 use super::{
     Arc, BTreeMap, DaemonLspProtocolSession, DiagnosticSnapshotPort, FeedbackCyclePort,
@@ -26,8 +26,10 @@ const MAX_TRACKED_NATIVE_INTEGRATION_TRANSACTIONS: usize = 128;
 #[derive(Default)]
 pub(super) struct NativeIntegrationController {
     pub(super) port: Option<Arc<dyn NativeIntegrationStatusPort>>,
-    pub(super) notified:
-        BTreeMap<NativeIntegrationTransactionId, NativeIntegrationStatusProjectionV1>,
+    pub(super) notified: BTreeMap<
+        (RepositoryId, NativeIntegrationTransactionId),
+        NativeIntegrationStatusProjectionV1,
+    >,
 }
 
 impl<P, S, D> DaemonLspProtocolSession<P, S, D>
@@ -46,12 +48,11 @@ where
             return;
         };
         for projection in port.poll_status(MAX_NATIVE_INTEGRATION_STATUS_PER_POLL) {
-            if self
-                .native_integration
-                .notified
-                .get(&projection.transaction_id)
-                == Some(&projection)
-            {
+            let identity = (
+                projection.repository_id.clone(),
+                projection.transaction_id.clone(),
+            );
+            if self.native_integration.notified.get(&identity) == Some(&projection) {
                 continue;
             }
             let Ok(params) = serde_json::to_value(&projection) else {
@@ -67,14 +68,14 @@ where
             }
             self.native_integration
                 .notified
-                .insert(projection.transaction_id.clone(), projection);
+                .insert(identity, projection);
             if self.native_integration.notified.len() > MAX_TRACKED_NATIVE_INTEGRATION_TRANSACTIONS
                 && let Some(oldest) = self
                     .native_integration
                     .notified
                     .iter()
                     .min_by_key(|(_, status)| status.updated_at)
-                    .map(|(transaction_id, _)| transaction_id.clone())
+                    .map(|(identity, _)| identity.clone())
             {
                 self.native_integration.notified.remove(&oldest);
             }
@@ -113,6 +114,10 @@ mod tests {
         fn replace(&self, projection: NativeIntegrationStatusProjectionV1) {
             *self.statuses.lock().unwrap() = vec![projection];
         }
+
+        fn replace_many(&self, projections: Vec<NativeIntegrationStatusProjectionV1>) {
+            *self.statuses.lock().unwrap() = projections;
+        }
     }
 
     impl NativeIntegrationStatusPort for ScriptedStatusPort {
@@ -128,11 +133,27 @@ mod tests {
         phase_revision: u64,
         terminal_outcome: Option<NativeIntegrationTerminalOutcomeV1>,
     ) -> NativeIntegrationStatusProjectionV1 {
+        projection_for(
+            "repository.lsp.notify",
+            "transaction.lsp.notify",
+            phase,
+            phase_revision,
+            terminal_outcome,
+        )
+    }
+
+    fn projection_for(
+        repository_id: &str,
+        transaction_id: &str,
+        phase: NativeIntegrationPhaseV1,
+        phase_revision: u64,
+        terminal_outcome: Option<NativeIntegrationTerminalOutcomeV1>,
+    ) -> NativeIntegrationStatusProjectionV1 {
         NativeIntegrationStatusProjectionV1 {
-            transaction_id: NativeIntegrationTransactionId::new("transaction.lsp.notify").unwrap(),
+            transaction_id: NativeIntegrationTransactionId::new(transaction_id).unwrap(),
             preview_id: NativeIntegrationPreviewId::new("preview.lsp.notify").unwrap(),
             preview_digest: ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
-            repository_id: RepositoryId::new("repository.lsp.notify").unwrap(),
+            repository_id: RepositoryId::new(repository_id).unwrap(),
             destination_ref: RefId::new("refs/heads/main").unwrap(),
             phase,
             phase_revision,
@@ -189,5 +210,48 @@ mod tests {
         session.flush_due(1);
 
         assert!(native_integration_notifications(session.drain_outbound()).is_empty());
+    }
+
+    #[test]
+    fn equal_transaction_ids_from_distinct_projects_dedupe_independently() {
+        let shared_transaction = "transaction.shared";
+        let port = ScriptedStatusPort::holding(projection_for(
+            "repository.first",
+            shared_transaction,
+            NativeIntegrationPhaseV1::Prepared,
+            1,
+            None,
+        ));
+        port.replace_many(vec![
+            projection_for(
+                "repository.first",
+                shared_transaction,
+                NativeIntegrationPhaseV1::Prepared,
+                1,
+                None,
+            ),
+            projection_for(
+                "repository.second",
+                shared_transaction,
+                NativeIntegrationPhaseV1::Prepared,
+                1,
+                None,
+            ),
+        ]);
+        let mut session =
+            session().with_native_integration_status_port(Arc::clone(&port) as Arc<_>);
+        initialize(&mut session);
+        assert_eq!(
+            native_integration_notifications(session.drain_outbound()).len(),
+            2,
+            "both project-owned statuses notify once"
+        );
+
+        session.flush_due(2);
+
+        assert!(
+            native_integration_notifications(session.drain_outbound()).is_empty(),
+            "unchanged statuses with colliding transaction ids must stay deduped"
+        );
     }
 }

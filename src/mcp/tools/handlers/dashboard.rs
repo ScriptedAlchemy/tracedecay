@@ -31,8 +31,7 @@ use crate::dashboard::{
     DashboardApplicationRuntime, DashboardAutomationWriter, DashboardConfigurationApplyError,
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
     DashboardHttpRequestControlV1, DashboardScopeSetReadFuture, DashboardStateCompositionV1,
-    bind_dashboard,
-    build_state_with_automation_reconciler, router, validate_dashboard_host,
+    bind_dashboard, build_state_with_automation_reconciler, router, validate_dashboard_host,
 };
 
 struct DashboardInvocationExecutorAdapter {
@@ -69,6 +68,26 @@ impl DashboardInvocationExecutorAdapter {
 impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
     fn user_profile_id(&self) -> Option<&UserProfileId> {
         self.user_profile_id.as_ref()
+    }
+
+    fn for_project_root(
+        &self,
+        project_root: &std::path::Path,
+    ) -> std::result::Result<Arc<dyn DashboardApplicationRuntime>, String> {
+        let handshake = crate::daemon::DaemonHandshake::for_current_client(
+            Some(project_root.to_path_buf()),
+            None,
+            false,
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+        let executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor> = Arc::new(
+            crate::daemon_client::DaemonInvocationClient::for_current(handshake)
+                .map_err(|error| error.to_string())?,
+        );
+        Self::new(executor, self.user_profile_id.clone())
+            .map(|runtime| Arc::new(runtime) as Arc<dyn DashboardApplicationRuntime>)
+            .map_err(|error| error.to_string())
     }
 
     fn routers(
@@ -165,13 +184,14 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                 .map_err(|error| DashboardDaemonReadUnavailableV1 {
                     detail: error.to_string(),
                 })?;
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::multi_root_scope_set_read(
-                control.request_id().as_str(),
-                request,
-                control.observed_at(),
-                control.deadline(),
-                control.cancellation().context(),
-            );
+            let invocation =
+                crate::daemon_contract::DaemonInvocationRequest::multi_root_scope_set_read(
+                    control.request_id().as_str(),
+                    request,
+                    control.observed_at(),
+                    control.deadline(),
+                    control.cancellation().context(),
+                );
             let response = executor
                 .invoke_controlled(
                     invocation,
@@ -193,22 +213,21 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                         detail: "the daemon multi-root read returned no evidence payload"
                             .to_owned(),
                     }),
-                crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem {
-                    problem,
-                } => Err(DashboardDaemonReadUnavailableV1 {
-                    detail: format!(
-                        "the daemon rejected the multi-root read: {}",
-                        problem.safe_message()
-                    ),
-                }),
+                crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                    Err(DashboardDaemonReadUnavailableV1 {
+                        detail: format!(
+                            "the daemon rejected the multi-root read: {}",
+                            problem.safe_message()
+                        ),
+                    })
+                }
                 crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
                     Err(DashboardDaemonReadUnavailableV1 {
                         detail: format!("the daemon refused the multi-root read: {problem:?}"),
                     })
                 }
                 _ => Err(DashboardDaemonReadUnavailableV1 {
-                    detail: "the daemon multi-root read answered with a foreign outcome"
-                        .to_owned(),
+                    detail: "the daemon multi-root read answered with a foreign outcome".to_owned(),
                 }),
             }
         })
@@ -239,40 +258,59 @@ pub(crate) async fn dashboard_native_integration_status(
 > {
     use crate::dashboard::DashboardDaemonReadUnavailableV1;
 
-    let result = crate::application_surface::resolve_dashboard_application_surface(
+    let request = crate::daemon_contract::DaemonInvocationRequest::native_integration(
+        control.request_id().as_str(),
         crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStatus,
-        control.request_id(),
-        crate::application_surface::ApplicationSurfaceRequest::NativeIntegration(
-            crate::application_surface::NativeIntegrationSurfaceRequest::Status(
-                tracedecay_application::NativeIntegrationStatusSurfaceRequest { transaction_id },
-            ),
+        crate::application_surface::NativeIntegrationSurfaceRequest::Status(
+            tracedecay_application::NativeIntegrationStatusSurfaceRequest { transaction_id },
         ),
-        crate::daemon_client::RequestedOutputFormat::Json,
-        Some(executor),
-    )
-    .await
-    .map_err(|error| DashboardDaemonReadUnavailableV1 {
-        detail: format!("the dashboard native-integration surface is unavailable: {error}"),
-    })?;
-    let envelope = result
-        .result
-        .map_err(|problem| DashboardDaemonReadUnavailableV1 {
-            detail: format!(
-                "the daemon rejected the native-integration status read: {}",
-                problem.problem.message
-            ),
+        control.observed_at(),
+        control.deadline(),
+        control.cancellation().context(),
+    );
+    let response = executor
+        .invoke_controlled(
+            request,
+            control.deadline(),
+            control.cancellation().clone(),
+            crate::daemon_client::InvocationCancellationPolicy::ReadOnly,
+        )
+        .await
+        .map_err(|error| DashboardDaemonReadUnavailableV1 {
+            detail: format!("the dashboard native-integration transport failed: {error:?}"),
         })?;
-    let tracedecay_application::ApplicationOutcome::Evidence(packet) = envelope.outcome else {
-        return Err(DashboardDaemonReadUnavailableV1 {
-            detail: "the native-integration status read answered with a foreign outcome"
-                .to_owned(),
-        });
+    let payload = match response.outcome {
+        crate::daemon_contract::DaemonInvocationOutcome::NativeIntegration {
+            outcome: tracedecay_application::ApplicationOutcome::Evidence(packet),
+            ..
+        } => packet
+            .payload
+            .ok_or_else(|| DashboardDaemonReadUnavailableV1 {
+                detail: "the native-integration status read returned no evidence payload"
+                    .to_owned(),
+            })?,
+        crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+            return Err(DashboardDaemonReadUnavailableV1 {
+                detail: format!(
+                    "the daemon rejected the native-integration status read: {}",
+                    problem.safe_message()
+                ),
+            });
+        }
+        crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
+            return Err(DashboardDaemonReadUnavailableV1 {
+                detail: format!(
+                    "the daemon refused the native-integration status read: {problem:?}"
+                ),
+            });
+        }
+        _ => {
+            return Err(DashboardDaemonReadUnavailableV1 {
+                detail: "the native-integration status read answered with a foreign outcome"
+                    .to_owned(),
+            });
+        }
     };
-    let payload = packet
-        .payload
-        .ok_or_else(|| DashboardDaemonReadUnavailableV1 {
-            detail: "the native-integration status read returned no evidence payload".to_owned(),
-        })?;
     serde_json::from_value(payload).map_err(|_| DashboardDaemonReadUnavailableV1 {
         detail: "the native-integration status payload violated its wire contract".to_owned(),
     })

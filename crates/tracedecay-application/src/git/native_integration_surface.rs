@@ -556,7 +556,7 @@ struct NativeIntegrationSurfaceSpec {
     surfaces: &'static [BindingSurface],
 }
 
-/// Plan 36 exposes the transaction journey through CLI and MCP only. HTTP is
+/// Native-integration mutations are exposed through CLI and MCP only. HTTP is
 /// deliberately excluded for the same reason `git_preview`/`git_apply` are:
 /// apply is an authoritative native mutation and there is no transport
 /// fallback path.
