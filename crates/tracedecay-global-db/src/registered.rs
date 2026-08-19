@@ -532,12 +532,42 @@ impl RegisteredGlobalDb {
         self.database.checkpoint().await
     }
 
+    /// The write-authority role retained by this client's guarded database.
+    /// WAL file truncation is authorized by the runtime only for the
+    /// exclusive maintenance role.
+    pub(crate) fn write_authority_role(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<tracedecay_runtime_core::db::DatabaseAuthorityRole>
+    {
+        Ok(self.database.write_authority()?.role())
+    }
+
+    /// Truncates the drained WAL file through the runtime's exclusive
+    /// maintenance facade.
+    pub(crate) async fn truncate_database_wal(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<()> {
+        self.database.truncate_wal_for_offline_maintenance().await
+    }
+
     fn from_database(database: Database) -> Self {
         Self {
             database,
             project_graph: OnceLock::new(),
             session_relation_graph: OnceLock::new(),
         }
+    }
+
+    /// Wraps an already-published guarded database for WAL maintenance tests.
+    ///
+    /// The exclusive-maintenance truncation lane cannot be exercised through
+    /// the ordinary registered harness because the registered fixture
+    /// publisher mints only Test-role authority; this constructor lets a test
+    /// drive [`RegisteredGlobalDb::checkpoint_result`] over a
+    /// maintenance-scoped publication without bypassing the database facade.
+    #[cfg(test)]
+    pub(crate) fn from_database_for_wal_maintenance_test(database: Database) -> Self {
+        Self::from_database(database)
     }
 
     pub fn read_connection(&self) -> DatabaseEngineReadConnection {
