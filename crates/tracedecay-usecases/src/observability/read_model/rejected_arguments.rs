@@ -174,9 +174,8 @@ fn finish(
             if eligible >= RATE_SUPPORT_FLOOR && rejected <= eligible
     );
     let rejection_rate = if rate_ready {
-        eligible_attempts.and_then(|eligible| {
-            rejected_total.map(|rejected| rejected as f64 / eligible as f64)
-        })
+        eligible_attempts
+            .and_then(|eligible| rejected_total.map(|rejected| rejected as f64 / eligible as f64))
     } else {
         None
     };

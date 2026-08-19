@@ -70,14 +70,12 @@ fn pending_reason(
     model: &crate::semantic_code::CatalogedFastEmbedModelV1,
 ) -> Option<String> {
     model.members.iter().find_map(|(role, member)| {
-        (!member_matches_pin(&cache.join(&member.path), member.length, &member.sha256)).then(
-            || {
-                format!(
-                    "member '{role}' ({}) is absent or fails its SHA-256/length pin",
-                    member.path
-                )
-            },
-        )
+        (!member_matches_pin(&cache.join(&member.path), member.length, &member.sha256)).then(|| {
+            format!(
+                "member '{role}' ({}) is absent or fails its SHA-256/length pin",
+                member.path
+            )
+        })
     })
 }
 
@@ -219,7 +217,10 @@ async fn isolated_fixture_repo_embeds_and_indexes_without_activation() {
             .is_some_and(|results| !results.is_empty()),
         "exact/lexical/graph fusion must answer with semantic unactivated: {core}"
     );
-    assert_eq!(core["code_generation"], json!(code.manifest().generation_id));
+    assert_eq!(
+        core["code_generation"],
+        json!(code.manifest().generation_id)
+    );
     for lane in ["exact", "lexical", "graph"] {
         assert_lane_complete(&core["coverage"], lane);
     }
