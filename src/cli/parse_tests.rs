@@ -2238,10 +2238,7 @@ fn remote_capture_query_and_transfer_frame_parse_authority_flags() {
         };
         assert_eq!(authority.endpoint, "https://node.example/remote/");
         assert_eq!(authority.credential_file, std::path::Path::new("cred.bin"));
-        assert_eq!(
-            authority.request_file,
-            std::path::Path::new("request.json")
-        );
+        assert_eq!(authority.request_file, std::path::Path::new("request.json"));
         assert!(authority.json);
     }
 }

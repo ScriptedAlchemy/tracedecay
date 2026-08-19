@@ -198,8 +198,7 @@ fn tool_call_open_refusal_response(
     };
     let id = request.id.clone()?;
     let tool_name = request.params.as_ref()?.get("name")?.as_str()?;
-    let request_id =
-        crate::request_identity::mcp_connection_request_id(&id, connection_scope)?;
+    let request_id = crate::request_identity::mcp_connection_request_id(&id, connection_scope)?;
     let envelope = crate::application_surface::mcp_project_open_reset_refusal(
         tool_name, request_id, authority, reason,
     )?;
@@ -290,8 +289,7 @@ mod tests {
             "params": { "name": "tracedecay_storage_status", "arguments": {} },
         }))
         .expect("canonical tools/call request");
-        let error =
-            TraceDecayError::reset_required("project store", "schema v26 is incompatible");
+        let error = TraceDecayError::reset_required("project store", "schema v26 is incompatible");
 
         let response = tool_call_open_refusal_response(&request, "connection.test", &error)
             .expect("an application tools/call refusal must answer on the tool surface");
@@ -310,7 +308,10 @@ mod tests {
         let envelope: serde_json::Value =
             serde_json::from_str(text).expect("machine-readable envelope");
         assert_eq!(envelope["problem"]["kind"], "reset_required");
-        assert_eq!(envelope["problem"]["legal_actions"], serde_json::json!(["reset"]));
+        assert_eq!(
+            envelope["problem"]["legal_actions"],
+            serde_json::json!(["reset"])
+        );
         assert!(
             envelope["problem"]["diagnostic"]["message"]
                 .as_str()

@@ -668,9 +668,11 @@ mod tests {
             .expect("query result fixture");
 
         let rendered = super::render_query_coverage(&result);
-        assert!(rendered.contains(
-            "Local pending captures: unavailable (requesting node spool not supplied)"
-        ));
+        assert!(
+            rendered.contains(
+                "Local pending captures: unavailable (requesting node spool not supplied)"
+            )
+        );
     }
 
     #[test]

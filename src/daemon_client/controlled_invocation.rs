@@ -66,15 +66,19 @@ impl DaemonInvocationClient {
                         // once did (`settle_in_process_invocation`). Keep
                         // reading over the same response grace the daemon's
                         // own clients use so the effect's real terminal is
-                        // the one reported.
+                        // the one reported. A transport failure after the
+                        // cancel attempt is the same indeterminate state as
+                        // an unanswered grace: the effect may have committed,
+                        // so `Unavailable` (which invites a retry) would be
+                        // untruthful.
                         match tokio::time::timeout(
                             crate::daemon::DAEMON_TOOL_RESPONSE_GRACE,
                             &mut invocation,
                         )
                         .await
                         {
-                            Ok(result) => result.map_err(|_| DaemonInvocationError::Unavailable),
-                            Err(_) => Ok(
+                            Ok(Ok(response)) => Ok(response),
+                            Ok(Err(_)) | Err(_) => Ok(
                                 crate::daemon_contract::DaemonInvocationResponse::problem(
                                     target_request_id,
                                     crate::daemon_contract::DaemonInvocationProblem::ResetRequired,

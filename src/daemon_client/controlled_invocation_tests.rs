@@ -213,14 +213,18 @@ async fn reset_then_reconnect_client(
             .expect("read cancellation request")
             .expect("cancellation request");
 
-        let second_stream = listener.accept().await.expect("accept second invocation");
-        let (second_reader, mut second_writer) = second_stream.into_split();
-        let mut second_lines = BufReader::new(second_reader).lines();
-        second_lines
-            .next_line()
-            .await
-            .expect("read second handshake")
-            .expect("second handshake");
+        // The client's response-grace read polls daemon liveness by opening a
+        // probe connection and dropping it without a handshake; the real
+        // daemon's accept loop tolerates those, so this fixture must too.
+        let (mut second_lines, mut second_writer) = loop {
+            let second_stream = listener.accept().await.expect("accept second invocation");
+            let (second_reader, second_writer) = second_stream.into_split();
+            let mut second_lines = BufReader::new(second_reader).lines();
+            match second_lines.next_line().await {
+                Ok(Some(_handshake)) => break (second_lines, second_writer),
+                Ok(None) | Err(_) => continue,
+            }
+        };
         let second_line = second_lines
             .next_line()
             .await
