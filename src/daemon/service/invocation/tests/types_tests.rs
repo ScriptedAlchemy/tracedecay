@@ -411,6 +411,99 @@ async fn retryable_hook_work_does_not_acknowledge_the_durable_admission() {
     );
 }
 
+/// The durable-replay half of the retryable contract: after a cycle fails
+/// retryably and settles, the spool consumer re-admits the exact same
+/// envelope. The orchestrator must run a fresh cycle for it — not treat the
+/// settled failure as still in flight — and only the genuinely successful
+/// cycle may fire the acknowledgement that clears the pending hook work.
+#[tokio::test]
+async fn replayed_admission_after_retryable_failure_completes_a_fresh_cycle() {
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let work_attempts = Arc::clone(&attempts);
+    let first_attempted = Arc::new(tokio::sync::Notify::new());
+    let work_first_attempted = Arc::clone(&first_attempted);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
+        let attempts = Arc::clone(&work_attempts);
+        let first_attempted = Arc::clone(&work_first_attempted);
+        async move {
+            let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if attempt == 0 {
+                first_attempted.notify_one();
+                HookOrchestrationWorkOutcomeV1::RetryableFailure
+            } else {
+                HookOrchestrationWorkOutcomeV1::Completed
+            }
+        }
+    })
+    .unwrap();
+    let mut envelope = hook_envelope(HookEventV2::SavedEdit {
+        file_id: [7; 16],
+        changed_range_count: 1,
+    });
+    envelope.project_id = [23; 16];
+    envelope.worktree_id = [25; 16];
+    let mut binding = hook_binding();
+    binding.project_id = [23; 16];
+    binding.worktree_id = [25; 16];
+    assert!(register_hook_orchestration_runtime(
+        [23; 16], [25; 16], &runtime
+    ));
+    let acknowledged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let first_acknowledged = Arc::clone(&acknowledged);
+    assert_eq!(
+        admit_registered_hook_orchestration(
+            envelope.clone(),
+            binding.clone(),
+            Some(hook_lifecycle()),
+            1,
+            false,
+            Some(Arc::new(move || {
+                first_acknowledged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })),
+        ),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    first_attempted.notified().await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        acknowledged.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the failed cycle must not acknowledge the durable admission"
+    );
+
+    // The spool consumer replays the identical envelope until the producer
+    // work genuinely terminates. A replay that races the settling failure
+    // joins it and is dropped with it, so the consumer's next pass retries.
+    let replay_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while acknowledged.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        assert!(
+            std::time::Instant::now() < replay_deadline,
+            "a replayed admission must complete a fresh cycle after a retryable failure"
+        );
+        let replay_acknowledged = Arc::clone(&acknowledged);
+        assert_eq!(
+            admit_registered_hook_orchestration(
+                envelope.clone(),
+                binding.clone(),
+                Some(hook_lifecycle()),
+                1,
+                false,
+                Some(Arc::new(move || {
+                    replay_acknowledged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                })),
+            ),
+            HookOrchestrationAdmissionV1::Enqueued
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+        "acknowledgement requires a fresh successful cycle, not the settled failure"
+    );
+    unregister_hook_orchestration_runtime([23; 16], [25; 16], &runtime);
+}
+
 #[tokio::test]
 async fn superseded_blocking_work_is_joined_before_its_receipt_terminal() {
     let (blocking_started, blocking_started_receiver) = tokio::sync::oneshot::channel();
