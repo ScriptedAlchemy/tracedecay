@@ -4162,6 +4162,36 @@ fn http_adapter_problem(
         .map(|problem| problem.with_owning_layer(ProblemOwningLayer::Adapter))
 }
 
+/// The canonical typed terminal for an MCP `tools/call` whose project open
+/// was refused because the store requires an explicit reset.
+///
+/// The refusal settles before any project server exists, so the MCP boundary
+/// cannot route the call to its handler. The caller still named one exact
+/// application operation, and the truthful answer for that operation is the
+/// reset-required terminal under its own mounted MCP result contract — not a
+/// generic JSON-RPC internal error that hides the `reset` legal action.
+/// Returns `None` when the tool is not a mounted application operation; the
+/// caller then keeps the raw project-open refusal shape.
+pub(crate) fn mcp_project_open_reset_refusal(
+    tool_name: &str,
+    request_id: RequestId,
+    authority: &str,
+    reason: &str,
+) -> Option<ApplicationProblemEnvelope> {
+    let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
+    let catalog = application_surface_catalog_ref().ok()?;
+    let resolver = CatalogBindingResolver::new(catalog);
+    let binding = resolve_application_binding(&resolver, BindingSurface::Mcp, operation)?;
+    let contract = ResultContractRef::from_schema(&binding.result_schema);
+    let problem = ApplicationProblem::reset_required(SafeDiagnostic {
+        code: "application.surface.reset_required".to_owned(),
+        message: format!("The {authority} requires an explicit reset: {reason}"),
+    });
+    ApplicationProblemEnvelope::new(contract, request_id, problem)
+        .ok()
+        .map(|envelope| envelope.with_owning_layer(ProblemOwningLayer::Runtime))
+}
+
 fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
