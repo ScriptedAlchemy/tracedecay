@@ -48,9 +48,9 @@ pub mod windows;
 
 #[cfg(windows)]
 pub use windows::{
-    create_private_directory, create_private_file, create_private_file_retained, make_private_file,
-    open_private_directory, open_private_file, validate_directory_path, validate_private_directory,
-    validate_private_file,
+    available_space, create_private_directory, create_private_file, create_private_file_retained,
+    make_private_file, open_private_directory, open_private_file, validate_directory_path,
+    validate_private_directory, validate_private_file,
 };
 
 #[cfg(unix)]
@@ -158,6 +158,30 @@ mod unix {
         Ok(())
     }
 
+    /// Returns bytes available to the current user at `path` (quota-aware).
+    pub fn available_space(path: &Path) -> io::Result<u64> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "path contains an interior NUL")
+        })?;
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: `c_path` is a valid NUL-terminated C string and `stat` is
+        // writable for a `statvfs` result.
+        let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `statvfs` initialized `stat` on success.
+        let stat = unsafe { stat.assume_init() };
+        // Width of `statvfs` block fields differs by Unix target.
+        #[allow(clippy::unnecessary_cast)]
+        {
+            Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+        }
+    }
+
     fn validate_handle(file: &fs::File, directory: bool, mode: u32) -> io::Result<()> {
         let metadata = file.metadata()?;
         validate_kind(&metadata, directory)?;
@@ -193,9 +217,9 @@ mod unix {
 
 #[cfg(unix)]
 pub use unix::{
-    create_private_directory, create_private_file, create_private_file_retained, make_private_file,
-    open_private_directory, open_private_file, validate_directory_path, validate_private_directory,
-    validate_private_file,
+    available_space, create_private_directory, create_private_file, create_private_file_retained,
+    make_private_file, open_private_directory, open_private_file, validate_directory_path,
+    validate_private_directory, validate_private_file,
 };
 
 #[cfg(not(any(unix, windows)))]
@@ -265,5 +289,29 @@ mod tests {
         assert_eq!(created.metadata().unwrap().dev(), created_identity.dev());
         assert_eq!(created.metadata().unwrap().ino(), created_identity.ino());
         assert_ne!(created_identity.ino(), replacement_identity.ino());
+    }
+}
+
+#[cfg(test)]
+mod available_space_tests {
+    use tempfile::tempdir;
+
+    use super::available_space;
+
+    #[test]
+    fn available_space_reports_positive_capacity_on_tempdir() {
+        let temp = tempdir().unwrap();
+        let available = available_space(temp.path()).unwrap();
+        assert!(
+            available > 0,
+            "expected positive free space, got {available}"
+        );
+    }
+
+    #[test]
+    fn available_space_rejects_missing_path() {
+        let temp = tempdir().unwrap();
+        let missing = temp.path().join("does-not-exist");
+        assert!(available_space(&missing).is_err());
     }
 }
