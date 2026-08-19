@@ -686,9 +686,11 @@ fn parse_nonnegative_unix_integer(value: &str, label: &str) -> Result<i64> {
 /// affect the selected result. Returning parsed seconds with the record keeps
 /// schedule arithmetic on the same validated timestamp that established the
 /// winner.
-pub(super) fn latest_record_by_canonical_completion<'a>(
+pub(super) type CanonicalCompletionKey<'a> = (i64, i64, &'a str);
+
+pub(super) fn latest_record_by_canonical_completion_key<'a>(
     records: impl IntoIterator<Item = &'a AutomationRunLedgerRecord>,
-) -> Result<Option<(&'a AutomationRunLedgerRecord, i64)>> {
+) -> Result<Option<(&'a AutomationRunLedgerRecord, CanonicalCompletionKey<'a>)>> {
     let mut latest = None;
     for record in records {
         validate_run_id_component(&record.run_id)?;
@@ -719,9 +721,19 @@ pub(super) fn latest_record_by_canonical_completion<'a>(
             "automation history repeats run '{}' with conflicting canonical state",
             record.run_id
         ))),
-        Some((record, completed_at, _, false)) => Ok(Some((record, completed_at))),
+        Some((record, completed_at, completed_at_micros, false)) => Ok(Some((
+            record,
+            (completed_at, completed_at_micros, record.run_id.as_str()),
+        ))),
         None => Ok(None),
     }
+}
+
+pub(super) fn latest_record_by_canonical_completion<'a>(
+    records: impl IntoIterator<Item = &'a AutomationRunLedgerRecord>,
+) -> Result<Option<(&'a AutomationRunLedgerRecord, i64)>> {
+    latest_record_by_canonical_completion_key(records)
+        .map(|latest| latest.map(|(record, (completed_at, _, _))| (record, completed_at)))
 }
 
 fn run_ledger_scan_io_error(error: TraceDecayError) -> std::io::Error {
