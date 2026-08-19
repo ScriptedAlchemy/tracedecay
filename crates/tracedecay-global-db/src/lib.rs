@@ -153,8 +153,7 @@ pub use support::{
     global_accounting_mode, global_db_path, global_db_path_is_overridden,
 };
 use support::{
-    SESSION_MESSAGE_SEARCH_MAX_FETCH, analytics_scope_query,
-    code_projects_missing_primary_root_columns, downrank_inventory_messages,
+    SESSION_MESSAGE_SEARCH_MAX_FETCH, analytics_scope_query, downrank_inventory_messages,
     ensure_code_project_primary_root_columns, ensure_parse_offset_columns,
     ensure_session_parent_columns, ensure_table_columns, git_remote_search_alias,
     global_db_operation_error, global_db_operation_message, interleave_workflow_search_results,
