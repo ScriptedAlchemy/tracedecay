@@ -45,7 +45,9 @@ use tracedecay_domain::{
 };
 use tracedecay_store::NativeIntegrationStore;
 use tracedecay_usecases::observability::{
-    BoundedObservabilityProducerV1, record_native_integration_transition,
+    BoundedObservabilityProducerV1, WorkConflictObservationResultV1,
+    WorkConflictObservationUnavailableV1, record_native_integration_transition,
+    record_work_conflict_observation,
 };
 use tracedecay_usecases::stack_coordinator::StackCoordinatorErrorV1;
 
@@ -168,6 +170,28 @@ pub(super) async fn execute_native_integration(
         &execution.result,
         execution.owner_preview.as_ref(),
     );
+    // Telemetry only: the preflight disposition and terminal apply receipt
+    // additionally prove one mechanical conflict prediction/outcome pair.
+    match record_work_conflict_observation(
+        registered.scope.project_id.as_str(),
+        observability_producer.as_deref(),
+        surface_operation.as_str(),
+        owner_mounted,
+        &execution.result,
+        execution.owner_preview.as_ref(),
+    ) {
+        WorkConflictObservationResultV1::Enqueued { .. }
+        | WorkConflictObservationResultV1::Unavailable {
+            reason: WorkConflictObservationUnavailableV1::NotAdjudicated,
+        } => {}
+        refused => {
+            tracing::debug!(
+                outcome = ?refused,
+                operation = surface_operation.as_str(),
+                "work-conflict observation was not recorded"
+            );
+        }
+    }
 
     let Ok(payload) = serde_json::to_value(&execution.result) else {
         return DaemonInvocationResponse::problem(

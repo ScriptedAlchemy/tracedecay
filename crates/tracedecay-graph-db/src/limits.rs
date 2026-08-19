@@ -1,7 +1,15 @@
 use crate::{GraphBudgetKind, GraphDbError};
 
-pub const MAX_VERIFIED_GENERATION_ENTITIES: usize = 1_000_000;
-pub const MAX_VERIFIED_GENERATION_RELATIONS: usize = 2_000_000;
+/// Sized for the largest real indexed checkouts, not typical ones: the
+/// TraceDecay repository itself seals more than a million entities, and the
+/// dashboard's GPU tier serves brains past 1.6M nodes. A generation above
+/// these caps is refused as a typed capacity budget at activation, so a cap
+/// below real repositories turns them permanently unserveable (observed live:
+/// every activation retry exhausted capacity and the census never sealed).
+/// Actual memory pressure is governed by the daemon's resident-memory gate;
+/// these remain sanity ceilings against runaway projections.
+pub const MAX_VERIFIED_GENERATION_ENTITIES: usize = 8_000_000;
+pub const MAX_VERIFIED_GENERATION_RELATIONS: usize = 16_000_000;
 pub const MAX_VERIFIED_GENERATION_BATCH_MUTATIONS: usize = 4_096;
 pub const MAX_GRAPH_VECTOR_DIMENSION: usize = 4_096;
 pub const MAX_GRAPH_IDENTIFIER_BYTES: usize = 1_024;

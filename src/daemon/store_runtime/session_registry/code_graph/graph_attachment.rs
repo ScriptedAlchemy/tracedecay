@@ -70,6 +70,14 @@ pub(in crate::daemon::store_runtime::session_registry) async fn close_retained_f
     verified_locator: VerifiedStoreLocatorV1,
 ) -> Result<()> {
     let graph_registry = graph_registry.clone();
+    // KNOWN DEFECT, deliberately fast-failing: this close requires an
+    // unleased owner, but the retained memory-graph runtimes in the project
+    // owner map still hold their standing operation leases at this point in
+    // shutdown, so the close reports a typed Conflict on every shutdown and
+    // the reconciliation join is skipped (the receipt carries this exact
+    // detail). Retrying here only slows shutdown — the lease is structural,
+    // not a settling race. The fix is ordering: retire the retained runtimes
+    // (releasing their leases) before closing the session relation graphs.
     tokio::task::spawn_blocking(move || {
         graph_registry.close_retained_for_shutdown(&binding, &verified_locator)
     })

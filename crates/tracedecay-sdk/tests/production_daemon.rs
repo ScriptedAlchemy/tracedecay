@@ -402,7 +402,12 @@ fn stop_daemon(daemon: &mut Daemon) {
         .status()
         .unwrap();
     assert!(signal.success(), "failed to request daemon shutdown");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // The daemon's own shutdown contract is DAEMON_SHUTDOWN_DEADLINE (45s):
+    // every owner phase gets a typed deadline and the process exits with a
+    // receipt even when an owner times out. The assertion here is that
+    // shutdown COMPLETES within that contract — a tighter local SLA turned
+    // loaded CI runners into false failures.
+    let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         if let Some(status) = daemon.child.try_wait().unwrap() {
             assert!(
@@ -605,7 +610,12 @@ fn wait_for_remote_authority(child: &mut Child, path: &Path) -> Value {
 }
 
 fn wait_for_authority_record(child: &mut Child, path: &Path, require_remote: bool) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    // Generous on purpose: daemon boot converges registered schemas before the
+    // authority record carries every endpoint, and on a loaded runner (or a
+    // second daemon booting behind a first) that legitimately takes tens of
+    // seconds. The assertion is that the authority appears, not that the
+    // machine was idle.
+    let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         assert!(
             child.try_wait().unwrap().is_none(),

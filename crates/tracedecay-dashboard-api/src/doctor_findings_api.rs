@@ -416,8 +416,9 @@ mod tests {
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Partial);
         // Advisory has both host-integration and feedback-owner findings;
-        // StorageRuntime has runtime, remote, and profile-authority findings.
-        assert_eq!(envelope.payload.entries.len(), 10);
+        // StorageRuntime has runtime, remote-replay, remote-operational, and
+        // profile-authority findings.
+        assert_eq!(envelope.payload.entries.len(), 11);
         assert!(envelope.payload.entries.iter().all(|entry| {
             entry.finding().state()
                 == tracedecay_application::doctor::DoctorEvidenceStateV1::Unknown

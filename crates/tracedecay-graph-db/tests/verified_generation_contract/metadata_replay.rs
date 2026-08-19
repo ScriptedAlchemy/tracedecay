@@ -47,6 +47,7 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
             &mut authority,
             &context,
             &record.publication.key,
+            None,
         ),
         Err(GraphDbError::Unavailable { .. })
     ));
@@ -63,24 +64,24 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
         GraphProperty::String("different-digest".to_owned()),
     );
     assert!(matches!(
-        registered.registry.publish_verified_manifest(
+        registered.registry.publish_verified(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
             &context,
             &record.publication.key,
-            mismatched_manifest,
+            Some(mismatched_manifest),
         ),
         Err(GraphDbError::Conflict)
     ));
 
     let committed = registered
         .registry
-        .publish_verified_manifest(
+        .publish_verified(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
             &context,
             &record.publication.key,
-            vector_manifest.clone(),
+            Some(vector_manifest.clone()),
         )
         .unwrap();
     assert_eq!(
@@ -109,12 +110,12 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
         GraphPublicationOperationContextV1::new(&replay_control, &replay_probe).unwrap();
     let exact_replay = registered
         .registry
-        .publish_verified_manifest(
+        .publish_verified(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
             &replay_context,
             &record.publication.key,
-            vector_manifest,
+            Some(vector_manifest),
         )
         .unwrap();
     assert_eq!(exact_replay.head, expected_head);
@@ -161,12 +162,12 @@ fn incomplete_pending_generation_cannot_advance_verified_head() {
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
 
     assert!(matches!(
-        registered.registry.publish_verified_manifest(
+        registered.registry.publish_verified(
             registration(registered.binding.clone(), temp.path()),
             &mut authority,
             &context,
             &record.publication.key,
-            incomplete,
+            Some(incomplete),
         ),
         Err(GraphDbError::Conflict)
     ));

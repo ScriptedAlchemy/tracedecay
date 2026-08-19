@@ -12,6 +12,7 @@ import {
   MessagesSquare,
   Settings,
   Wallet,
+  Waypoints,
   Workflow,
 } from 'lucide-react';
 import { NavLink } from 'react-router';
@@ -34,6 +35,9 @@ const ICONS: Record<string, LucideIcon> = {
   costs: Wallet,
   settings: Settings,
   work: ListTodo,
+  // `Workflow` is Loom's icon; the Workflows workspace uses the DAG waypoints
+  // mark so the two channels stay distinguishable at a glance.
+  workflows: Waypoints,
 };
 
 const MAIN = CHANNELS.filter((channel) => channel.path !== 'settings');

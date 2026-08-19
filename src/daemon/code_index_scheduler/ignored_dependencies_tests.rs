@@ -407,6 +407,9 @@ export function GenerationAnchor() { return 1; }
     registry.shutdown().await;
 }
 
+// Builds its escape fixture with unix symlinks; Windows symlink creation
+// needs privileges the CI runner does not hold.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsafe_or_unverified_ignored_entrypoints_preserve_the_serving_head() {
     let fixture = GitFixture::new(

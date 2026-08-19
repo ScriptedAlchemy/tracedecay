@@ -444,6 +444,100 @@ fn stage_manifest(
     )
 }
 
+/// Sealed code generations journal only their replay source; the projection
+/// manifest is rebuilt from the sealed artifact and supplied by the
+/// publication owner. The supplied manifest must bind through the journaled
+/// identity digests and publish. Refusing every sealed supplied manifest as
+/// `Conflict` failed each code-graph publication immediately after its own
+/// journal append, so no sealed generation could ever become the verified
+/// head and code-index activation looped on `code graph database conflict`.
+#[test]
+fn sealed_code_generation_publishes_with_its_supplied_manifest() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("code-scope:sealed-supplied", "code-generation");
+    let sealed_manifest = manifest(
+        identity.clone(),
+        "code-graph:sealed-supplied",
+        "sealed",
+        vec![],
+        vec![],
+    );
+    let sealed_source = SealedCodeGenerationReplay {
+        repository: RepositoryId::new("repository.sealed-supplied").unwrap(),
+        generation: CodeGenerationId::new("code-generation.sealed-supplied").unwrap(),
+        sealed_state_digest: SealedGraphStateDigest::try_from(format!("sha256:{}", "7".repeat(64)))
+            .unwrap(),
+        projector_revision: GraphProjectorRevision::try_from(
+            "projector.sealed-supplied".to_owned(),
+        )
+        .unwrap(),
+    };
+    // The journal row is exactly what the code-index publisher appends: the
+    // sealed replay source rides in the payload while the identity digests
+    // pin the projection manifest built from the sealed artifact.
+    let record = authority.stage(
+        sealed_manifest
+            .relational_sealed_replay(
+                registered.binding.shard_id.clone(),
+                GraphIdempotencyKey::new("publish:code-graph:sealed-supplied").unwrap(),
+                digest('1'),
+                None,
+                sealed_source,
+                &|| Ok(()),
+            )
+            .unwrap(),
+    );
+
+    // A foreign manifest for the same journaled sealed replay stays refused:
+    // different projected content cannot pass the journaled recovered digest.
+    let foreign = manifest(
+        identity.clone(),
+        "code-graph:sealed-supplied",
+        "foreign-content",
+        vec![],
+        vec![],
+    );
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered
+            .registry
+            .publish_verified(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &record.publication.key,
+                Some(foreign),
+            )
+            .unwrap_err(),
+        GraphDbError::Conflict
+    );
+
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            Some(sealed_manifest.clone()),
+        )
+        .expect("the exact supplied sealed projection manifest must publish");
+    assert_eq!(commit.head.key, record.publication.key);
+    let snapshot = registered
+        .registry
+        .verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &identity,
+        )
+        .unwrap();
+    assert_eq!(snapshot.generation(), &sealed_manifest.generation);
+}
+
 #[test]
 fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes() {
     let temp = TempDir::new().unwrap();
@@ -474,6 +568,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
             &mut authority,
             &context,
             &g1_record.publication.key,
+            None,
         )
         .unwrap();
     let g1_head = g1_commit.head.clone();
@@ -520,6 +615,7 @@ fn retired_replay_survives_native_delete_failure_until_restart_cleanup_finalizes
             &mut authority,
             &context,
             &g2_record.publication.key,
+            None,
         )
         .unwrap();
     drop(g2_commit);
@@ -665,6 +761,7 @@ fn verified_generations_keep_old_reads_dependencies_and_leases_stable() {
             &mut authority,
             &context,
             &b1_record.publication.key,
+            None,
         )
         .unwrap();
 
@@ -709,6 +806,7 @@ fn verified_generations_keep_old_reads_dependencies_and_leases_stable() {
             &mut authority,
             &context,
             &a1_record.publication.key,
+            None,
         )
         .unwrap();
     let a1_snapshot = registered
@@ -762,6 +860,7 @@ fn verified_generations_keep_old_reads_dependencies_and_leases_stable() {
             &mut authority,
             &context,
             &b2_record.publication.key,
+            None,
         )
         .unwrap();
     assert_eq!(authority.cas_calls, 3);
@@ -799,6 +898,7 @@ fn verified_generations_keep_old_reads_dependencies_and_leases_stable() {
             &mut authority,
             &context,
             &a2_record.publication.key,
+            None,
         )
         .unwrap();
     drop(a1_snapshot);
@@ -828,6 +928,7 @@ fn restart_reverification_installs_once_and_steady_reads_need_no_authority() {
             &mut authority,
             &context,
             &record.publication.key,
+            None,
         )
         .unwrap();
     let first_head = first.head.clone();
@@ -848,6 +949,7 @@ fn restart_reverification_installs_once_and_steady_reads_need_no_authority() {
             &mut authority,
             &context,
             &g2_record.publication.key,
+            None,
         )
         .unwrap();
     assert!(registered.close().unwrap());
@@ -941,6 +1043,7 @@ fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
             &mut authority,
             &context,
             &g1_record.publication.key,
+            None,
         )
         .unwrap();
     let calls_after_g1 = authority.cas_calls;
@@ -951,6 +1054,7 @@ fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
             &mut authority,
             &context,
             &g1_record.publication.key,
+            None,
         )
         .unwrap();
     assert_eq!(exact.head, first.head);
@@ -974,6 +1078,7 @@ fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
                 &mut authority,
                 &context,
                 &g2_record.publication.key,
+                None,
             )
             .unwrap_err(),
         tracedecay_graph_db::GraphDbError::Cancelled
@@ -1052,6 +1157,7 @@ fn labeled_byte_record_entities_reach_a_verified_head() {
             &mut authority,
             &context,
             &record.publication.key,
+            None,
         )
         .unwrap();
     assert_eq!(commit.head.key, record.publication.key);

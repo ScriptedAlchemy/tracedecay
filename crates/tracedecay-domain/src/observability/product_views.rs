@@ -288,7 +288,9 @@ impl RemoteCoverageObservedV1 {
 
 /// Transport that rejected a surface argument. Unknown preserves missing
 /// attribution instead of inventing cli/mcp/http.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectedArgumentSurfaceV1 {
     Cli,
@@ -299,7 +301,9 @@ pub enum RejectedArgumentSurfaceV1 {
 
 /// Normalized rejected-argument name. Raw flags, values, and tokens never
 /// enter this vocabulary.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectedArgumentNameV1 {
     RequestBody,
@@ -311,7 +315,9 @@ pub enum RejectedArgumentNameV1 {
 }
 
 /// Closed error class for a rejected surface argument.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectedArgumentErrorClassV1 {
     Missing,

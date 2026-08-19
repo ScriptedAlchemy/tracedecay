@@ -149,11 +149,9 @@ pub(super) fn semantic_source_from_read(read: ExplorerSemanticReadV1) -> Explore
             "semantic_rollback",
             "a semantic generation rollback is in progress",
         ),
-        SemanticRuntimeStateV1::Failed { detail, .. } => ExplorerSourceProgressV1::error(
-            ExplorerSourceIdV1::Semantic,
-            "semantic_failed",
-            detail,
-        ),
+        SemanticRuntimeStateV1::Failed { detail, .. } => {
+            ExplorerSourceProgressV1::error(ExplorerSourceIdV1::Semantic, "semantic_failed", detail)
+        }
     }
 }
 

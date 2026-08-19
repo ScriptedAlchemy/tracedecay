@@ -14,9 +14,9 @@ import type { WorkChannel } from './workChannel.ts';
  * walks the attempt page, `workAccountingCards.ts` builds the sourced cards,
  * and `workTopologyAccounting.ts` assembles the twelve.
  *
- * `metricsGap` says `unsupported_schema` rather than `unavailable` on purpose;
- * the reasoning is in the assembler's module doc, which explains which three
- * dimensions have a mounted source and why the other nine cannot.
+ * `metricsGap` says `unsupported` rather than `unavailable` on purpose; the
+ * reasoning is in the assembler's module doc, which explains which dimensions
+ * are decoded from the mounted reads and why the rest stay stated absences.
  */
 
 /** The one `WorkAttemptListV1` variant that carries a page. */
@@ -90,13 +90,14 @@ export function accountingDimensionTitle(dimension: WorkAccountingDimension): st
 }
 
 /**
- * The persisted event kind that would feed each dimension.
+ * The persisted event kind that feeds each dimension.
  *
  * Copied from Plan 26's execution-topology event family and from
  * `EXECUTION_TOPOLOGY_EVENT_KINDS_V1` in the Rust projector, which spell them
- * identically. Naming the kind rather than the route is deliberate: the gap is
- * a read model that is not published, not a transport that is down, and a
- * reviewer who greps the kind lands on the projector rather than on a router.
+ * identically. Naming the kind rather than the route is deliberate: an
+ * absence here is a descriptor this ledger does not decode, not a transport
+ * that is down, and a reviewer who greps the kind lands on the projector
+ * rather than on a router.
  */
 export function accountingEventKind(dimension: WorkAccountingDimension): string {
   switch (dimension) {
@@ -282,12 +283,14 @@ export interface WorkTopologyAccountingReading {
 // --- Absences ----------------------------------------------------------------
 
 /**
- * The absence every unpublished dimension wears.
+ * The absence a dimension wears when this ledger takes no measurement for it.
  *
- * `unsupported_schema` rather than `unavailable`: the read model exists and
- * runs server-side, and what is missing is its publication to the dashboard
- * contract catalog. Saying `unavailable` would tell a reader a reachable
- * source refused, which is a different and fixable-in-a-different-place thing.
+ * `unsupported` rather than `unavailable`: `ExecutionTopologyMetricsV1` is
+ * published and mounted at `operation.work.topology_metrics`, and this ledger
+ * decodes its integration and stack families, but it does not decode a
+ * descriptor for this measure. Saying `unavailable` would tell a reader a
+ * reachable source refused, which is a different and
+ * fixable-in-a-different-place thing.
  */
 export function metricsGap(
   dimension: WorkAccountingDimension,
@@ -298,8 +301,8 @@ export function metricsGap(
   const tail = extra === undefined ? '' : ` ${extra}`;
   return {
     available: false,
-    state: 'unsupported_schema',
-    detail: `${measure} is projected by ExecutionTopologyMetricsV1 from ${kind}, and that read model is not published to this build — it has no entry in the dashboard contract schema and therefore no generated DTO and no mounted route, so this is a measurement no read here can take rather than one measured as zero.${tail}`,
+    state: 'unsupported',
+    detail: `${measure} belongs to the ${kind} event family Plan 26 projects through ExecutionTopologyMetricsV1; this ledger does not decode a descriptor for it, so it is a measurement not taken here rather than one measured as zero.${tail}`,
   };
 }
 

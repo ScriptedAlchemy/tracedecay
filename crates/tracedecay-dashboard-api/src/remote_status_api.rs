@@ -336,9 +336,7 @@ impl RemoteAuthoritySummaryV1 {
                 missing,
                 ..
             } => Self::Partial {
-                fence: known_fence
-                    .as_ref()
-                    .map(RemoteFenceSummaryV1::from_fence),
+                fence: known_fence.as_ref().map(RemoteFenceSummaryV1::from_fence),
                 missing: missing
                     .into_iter()
                     .map(RemoteAuthorityMissingReasonV1::from_reason)
@@ -432,22 +430,18 @@ mod tests {
                 note: READER_UNSUPPORTED_NOTE.to_owned(),
             }
         );
-        assert_eq!(
-            envelope.legal_actions,
-            vec![refresh_action()]
-        );
+        assert_eq!(envelope.legal_actions, vec![refresh_action()]);
     }
 
     #[test]
     fn present_reader_maps_the_canonical_observed_status() {
         let status = ready_status();
-        let reader: crate::RemoteOperationalStatusReader = Arc::new(move || {
-            RemoteOperationalStatusReadV1::Observed {
+        let reader: crate::RemoteOperationalStatusReader =
+            Arc::new(move || RemoteOperationalStatusReadV1::Observed {
                 listener: RemoteListenerReadV1::Serving,
                 status: status.clone(),
                 coverage: DoctorCoverageCompletenessV1::Complete,
-            }
-        });
+            });
 
         let envelope = status_from_reader(scope(), Some(reader));
 

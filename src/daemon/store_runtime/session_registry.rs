@@ -2403,6 +2403,13 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
         >,
     >,
     project_owners: ProjectRuntimeOwnerRegistryV1,
+    /// One graph-publication gate per code shard. The seat pass and the
+    /// background reconcile can both activate the same sealed generation, and
+    /// unserialized they race the graph database into Conflicts that burn the
+    /// whole activation window. The gate lives here because the retained code
+    /// graph runtime itself is minted fresh per activation call.
+    code_graph_publication_gates:
+        StdMutex<BTreeMap<tracedecay_store::StoreShardIdV1, Arc<StdMutex<()>>>>,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     retained_hook_tasks: RetainedHookTasks,
     session_sync_service:

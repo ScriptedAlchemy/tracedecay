@@ -810,6 +810,22 @@ pub enum RemoteAction {
         #[arg(long, value_name = "FILE")]
         enrollment_credential_file: PathBuf,
     },
+    /// Capture one observation into a node's offline spool while the
+    /// authority is unreachable
+    Capture {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+    /// Query one exact observation with honest local/remote coverage
+    Query {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+    /// Transfer one encrypted offline-capture frame to an enrolled node's spool
+    TransferFrame {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
     /// Replay pending offline-capture frames through the current authority
     Replay {
         #[command(flatten)]
@@ -842,6 +858,15 @@ impl From<RemoteAction> for tracedecay::remote_command::RemoteCommand {
             } => Self::Enroll {
                 args: authority.into(),
                 enrollment_credential_file,
+            },
+            RemoteAction::Capture { authority } => Self::Capture {
+                args: authority.into(),
+            },
+            RemoteAction::Query { authority } => Self::Query {
+                args: authority.into(),
+            },
+            RemoteAction::TransferFrame { authority } => Self::TransferFrame {
+                args: authority.into(),
             },
             RemoteAction::Replay { authority } => Self::Replay {
                 args: authority.into(),
