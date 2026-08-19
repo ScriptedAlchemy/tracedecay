@@ -23,7 +23,7 @@ use crate::observation::{
 };
 use crate::store::observation::GlobalDbObservationStore;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::privacy::RecordSanitizerV1;
+use tracedecay_runtime_core::privacy::{PrivacySanitizerError, RecordSanitizerV1};
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 
 mod discovery_queue;
@@ -1199,6 +1199,13 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
             HostAdmissionStatus::Degraded,
             false,
             Some("invalid_observation_contract"),
+        ),
+        ObservationApplicationError::Privacy(
+            PrivacySanitizerError::InvalidPolicy | PrivacySanitizerError::DetectorUnavailable,
+        ) => HostAdmissionOutcome::new(
+            HostAdmissionStatus::Unavailable,
+            true,
+            Some("privacy_authority_unavailable"),
         ),
         ObservationApplicationError::Privacy(_) => HostAdmissionOutcome::new(
             HostAdmissionStatus::Degraded,
