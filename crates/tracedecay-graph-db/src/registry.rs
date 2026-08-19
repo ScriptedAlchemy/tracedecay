@@ -2355,7 +2355,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_runtime_denies_resolution_without_waiting() {
+    fn closing_runtime_defers_resolution_until_the_close_settles() {
         let temporary = TempDir::new().unwrap();
         let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
         let registration = registration(temporary.path());
@@ -2376,11 +2376,16 @@ mod tests {
         else {
             panic!("ready runtime must enter closing for this test");
         };
+        // While the close is in flight, resolution waits and observes its own
+        // typed deadline, never a fabricated conflict for the same owner.
+        let mut bounded = registration.clone();
+        bounded.deadline = Instant::now() + Duration::from_millis(100);
         assert_eq!(
-            registry.resolve(registration.clone()).unwrap_err(),
-            GraphDbError::Conflict
+            registry.resolve(bounded).unwrap_err(),
+            GraphDbError::DeadlineExceeded
         );
         registry.restore_ready(*reservation).unwrap();
+        drop(registry.resolve(registration).unwrap());
     }
 
     #[test]
