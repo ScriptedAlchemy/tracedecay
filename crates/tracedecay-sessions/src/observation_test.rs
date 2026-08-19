@@ -534,6 +534,31 @@ async fn exact_duplicate_reports_authoritative_projection_status() {
 }
 
 #[tokio::test]
+async fn exact_duplicate_with_missed_read_back_stays_typed_unavailable() {
+    let application = application();
+    let record = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "duplicate read miss" }
+    });
+    application
+        .capture_claude_observation(request(&record))
+        .await
+        .expect("first capture persists");
+    *application.store.read_none_once.lock().unwrap() = true;
+
+    let error = application
+        .capture_claude_observation(request(&record))
+        .await
+        .expect_err("a duplicate read miss cannot fabricate projection status");
+
+    assert!(matches!(
+        error,
+        ObservationApplicationError::PersistedObservationUnavailable
+    ));
+    assert_eq!(application.store.observations.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn replay_reports_partial_coverage_and_a_truthful_continuation() {
     let application = application();
     let mut start = 0;
