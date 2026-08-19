@@ -88,7 +88,12 @@ impl StoreAdministration {
         self.session_runtime_registry().await
     }
 
-    pub(in crate::daemon) async fn close_session_relation_graphs(&self) -> Result<()> {
+    /// Shutdown-only: drains the retained graph owners out of every session
+    /// runtime registry and closes their Grafeo runtimes. Call only after
+    /// [`SessionRuntimeMemoryGraphReconciliationShutdownV1::shutdown`] has
+    /// joined the reconciliation workers; the drain drops the runtimes those
+    /// workers publish through.
+    pub(in crate::daemon) async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
         let registries = self
             .session_runtime_registries
             .lock()
@@ -98,7 +103,7 @@ impl StoreAdministration {
             .collect::<Vec<_>>();
         let mut first_error = None;
         for registry in registries {
-            if let Err(error) = registry.close_mounted_session_relation_graphs().await
+            if let Err(error) = registry.close_retained_graph_runtimes_for_shutdown().await
                 && first_error.is_none()
             {
                 first_error = Some(error);

@@ -160,16 +160,24 @@ impl DaemonEngine {
             "memory_graph_reconciliation",
             || {},
             move |_| async move {
+                // Ordering is the correctness contract here: close registry
+                // admission, cancel reconciliation, JOIN the workers while
+                // their runtimes are still alive, and only then drain the
+                // retained owners and close the graphs. Closing before the
+                // join leaves the standing owner attachments leased and the
+                // close reports a structural Conflict on every shutdown.
+                // Every step stays bounded by this owner's deadline, so a
+                // genuinely stuck pass still surfaces as a typed timeout.
                 let owner = administration
                     .prepare_memory_graph_reconciliation_shutdown()
                     .await
                     .map_err(|error| error.to_string())?;
                 owner.cancel();
+                owner.shutdown().await?;
                 administration
-                    .close_session_relation_graphs()
+                    .close_retained_graph_runtimes_for_shutdown()
                     .await
-                    .map_err(|error| error.to_string())?;
-                owner.shutdown().await
+                    .map_err(|error| error.to_string())
             },
         )
     }

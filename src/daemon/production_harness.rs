@@ -652,22 +652,22 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
     {
         Ok(owner) => {
             owner.cancel();
+            if let Err(error) = owner.shutdown().await {
+                tracing::warn!(
+                    event = "production_harness_graph_shutdown_failed",
+                    error = %error,
+                    "production-composition graph reconciliation tasks did not stop cleanly"
+                );
+            }
             if let Err(error) = resources
                 .store_administration
-                .close_session_relation_graphs()
+                .close_retained_graph_runtimes_for_shutdown()
                 .await
             {
                 tracing::warn!(
                     event = "production_harness_graph_shutdown_failed",
                     error = %error,
                     "production-composition graph runtimes did not close cleanly"
-                );
-            }
-            if let Err(error) = owner.shutdown().await {
-                tracing::warn!(
-                    event = "production_harness_graph_shutdown_failed",
-                    error = %error,
-                    "production-composition graph reconciliation tasks did not stop cleanly"
                 );
             }
         }
