@@ -6,8 +6,8 @@ use super::{
     DynamicDiagnosticsController, EffectiveCapabilities, FeedbackCyclePort, GatewayCapabilities,
     GatewayMethod, LifecycleError, LspCatalogAdmission, LspRequestFailure, LspRequestId,
     LspSessionControl, MAX_CONTEXT_PROJECTION_KINDS, Map, MethodUnavailableReason,
-    OutboundController, OverlayError, OverlayStore, RpcFailure, SemanticController,
-    SemanticProviderPort, SessionLifecycle, TRACEDECAY_CONTEXT_EXPAND_METHOD,
+    NativeIntegrationController, OutboundController, OverlayError, OverlayStore, RpcFailure,
+    SemanticController, SemanticProviderPort, SessionLifecycle, TRACEDECAY_CONTEXT_EXPAND_METHOD,
     TRACEDECAY_CONTEXT_METHOD, UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, Value,
     error_response, initialized_workspace_uris, is_supported_context_projection, json,
     negotiate_capabilities, overlay_failure, request_id, request_id_value, success_response,
@@ -136,6 +136,7 @@ where
             diagnostics: DiagnosticsController::new(diagnostics),
             dynamic_diagnostics: DynamicDiagnosticsController::default(),
             context: ContextController::default(),
+            native_integration: NativeIntegrationController::default(),
             semantic: SemanticController::default(),
             catalog: LspCatalogAdmission::from_application_catalog(),
             pending_workspace_mutation: None,
@@ -173,6 +174,17 @@ where
         C: ContextProjectionPort + Send + Sync + 'static,
     {
         self.context.port = Some(Arc::new(context));
+        self
+    }
+
+    /// Mounts the daemon-owned read of recently observed native-integration
+    /// transaction statuses, forwarded as server-to-client notifications only.
+    #[must_use]
+    pub fn with_native_integration_status_port(
+        mut self,
+        port: Arc<dyn crate::native_integration::NativeIntegrationStatusPort>,
+    ) -> Self {
+        self.native_integration.port = Some(port);
         self
     }
 

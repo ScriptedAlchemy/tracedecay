@@ -11,7 +11,7 @@ use tracedecay_domain::{
     WorkflowOutputArtifact, WorkflowOutputName, WorkflowOutputReference, WorkflowPlacementReceipt,
     WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext, WorkflowRunProjection,
     WorkflowRunStateError, WorkflowRunStatus, WorkflowStep, WorkflowStepEffectOutcome,
-    WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepOutput,
+    WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepOutput, WorkflowStepStatus,
 };
 
 fn id<T>(value: &str) -> T
@@ -461,7 +461,14 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
     )
     .unwrap();
     let mut run = WorkflowRunProjection::rebuild(&[admitted]).unwrap();
-    assert_eq!(run.ready_steps(), vec![id::<WorkflowStepId>("prepare")]);
+    assert_eq!(
+        run.step(&id("prepare")).unwrap().status(),
+        WorkflowStepStatus::Ready
+    );
+    assert_eq!(
+        run.step(&id("review")).unwrap().status(),
+        WorkflowStepStatus::Blocked
+    );
 
     let started = run
         .next_event(
@@ -512,12 +519,18 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
         .unwrap();
     run = run.apply(&completed).unwrap();
 
-    assert_eq!(run.ready_steps(), vec![id::<WorkflowStepId>("review")]);
-    let inputs = run.resolved_inputs(&id("review")).unwrap();
-    assert_eq!(inputs.len(), 1);
-    assert_eq!(inputs[0].reference(), &output("prepare", "context"));
-    assert_eq!(inputs[0].artifacts()[0].artifact(), &artifact);
-    assert_eq!(inputs[0].artifacts()[1].artifact(), &second_artifact);
+    assert_eq!(
+        run.step(&id("review")).unwrap().status(),
+        WorkflowStepStatus::Ready
+    );
+    let recorded = run
+        .step(&id("prepare"))
+        .unwrap()
+        .outputs()
+        .get(&id::<WorkflowOutputName>("context"))
+        .unwrap();
+    assert_eq!(recorded.artifacts()[0].artifact(), &artifact);
+    assert_eq!(recorded.artifacts()[1].artifact(), &second_artifact);
     assert_eq!(run.status(), WorkflowRunStatus::Running);
 }
 
