@@ -397,12 +397,14 @@ fn log_background_shutdown_receipt(receipt: &shutdown_coordination::ShutdownRece
             .owners
             .iter()
             .find(|entry| entry.name == *owner)
-            .map(|entry| match &entry.status {
-                shutdown_coordination::ShutdownStatus::Clean => "clean".to_owned(),
-                shutdown_coordination::ShutdownStatus::Failed(error) => error.clone(),
-                shutdown_coordination::ShutdownStatus::TimedOut => "timed_out".to_owned(),
-            })
-            .unwrap_or_else(|| "unreported".to_owned());
+            .map_or_else(
+                || "unreported".to_owned(),
+                |entry| match &entry.status {
+                    shutdown_coordination::ShutdownStatus::Clean => "clean".to_owned(),
+                    shutdown_coordination::ShutdownStatus::Failed(error) => error.clone(),
+                    shutdown_coordination::ShutdownStatus::TimedOut => "timed_out".to_owned(),
+                },
+            );
         log_daemon_event(
             "daemon_shutdown",
             &[

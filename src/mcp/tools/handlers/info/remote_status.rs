@@ -29,6 +29,10 @@ pub(crate) fn handle_remote_status(
 }
 
 #[cfg(test)]
+// The env lock deliberately spans the fixture's await points: it serializes
+// process-wide TRACEDECAY_DATA_DIR mutation exactly like the other dispatch
+// test modules, which carry the same allowance.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use std::path::Path;
     use std::sync::Arc;

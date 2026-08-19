@@ -10,7 +10,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;

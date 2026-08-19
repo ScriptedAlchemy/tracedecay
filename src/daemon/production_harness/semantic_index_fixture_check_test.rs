@@ -2,7 +2,7 @@
 //!
 //! Copies the demo codebase in `tests/fixtures/semantic_index` into a
 //! throwaway checkout, installs SHA-256-verified local model bytes into an
-//! isolated `TRACEDECAY_DATA_DIR`, and proves in-process FastEmbed embeds
+//! isolated `TRACEDECAY_DATA_DIR`, and proves in-process `FastEmbed` embeds
 //! and indexes it: a complete vector generation publishes while semantic
 //! activation stays off (Plan 20 compare-and-swap after a passing Plan 15
 //! evaluation) and exact/lexical/graph retrieval keep answering.
@@ -34,11 +34,10 @@ use super::*;
 const PROBE_SYMBOL: &str = "reserve_inventory_for_checkout";
 
 fn model_cache_dir() -> PathBuf {
-    std::env::var_os("TRACEDECAY_FASTEMBED_MODEL_CACHE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("target/fastembed-model-cache")
-        })
+    std::env::var_os("TRACEDECAY_FASTEMBED_MODEL_CACHE").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("target/fastembed-model-cache"),
+        PathBuf::from,
+    )
 }
 
 /// A member is reusable only as a regular file whose length and SHA-256
