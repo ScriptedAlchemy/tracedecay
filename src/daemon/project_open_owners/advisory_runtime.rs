@@ -110,7 +110,7 @@ mod tests;
 #[derive(Clone)]
 struct ProjectOpenAdvisoryFeedbackCycleV1 {
     registration: Arc<AdvisoryProductionStartupRegistrationV1>,
-    lsp_input: FeedbackCycleLspInput,
+    producer: Arc<ProjectOpenScoutProducerV1>,
     root_uri: String,
     feedback_scope: FeedbackScopeV1,
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
@@ -178,19 +178,25 @@ impl Drop for ScoutHookRegistrationV1 {
 }
 
 impl ProjectOpenAdvisoryFeedbackCycleV1 {
+    /// Resolves the cycle input from the current configuration revision and
+    /// the current sealed code-index generation on every invocation. A Plan 20
+    /// settings PATCH landing after project open (for example enabling the
+    /// Context Scout checkbox) therefore remounts the producer path on the
+    /// next cycle instead of rejecting every cycle as
+    /// `feedback-cycle-configuration-drift` until the project is reopened, and
+    /// files sealed by later generations stay eligible without a reopen.
     async fn run_cycle(
         &self,
         request: FeedbackCycleRequest,
         deadline: MonotonicDeadline,
         agent_stop_gate: bool,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
-        self.run_cycle_with_lsp_input(
-            Arc::clone(&self.lsp_input),
-            request,
-            deadline,
-            agent_stop_gate,
-        )
-        .await
+        let indexed_files = current_indexed_files(&self.producer)
+            .await
+            .ok_or_else(|| LspRuntimeFailure::new("feedback-cycle-current-census"))?;
+        let lsp_input = current_feedback_lsp_input(&self.producer, &indexed_files).await?;
+        self.run_cycle_with_lsp_input(lsp_input, request, deadline, agent_stop_gate)
+            .await
     }
 
     async fn run_cycle_with_lsp_input(
@@ -522,6 +528,26 @@ struct ProjectOpenScoutProducerV1 {
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
 }
 
+/// Sorted logical paths from the current sealed code-index generation,
+/// resolved per cycle. The one-time project-open census is never retained, so
+/// files sealed by later generations map saved-edit hooks and mount providers
+/// without a project reopen. `None` is the typed no-sealed-generation state.
+async fn current_indexed_files(producer: &ProjectOpenScoutProducerV1) -> Option<Vec<String>> {
+    let generation = producer
+        .code_index_schedulers
+        .latest_complete_ready_decoded_for_root_scope(&producer.project_root, &producer.scope)
+        .await?;
+    let mut indexed_files = generation
+        .generation()
+        .snapshot()
+        .files
+        .iter()
+        .map(|file| file.logical_path.clone())
+        .collect::<Vec<_>>();
+    indexed_files.sort();
+    Some(indexed_files)
+}
+
 async fn current_feedback_lsp_input(
     producer: &ProjectOpenScoutProducerV1,
     indexed_files: &[String],
@@ -591,18 +617,14 @@ async fn current_feedback_lsp_input(
 /// none of them invents guidance.
 async fn run_production_hook_cycle(
     cycle: Arc<ProjectOpenAdvisoryFeedbackCycleV1>,
-    producer: Arc<ProjectOpenScoutProducerV1>,
     request: HookOrchestrationRequestV1,
     work_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> HookOrchestrationWorkOutcomeV1 {
     if work_cancellation.is_cancelled() {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
-    let Some(generation) = producer
-        .code_index_schedulers
-        .latest_complete_ready_decoded_for_root_scope(&producer.project_root, &producer.scope)
-        .await
-    else {
+    let producer = Arc::clone(&cycle.producer);
+    let Some(indexed_files) = current_indexed_files(&producer).await else {
         observe_hook_feedback_cycle_terminal(
             &cycle.registration.host_delivery.source_observations,
             &request,
@@ -610,14 +632,6 @@ async fn run_production_hook_cycle(
         );
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
-    let mut indexed_files = generation
-        .generation()
-        .snapshot()
-        .files
-        .iter()
-        .map(|file| file.logical_path.clone())
-        .collect::<Vec<_>>();
-    indexed_files.sort();
     let Some(document_uri) = hook_feedback_document_uri_or_observe(
         &producer.project_root,
         &indexed_files,
@@ -907,7 +921,7 @@ pub(super) async fn register_production_feedback_and_advisory(
     state: &ProjectOpenDependentOwnerState,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
 ) -> Result<()> {
-    let (feedback_cycle, feedback_scope, lsp_input) =
+    let (feedback_cycle, feedback_scope) =
         register_production_feedback_cycle(invocation, project_root, state).await?;
     register_production_advisory_owner(
         invocation,
@@ -915,7 +929,6 @@ pub(super) async fn register_production_feedback_and_advisory(
         state,
         feedback_cycle,
         feedback_scope,
-        lsp_input,
         lsp_session_factory,
     )
     .await
@@ -1037,11 +1050,7 @@ async fn register_production_feedback_cycle(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
-) -> Result<(
-    Arc<FeedbackCycleRuntime>,
-    FeedbackScopeV1,
-    FeedbackCycleLspInput,
-)> {
+) -> Result<(Arc<FeedbackCycleRuntime>, FeedbackScopeV1)> {
     let configuration_digest = &state.scout_configuration.snapshot.effective_behavior_digest;
     let policy_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.project-open.policy.v1",
@@ -1082,9 +1091,8 @@ async fn register_production_feedback_cycle(
         message: format!("project-open feedback cycle parts failed: {error}"),
     })?;
     let feedback_scope = parts.feedback_scope.clone();
-    let lsp_input = Arc::clone(&parts.lsp_input);
     if let Some(runtime) = invocation.service.feedback_cycle(Some(project_root)).await {
-        return Ok((runtime, feedback_scope, lsp_input));
+        return Ok((runtime, feedback_scope));
     }
     let runtime = invocation
         .feedback_runtime_registrar()
@@ -1108,7 +1116,7 @@ async fn register_production_feedback_cycle(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open feedback cycle registration failed: {error}"),
         })?;
-    Ok((runtime, feedback_scope, lsp_input))
+    Ok((runtime, feedback_scope))
 }
 
 async fn register_production_advisory_owner(
@@ -1117,15 +1125,8 @@ async fn register_production_advisory_owner(
     state: &ProjectOpenDependentOwnerState,
     feedback_cycle: Arc<FeedbackCycleRuntime>,
     feedback_scope: FeedbackScopeV1,
-    lsp_input: FeedbackCycleLspInput,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
 ) -> Result<()> {
-    let scout_configuration = ContextScoutConfigurationPinV1::from_current(
-        &state.scout_configuration,
-    )
-    .ok_or_else(|| TraceDecayError::Config {
-        message: "project-open Context Scout configuration is unavailable".to_owned(),
-    })?;
     let scout_owner =
         state
             .graph
@@ -1147,12 +1148,14 @@ async fn register_production_advisory_owner(
         revision_id: configuration.revision_id.clone(),
         snapshot: configuration.snapshot.clone(),
     };
-    if !scout_configuration.matches_current(&current_configuration) {
-        return Err(TraceDecayError::Config {
-            message: "project-open Context Scout configuration changed before model installation"
-                .to_owned(),
-        });
-    }
+    // The Plan 20 control pin and the model configuration are read from the
+    // same current snapshot: a settings PATCH that landed after project open
+    // (a deferred mount, or the user enabling the Context Scout checkbox)
+    // mounts the updated state here instead of failing until reopen.
+    let scout_configuration = ContextScoutConfigurationPinV1::from_current(&current_configuration)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open Context Scout configuration is unavailable".to_owned(),
+        })?;
     let model_config = tracedecay_agent_hosts::automation::config::from_configuration_snapshot(
         &configuration.snapshot,
     )?;
@@ -1241,15 +1244,6 @@ async fn register_production_advisory_owner(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open advisory runtime construction failed: {error}"),
         })?;
-    let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
-        registration: Arc::clone(&registration),
-        lsp_input,
-        root_uri: state.admitted_root_uri.clone(),
-        feedback_scope: feedback_scope.clone(),
-        github_pull_request_id,
-        ci_discovery_config,
-        hook_config_root: state.graph.hook_store_layout().data_root.clone(),
-    });
     let producer = Arc::new(ProjectOpenScoutProducerV1 {
         graph: Arc::clone(&state.graph),
         scout_owner,
@@ -1263,13 +1257,21 @@ async fn register_production_advisory_owner(
         requester: state.requester.clone(),
         diagnostic_broker: Arc::clone(&state.diagnostic_broker),
     });
+    let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
+        registration: Arc::clone(&registration),
+        producer,
+        root_uri: state.admitted_root_uri.clone(),
+        feedback_scope: feedback_scope.clone(),
+        github_pull_request_id,
+        ci_discovery_config,
+        hook_config_root: state.graph.hook_store_layout().data_root.clone(),
+    });
     let work_cycle = Arc::clone(&advisory_cycle);
     let work =
         move |request: HookOrchestrationRequestV1,
               work_cancellation: tracedecay_runtime_core::cancellation::CancellationToken| {
             let cycle = Arc::clone(&work_cycle);
-            let producer = Arc::clone(&producer);
-            async move { run_production_hook_cycle(cycle, producer, request, work_cancellation).await }
+            async move { run_production_hook_cycle(cycle, request, work_cancellation).await }
         };
     let orchestrator =
         BoundedHookOrchestratorV1::new(1, work).ok_or_else(|| TraceDecayError::Config {
