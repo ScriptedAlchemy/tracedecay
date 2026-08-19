@@ -4,7 +4,7 @@ import type {
   WorkflowDefinitionDisposition,
   WorkflowRunProjection,
 } from '../../contracts/index.ts';
-import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
+import { scopeKey, scopedUrl, scopeWritable, useScope } from '../../data/scope/store.ts';
 import { callWork, type WorkResult } from '../work/workApi.ts';
 import {
   WORKFLOW_ACTIVATE_DEFINITION_ROUTE,
@@ -78,14 +78,27 @@ function lifecycleRoute(action: WorkflowLifecycleAction) {
   }
 }
 
+/** The refusal a lifecycle command outside the writable scope reports without
+ * issuing a request — the same `locked` reading Work commands answer, because
+ * the gateway rule it repeats is the same one (`scopeWritable`). */
+function notWritable(reason: string): WorkResult<WorkflowDefinitionDisposition> {
+  return { outcome: 'refused', state: 'locked', detail: reason };
+}
+
 /** One compare-and-swap lifecycle transition; resolves to the daemon's own
- * `WorkResult` and re-reads the definitions list afterwards. */
+ * `WorkResult` and re-reads the definitions list afterwards. A scope the
+ * gateway serves read-only is refused here without dispatching, exactly as
+ * Work commands are. */
 export function useWorkflowLifecycle() {
   const scope = useScope((state) => state.scope);
   const key = scopeKey(scope);
   const client = useQueryClient();
+  const writability = scopeWritable(scope);
   return useMutation<WorkResult<WorkflowDefinitionDisposition>, never, WorkflowLifecycleCommand>({
     mutationFn: (command) => {
+      if (writability.state !== 'writable') {
+        return Promise.resolve(notWritable(writability.reason));
+      }
       const route = lifecycleRoute(command.action);
       return callWork(
         route,

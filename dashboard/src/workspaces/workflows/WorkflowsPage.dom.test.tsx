@@ -218,6 +218,39 @@ describe('the Workflows page over mounted routes', () => {
     expect((screen.getByLabelText('Expected revision') as HTMLInputElement).value).toBe('1');
   });
 
+  it('refuses a lifecycle command under a read-only scope without dispatching it', async () => {
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'proj_other',
+        label: 'Other project',
+        activation: 'selected',
+      },
+    });
+    const calls = serve((url) =>
+      url.includes('/application/workflow/list-definitions')
+        ? { status: 200, body: envelope([definition()]) }
+        : { status: 503, body: { kind: 'problem', value: { problem: {} } } },
+    );
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: /workflow\.release-train/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'activate' }));
+
+    // The scope authority's own reason, answered without a request: the
+    // gateway serves every non-active project read-only.
+    expect(await screen.findByText(/is not the active project/)).toBeTruthy();
+    expect(
+      calls.find((call) => call.url.includes('/application/workflow/activate-definition')),
+    ).toBeUndefined();
+    // The definitions read did dispatch, through the selected project's gateway.
+    expect(
+      calls.some((call) =>
+        call.url.startsWith('/api/projects/proj_other/application/workflow/list-definitions'),
+      ),
+    ).toBe(true);
+  });
+
   it('renders a lifecycle conflict verbatim rather than pretending the transition landed', async () => {
     serve((url) => {
       if (url.includes('/application/workflow/list-definitions')) {
