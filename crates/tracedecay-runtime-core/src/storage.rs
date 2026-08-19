@@ -439,6 +439,22 @@ pub fn resolve_persisted_layout(
     .map(Some)
 }
 
+/// Evidence gathered while matching legacy profile stores. The caller uses it
+/// to decide whether the selected store outranks the candidates or whether
+/// the split identity must surface as a cutover conflict; a typed record
+/// keeps the flags from being transposed across that boundary.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StoreSelectionEvidence {
+    /// The selected store's own manifest names this exact checkout root.
+    pub selected_manifest_names_exact_root: bool,
+    /// At least one candidate manifest names this exact checkout root.
+    pub candidates_name_exact_root: bool,
+    /// The registry selected this store through an exact path alias whose
+    /// recorded Git identity still matches the live checkout. Filled by the
+    /// caller, which owns registry access.
+    pub selected_via_exact_registry_alias: bool,
+}
+
 /// Finds pre-repository-identity profile stores that were keyed by an older
 /// path-derived project id but still name this exact local checkout, or one of
 /// its linked worktrees, in their manifest. Remote URLs are deliberately not
@@ -447,7 +463,7 @@ pub fn matching_legacy_profile_layouts(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
-) -> Result<(Vec<StoreLayout>, bool, bool)> {
+) -> Result<(Vec<StoreLayout>, StoreSelectionEvidence)> {
     matching_legacy_profile_layouts_with_git_identity_resolver(
         project_root,
         profile_root,
@@ -463,14 +479,14 @@ fn matching_legacy_profile_layouts_with_git_identity_resolver<D, G>(
     excluded_project_id: Option<&str>,
     mut is_detached_linked_worktree: D,
     mut git_identity: G,
-) -> Result<(Vec<StoreLayout>, bool, bool)>
+) -> Result<(Vec<StoreLayout>, StoreSelectionEvidence)>
 where
     D: FnMut(&Path) -> bool,
     G: FnMut(&Path) -> crate::worktree::GitRepoIdentityOutcome,
 {
     let projects_root = profile_root.join("projects");
     let Ok(entries) = fs::read_dir(&projects_root) else {
-        return Ok((Vec::new(), false, false));
+        return Ok((Vec::new(), StoreSelectionEvidence::default()));
     };
     let mut manifest_paths = entries
         .flatten()
@@ -591,8 +607,11 @@ where
     }
     Ok((
         layouts,
-        selected_manifest_matches_exact_root,
-        candidates_match_exact_root,
+        StoreSelectionEvidence {
+            selected_manifest_names_exact_root: selected_manifest_matches_exact_root,
+            candidates_name_exact_root: candidates_match_exact_root,
+            selected_via_exact_registry_alias: false,
+        },
     ))
 }
 
@@ -1357,7 +1376,7 @@ mod tests {
         )
         .unwrap();
 
-        let (layouts, _, _) = matching_legacy_profile_layouts_with_git_identity_resolver(
+        let (layouts, _) = matching_legacy_profile_layouts_with_git_identity_resolver(
             &project_root,
             &profile_root,
             None,
@@ -1367,7 +1386,7 @@ mod tests {
         .unwrap();
         assert!(layouts.is_empty(), "a timed-out current root cannot match");
 
-        let (layouts, _, _) = matching_legacy_profile_layouts_with_git_identity_resolver(
+        let (layouts, _) = matching_legacy_profile_layouts_with_git_identity_resolver(
             &project_root,
             &profile_root,
             None,
@@ -1424,63 +1443,61 @@ mod tests {
         write_manifest(&profile_root, "proj_unrelated", &unrelated_root);
 
         let resolver_calls = RefCell::new(Vec::new());
-        let (layouts, selected_manifest_matches_exact_root, candidates_match_exact_root) =
-            matching_legacy_profile_layouts_with_git_identity_resolver(
-                &project_root,
-                &profile_root,
-                None,
-                |_| false,
-                |root| {
-                    resolver_calls.borrow_mut().push(root.to_path_buf());
-                    crate::worktree::GitRepoIdentityOutcome::Resolved(
-                        crate::worktree::GitRepoIdentity {
-                            worktree_root: root.to_path_buf(),
-                            common_dir: dir.path().join("shared.git"),
-                        },
-                    )
-                },
-            )
-            .unwrap();
+        let (layouts, evidence) = matching_legacy_profile_layouts_with_git_identity_resolver(
+            &project_root,
+            &profile_root,
+            None,
+            |_| false,
+            |root| {
+                resolver_calls.borrow_mut().push(root.to_path_buf());
+                crate::worktree::GitRepoIdentityOutcome::Resolved(
+                    crate::worktree::GitRepoIdentity {
+                        worktree_root: root.to_path_buf(),
+                        common_dir: dir.path().join("shared.git"),
+                    },
+                )
+            },
+        )
+        .unwrap();
         assert_eq!(layouts.len(), 1);
         assert_eq!(
             layouts[0].identity.project_id.as_deref(),
             Some("proj_exact")
         );
-        assert!(!selected_manifest_matches_exact_root);
-        assert!(candidates_match_exact_root);
+        assert!(!evidence.selected_manifest_names_exact_root);
+        assert!(evidence.candidates_name_exact_root);
         assert!(
             resolver_calls.borrow().is_empty(),
             "exact-root selection must not invoke shared-Git discovery"
         );
 
         resolver_calls.borrow_mut().clear();
-        let (layouts, selected_manifest_matches_exact_root, candidates_match_exact_root) =
-            matching_legacy_profile_layouts_with_git_identity_resolver(
-                &project_root,
-                &profile_root,
-                Some("proj_exact"),
-                |_| false,
-                |root| {
-                    resolver_calls.borrow_mut().push(root.to_path_buf());
-                    crate::worktree::GitRepoIdentityOutcome::Resolved(
-                        crate::worktree::GitRepoIdentity {
-                            worktree_root: root.to_path_buf(),
-                            common_dir: dir.path().join("shared.git"),
-                        },
-                    )
-                },
-            )
-            .unwrap();
+        let (layouts, evidence) = matching_legacy_profile_layouts_with_git_identity_resolver(
+            &project_root,
+            &profile_root,
+            Some("proj_exact"),
+            |_| false,
+            |root| {
+                resolver_calls.borrow_mut().push(root.to_path_buf());
+                crate::worktree::GitRepoIdentityOutcome::Resolved(
+                    crate::worktree::GitRepoIdentity {
+                        worktree_root: root.to_path_buf(),
+                        common_dir: dir.path().join("shared.git"),
+                    },
+                )
+            },
+        )
+        .unwrap();
         assert_eq!(layouts.len(), 1);
         assert_eq!(
             layouts[0].identity.project_id.as_deref(),
             Some("proj_unrelated")
         );
         assert!(
-            selected_manifest_matches_exact_root,
+            evidence.selected_manifest_names_exact_root,
             "the caller decides whether the selected exact root outranks recovery"
         );
-        assert!(!candidates_match_exact_root);
+        assert!(!evidence.candidates_name_exact_root);
         assert_eq!(
             resolver_calls.borrow().as_slice(),
             [project_root, unrelated_root],
@@ -1557,27 +1574,26 @@ mod tests {
         write_manifest(&profile_root, "proj_historical", &historical_root);
 
         let resolver_calls = RefCell::new(Vec::new());
-        let (layouts, selected_manifest_matches_exact_root, candidates_match_exact_root) =
-            matching_legacy_profile_layouts_with_git_identity_resolver(
-                &worktree_root,
-                &profile_root,
-                Some("proj_selected"),
-                |_| false,
-                |root| {
-                    resolver_calls.borrow_mut().push(root.to_path_buf());
-                    crate::worktree::GitRepoIdentityOutcome::Resolved(
-                        crate::worktree::GitRepoIdentity {
-                            worktree_root: root.to_path_buf(),
-                            common_dir: dir.path().join("shared.git"),
-                        },
-                    )
-                },
-            )
-            .unwrap();
+        let (layouts, evidence) = matching_legacy_profile_layouts_with_git_identity_resolver(
+            &worktree_root,
+            &profile_root,
+            Some("proj_selected"),
+            |_| false,
+            |root| {
+                resolver_calls.borrow_mut().push(root.to_path_buf());
+                crate::worktree::GitRepoIdentityOutcome::Resolved(
+                    crate::worktree::GitRepoIdentity {
+                        worktree_root: root.to_path_buf(),
+                        common_dir: dir.path().join("shared.git"),
+                    },
+                )
+            },
+        )
+        .unwrap();
 
         assert_eq!(layouts.len(), 1);
-        assert!(!selected_manifest_matches_exact_root);
-        assert!(!candidates_match_exact_root);
+        assert!(!evidence.selected_manifest_names_exact_root);
+        assert!(!evidence.candidates_name_exact_root);
         assert_eq!(
             resolver_calls.borrow().as_slice(),
             [worktree_root, historical_root],
