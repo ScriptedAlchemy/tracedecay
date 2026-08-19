@@ -84,7 +84,7 @@ platform = { host = 'cfg(windows)' }
 test-group = 'windows-session-sqlite'
 
 [[profile.ci.overrides]]
-filter = '(binary(=core_cli_suite) & test(/^tool_first_touch_test::/)) | (binary(=mcp_suite) & test(/^mcp_dashboard_tool_test::/)) | (binary(=hooks_lsp_suite) & (test(/^lsp_code_diagnostics_test::/) | test(/^extract_worker_test::/)))'
+filter = '(binary(=core_cli_suite) & test(/^tool_first_touch_test::/)) | (binary(=mcp_suite) & test(/^mcp_dashboard_tool_test::/)) | (binary(=hooks_lsp_suite) & test(/^lsp_code_diagnostics_test::/))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-process-heavy'
 

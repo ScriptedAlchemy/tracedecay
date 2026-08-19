@@ -60,6 +60,7 @@ mod registered_accounting;
 mod registered_analytics;
 mod registered_dashboard;
 mod registered_lcm;
+mod registered_lcm_privacy;
 mod registered_legacy_relations;
 mod registered_session_sync;
 mod registered_sessions;
@@ -123,6 +124,7 @@ pub use registered::{
     WorkAttemptDeliveryCensusReadV1,
 };
 pub use registered_analytics::ObservabilityRetentionReceiptV1;
+pub use registered_lcm_privacy::{LcmPrivacyRescanOutcomeV1, LcmPrivacyRescanReceiptV1};
 pub use remote_deletion::{
     RemoteDeletionCleanupState, RemoteDeletionFailureCode, RemoteDeletionPhase,
     RemoteDeletionTarget, RemoteDeletionTombstone, RemoteDeletionTombstoneRecordOutcome,
@@ -153,8 +155,7 @@ pub use support::{
     global_accounting_mode, global_db_path, global_db_path_is_overridden,
 };
 use support::{
-    SESSION_MESSAGE_SEARCH_MAX_FETCH, analytics_scope_query,
-    code_projects_missing_primary_root_columns, downrank_inventory_messages,
+    SESSION_MESSAGE_SEARCH_MAX_FETCH, analytics_scope_query, downrank_inventory_messages,
     ensure_code_project_primary_root_columns, ensure_parse_offset_columns,
     ensure_session_parent_columns, ensure_table_columns, git_remote_search_alias,
     global_db_operation_error, global_db_operation_message, interleave_workflow_search_results,

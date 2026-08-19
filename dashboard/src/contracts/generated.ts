@@ -3554,6 +3554,7 @@ export const ProjectContextPayloadV1Schema = z.object({
 export type ProjectContextPayloadV1 = z.infer<typeof ProjectContextPayloadV1Schema>;
 
 export const ProjectEditableSettingsV1Schema = z.object({
+  context_scout: z.boolean(),
   exclude: z.array(z.string()),
   extract_docstrings: z.boolean(),
   git_ignore: z.boolean(),
@@ -3611,6 +3612,7 @@ export type ProjectRepoGroup = z.infer<typeof ProjectRepoGroupSchema>;
 
 /** Project-scoped settings patch accepted by `PATCH /api/settings/project`. */
 export const ProjectSettingsPatchSchema = z.object({
+  context_scout: z.boolean().nullable().optional(),
   exclude: z.array(z.string()).nullable().optional(),
   expected_revision_id: z.string(),
   extract_docstrings: z.boolean().nullable().optional(),

@@ -398,6 +398,7 @@ fn torn_durable_store_faults_reopen_and_never_advances_the_verified_head() {
             &mut authority,
             &context,
             &g1_record.publication.key,
+            None,
         )
         .unwrap();
     let verified_head = first.head.clone();
@@ -484,6 +485,7 @@ fn torn_durable_store_faults_reopen_and_never_advances_the_verified_head() {
             &mut authority,
             &context,
             &g2_record.publication.key,
+            None,
         )
         .unwrap_err();
     assert_eq!(publish_error, error);
@@ -520,6 +522,7 @@ fn interrupted_convergence_serves_the_prior_snapshot_and_replays_identically() {
             &mut authority,
             &context,
             &g1_record.publication.key,
+            None,
         )
         .unwrap();
     let prior_head = first.head.clone();
@@ -545,6 +548,7 @@ fn interrupted_convergence_serves_the_prior_snapshot_and_replays_identically() {
             &mut authority,
             &context,
             &g2_record.publication.key,
+            None,
         )
         .unwrap_err();
     assert!(
@@ -597,6 +601,7 @@ fn interrupted_convergence_serves_the_prior_snapshot_and_replays_identically() {
             &mut authority,
             &context,
             &g2_record.publication.key,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -618,6 +623,7 @@ fn interrupted_convergence_serves_the_prior_snapshot_and_replays_identically() {
             &mut authority,
             &context,
             &g2_record.publication.key,
+            None,
         )
         .unwrap();
     assert_eq!(exact.head, replayed_head);
@@ -665,6 +671,7 @@ fn reset_required_shape_is_recreated_fresh_and_republished_from_the_manifest() {
             &mut authority,
             &context,
             &record.publication.key,
+            None,
         )
         .unwrap();
     let head = commit.head.clone();

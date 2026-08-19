@@ -443,15 +443,6 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "bincode"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
@@ -2674,7 +2665,7 @@ version = "0.5.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38cf1373a739aeaa070430588c4026b3c1aa11cd0ad6e6673bda22a390aacda4"
 dependencies = [
- "bincode 2.0.1",
+ "bincode",
  "grafeo-common",
  "grafeo-core",
  "hashbrown 0.17.1",
@@ -2691,7 +2682,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5f446c25eeedab9cccaabc85060dfa08dac2d1041974244864f36436b81ca5a"
 dependencies = [
  "arcstr",
- "bincode 2.0.1",
+ "bincode",
  "bumpalo",
  "byteorder",
  "bytes",
@@ -2712,7 +2703,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e185dd750843637a2d99e56100c08ef4cc34ce4a7b5f9cb9566f873bbf54c90"
 dependencies = [
  "arcstr",
- "bincode 2.0.1",
+ "bincode",
  "byteorder",
  "bytes",
  "crc32fast",
@@ -2737,7 +2728,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ede967e6b0a16396c91752febdf037ab04ca69b851f6fb43565ee5f30586ee0d"
 dependencies = [
  "arcstr",
- "bincode 2.0.1",
+ "bincode",
  "bytes",
  "crc32fast",
  "grafeo-adapters",
@@ -2758,7 +2749,7 @@ version = "0.5.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6857029da63e10209ae622ba85a87593ea08646ea17c02d5aa14461c7ff296f7"
 dependencies = [
- "bincode 2.0.1",
+ "bincode",
  "byteorder",
  "bytes",
  "crc32fast",
@@ -5567,7 +5558,6 @@ version = "0.1.0-beta.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
- "bincode 1.3.3",
  "cap-fs-ext",
  "cap-std",
  "clap",

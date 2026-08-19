@@ -159,9 +159,9 @@ describe('Settings read model', () => {
     const config = project?.rows.find((row) => row.id === 'config');
     expect(config?.kind).toBe('group');
     // include, exclude, max_file_size, extract_docstrings, track_call_sites,
-    // git_ignore, telemetry.timings, sync.auto_track_pr_branches,
-    // sync.auto_track_pr_poll_secs
-    expect(config?.count).toBe(9);
+    // git_ignore, context_scout, telemetry.timings,
+    // sync.auto_track_pr_branches, sync.auto_track_pr_poll_secs
+    expect(config?.count).toBe(10);
     expect(countSettings(project?.rows ?? [])).toBe(project?.settingCount);
   });
 
@@ -325,6 +325,7 @@ describe('Settings authorized changes', () => {
         extract_docstrings: true,
         track_call_sites: true,
         git_ignore: true,
+        context_scout: false,
         telemetry_timings: false,
         auto_track_pr_branches: true,
         auto_track_pr_poll_secs: '120',

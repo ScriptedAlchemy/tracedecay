@@ -214,10 +214,6 @@ fn install_daemon_cpu_pool(command: Option<&Commands>) -> tracedecay::errors::Re
         })
 }
 
-fn is_extract_worker(command: Option<&Commands>) -> bool {
-    matches!(command, Some(Commands::ExtractWorker))
-}
-
 fn main() {
     let args = std::env::args_os().collect::<Vec<_>>();
     if let Some(code) = hook_capture_cmd::try_run(&args) {
@@ -280,13 +276,6 @@ fn async_main() -> tracedecay::errors::Result<()> {
     // the host, so which command is running has to be known before anything
     // is allowed to write there.
     tracedecay::daemon::install_stderr_tracing(stderr_tracing_default(cli.command.as_ref()));
-    // Extraction workers are synchronous subprocesses. Dispatch them before
-    // constructing Tokio: a full sync can spawn many workers, and giving each
-    // one its own async/blocking pools multiplies thread stacks and allocator
-    // arenas without doing any async work.
-    if is_extract_worker(cli.command.as_ref()) {
-        tracedecay::extraction_worker::run_worker();
-    }
     // Rayon otherwise creates one worker per logical CPU on first use. On
     // large hosts that pool competes with Tokio, SQLite, and per-index pools,
     // amplifying worktree warmup into CPU and memory contention. The daemon
@@ -573,7 +562,6 @@ impl CommandFamily {
             | Commands::Workflow { .. }
             | Commands::Lsp { .. }
             | Commands::Remote { .. }
-            | Commands::ExtractWorker
             | Commands::Dashboard { .. }
             | Commands::Serve { .. }
             | Commands::Daemon { .. } => Self::Runtime,
@@ -822,7 +810,6 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
         Commands::Lsp { action } => {
             lsp_cmd::handle_lsp_action(action).await?;
         }
-        Commands::ExtractWorker => unreachable!("extract-worker handled by early dispatch"),
         Commands::Dashboard {
             path,
             host,

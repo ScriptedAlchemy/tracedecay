@@ -15284,6 +15284,10 @@
     },
     "ProjectEditableSettingsV1": {
       "properties": {
+        "context_scout": {
+          "description": "Rendered from the effective Plan 20 `context_scout.settings.v1` value;\nthe dashboard holds no Scout state of its own.",
+          "type": "boolean"
+        },
         "exclude": {
           "items": {
             "type": "string"
@@ -15325,7 +15329,8 @@
         "track_call_sites",
         "git_ignore",
         "telemetry",
-        "sync"
+        "sync",
+        "context_scout"
       ],
       "type": "object"
     },
@@ -15481,6 +15486,12 @@
       "additionalProperties": false,
       "description": "Project-scoped settings patch accepted by `PATCH /api/settings/project`.",
       "properties": {
+        "context_scout": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "exclude": {
           "items": {
             "type": "string"

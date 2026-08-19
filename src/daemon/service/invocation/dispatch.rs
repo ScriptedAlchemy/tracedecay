@@ -299,11 +299,18 @@ impl DaemonInvocationService {
                 cancellation,
             } => {
                 let observability_producer = self.observability_producer(project_root).await;
+                let status_broadcast = match project_root {
+                    Some(project_root) => {
+                        Some(self.native_integration_status_broadcast(project_root).await)
+                    }
+                    None => None,
+                };
                 Box::pin(execute_native_integration(
                     request_id,
                     configuration_runtime.clone(),
                     native_integration_service,
                     observability_producer,
+                    status_broadcast,
                     surface_operation,
                     request,
                     observed_at,

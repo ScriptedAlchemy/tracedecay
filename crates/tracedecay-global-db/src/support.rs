@@ -406,23 +406,6 @@ pub(crate) async fn table_exists(
     Ok(rows.next().await?.is_some())
 }
 
-/// True when `code_projects` exists but still carries the released
-/// pre-`primary_root` column shape (the 8-column registry shipped through
-/// 0.0.66). A missing table is an unknown shape, not a released one.
-pub(crate) async fn code_projects_missing_primary_root_columns(
-    conn: &(impl tracedecay_runtime_core::db::engine::QueryExecutor + ?Sized),
-) -> tracedecay_runtime_core::db::engine::Result<bool> {
-    if !table_exists(conn, "code_projects").await? {
-        return Ok(false);
-    }
-    for &(column, _) in CODE_PROJECT_PRIMARY_ROOT_COLUMNS {
-        if !table_column_exists(conn, "code_projects", column).await? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// Adds the nullable `primary_root_*` columns the final `code_projects`
 /// contract requires to a registry created by a released pre-`primary_root`
 /// binary. Purely additive: existing rows are preserved with NULL values

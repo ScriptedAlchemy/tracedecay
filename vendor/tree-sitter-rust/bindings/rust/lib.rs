@@ -14,23 +14,6 @@ unsafe extern "C" {
 /// The tree-sitter [`LanguageFn`] for the patched Rust grammar.
 pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_rust) };
 
-/// Generated node type metadata for the patched grammar.
-pub const NODE_TYPES: &str = include_str!(
-    "../../../../crates/tracedecay-code-extraction/vendor/tree-sitter-rust/src/node-types.json"
-);
-/// Syntax highlighting query for the patched grammar.
-pub const HIGHLIGHTS_QUERY: &str = include_str!(
-    "../../../../crates/tracedecay-code-extraction/vendor/tree-sitter-rust/queries/highlights.scm"
-);
-/// Injection query for the patched grammar.
-pub const INJECTIONS_QUERY: &str = include_str!(
-    "../../../../crates/tracedecay-code-extraction/vendor/tree-sitter-rust/queries/injections.scm"
-);
-/// Symbol tagging query for the patched grammar.
-pub const TAGS_QUERY: &str = include_str!(
-    "../../../../crates/tracedecay-code-extraction/vendor/tree-sitter-rust/queries/tags.scm"
-);
-
 #[cfg(test)]
 mod tests {
     #[test]

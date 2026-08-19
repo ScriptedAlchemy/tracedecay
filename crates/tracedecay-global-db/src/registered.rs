@@ -54,22 +54,21 @@ impl RegisteredGlobalDbOwnerV1 {
     /// version-skewed, or drifted store fails the attach with each
     /// authority's exact typed reset identity instead of opening on schema it
     /// cannot honor, and an admissibly-fresh existing store receives the full
-    /// install.
+    /// install. Nothing steps an incompatible store forward in place; the
+    /// only in-place changes admission performs are the additive columns for
+    /// shapes released binaries actually shipped.
     ///
     /// Short-lived attaches have no background maintenance task, so the
     /// authority-invariant convergence runs synchronously here: a store whose
     /// tamper-invalidation triggers deleted the trusted audit checkpoint (or
     /// whose guard triggers were altered) fails the attach instead of opening
     /// on unaudited authority rows.
-    pub async fn migrate_and_attach(
+    pub async fn admit_and_attach(
         database: DatabaseOwnerV1,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_database(temporary);
         super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
-        registered.migrate_released_registry_columns().await?;
-        registered.require_admitted_registry_shape().await?;
-        registered.validate_authority_schema_contract().await?;
         registered.rearm_queued_projection_retries().await?;
         super::schema_stages::converge_attached_registered_schema(&registered.database).await?;
         drop(registered);
@@ -78,7 +77,7 @@ impl RegisteredGlobalDbOwnerV1 {
 
     /// Returns the resumable convergence plan for an already admitted schema
     /// without retaining an unowned client lease.
-    pub async fn migrate_and_attach_for_daemon(
+    pub async fn admit_and_attach_for_daemon(
         database: DatabaseOwnerV1,
     ) -> tracedecay_runtime_core::errors::Result<(
         Self,
@@ -87,9 +86,6 @@ impl RegisteredGlobalDbOwnerV1 {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_database(temporary);
         super::schema_stages::ensure_attached_registered_schema(&registered.database).await?;
-        registered.migrate_released_registry_columns().await?;
-        registered.require_admitted_registry_shape().await?;
-        registered.validate_authority_schema_contract().await?;
         registered.rearm_queued_projection_retries().await?;
         drop(registered);
         Ok((
@@ -682,76 +678,6 @@ impl RegisteredGlobalDb {
             },
         )?;
         Ok(())
-    }
-
-    async fn validate_authority_schema_contract(
-        &self,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
-        let snapshot = self.read_snapshot().await.map_err(|error| {
-            registered_error("begin registered authority schema validation", error)
-        })?;
-        // Classify pre-release observation shapes with their typed reset
-        // authority before the generic contract validation reports them as an
-        // untyped column mismatch. Like `require_admitted_registry_shape`,
-        // this is where an existing store meets the final contract.
-        super::observation::require_admitted_observation_shape(&snapshot).await?;
-        super::schema_contract::validate_authority_schema_contract(&snapshot).await
-    }
-
-    /// Classifies registry and remote-deletion contract drift on an existing
-    /// store with the same typed reset authorities as schema admission, so a
-    /// store that outlived its persisted shape surfaces `ResetRequired`
-    /// instead of an untyped database error. Admission only runs when a store
-    /// is first initialized, so this attach boundary is where existing stores
-    /// meet the final contract.
-    async fn require_admitted_registry_shape(&self) -> tracedecay_runtime_core::errors::Result<()> {
-        let snapshot = self.read_snapshot().await.map_err(|error| {
-            registered_error("begin registered authority schema validation", error)
-        })?;
-        if let Err(error) =
-            super::schema_contract::validate_remote_deletion_schema_contract(&snapshot).await
-        {
-            return Err(TraceDecayError::reset_required(
-                "remote deletion tombstones",
-                error.to_string(),
-            ));
-        }
-        if let Err(error) =
-            super::schema_contract::validate_registry_schema_contract(&snapshot).await
-        {
-            return Err(TraceDecayError::reset_required(
-                super::project_registry::PROJECT_REGISTRY_AUTHORITY,
-                error.to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Migrates a registry created by a released pre-`primary_root` binary
-    /// (the 8-column `code_projects` shape shipped through 0.0.66) by adding
-    /// the final nullable columns in place. Purely additive: existing rows
-    /// are preserved and every other schema drift still fails validation.
-    /// Reads first so an already-final store never opens a write transaction.
-    async fn migrate_released_registry_columns(
-        &self,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
-        const OPERATION: &str = "migrate released code_projects registry columns";
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| registered_error(OPERATION, error))?;
-        let missing = super::code_projects_missing_primary_root_columns(&snapshot)
-            .await
-            .map_err(|error| registered_error(OPERATION, error))?;
-        drop(snapshot);
-        if !missing {
-            return Ok(());
-        }
-        let transaction = self.database.begin_write_transaction(OPERATION).await?;
-        super::ensure_code_project_primary_root_columns(&transaction)
-            .await
-            .map_err(|error| registered_error(OPERATION, error))?;
-        transaction.commit().await
     }
 
     async fn rearm_queued_projection_retries(&self) -> tracedecay_runtime_core::errors::Result<()> {

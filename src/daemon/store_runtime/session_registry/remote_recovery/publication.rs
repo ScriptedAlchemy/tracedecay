@@ -315,7 +315,7 @@ impl RemoteRecoveryPublicationContextV1 {
         )
         .await?;
         let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
-        let database = RegisteredGlobalDbOwnerV1::migrate_and_attach(database).await?;
+        let database = RegisteredGlobalDbOwnerV1::admit_and_attach(database).await?;
         let (graph, store_target) =
             super::super::code_graph::graph_attachment::open_session_relation_owner(
                 &self.registry,

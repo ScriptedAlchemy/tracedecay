@@ -31,11 +31,9 @@ use super::{TraceDecay, TraceDecayOpenOptions};
 mod adoption;
 mod branches;
 mod identity;
-mod recovery;
 mod registry;
 
 pub use adoption::MovedStoreAdoption;
-pub(crate) use recovery::is_fts_only_corruption;
 pub(crate) use registry::git_remote_url;
 
 #[cfg(not(any(test, feature = "test-transport")))]
@@ -371,6 +369,7 @@ impl TraceDecay {
             read_only: false,
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
+            context_scout_claim_authorities: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
@@ -597,6 +596,7 @@ impl TraceDecay {
             read_only: false,
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
+            context_scout_claim_authorities: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
@@ -798,6 +798,7 @@ impl TraceDecay {
             read_only: true,
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
+            context_scout_claim_authorities: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,

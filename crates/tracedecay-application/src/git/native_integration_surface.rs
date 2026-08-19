@@ -556,10 +556,19 @@ struct NativeIntegrationSurfaceSpec {
     surfaces: &'static [BindingSurface],
 }
 
-/// Plan 36 exposes this journey through CLI and MCP only. HTTP is deliberately
-/// excluded for the same reason `git_preview`/`git_apply` are: apply is an
-/// authoritative native mutation and there is no transport fallback path.
+/// Native-integration mutations are exposed through CLI and MCP only. HTTP is
+/// deliberately excluded for the same reason `git_preview`/`git_apply` are:
+/// apply is an authoritative native mutation and there is no transport
+/// fallback path.
 const NATIVE_INTEGRATION_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
+/// The read-only status projection additionally serves the dashboard consumer
+/// over the same application result. No mutating operation gains a dashboard
+/// binding: the dashboard can observe a transaction but never advance one.
+const NATIVE_INTEGRATION_STATUS_SURFACES: [BindingSurface; 3] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Dashboard,
+];
 const NATIVE_WORKTREE_SURFACES: [BindingSurface; 3] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
@@ -631,7 +640,7 @@ const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 11] = [
         description: "Read the durable phase, cancellation request, and terminal outcome of \
                       one native-integration transaction.",
         example: "Show the status of this native-integration transaction",
-        surfaces: &NATIVE_INTEGRATION_SURFACES,
+        surfaces: &NATIVE_INTEGRATION_STATUS_SURFACES,
     },
     NativeIntegrationSurfaceSpec {
         operation: NATIVE_INTEGRATION_CANCEL_OPERATION,

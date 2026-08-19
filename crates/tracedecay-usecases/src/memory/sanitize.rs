@@ -22,16 +22,43 @@ impl SanitizedAddFactRequest {
     }
 }
 
+/// Canonical fact payload wire shared by ingest sanitization and the at-rest
+/// privacy rescan: both must present the detector with exactly this shape so
+/// receipts and re-evaluations agree.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SanitizedFactPayloadWire {
-    content: String,
-    category: FactCategoryV1,
-    tags: Vec<String>,
-    entities: Vec<String>,
-    metadata: Value,
+pub(super) struct SanitizedFactPayloadWire {
+    pub(super) content: String,
+    pub(super) category: FactCategoryV1,
+    pub(super) tags: Vec<String>,
+    pub(super) entities: Vec<String>,
+    pub(super) metadata: Value,
     #[serde(default)]
-    source_label: Option<String>,
+    pub(super) source_label: Option<String>,
+}
+
+pub(super) fn fact_payload_wire(
+    content: &str,
+    category: FactCategoryV1,
+    tags: &[String],
+    entities: &[String],
+    metadata: &Value,
+    source_label: Option<&str>,
+) -> Value {
+    let mut wire = json!({
+        "content": content,
+        "category": category,
+        "tags": tags,
+        "entities": entities,
+        "metadata": metadata,
+    });
+    if let (Some(source_label), Value::Object(object)) = (source_label, &mut wire) {
+        object.insert(
+            "source_label".to_owned(),
+            Value::String(source_label.to_owned()),
+        );
+    }
+    wire
 }
 
 pub(super) fn sanitize_add_fact_request(
@@ -48,21 +75,14 @@ pub(super) fn sanitize_add_fact_request(
     let Some(source_label) = sanitize_optional_memory_text(request.source_label.clone()) else {
         return Ok(None);
     };
-    let mut wire = json!({
-        "content": &request.content,
-        "category": request.category,
-        "tags": &request.tags,
-        "entities": &request.entities,
-        "metadata": &request.metadata,
-    });
-    if let Some(source_label) = &source_label
-        && let Value::Object(wire) = &mut wire
-    {
-        wire.insert(
-            "source_label".to_owned(),
-            Value::String(source_label.clone()),
-        );
-    }
+    let wire = fact_payload_wire(
+        &request.content,
+        request.category,
+        &request.tags,
+        &request.entities,
+        &request.metadata,
+        source_label.as_deref(),
+    );
     let MemoryFactSanitizationV1::Durable { payload, receipt } = sanitize_memory_fact_payload(wire)
         .map_err(|_| MemoryApplicationError::InvalidInput {
             invariant: "project-memory add request privacy sanitizer",

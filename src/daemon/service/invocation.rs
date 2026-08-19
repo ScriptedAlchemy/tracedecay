@@ -13,12 +13,12 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tracedecay_application::feedback::{
     FeedbackReadPort, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
 };
@@ -80,7 +80,8 @@ use super::project_runtime::{
     ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1,
 };
 use crate::agents::context_scout_ports::{
-    AdmittedContextScoutHookV1, ProjectContextScoutAddressRegistryV1,
+    AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
+    ProjectContextScoutAddressRegistryV1,
 };
 use crate::application_surface::{
     ContextScoutSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
@@ -238,7 +239,10 @@ pub(crate) use primitive::{
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
 };
 pub(crate) use types::{
-    DaemonLspInvocationOwner, HookOrchestrationAdmissionV1, admit_hook_orchestration,
+    BoundedHookOrchestratorV1, DaemonLspInvocationOwner, HookOrchestrationAdmissionV1,
+    HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
+    admit_registered_hook_orchestration, register_hook_orchestration_runtime,
+    unregister_hook_orchestration_runtime,
 };
 // `pub(super)` on these shapes, in their original flat-file home, meant
 // "visible to `daemon::service`" (their home's actual parent); nesting them
@@ -293,6 +297,17 @@ pub(crate) struct DaemonInvocationService {
     worktree_holder_admission: crate::daemon::native_integration::WorktreeHolderAdmissionFenceV1,
     session_holder_databases:
         Arc<Mutex<BTreeMap<PathBuf, crate::global_db::RegisteredGlobalDbLeaseV1>>>,
+    /// Per-project fan-out of observed native-integration transaction
+    /// statuses. The invocation handler publishes; LSP sessions read and
+    /// notify. Created on demand under one project-root key shared by both.
+    native_integration_status_broadcasts: Arc<
+        Mutex<
+            BTreeMap<
+                PathBuf,
+                Arc<tracedecay_usecases::native_integration::NativeIntegrationStatusBroadcastV1>,
+            >,
+        >,
+    >,
 }
 
 #[cfg(test)]
@@ -326,7 +341,22 @@ impl DaemonInvocationService {
             worktree_holder_admission:
                 crate::daemon::native_integration::daemon_worktree_holder_admission_fence(),
             session_holder_databases: Arc::new(Mutex::new(BTreeMap::new())),
+            native_integration_status_broadcasts: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    /// The one status broadcast shared by the native-integration invocation
+    /// handler and every LSP session factory registered for `project_root`.
+    pub(crate) async fn native_integration_status_broadcast(
+        &self,
+        project_root: &Path,
+    ) -> Arc<tracedecay_usecases::native_integration::NativeIntegrationStatusBroadcastV1> {
+        let mut broadcasts = self.native_integration_status_broadcasts.lock().await;
+        Arc::clone(
+            broadcasts
+                .entry(project_root.to_path_buf())
+                .or_default(),
+        )
     }
 
     pub(crate) fn github_stack_coordinator(

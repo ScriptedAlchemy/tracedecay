@@ -109,6 +109,12 @@ export function ProjectSettingsFields({
           error={errorFor(errors, 'auto_track_pr_branches')}
           onChange={(checked) => onChange({ ...values, auto_track_pr_branches: checked })}
         />
+        <SettingsCheckbox
+          label="Context Scout suggestions"
+          checked={values.context_scout}
+          error={errorFor(errors, 'context_scout')}
+          onChange={(checked) => onChange({ ...values, context_scout: checked })}
+        />
       </div>
       {writable.state === 'writable' ? (
         <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>

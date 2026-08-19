@@ -7,6 +7,8 @@ use super::{
 
 pub mod harness;
 #[cfg(test)]
+mod lcm_privacy_rescan;
+#[cfg(test)]
 mod lcm_schema;
 #[cfg(test)]
 mod session_sync;

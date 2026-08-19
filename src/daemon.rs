@@ -158,6 +158,7 @@ use connection_serving::{
     await_project_owner_or_disconnect, serve_routed_rmcp_connection, serve_windows_broker_client,
     serve_windows_broker_client_with_class,
 };
+pub(crate) mod context_scout_lifecycle;
 mod core_admission;
 mod engine;
 #[cfg(unix)]
@@ -186,6 +187,7 @@ pub(crate) mod dashboard_automation;
 mod dashboard_configuration_test_runtime;
 pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay;
+pub(crate) mod privacy_remediation;
 pub(crate) mod project_open_owners;
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_configuration_test_runtime::{
@@ -369,7 +371,7 @@ pub(crate) use service::invocation::{
     DaemonFeedbackRuntimeRegistrationError, DaemonInvocationService, DaemonLspOwnerRegistrar,
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
     DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
-    DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1, admit_hook_orchestration,
+    DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1, admit_registered_hook_orchestration,
     daemon_operation_event_authority,
 };
 pub use service::{

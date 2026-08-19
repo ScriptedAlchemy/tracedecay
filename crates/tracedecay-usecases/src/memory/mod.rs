@@ -12,6 +12,7 @@ mod curation;
 mod dashboard;
 mod error;
 mod graph;
+mod privacy_remediation;
 mod project_memory;
 mod sanitize;
 
@@ -25,6 +26,9 @@ pub use curation::{
     ProjectMemoryFactMutationTarget,
 };
 pub use error::{MemoryApplicationError, MemoryMutationError};
+pub use privacy_remediation::{
+    PrivacyRemediationTriggerV1, ProjectMemoryPrivacyRemediationReceiptV1,
+};
 pub use project_memory::{
     ProjectMemoryFactAddEffectMaterialV1, ProjectMemoryFactAddPreflight,
     ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome, automatic_fact_add_command,

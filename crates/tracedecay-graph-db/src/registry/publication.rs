@@ -380,15 +380,39 @@ impl GraphDbRegistry {
         }
     }
 
+    /// Publishes the journaled replay behind `publication_key` through the
+    /// one crash-safe first-publish protocol: apply the graph batch as
+    /// unverified projection work, close and reopen the database file,
+    /// recompute the recovered generation digest from actual rows, and only
+    /// then advance the relational verified head by compare-and-swap. A
+    /// successful WAL sync during the apply is not a publication receipt;
+    /// nothing is served until the recovered digest matches.
+    ///
+    /// A supplied manifest carries the native rows already in the caller's
+    /// hands (a sealed code generation's projection, or a semantic-vector
+    /// manifest whose canonical source is metadata-only) so first publication
+    /// does not re-read and re-project the canonical replay source. It is
+    /// validated against the journaled replay binding before any row is
+    /// applied; a foreign manifest for the same journaled replay conflicts.
+    /// Without one, the manifest is reconstructed from the journaled
+    /// canonical replay source.
     pub fn publish_verified(
         &self,
         registration: GraphDbRegistration,
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
+        supplied_manifest: Option<GraphGenerationManifest>,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         let operation = self.registered_operation(registration)?;
-        self.publish_verified_inner(&operation, authority, context, publication_key, None, false)
+        self.publish_verified_inner(
+            &operation,
+            authority,
+            context,
+            publication_key,
+            supplied_manifest,
+            false,
+        )
     }
 
     /// Publishes through an already-issued, registry-validated graph lease.
@@ -405,25 +429,6 @@ impl GraphDbRegistry {
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         let operation = self.registered_operation_with_lease(database)?;
         self.publish_verified_inner(&operation, authority, context, publication_key, None, false)
-    }
-
-    pub fn publish_verified_manifest(
-        &self,
-        registration: GraphDbRegistration,
-        authority: &mut dyn GraphPublicationStoreV1,
-        context: &GraphPublicationOperationContextV1<'_>,
-        publication_key: &GraphPublicationKeyV1,
-        manifest: GraphGenerationManifest,
-    ) -> Result<VerifiedGraphCommit, GraphDbError> {
-        let operation = self.registered_operation(registration)?;
-        self.publish_verified_inner(
-            &operation,
-            authority,
-            context,
-            publication_key,
-            Some(manifest),
-            false,
-        )
     }
 
     pub(super) fn publish_ready_staged_generation(

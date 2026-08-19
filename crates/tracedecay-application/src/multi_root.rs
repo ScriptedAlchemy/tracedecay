@@ -15,11 +15,16 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use crate::{RequestAdmission, RequestContext};
 
 pub mod catalog;
+mod collection;
 mod locator;
 
 pub use catalog::{
     MultiRootApplicationOperation, multi_root_capability_manifest,
     multi_root_executable_binding_registry, multi_root_operation_authority,
+};
+pub use collection::{
+    MultiRootCollectionResolutionV1, MultiRootCollectionSelectorV1,
+    MultiRootCollectionUnavailableV1,
 };
 pub use locator::{
     AuthorizedRoot, AuthorizedRootAdmission, RegisteredRootLocatorV1, RegisteredRootSelectorV1,

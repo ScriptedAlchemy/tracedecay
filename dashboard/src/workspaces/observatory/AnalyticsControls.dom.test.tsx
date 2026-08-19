@@ -290,6 +290,7 @@ function settingsPayload() {
         exclude: [],
         extract_docstrings: true,
         git_ignore: true,
+        context_scout: false,
         include: [],
         max_file_size: 1_048_576,
         sync: { auto_track_pr_branches: false, auto_track_pr_poll_secs: 300 },
