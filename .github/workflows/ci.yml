@@ -266,6 +266,11 @@ jobs:
           npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
           ast-grep --version
 
+      # The architecture tests exec `cargo metadata` at runtime; without an
+      # installed toolchain the rustup shim starts a mid-test component
+      # download that flakes. Install up front like the build job does.
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
