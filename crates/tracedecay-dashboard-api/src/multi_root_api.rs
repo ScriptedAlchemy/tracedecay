@@ -73,17 +73,7 @@ pub(crate) async fn resolve_collection_capability(
             MultiRootCollectionUnavailableV1::TransportNotAdmitted.reason(),
         );
     };
-    let selector = match MultiRootCollectionSelectorV1::new(explicit_target, None) {
-        Ok(selector) => selector,
-        Err(error) => {
-            return MultiRootCapabilityV1::unavailable(
-                MultiRootCollectionUnavailableV1::AuthorityUnavailable {
-                    detail: error.to_string(),
-                }
-                .reason(),
-            );
-        }
-    };
+    let selector = MultiRootCollectionSelectorV1::new(explicit_target, None);
     let Some(target) = selector.target().cloned() else {
         return MultiRootCapabilityV1::unavailable(
             MultiRootCollectionUnavailableV1::NoCollectionNamed.reason(),

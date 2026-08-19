@@ -8,7 +8,7 @@
 
 use tracedecay_domain::ScopeSetId;
 
-use super::{AuthorizedScopeSet, MultiRootQueryError};
+use super::AuthorizedScopeSet;
 
 /// Selects the collection a read surface must resolve.
 ///
@@ -25,16 +25,11 @@ impl MultiRootCollectionSelectorV1 {
     pub fn new(
         explicit_target: Option<ScopeSetId>,
         default_collection: Option<ScopeSetId>,
-    ) -> Result<Self, MultiRootQueryError> {
-        for collection in explicit_target.iter().chain(default_collection.iter()) {
-            collection
-                .validate()
-                .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
-        }
-        Ok(Self {
+    ) -> Self {
+        Self {
             explicit_target,
             default_collection,
-        })
+        }
     }
 
     pub fn target(&self) -> Option<&ScopeSetId> {
@@ -199,22 +194,20 @@ mod tests {
         let selector = MultiRootCollectionSelectorV1::new(
             Some(collection("scope-set.explicit")),
             Some(collection("scope-set.default")),
-        )
-        .expect("selector");
+        );
         assert_eq!(selector.target(), Some(&collection("scope-set.explicit")));
     }
 
     #[test]
     fn default_collection_answers_only_when_nothing_explicit_is_named() {
         let with_default =
-            MultiRootCollectionSelectorV1::new(None, Some(collection("scope-set.default")))
-                .expect("selector");
+            MultiRootCollectionSelectorV1::new(None, Some(collection("scope-set.default")));
         assert_eq!(
             with_default.target(),
             Some(&collection("scope-set.default"))
         );
 
-        let unnamed = MultiRootCollectionSelectorV1::new(None, None).expect("selector");
+        let unnamed = MultiRootCollectionSelectorV1::new(None, None);
         assert_eq!(unnamed.target(), None);
     }
 
