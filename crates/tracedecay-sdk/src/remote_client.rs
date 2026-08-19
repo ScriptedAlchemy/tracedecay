@@ -162,9 +162,10 @@ impl EnrolledRemoteClient {
                 .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
         let mut builder = HttpClient::builder().timeout(timeout);
         if endpoint.scheme() == "http" {
-            // reqwest's system-proxy default would forward the plaintext
-            // request — Bearer credential included — to an HTTP_PROXY/
-            // ALL_PROXY host; loopback traffic never uses a proxy.
+            // The loopback-only plaintext admission above is void if a system
+            // proxy (`HTTP_PROXY`/`ALL_PROXY`) re-routes the request: the
+            // Bearer enrollment credential would leave the machine
+            // unencrypted. The loopback target never needs a proxy.
             builder = builder.no_proxy();
         }
         if let Some(pem) = root_certificate_pem {
