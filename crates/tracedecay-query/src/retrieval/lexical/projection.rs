@@ -8,8 +8,9 @@ use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
     ExtractionAdmittedChunkV1, FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1,
-    LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness, SourceOccurrenceId,
+    LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
+    SourceOccurrenceId,
 };
 
 use super::{
@@ -36,6 +37,12 @@ const BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1: usize = 512 * 1024 * 1024;
 /// First-query `new` / `new_admitted` is O(store); a missing caller deadline
 /// must not let that build run unbounded on the daemon query path.
 pub const LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1: u64 = 30_000_000;
+
+/// Plan 20 / request-budget override. A set `deadline_micros` wins; otherwise
+/// the crate fallback applies.
+pub fn lexical_projection_build_deadline_micros(request_deadline_micros: Option<u64>) -> u64 {
+    request_deadline_micros.unwrap_or(LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1)
+}
 
 fn map_postings_build_error(error: String) -> RetrievalPortError {
     if error == postings::LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED {
@@ -399,12 +406,42 @@ impl CodeLexicalProjectionAdapterV1 {
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<CodeSearchChunkV1>,
     ) -> Result<Self, RetrievalPortError> {
-        Self::new_inner(metadata, chunks, false)
+        Self::new_inner(metadata, chunks, false, None)
+    }
+
+    pub fn new_with_budget(
+        metadata: CodeLexicalProjectionMetadataV1,
+        chunks: Vec<CodeSearchChunkV1>,
+        budget: &RetrievalBudget,
+    ) -> Result<Self, RetrievalPortError> {
+        Self::new_inner(metadata, chunks, false, budget.deadline_micros)
     }
 
     pub fn new_admitted<C>(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<C>,
+    ) -> Result<Self, RetrievalPortError>
+    where
+        C: ExtractionAdmittedChunkV1,
+    {
+        Self::new_admitted_with_deadline(metadata, chunks, None)
+    }
+
+    pub fn new_admitted_with_budget<C>(
+        metadata: CodeLexicalProjectionMetadataV1,
+        chunks: Vec<C>,
+        budget: &RetrievalBudget,
+    ) -> Result<Self, RetrievalPortError>
+    where
+        C: ExtractionAdmittedChunkV1,
+    {
+        Self::new_admitted_with_deadline(metadata, chunks, budget.deadline_micros)
+    }
+
+    fn new_admitted_with_deadline<C>(
+        metadata: CodeLexicalProjectionMetadataV1,
+        chunks: Vec<C>,
+        deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError>
     where
         C: ExtractionAdmittedChunkV1,
@@ -416,6 +453,7 @@ impl CodeLexicalProjectionAdapterV1 {
                 .map(ExtractionAdmittedChunkV1::into_admitted_chunk)
                 .collect(),
             true,
+            deadline_micros,
         )
     }
 
@@ -423,9 +461,10 @@ impl CodeLexicalProjectionAdapterV1 {
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<CodeSearchChunkV1>,
         extraction_admitted: bool,
+        deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError> {
-        let deadline =
-            Instant::now() + Duration::from_micros(LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1);
+        let deadline = Instant::now()
+            + Duration::from_micros(lexical_projection_build_deadline_micros(deadline_micros));
         check_projection_build_deadline(deadline)?;
         metadata.validate()?;
         check_projection_build_deadline(deadline)?;
