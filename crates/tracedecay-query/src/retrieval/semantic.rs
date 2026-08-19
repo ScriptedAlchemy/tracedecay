@@ -24,6 +24,11 @@ use super::ports::{
     checkpoint_digest, contract_error, lane_candidate_cap,
 };
 
+/// Fallback exact-flat scan deadline when both request budgets omit
+/// `deadline_micros`. Retention is heap-capped; the visit is still a full
+/// generation scan, so a missing request deadline must not run unbounded.
+pub const SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1: u64 = 5_000_000;
+
 mod execution_authority;
 mod service;
 pub use execution_authority::{
@@ -657,20 +662,23 @@ fn semantic_checkpoint_digest(
     ))
 }
 
+fn effective_deadline_micros(request: &SemanticRetrievalRequestV1<'_>) -> u64 {
+    match (
+        request.budget.deadline_micros,
+        request.base.budget.deadline_micros,
+    ) {
+        (Some(lane), Some(base)) => lane.min(base),
+        (Some(lane), None) => lane,
+        (None, Some(base)) => base,
+        (None, None) => SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1,
+    }
+}
+
 fn deadline_exhausted<C: SemanticExecutionControl>(
     request: &SemanticRetrievalRequestV1<'_>,
     control: &C,
 ) -> bool {
-    let elapsed = elapsed_micros(request, control);
-    request
-        .budget
-        .deadline_micros
-        .is_some_and(|deadline| elapsed >= deadline)
-        || request
-            .base
-            .budget
-            .deadline_micros
-            .is_some_and(|deadline| elapsed >= deadline)
+    elapsed_micros(request, control) >= effective_deadline_micros(request)
 }
 
 fn elapsed_micros<C: SemanticExecutionControl>(

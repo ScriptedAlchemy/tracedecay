@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use roaring::RoaringBitmap;
 use tracedecay_domain::{
@@ -30,6 +31,19 @@ const FUZZY_SCORE_MILLIS: u64 = 500;
 const PHRASE_SCORE_MILLIS: u64 = 2_000;
 const ECHO_SCORE_MILLIS: u64 = 750;
 const BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1: usize = 512 * 1024 * 1024;
+
+/// Wall-clock bound for materializing one lexical generation's postings.
+/// First-query `new` / `new_admitted` is O(store); a missing caller deadline
+/// must not let that build run unbounded on the daemon query path.
+pub const LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1: u64 = 30_000_000;
+
+fn map_postings_build_error(error: String) -> RetrievalPortError {
+    if error == postings::LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED {
+        RetrievalPortError::BudgetExceeded
+    } else {
+        RetrievalPortError::Contract(error)
+    }
+}
 
 /// Generation and source metadata bound to one immutable lexical projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,13 +191,16 @@ struct LexicalGenerationPostingsV1 {
 }
 
 impl LexicalGenerationPostingsV1 {
-    fn from_rows(rows: &[ProjectedChunkV1]) -> Result<Self, RetrievalPortError> {
+    fn from_rows(rows: &[ProjectedChunkV1], deadline: Instant) -> Result<Self, RetrievalPortError> {
         let mut vocabulary = BTreeSet::new();
         let mut term_documents = BTreeMap::<LexicalFieldV1, BTreeMap<String, RoaringBitmap>>::new();
         let mut exact_documents = BTreeMap::<ExactFieldV1, BTreeMap<Vec<u8>, RoaringBitmap>>::new();
         let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
         let mut field_lengths = BTreeMap::<LexicalFieldV1, usize>::new();
         for (document, row) in rows.iter().enumerate() {
+            if Instant::now() >= deadline {
+                return Err(RetrievalPortError::BudgetExceeded);
+            }
             let document = document as u32;
             for (field, terms) in &row.fields {
                 *field_lengths.entry(*field).or_default() += terms.len();
@@ -234,8 +251,9 @@ impl LexicalGenerationPostingsV1 {
             ByteNgramPostings::from_documents(
                 rows.iter().map(|row| row.normalized_text.as_bytes()),
                 &mut ngram_budget,
+                Some(deadline),
             )
-            .map_err(RetrievalPortError::Contract)?,
+            .map_err(map_postings_build_error)?,
         );
         let raw_matches_normalized = rows.iter().all(|row| {
             row.chunk.sanitized_text.as_str().as_bytes() == row.normalized_text.as_bytes()
@@ -248,8 +266,9 @@ impl LexicalGenerationPostingsV1 {
                     rows.iter()
                         .map(|row| row.chunk.sanitized_text.as_str().as_bytes()),
                     &mut ngram_budget,
+                    Some(deadline),
                 )
-                .map_err(RetrievalPortError::Contract)?,
+                .map_err(map_postings_build_error)?,
             )
         };
         Ok(Self {
@@ -435,7 +454,9 @@ impl CodeLexicalProjectionAdapterV1 {
             rows.push(ProjectedChunkV1::new(chunk, logical_path));
         }
         rows.sort_by(|left, right| left.chunk.id.cmp(&right.chunk.id));
-        let postings = Arc::new(LexicalGenerationPostingsV1::from_rows(&rows)?);
+        let deadline =
+            Instant::now() + Duration::from_micros(LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1);
+        let postings = Arc::new(LexicalGenerationPostingsV1::from_rows(&rows, deadline)?);
         Ok(Self {
             metadata,
             rows: Arc::new(rows),
