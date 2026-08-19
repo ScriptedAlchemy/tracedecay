@@ -424,9 +424,14 @@ fn windows_pinned_file_blocks_replacement_until_authority_closes() {
     let retained = pinned.try_clone().unwrap();
 
     assert_eq!(retained.writer_open_path(&path).unwrap(), path);
-    assert_eq!(
-        std::fs::rename(&path, &retired).unwrap_err().kind(),
-        std::io::ErrorKind::PermissionDenied
+    // The block surfaces as ERROR_SHARING_VIOLATION (32) from the pin's
+    // share mode, or ERROR_ACCESS_DENIED (5) on hosts that deny through the
+    // handle instead; std's ErrorKind mapping for 32 varies by release, so
+    // assert the raw contract.
+    let blocked = std::fs::rename(&path, &retired).unwrap_err();
+    assert!(
+        matches!(blocked.raw_os_error(), Some(5 | 32)),
+        "pinned replacement must be blocked while the authority is open: {blocked}"
     );
     pinned.verify_current_path(&path).unwrap();
 

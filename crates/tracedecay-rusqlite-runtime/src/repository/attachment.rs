@@ -822,6 +822,11 @@ mod tests {
             .unwrap();
     }
 
+    /// Unix-only: on Windows the writer's pin denies the swap-back rename
+    /// outright, so this race cannot occur there;
+    /// `connection::tests::windows_pinned_file_blocks_replacement_until_authority_closes`
+    /// proves that stronger OS-level protection directly.
+    #[cfg(unix)]
     #[test]
     fn writer_binds_pinned_file_across_a_b_a_path_swap() {
         let directory = TempDir::new().unwrap();
