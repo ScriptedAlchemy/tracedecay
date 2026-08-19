@@ -438,9 +438,21 @@ where
                     if cancellation.is_cancelled() {
                         return Err(ObservationApplicationError::Cancelled);
                     }
-                    let projection_status = stored
-                        .ok_or(ObservationApplicationError::PersistedObservationUnavailable)?
-                        .projection_status();
+                    // A newly committed row is queued by this persist even
+                    // when an immediate reader snapshot trails the write. An
+                    // exact or covered duplicate wrote no projection state,
+                    // so a read-back miss cannot truthfully invent one.
+                    let projection_status = match stored {
+                        Some(stored) => stored.projection_status(),
+                        None if matches!(&outcome, ObservationPersistOutcome::Committed(_)) => {
+                            ObservationProjectionStatus::Queued
+                        }
+                        None => {
+                            return Err(
+                                ObservationApplicationError::PersistedObservationUnavailable,
+                            );
+                        }
+                    };
                     Ok(CaptureObservationOutcome::Persisted {
                         outcome: Box::new(outcome),
                         projection_status,

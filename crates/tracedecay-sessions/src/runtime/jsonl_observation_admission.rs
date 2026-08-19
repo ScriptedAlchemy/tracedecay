@@ -8,7 +8,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
-use crate::admission::{HostAdmission, is_admission_cancellation};
+use crate::admission::{HostAdmission, HostAdmissionOutcome, is_admission_cancellation};
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
@@ -309,19 +309,13 @@ impl ActiveAdmission<'_> {
                 )
                 .await
             }
-            // Deterministic refusals (content-derived identity conflicts and
-            // other non-retryable dispositions) re-fail identically forever;
+            // Deterministic content refusals re-fail identically forever;
             // advance coverage with a durable typed reason so the stream
             // converges instead of re-reporting the same records every sweep.
-            Err(outcome) if !outcome.retryable => {
-                if self.cancellation.is_cancelled() {
-                    return Err(TranscriptIngestError::NonDurableRecord {
-                        provider: self.provider,
-                        offset: frame.checkpoint.offset,
-                        end_offset: frame.checkpoint.end_offset,
-                        reason: outcome.reason_code.unwrap_or("host_admission_incomplete"),
-                    });
-                }
+            Err(outcome)
+                if is_deterministic_content_refusal(&outcome)
+                    && !self.cancellation.is_cancelled() =>
+            {
                 tracing::warn!(
                     provider = self.provider,
                     offset = frame.checkpoint.offset,
@@ -336,17 +330,24 @@ impl ActiveAdmission<'_> {
                 )
                 .await
             }
-            // Only retryable outcomes reach here (the arm above matched the
-            // rest). A retryable admission failure says nothing about the
-            // record itself, so the admission authority's own verdict must
-            // survive to classification — wrapping it as NonDurable laundered
-            // a converging cursor conflict into a terminal Degraded record.
             Err(outcome) => {
                 if is_admission_cancellation(&outcome, &self.cancellation) {
                     Err(TranscriptIngestError::Cancelled {
                         provider: self.provider,
                     })
                 } else {
+                    // Everything else says nothing about the record's
+                    // content: commit/read-back failures
+                    // (`observation_commit_failed`,
+                    // `authority_write_failed`,
+                    // `observation_persisted_value_unavailable`), unbound
+                    // authorities, and retryable races keep the admission
+                    // authority's own verdict as a typed block. The frontier
+                    // must not advance over a record whose durable fate is
+                    // unknown — the persist may already have committed and
+                    // advanced the source cursor, so a cover-past write here
+                    // would stack a second, conflicting cursor advance on
+                    // every frame.
                     Err(host_admission_error(self.provider, outcome))
                 }
             }
@@ -565,6 +566,21 @@ pub(super) async fn admit_jsonl_observations<State>(
     Ok(progress)
 }
 
+/// Non-retryable admission failures that are verdicts about the record's
+/// content. Only these may be covered past: they re-fail identically on every
+/// sweep, so a durable `AdmissionRefused` coverage row is what lets the
+/// stream converge. Every other failure — store commit/read-back failures,
+/// unbound authorities, retryable races — says nothing about the record and
+/// must surface as a typed block instead of writing coverage over a commit
+/// that never landed (or one that already landed and advanced the cursor).
+fn is_deterministic_content_refusal(outcome: &HostAdmissionOutcome) -> bool {
+    !outcome.retryable
+        && matches!(
+            outcome.reason_code,
+            Some("invalid_observation_contract" | "privacy_boundary_failed")
+        )
+}
+
 /// Log identity for a transcript file. Transcript paths sit under the
 /// operator's home directory and name real sessions, so ingest logs carry the
 /// basename only rather than persisting an absolute path into the daemon log.
@@ -599,3 +615,6 @@ pub(super) fn preflight_and_parse_new(
     preflight_strict_jsonl(provider, path, prev, max_new_bytes)?;
     Ok(parse_new())
 }
+
+#[cfg(test)]
+mod tests;

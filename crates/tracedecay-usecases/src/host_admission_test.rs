@@ -119,4 +119,17 @@ fn application_errors_map_to_bounded_static_outcomes() {
             Some("authority_write_failed"),
         )
     );
+    for error in [
+        tracedecay_runtime_core::privacy::PrivacySanitizerError::DetectorUnavailable,
+        tracedecay_runtime_core::privacy::PrivacySanitizerError::InvalidPolicy,
+    ] {
+        assert_eq!(
+            classify_error(&ObservationApplicationError::Privacy(error)),
+            HostAdmissionOutcome::new(
+                HostAdmissionStatus::Unavailable,
+                true,
+                Some("privacy_authority_unavailable"),
+            )
+        );
+    }
 }
