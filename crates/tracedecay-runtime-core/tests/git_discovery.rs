@@ -17,6 +17,50 @@ fn run_git(cwd: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed in {}", cwd.display());
 }
 
+#[test]
+fn repository_discovery_does_not_wait_for_the_blocking_pool() {
+    let fixture = TempDir::new().expect("fixture");
+    let repository = fixture.path().join("repository");
+    std::fs::create_dir_all(&repository).expect("repository directory");
+    run_git(&repository, &["init", "--quiet"]);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let blocker = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).expect("announce blocking task");
+            release_rx.recv().expect("release blocking task");
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocking task started");
+
+        let discovery = tokio::time::timeout(
+            Duration::from_secs(1),
+            discover_repository_identity(
+                &repository,
+                MonotonicDeadline::at(Instant::now() + Duration::from_secs(2)),
+                &CancellationToken::new(),
+            ),
+        )
+        .await;
+
+        release_tx.send(()).expect("release blocking task");
+        blocker.await.expect("blocking task joined");
+        let outcome = discovery.expect("repository discovery must not use the blocking pool");
+        assert!(
+            matches!(outcome, GitRepositoryIdentityOutcome::Resolved(_)),
+            "repository identity should resolve, got {outcome:?}"
+        );
+    });
+}
+
 #[tokio::test]
 async fn bounded_discovery_distinguishes_repository_and_non_repository() {
     let fixture = TempDir::new().expect("fixture");
