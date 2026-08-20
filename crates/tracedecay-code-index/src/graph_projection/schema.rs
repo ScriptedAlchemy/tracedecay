@@ -43,6 +43,15 @@ pub(super) fn file_import_relation_id(
     import: &CodeIndexImportEvidenceV1,
 ) -> Result<GraphRelationId, CodeGraphProjectionError> {
     let import_id = import_entity_id(import)?;
+    file_import_relation_id_with(import, &import_id)
+}
+
+/// Same relation identity with the import entity id already derived, so a
+/// caller that just computed it does not serialize and hash the import again.
+pub(super) fn file_import_relation_id_with(
+    import: &CodeIndexImportEvidenceV1,
+    import_id: &GraphEntityId,
+) -> Result<GraphRelationId, CodeGraphProjectionError> {
     GraphRelationId::new(stable_identity(
         "file-import",
         &format!(

@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
     time::Duration,
@@ -8,8 +9,8 @@ use tracedecay_code_extraction::incremental::ParseLimits;
 use tracedecay_code_index::{
     chunks::content_digest,
     graph_projection::{
-        CODE_GRAPH_PROJECTOR_REVISION, build_published_code_graph_manifest_checked,
-        code_graph_projection_identity,
+        CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError,
+        build_published_code_graph_manifest_checked, code_graph_projection_identity,
     },
     production::{
         CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
@@ -34,7 +35,7 @@ use tracedecay_domain::{
     SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
     StackNodeId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
 };
-use tracedecay_graph_db::{GraphNamespace, GraphProjectorRevision};
+use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
 use crate::support::{RUST_SOURCE, id};
 
@@ -698,6 +699,119 @@ fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_ident
         replayed
             .expected_recovered_digest(&|| Ok(()))
             .expect("replayed projection digest")
+    );
+}
+
+/// The graph publication manifest is a pure function of the immutable
+/// generation, so seat retries and the seat/reconcile duplicate publication of
+/// one sealed generation must not re-examine every chunk, symbol, and edge.
+/// The memo is fail-closed: a deadline mid-build records nothing, a memo hit
+/// still refuses an expired request, and a foreign projection identity or
+/// projector revision rebuilds in full instead of aliasing the cached
+/// manifest.
+#[test]
+fn repeated_graph_manifest_builds_reuse_the_memo_without_reexamining_the_generation() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(request("file.graph-memo", 1_260_000), &ActiveControl)
+        .expect("generation publishes");
+    let projector_revision =
+        GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
+            .expect("projector revision");
+    let projection =
+        code_graph_projection_identity(GraphNamespace::new("code-graph-memo").expect("namespace"))
+            .expect("projection identity");
+
+    // A deadline mid-build is a failed generation build that memoizes nothing.
+    let interrupted_checks = Cell::new(0usize);
+    let interrupted = build_published_code_graph_manifest_checked(
+        projection.clone(),
+        &generation,
+        &projector_revision,
+        &|| {
+            interrupted_checks.set(interrupted_checks.get() + 1);
+            if interrupted_checks.get() > 3 {
+                Err(GraphDbError::DeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .expect_err("a deadline mid-build fails the build");
+    assert_eq!(interrupted, CodeGraphProjectionError::DeadlineExceeded);
+
+    let first_checks = Cell::new(0usize);
+    let first = build_published_code_graph_manifest_checked(
+        projection.clone(),
+        &generation,
+        &projector_revision,
+        &|| {
+            first_checks.set(first_checks.get() + 1);
+            Ok(())
+        },
+    )
+    .expect("first complete build");
+    let second_checks = Cell::new(0usize);
+    let second = build_published_code_graph_manifest_checked(
+        projection.clone(),
+        &generation,
+        &projector_revision,
+        &|| {
+            second_checks.set(second_checks.get() + 1);
+            Ok(())
+        },
+    )
+    .expect("memoized build");
+    assert_eq!(first, second, "the memo returns the identical manifest");
+    assert!(
+        first_checks.get() > 3,
+        "the interrupted build must not have been memoized (first build saw {} checks)",
+        first_checks.get()
+    );
+    assert!(
+        first_checks.get() > first.entities.len() / 4,
+        "a fresh build examines the generation item by item ({} checks over {} entities)",
+        first_checks.get(),
+        first.entities.len()
+    );
+    assert_eq!(
+        second_checks.get(),
+        1,
+        "a memo hit performs the admission check only, with no per-item examination"
+    );
+
+    // A memo hit still refuses an already-expired request.
+    let refused = build_published_code_graph_manifest_checked(
+        projection.clone(),
+        &generation,
+        &projector_revision,
+        &|| Err(GraphDbError::DeadlineExceeded),
+    )
+    .expect_err("an expired request is refused before the memo serves");
+    assert_eq!(refused, CodeGraphProjectionError::DeadlineExceeded);
+
+    // A foreign projection identity is a memo miss that rebuilds in full.
+    let foreign = code_graph_projection_identity(
+        GraphNamespace::new("code-graph-memo-other").expect("namespace"),
+    )
+    .expect("projection identity");
+    let foreign_checks = Cell::new(0usize);
+    let rebuilt = build_published_code_graph_manifest_checked(
+        foreign.clone(),
+        &generation,
+        &projector_revision,
+        &|| {
+            foreign_checks.set(foreign_checks.get() + 1);
+            Ok(())
+        },
+    )
+    .expect("foreign projection rebuilds");
+    assert_eq!(rebuilt.projection, foreign);
+    assert!(
+        foreign_checks.get() > 1,
+        "a foreign projection identity cannot serve the cached manifest"
     );
 }
 
