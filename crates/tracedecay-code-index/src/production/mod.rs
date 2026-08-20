@@ -9,7 +9,6 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_code_extraction::incremental::ParseError;
-use tracedecay_graph_db::{GraphGenerationManifest, GraphProjectionIdentity, GraphProjectorRevision};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeIndexCapabilityManifestV1, CodeSearchEligibilityV1, ComponentVersion, CoverageSummaryV1,
@@ -20,6 +19,9 @@ use tracedecay_domain::{
     SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolLineageCandidateV1,
     SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1,
     ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
+};
+use tracedecay_graph_db::{
+    GraphGenerationManifest, GraphProjectionIdentity, GraphProjectorRevision,
 };
 
 use super::{
