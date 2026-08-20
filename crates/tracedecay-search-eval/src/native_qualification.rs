@@ -854,3 +854,17 @@ fn canonical_sha256(bytes: &[u8]) -> String {
     digest.push_str(&hex::encode(Sha256::digest(bytes)));
     digest
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_denies_activation_without_reviewed_native_evidence() {
+        assert!(packaged_native_qualification_bytes().is_empty());
+        assert_eq!(
+            load_embedded_qualification(),
+            Err(PackagedNativeQualificationErrorV1::EmbeddedAssetUnavailable)
+        );
+    }
+}

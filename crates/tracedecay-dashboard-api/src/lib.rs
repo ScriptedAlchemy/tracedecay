@@ -809,10 +809,6 @@ pub async fn build_selected_project_state(
     cg: Arc<TraceDecay>,
     active: &DashboardState,
 ) -> Result<DashboardState> {
-    let application_invocation_executor = selected_project_application_runtime(
-        active.application_invocation_executor.as_ref(),
-        cg.project_root(),
-    )?;
     build_state_inner(
         cg.as_ref(),
         Some(Arc::clone(&cg)),
@@ -848,7 +844,10 @@ pub async fn build_selected_project_state(
             explorer_semantic_reader: active.explorer_semantic_reader.clone(),
             feedback_status_reader: active.feedback_status_reader.clone(),
             code_diagnostics_broker: None,
-            application_invocation_executor,
+            // Rebinding an application transport is required only for the
+            // selected project's application routes. Ordinary read routes
+            // must not fail because that independent authority is absent.
+            application_invocation_executor: None,
             delivery_settlement_authority: None,
         },
     )
@@ -1612,9 +1611,35 @@ async fn project_scoped_api_gateway(
             )
                 .into_response();
         };
+        let application_runtime = if runtime.active_project_id() == Some(project_id.as_str()) {
+            selected.state.application_invocation_executor.clone()
+        } else {
+            match selected_project_application_runtime(
+                runtime
+                    .active_state()
+                    .application_invocation_executor
+                    .as_ref(),
+                project_graph.project_root(),
+            ) {
+                Ok(application_runtime) => application_runtime,
+                Err(err) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "status": "unavailable",
+                            "detail": format!(
+                                "selected project {read} authority is unavailable: {err}"
+                            ),
+                            "project_id": project_id,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        };
         let application = match ActiveProjectApplicationRoutes::for_active_project(
             project_graph,
-            selected.state.application_invocation_executor.clone(),
+            application_runtime,
         ) {
             Ok(application) => application,
             Err(err) => {

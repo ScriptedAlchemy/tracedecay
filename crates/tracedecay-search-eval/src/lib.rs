@@ -19,8 +19,6 @@ mod report;
 pub mod semantic_native;
 
 #[cfg(test)]
-mod native_qualification_tests;
-#[cfg(test)]
 mod report_tests;
 
 pub use report::{
