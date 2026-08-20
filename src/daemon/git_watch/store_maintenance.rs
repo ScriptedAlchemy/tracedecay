@@ -159,13 +159,36 @@ pub(super) async fn run_semantic_vector_generation_retention(
         .configuration_runtime()
         .semantic_configuration_inventory_authority()
     else {
-        // No seated semantic runtime is the ordinary default-off state, not a
-        // failure: there are no vector generations to retire and no census
-        // that could ever complete. Pin the typed unseated read for the
-        // code-generation pass and succeed quietly instead of resetting to
-        // Unknown and re-logging a degraded retry loop every tick.
-        observations.record_semantic_vector_retention_unseated(root);
-        return true;
+        // The activation coordinator is not seated. Whether that is the
+        // ordinary default-off state or a project-open overlap is decided by
+        // the durable semantic configuration, never by mount timing: a
+        // committed retrieval profile means a coordinator is expected
+        // imminently, so the pass stays retryable on the short cadence
+        // instead of pinning quiet and making the first census wait a full
+        // maintenance interval.
+        return match graph.configuration_runtime().client().current().await {
+            Ok(runtime_configuration)
+                if semantic_retrieval_profiles_disabled(&runtime_configuration.config.semantic) =>
+            {
+                // Plan 20 default off: no committed active or rollback
+                // retrieval profile, so no census will ever complete. Pin the
+                // typed unseated read for the code-generation pass and
+                // succeed quietly instead of resetting to Unknown and
+                // re-logging a degraded retry loop every tick.
+                observations.record_semantic_vector_retention_unseated(root);
+                true
+            }
+            Ok(_) => {
+                observations.record_semantic_vector_retention_failure(root);
+                log_semantic_vector_retention_degraded("configuration_inventory_unavailable");
+                false
+            }
+            Err(_) => {
+                observations.record_semantic_vector_retention_failure(root);
+                log_semantic_vector_retention_degraded("runtime_configuration_unavailable");
+                false
+            }
+        };
     };
     let after = observations.semantic_vector_retention_cursor(root);
     match crate::daemon::code_index_scheduler::semantic_vector_graph::retire_one_project_vector_generation(
@@ -235,6 +258,15 @@ pub(super) async fn run_semantic_vector_generation_retention(
             false
         }
     }
+}
+
+/// Plan 20 default-off: semantic retrieval is genuinely disabled only when
+/// the durable configuration commits neither an active nor a rollback
+/// retrieval profile. A committed profile with an unseated activation
+/// coordinator is a transient (or genuinely degraded) state that must stay
+/// retryable, not a quiet pin.
+fn semantic_retrieval_profiles_disabled(semantic: &crate::config::SemanticConfig) -> bool {
+    semantic.active_profile.is_none() && semantic.rollback_profile.is_none()
 }
 
 fn log_semantic_vector_retention_degraded(failure: &str) {

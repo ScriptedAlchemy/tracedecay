@@ -206,6 +206,49 @@ fn record_paging_census(observations: &StoreTelemetrySamplingRegistry, project_r
     );
 }
 
+#[test]
+fn committed_retrieval_profiles_keep_the_unseated_state_retryable() {
+    let selection = crate::config::SemanticProfileSelection {
+        profile_id: "profile.retention-fixture".to_owned(),
+        accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
+            "sha256:{}",
+            "a".repeat(64)
+        ))
+        .expect("accepted profile digest"),
+        artifact_digest: format!("sha256:{}", "b".repeat(64)),
+        artifact_path: PathBuf::from("/fixture/semantic-model"),
+    };
+    let disabled = crate::config::SemanticConfig {
+        selected_model: Some(crate::semantic_code::DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
+        auto_download: false,
+        active_profile: None,
+        rollback_profile: None,
+        resources: crate::config::SemanticResourceCeilings::default(),
+    };
+    assert!(
+        super::semantic_retrieval_profiles_disabled(&disabled),
+        "no committed retrieval profile is the genuine Plan 20 default-off state"
+    );
+
+    let active = crate::config::SemanticConfig {
+        active_profile: Some(selection.clone()),
+        ..disabled.clone()
+    };
+    assert!(
+        !super::semantic_retrieval_profiles_disabled(&active),
+        "a committed active profile expects a seated coordinator: stay retryable"
+    );
+
+    let rollback_only = crate::config::SemanticConfig {
+        rollback_profile: Some(selection),
+        ..disabled
+    };
+    assert!(
+        !super::semantic_retrieval_profiles_disabled(&rollback_only),
+        "a committed rollback profile still pins vector machinery: stay retryable"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unseated_semantic_runtime_sweeps_quietly_without_a_degraded_loop() {
     let fixture = open_unseated_graph_fixture().await;
