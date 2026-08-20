@@ -24,6 +24,7 @@ use crate::automation::run_ledger::AutomationRunStatus;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use crate::store::memory::DatabaseFactStore;
+use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
 use tracedecay_store::{FactStoreError, ProjectMemoryGraphQueryV1};
 use tracedecay_usecases::memory::MemoryApplicationError;
 
@@ -53,6 +54,9 @@ impl ProfileRuntime for FixtureProfileRuntime {
 struct UserRuntimeHarness {
     profile_root: PathBuf,
     registry: Arc<dyn ProfileRuntime>,
+    /// Strong graph port; the database keeps only a weak binding, so this
+    /// handle keeps the profile memory graph mountable for the test lifetime.
+    _memory_graph_runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
     _session_runtime: RegisteredGlobalDbTestRuntime,
     _directory: TempDir,
 }
@@ -75,7 +79,7 @@ impl UserRuntimeHarness {
         )
         .await
         .expect("registered profile memory");
-        bind_profile_memory_graph_runtime(&memory);
+        let memory_graph_runtime = bind_profile_memory_graph_runtime(&memory);
         let registry: Arc<dyn ProfileRuntime> = Arc::new(FixtureProfileRuntime {
             profile_id: UserProfileId::new("profile.automation.fixture").expect("profile id"),
             sessions: session_runtime.profile_database_arc(),
@@ -84,6 +88,7 @@ impl UserRuntimeHarness {
         Self {
             profile_root,
             registry,
+            _memory_graph_runtime: memory_graph_runtime,
             _session_runtime: session_runtime,
             _directory: directory,
         }
