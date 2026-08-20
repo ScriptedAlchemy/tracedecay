@@ -396,7 +396,7 @@ fn is_safe_structural_location(location: &str) -> bool {
     true
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum DetectionError {
     #[error("privacy detector initialization failed")]
     Initialization,
