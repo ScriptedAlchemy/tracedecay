@@ -4,7 +4,7 @@ version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
-description = "JSON-RPC 2.0 protocol types and line-transport contract for TraceDecay"
+description = "JSON-RPC 2.0 contracts for TraceDecay"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [lib]

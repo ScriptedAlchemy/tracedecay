@@ -498,6 +498,19 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
+    /// Close admission and move the retained writer to `Draining` so an
+    /// exclusive maintenance checkpoint can run. Unlike [`Self::drain`], the
+    /// writer is neither taken nor joined: its checkpoint handle stays live
+    /// for [`Self::run_maintenance_checkpoint`]. Idempotent while draining.
+    ///
+    /// Crate-private: public callers use [`Self::run_maintenance_checkpoint`],
+    /// which validates permit and admission-stage authority first. Admission is
+    /// not reopened; that exclusive window is intentional.
+    pub(crate) fn begin_maintenance_drain(&self) -> Result<(), RepositoryDispatchError> {
+        let mut state = self.lock_state();
+        Self::begin_maintenance_drain_locked(&mut state)
+    }
+
     fn begin_maintenance_drain_locked(
         state: &mut RepositoryRuntimePhysicalState,
     ) -> Result<(), RepositoryDispatchError> {
@@ -1312,6 +1325,10 @@ mod tests {
                 AdmissionConfigV1::default(),
             )
             .unwrap();
+        assert!(matches!(
+            read_only.begin_maintenance_drain(),
+            Err(RepositoryDispatchError::Closed)
+        ));
         let request = maintenance_request(&read_only, MaintenanceCheckpointMode::Truncate);
         let error = runtime
             .block_on(
@@ -1325,6 +1342,10 @@ mod tests {
         let writable = attach_wal_database(&directory);
         writable.drain().unwrap();
         writable.close_and_join().unwrap();
+        assert!(matches!(
+            writable.begin_maintenance_drain(),
+            Err(RepositoryDispatchError::Closed)
+        ));
         let request = maintenance_request(&writable, MaintenanceCheckpointMode::Truncate);
         let error = runtime
             .block_on(writable.run_maintenance_checkpoint(request, Arc::new(UnrestrictedAuthority)))
@@ -1333,13 +1354,30 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_checkpoint_keeps_writer_attached_and_closes_admission() {
+    fn maintenance_drain_keeps_writer_attached_and_closes_admission() {
         let directory = TempDir::new().unwrap();
         let attachment = attach_wal_database(&directory);
         let handle = attachment.exact_sql_handle().unwrap();
         handle
             .execute_batch("CREATE TABLE maintenance_probe (value INTEGER NOT NULL)".to_owned())
             .unwrap();
+
+        attachment.begin_maintenance_drain().unwrap();
+        attachment.begin_maintenance_drain().unwrap();
+        {
+            let state = attachment.lock_state();
+            assert!(!state.admission_open);
+            assert!(!state.closed);
+            let writer = state.writer.as_ref().expect("writer stays attached");
+            assert_eq!(writer.state(), WriterState::Draining);
+            assert!(state.readers.is_some());
+        }
+        assert!(attachment.snapshot().writer_present);
+        let admission_error = match attachment.exact_sql_handle() {
+            Err(error) => error,
+            Ok(_) => panic!("maintenance drain must close exact-SQL admission"),
+        };
+        assert_eq!(admission_error, ExactSqlError::WriterUnavailable);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -1357,20 +1395,6 @@ mod tests {
                 ..
             }
         ));
-        {
-            let state = attachment.lock_state();
-            assert!(!state.admission_open);
-            assert!(!state.closed);
-            let writer = state.writer.as_ref().expect("writer stays attached");
-            assert_eq!(writer.state(), WriterState::Draining);
-            assert!(state.readers.is_some());
-        }
-        assert!(attachment.snapshot().writer_present);
-        let admission_error = match attachment.exact_sql_handle() {
-            Err(error) => error,
-            Ok(_) => panic!("maintenance drain must close exact-SQL admission"),
-        };
-        assert_eq!(admission_error, ExactSqlError::WriterUnavailable);
 
         attachment.drain().unwrap();
         attachment.close_and_join().unwrap();

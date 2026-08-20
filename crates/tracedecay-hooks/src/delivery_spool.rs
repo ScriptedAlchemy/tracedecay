@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::framed_log::{
-    DirectorySyncPolicy, atomic_write, read_bounded, sync_directory, validate_regular_or_missing,
-};
 use tracedecay_domain::{
     DeliverySettlementOutcomeV1, DeliverySettlementV1, DeliverySurfaceFamilyV1,
     canonical_json_bytes, canonical_sha256,
+};
+use tracedecay_private_fs::framed_log::{
+    DirectorySyncPolicy, atomic_write, read_bounded, sync_directory, validate_regular_or_missing,
 };
 
 const MAX_PENDING_RECEIPTS: usize = 1_024;

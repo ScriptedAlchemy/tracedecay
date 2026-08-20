@@ -21,7 +21,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_application::DirectorySyncPolicy;
+use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 
 #[path = "profile_backup/error.rs"]
 mod error;
@@ -1044,9 +1044,11 @@ fn sync_file(path: &Path) -> Result<(), ProfileBackupError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), ProfileBackupError> {
-    tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict).map_err(|error| {
-        ProfileBackupError::unavailable(format!("sync directory '{}': {error}", path.display()))
-    })
+    tracedecay_private_fs::framed_log::sync_directory(path, DirectorySyncPolicy::Strict).map_err(
+        |error| {
+            ProfileBackupError::unavailable(format!("sync directory '{}': {error}", path.display()))
+        },
+    )
 }
 
 #[cfg(unix)]

@@ -16,7 +16,7 @@ use std::{
 };
 
 use thiserror::Error;
-use tracedecay_application::{DirectorySyncPolicy, now_micros};
+use tracedecay_application::now_micros;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
@@ -25,6 +25,7 @@ use tracedecay_domain::{
     RetrievalBudget, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
     SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1, WorktreeId, canonical_sha256,
 };
+use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 use tracedecay_usecases::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
 };
@@ -437,7 +438,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 
     fn sync_directory(path: &Path) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict)
+        tracedecay_private_fs::framed_log::sync_directory(path, DirectorySyncPolicy::Strict)
             .map_err(Self::unavailable)
     }
 
