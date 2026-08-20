@@ -22,8 +22,8 @@ use tracedecay_domain::{
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
     PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
     ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    ScoreDomainId, SnapshotFileDispositionV1, WorktreeId, canonical_sha256,
+    RetrievalBudget, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 use tracedecay_usecases::code_index::{
@@ -1459,7 +1459,14 @@ impl LatestCompleteCodeIndexV1 {
                 self.generation.chunks().chunks(),
             )
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-            self.install_query_owners(graph, CodeGraphServingAuthorityV1::Memory)
+            // No request reaches a cold memory build: this arm only exists in
+            // the test configuration, where the daemon ceiling is the budget
+            // in reach. Its unset deadline keeps the crate build fallback.
+            self.install_query_owners(
+                graph,
+                CodeGraphServingAuthorityV1::Memory,
+                &queries::maximum_retrieval_budget(),
+            )
         }
     }
 
@@ -1498,10 +1505,15 @@ impl LatestCompleteCodeIndexV1 {
         )
     }
 
+    /// `build_budget` bounds the O(store) lexical projection build. A set
+    /// `deadline_micros`, including `Some(0)`, is used as-is; `None` is unset
+    /// and keeps the crate build fallback. A caller holding both a lane and a
+    /// base budget must pass the tighter of the two (smaller deadline wins).
     fn install_query_owners(
         &self,
         graph_reader: CodeGraphEvidenceReader,
         graph_authority: CodeGraphServingAuthorityV1,
+        build_budget: &RetrievalBudget,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
         if let Some(owners) = self.query_owners.get() {
             return Ok(Arc::clone(owners));
@@ -1548,8 +1560,11 @@ impl LatestCompleteCodeIndexV1 {
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
         // One materializing copy per generation build; every query thereafter
         // shares the Arc'd owners without touching the chunk set again.
-        let lexical_projection =
-            CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted.as_ref().clone())?;
+        let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted_with_budget(
+            metadata,
+            admitted.as_ref().clone(),
+            build_budget,
+        )?;
         let authority = CentralExactAdmissionAuthorityV1::new(
             ExactAdmissionRuleRevision::new(
                 tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,

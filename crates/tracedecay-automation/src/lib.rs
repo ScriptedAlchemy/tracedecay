@@ -8,6 +8,7 @@ pub mod artifact_policy;
 pub mod backend;
 pub mod config;
 mod error;
+pub mod evidence_budget;
 #[doc(hidden)]
 pub mod managed_skill_format;
 mod managed_skill_model;

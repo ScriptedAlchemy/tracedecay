@@ -519,32 +519,13 @@ async fn run_worker(
         first_error: None,
         rollup_frontier_initialized: false,
     };
-    let initialization_db = db.clone();
-    let initialization_scope = identity.authorized_scope_ref.clone();
-    let persistence_deadline = state.deadlines.persistence;
-    let frontier_initialization = async move {
-        match timeout(
-            persistence_deadline,
-            initialization_db.initialize_observability_rollup_frontier(&initialization_scope),
-        )
-        .await
-        {
-            Ok(Ok(_)) => true,
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "observability rollup frontier initialization failed");
-                false
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "observability rollup frontier initialization exceeded persistence deadline"
-                );
-                false
-            }
-        }
-    };
-    tokio::pin!(frontier_initialization);
-    let mut frontier_initialization_pending = true;
-    let rollup_tick = sleep_until(Instant::now() + ROLLUP_IDLE_RETRY_INTERVAL);
+    // Frontier write is idle-only: it happens inside the rollup arm of the
+    // biased select below, never as a concurrent future racing persist for
+    // the same 2s write deadline (live: exceeded persistence deadline). The
+    // first tick is due immediately so an idle producer still initializes
+    // the frontier and closes proved-quiet days promptly; a busy startup
+    // drains control and observations first because the select is biased.
+    let rollup_tick = sleep_until(Instant::now());
     tokio::pin!(rollup_tick);
     let mut rollup_source_persisted = false;
     loop {
@@ -612,26 +593,16 @@ async fn run_worker(
                 )
                 .await;
                 rollup_source_persisted |= wakes_rollup && progress.persisted > persisted_before;
-                if rollup_source_persisted && data.is_empty() {
+                if should_wake_rollup_now(
+                    progress.rollup_frontier_initialized,
+                    rollup_source_persisted,
+                    data.is_empty(),
+                ) {
                     // Only a newly durable topology/drop source can revoke a
-                    // prior deferral and wake the slow no-work cadence.
+                    // prior deferral and wake the slow no-work cadence, and
+                    // only after frontier init so persist does not pay the
+                    // write-lock fight again.
                     rollup_source_persisted = false;
-                    rollup_tick.as_mut().reset(Instant::now());
-                }
-            }
-            initialized = &mut frontier_initialization, if frontier_initialization_pending => {
-                frontier_initialization_pending = false;
-                progress.rollup_frontier_initialized = initialized;
-                recover_pending(
-                    &db,
-                    &identity,
-                    &data,
-                    &state.durable_emission_lock,
-                    &mut progress,
-                    state.deadlines.persistence,
-                )
-                .await;
-                if initialized && data.is_empty() {
                     rollup_tick.as_mut().reset(Instant::now());
                 }
             }
@@ -652,6 +623,14 @@ async fn run_worker(
         }
     }
     state.lifecycle.store(PRODUCER_STOPPED, Ordering::Release);
+}
+
+fn should_wake_rollup_now(
+    frontier_initialized: bool,
+    rollup_source_persisted: bool,
+    queue_empty: bool,
+) -> bool {
+    frontier_initialized && rollup_source_persisted && queue_empty
 }
 
 fn observation_dirties_rollup(observation: &QueuedObservation) -> bool {
@@ -971,5 +950,20 @@ fn telemetry_drop_envelope(
         process_boot_id: identity.process_boot_id.clone(),
         producer_sequence: last_missing,
         payload,
+    }
+}
+
+#[cfg(test)]
+mod cheaper_frontier_tests {
+    use super::should_wake_rollup_now;
+
+    #[test]
+    fn persist_wake_does_not_retry_uninitialized_frontier() {
+        assert!(
+            !should_wake_rollup_now(false, true, true),
+            "uninitialized frontier must wait for idle, not persist-wake"
+        );
+        assert!(should_wake_rollup_now(true, true, true));
+        assert!(!should_wake_rollup_now(true, true, false));
     }
 }
