@@ -1759,7 +1759,11 @@ mod tests {
     fn task_summary_keeps_the_budget_exhausted_anchor_visible_past_newer_skips() {
         let lines = vec![
             skipped_session_reflector_line("run-budget", SESSION_EVIDENCE_BUDGET_EXHAUSTED, 100),
-            skipped_session_reflector_line("run-cooldown", "scheduler_cooldown_active", 200),
+            skipped_session_reflector_line(
+                "run-suppressed",
+                "session_evidence_budget_suppressed",
+                200,
+            ),
         ];
         let (_temp, path) = write_ledger(&lines);
 
@@ -1772,7 +1776,7 @@ mod tests {
 
         assert_eq!(
             summary.latest_logical_activity().unwrap().run_id,
-            "run-cooldown"
+            "run-suppressed"
         );
         let anchor = summary.latest_session_evidence_budget_exhausted().unwrap();
         assert_eq!(anchor.run_id, "run-budget");

@@ -8,11 +8,21 @@
 //! for a deterministic window instead of re-attempting (and re-reporting)
 //! the exhausted retrieval on every tick.
 
+use std::num::NonZeroU64;
+
 /// Canonical ledger label for a session-evidence retrieval attempt that
 /// exhausted its budgets. The label is minted where the retrieval outcome is
 /// accepted and read back by the scheduler gate; both sides use this one
 /// authority.
 pub const SESSION_EVIDENCE_BUDGET_EXHAUSTED: &str = "session_evidence_budget_exhausted";
+
+/// Canonical ledger label for a tick suppressed by the budget backoff.
+///
+/// Suppressed ticks never attempted the retrieval, so they must not reuse
+/// the exhausted-attempt label (they would look like fresh attempts) nor the
+/// failure-cooldown label (exhaustion is a skip, not a failure). They also
+/// never advance the backoff anchor: only real exhausted attempts do.
+pub const SESSION_EVIDENCE_BUDGET_SUPPRESSED: &str = "session_evidence_budget_suppressed";
 
 /// A budget-exhausted retrieval attempt observed by an automation task.
 ///
@@ -56,14 +66,21 @@ const DEFAULT_SUPPRESSION_SECS: u64 = 3_600;
 
 impl Default for SessionEvidenceBudgetBackoff {
     fn default() -> Self {
-        Self::new(DEFAULT_SUPPRESSION_SECS)
+        Self {
+            suppression_secs: DEFAULT_SUPPRESSION_SECS,
+        }
     }
 }
 
 impl SessionEvidenceBudgetBackoff {
+    /// A zero window would degenerate into "attempt on every tick" — exactly
+    /// the retry loop this contract exists to stop — so it is unrepresentable:
+    /// the constructor only accepts non-zero windows.
     #[must_use]
-    pub const fn new(suppression_secs: u64) -> Self {
-        Self { suppression_secs }
+    pub const fn new(suppression_secs: NonZeroU64) -> Self {
+        Self {
+            suppression_secs: suppression_secs.get(),
+        }
     }
 
     #[must_use]
@@ -91,11 +108,17 @@ impl SessionEvidenceBudgetBackoff {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use super::*;
+
+    fn window(secs: u64) -> SessionEvidenceBudgetBackoff {
+        SessionEvidenceBudgetBackoff::new(NonZeroU64::new(secs).expect("non-zero test window"))
+    }
 
     #[test]
     fn suppresses_ticks_inside_the_window_and_reports_its_end() {
-        let backoff = SessionEvidenceBudgetBackoff::new(600);
+        let backoff = window(600);
         let exceeded = SessionEvidenceBudgetExceeded {
             observed_at_secs: 1_000,
         };
@@ -112,7 +135,7 @@ mod tests {
 
     #[test]
     fn permits_one_attempt_once_the_window_elapses() {
-        let backoff = SessionEvidenceBudgetBackoff::new(600);
+        let backoff = window(600);
         let exceeded = SessionEvidenceBudgetExceeded {
             observed_at_secs: 1_000,
         };
@@ -129,7 +152,7 @@ mod tests {
 
     #[test]
     fn re_anchoring_on_a_later_attempt_restarts_the_window() {
-        let backoff = SessionEvidenceBudgetBackoff::new(600);
+        let backoff = window(600);
         let re_anchored = SessionEvidenceBudgetExceeded {
             observed_at_secs: 1_600,
         };
@@ -141,8 +164,38 @@ mod tests {
     }
 
     #[test]
+    fn zero_windows_are_unrepresentable_and_the_minimum_window_still_suppresses() {
+        // `new(0)` cannot exist: the constructor only accepts NonZeroU64.
+        assert!(NonZeroU64::new(0).is_none());
+
+        // The smallest representable window still suppresses the tick that
+        // observed the exhaustion instead of degenerating into "always try".
+        let backoff = window(1);
+        let exceeded = SessionEvidenceBudgetExceeded {
+            observed_at_secs: 1_000,
+        };
+        assert_eq!(
+            backoff.gate(exceeded, 1_000),
+            SessionEvidenceBudgetGate::Suppressed { until_secs: 1_001 }
+        );
+        assert_eq!(
+            backoff.gate(exceeded, 1_001),
+            SessionEvidenceBudgetGate::AttemptPermitted
+        );
+    }
+
+    #[test]
+    fn exhausted_and_suppressed_labels_are_distinct_typed_states() {
+        assert_ne!(
+            SESSION_EVIDENCE_BUDGET_EXHAUSTED,
+            SESSION_EVIDENCE_BUDGET_SUPPRESSED,
+            "a suppressed tick must never present as a fresh exhausted attempt"
+        );
+    }
+
+    #[test]
     fn window_arithmetic_saturates_instead_of_wrapping() {
-        let backoff = SessionEvidenceBudgetBackoff::new(u64::MAX);
+        let backoff = window(u64::MAX);
         let exceeded = SessionEvidenceBudgetExceeded {
             observed_at_secs: i64::MAX - 1,
         };
