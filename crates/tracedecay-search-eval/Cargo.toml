@@ -28,6 +28,7 @@ tracedecay-application = { path = "../tracedecay-application", version = "0.1.0"
 ] }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["eval-helpers"] }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 
 [features]

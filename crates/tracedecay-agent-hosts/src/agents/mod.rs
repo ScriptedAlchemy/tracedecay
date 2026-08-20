@@ -1050,7 +1050,7 @@ pub fn safe_write_bytes_file_with_metadata(
         }
     };
     let publish_metadata = replacement_metadata.or(metadata.as_ref());
-    if let Err(e) = tracedecay_application::atomic_write_prepared(
+    if let Err(e) = tracedecay_private_fs::framed_log::atomic_write_prepared(
         path,
         "host-config",
         contents,
@@ -1063,7 +1063,7 @@ pub fn safe_write_bytes_file_with_metadata(
                 .map_err(std::io::Error::other)?;
             Ok(())
         },
-        tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
     ) {
         let hint = if let Some(b) = backup {
             format!(
@@ -1191,11 +1191,11 @@ fn persist_host_config_write_intent(
     .map_err(|error| TraceDecayError::Config {
         message: format!("could not serialize host config write intent: {error}"),
     })?;
-    tracedecay_application::atomic_write(
+    tracedecay_private_fs::framed_log::atomic_write(
         &intent_path,
         "host-config-intent",
         &intent,
-        tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!(
@@ -1216,11 +1216,11 @@ fn persist_host_config_remove_intent(path: &Path) -> Result<()> {
         ),
     })?;
     let intent_path = host_config_write_intent_path(&root, path)?;
-    tracedecay_application::atomic_write(
+    tracedecay_private_fs::framed_log::atomic_write(
         &intent_path,
         "host-config-remove-intent",
         &[0],
-        tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!(
