@@ -175,11 +175,14 @@ fn graph_path(root: &std::path::Path) -> std::path::PathBuf {
     root.join("graph.grafeo")
 }
 
-fn retirement_target(registration: &GraphDbRegistration) -> GraphDbRetirementTarget {
-    GraphDbRetirementTarget::new(
-        registration.authority_lease.binding().clone(),
-        registration.authority_lease.verified_locator().clone(),
-    )
+fn retirement_target(
+    registry: &GraphDbRegistry,
+    registration: &GraphDbRegistration,
+) -> GraphDbRetirementTarget {
+    registry
+        .resolve_owner_attachment(registration.clone())
+        .unwrap()
+        .retirement_target()
 }
 
 fn sidecar_wal_path(path: &std::path::Path) -> std::path::PathBuf {
@@ -580,8 +583,7 @@ fn retirement_reservation_denies_new_resolves_and_drop_restores_ready_entry() {
     let temporary = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let request = registration(identity("profile-a", "project-a"), temporary.path());
-    let target = retirement_target(&request);
-    drop(registry.resolve(request.clone()).unwrap());
+    let target = retirement_target(&registry, &request);
 
     let reservation = registry.reserve_retirement_batch(vec![target]).unwrap();
     assert_eq!(
@@ -613,8 +615,8 @@ fn retirement_batch_is_all_or_nothing_when_any_exact_entry_has_a_client() {
 
     assert!(matches!(
         registry.reserve_retirement_batch(vec![
-            retirement_target(&first_request),
-            retirement_target(&second_request),
+            retirement_target(&registry, &first_request),
+            retirement_target(&registry, &second_request),
         ]),
         Err(GraphDbError::Conflict)
     ));
@@ -632,20 +634,17 @@ fn retirement_batch_is_all_or_nothing_when_any_exact_entry_has_a_client() {
 #[test]
 fn retirement_reservation_rejects_foreign_identity_without_transitioning_entry() {
     let temporary = TempDir::new().unwrap();
+    let foreign_temporary = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let request = registration(identity("profile-a", "project-a"), temporary.path());
+    let foreign_registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let foreign_request =
+        registration(identity("profile-a", "project-a"), foreign_temporary.path());
     drop(registry.resolve(request.clone()).unwrap());
-    let foreign_binding = StoreRuntimeBindingV1::new(
-        request.authority_lease.binding().shard_id.clone(),
-        request.authority_lease.binding().incarnation,
-        StoreAuthorityEpochV1::new(2).unwrap(),
-    );
+    let foreign_target = retirement_target(&foreign_registry, &foreign_request);
 
     assert!(matches!(
-        registry.reserve_retirement_batch(vec![GraphDbRetirementTarget::new(
-            foreign_binding,
-            request.authority_lease.verified_locator().clone(),
-        )]),
+        registry.reserve_retirement_batch(vec![foreign_target]),
         Err(GraphDbError::Conflict)
     ));
     assert_eq!(
@@ -665,8 +664,8 @@ fn cancelled_retirement_commit_restores_all_preclose_entries() {
     drop(registry.resolve(second_request.clone()).unwrap());
     let mut reservation = registry
         .reserve_retirement_batch(vec![
-            retirement_target(&first_request),
-            retirement_target(&second_request),
+            retirement_target(&registry, &first_request),
+            retirement_target(&registry, &second_request),
         ])
         .unwrap();
 
@@ -707,8 +706,8 @@ fn retirement_commit_reports_every_closed_exact_entry() {
     let second_request = registration(identity("profile-a", "project-b"), second_root.path());
     drop(registry.resolve(first_request.clone()).unwrap());
     drop(registry.resolve(second_request.clone()).unwrap());
-    let first_target = retirement_target(&first_request);
-    let second_target = retirement_target(&second_request);
+    let first_target = retirement_target(&registry, &first_request);
+    let second_target = retirement_target(&registry, &second_request);
     let mut reservation = registry
         .reserve_retirement_batch(vec![first_target.clone(), second_target.clone()])
         .unwrap();

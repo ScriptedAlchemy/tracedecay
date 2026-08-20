@@ -187,7 +187,7 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Self, GraphDbError> {
         let owner = crate::GraphDbOwner::memory(Arc::clone(&cancellation))?;
-        let database = owner.lease();
+        let database = owner.issue_lease()?;
         let check = || {
             if cancellation.is_cancelled() {
                 Err(GraphDbError::Cancelled)

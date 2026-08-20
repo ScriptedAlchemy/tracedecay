@@ -44,11 +44,14 @@ pub use location::{GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphFo
 pub(crate) use location::{
     GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphFormatVersion,
 };
-pub use owner::GraphDbLeaseV1;
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 pub use owner::GraphDbOwner;
 #[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
 pub(crate) use owner::GraphDbOwner;
+pub use owner::{
+    GraphDbLeaseV1, GraphDbOwnerAttachmentV1, GraphDbRetirementTarget, GraphDbRuntimeIdentityV1,
+};
+pub(crate) use owner::{GraphDbOwnerAttachmentId, GraphDbOwnerId, GraphDbRetirementReservationId};
 pub use projection::{
     GraphCancellation, GraphCommit, GraphEntity, GraphEntityId, GraphGenerationId,
     GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace, GraphProjectionId,
@@ -74,8 +77,8 @@ pub use recovery::VerifiedGraphCommit;
 pub use registry::{
     GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphDbRegistryStatus,
     GraphDbRetirementCommit, GraphDbRetirementOutcome, GraphDbRetirementReservation,
-    GraphDbRetirementTarget, SemanticVectorRetentionAction, SemanticVectorRetentionCensus,
-    SemanticVectorRetentionStep, SemanticVectorRetirementReservation, VerifiedGenerationBatchApply,
+    SemanticVectorRetentionAction, SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
+    SemanticVectorRetirementReservation, VerifiedGenerationBatchApply,
     VerifiedGenerationBatchCommit,
 };
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};

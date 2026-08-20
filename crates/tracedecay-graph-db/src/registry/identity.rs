@@ -87,7 +87,9 @@ pub(super) fn require_closing(
         verified_locator,
         path,
         expected_format,
-        owner,
+        owner_id,
+        owner_attachment_id,
+        reservation_id,
     } = entry
     else {
         return Err(GraphDbError::unavailable(
@@ -98,7 +100,9 @@ pub(super) fn require_closing(
         || verified_locator != &reservation.verified_locator
         || path.as_path() != reservation.path
         || expected_format != &reservation.expected_format
-        || !Arc::ptr_eq(owner, &reservation.owner)
+        || owner_id != &reservation.owner_id()
+        || owner_attachment_id != &reservation.owner_attachment_id()
+        || reservation_id != &reservation.reservation_id()
         || !Arc::ptr_eq(authority_lease, &reservation.authority_lease)
     {
         return Err(GraphDbError::unavailable(
@@ -118,7 +122,9 @@ pub(super) fn require_retiring(
         verified_locator,
         path,
         expected_format,
-        owner,
+        owner_id,
+        owner_attachment_id,
+        reservation_id,
     } = entry
     else {
         return Err(GraphDbError::unavailable(
@@ -129,7 +135,12 @@ pub(super) fn require_retiring(
         || verified_locator != &reservation.verified_locator
         || path.as_path() != reservation.path
         || expected_format != &reservation.expected_format
-        || !Arc::ptr_eq(owner, &reservation.owner)
+        || owner_id != &reservation.owner_id()
+        || owner_attachment_id
+            != &reservation.owner_attachment_id().ok_or_else(|| {
+                GraphDbError::unavailable("graph retirement reservation lacks an owner attachment")
+            })?
+        || reservation_id != &reservation.reservation_id()
         || !Arc::ptr_eq(authority_lease, &reservation.authority_lease)
     {
         return Err(GraphDbError::unavailable(

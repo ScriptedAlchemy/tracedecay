@@ -62,7 +62,7 @@ fn relation(value: &str, from: &str, to: &str) -> GraphRelation {
 }
 
 fn open_memory() -> GraphDbLeaseV1 {
-    GraphDbOwner::memory(live()).unwrap().lease()
+    GraphDbOwner::memory(live()).unwrap().issue_lease().unwrap()
 }
 
 fn publish(db: &GraphDb, generation: &str) {

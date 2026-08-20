@@ -50,7 +50,7 @@ impl GraphDbRegistry {
             ),
         )?;
         *last_used = std::time::Instant::now();
-        Ok(owner.lease())
+        owner.issue_lease()
     }
 
     pub fn verified_snapshot(
