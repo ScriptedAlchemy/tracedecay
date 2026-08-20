@@ -288,3 +288,95 @@ pub(super) fn code_index_reconcile_sink(
     });
     sink
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn git(root: &Path, arguments: &[&str]) {
+        let status = Command::new(crate::git::git_program())
+            .current_dir(root)
+            .args(arguments)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {arguments:?}");
+    }
+
+    fn repository() -> TempDir {
+        let root = TempDir::new().expect("repository root");
+        git(root.path(), &["init", "-q"]);
+        std::fs::write(root.path().join("lib.rs"), "pub fn seed() {}\n").expect("seed source");
+        root
+    }
+
+    /// `tracedecay init` reports "code-index reconciliation requested" through
+    /// this sink before any scheduler is mounted. The pre-mount request must be
+    /// accepted and must start the demand-driven mount — otherwise init's
+    /// message is a no-op and the first index never runs.
+    #[tokio::test]
+    async fn reconcile_request_before_mount_activates_indexing() {
+        let repository = repository();
+        let root = repository
+            .path()
+            .canonicalize()
+            .expect("canonical repository root");
+        let mount_attempts = Arc::new(AtomicUsize::new(0));
+        let mount: code_index_scheduler::CodeIndexActivationMountV1 = {
+            let mount_attempts = Arc::clone(&mount_attempts);
+            Arc::new(move || {
+                let mount_attempts = Arc::clone(&mount_attempts);
+                Box::pin(async move {
+                    mount_attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        };
+        let overflow_batches = Arc::new(Mutex::new(Vec::new()));
+        let hint_sink: code_index_scheduler::CodeIndexActivationHintSinkV1 = {
+            let overflow_batches = Arc::clone(&overflow_batches);
+            Arc::new(move |batch| {
+                let overflow_batches = Arc::clone(&overflow_batches);
+                Box::pin(async move {
+                    overflow_batches.lock().expect("record batch").push(batch);
+                    true
+                })
+            })
+        };
+        let activation = Arc::new(code_index_scheduler::CodeIndexActivationV1::new(
+            &root,
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            mount,
+            hint_sink,
+        ));
+        let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+        let sink = code_index_reconcile_sink(registry, Arc::clone(&activation));
+
+        assert!(
+            sink(root.clone()).await,
+            "a pre-mount reconcile request must be accepted, not dropped"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let overflow_delivered = overflow_batches
+                    .lock()
+                    .expect("read batches")
+                    .iter()
+                    .any(|batch| batch.overflow);
+                if mount_attempts.load(Ordering::SeqCst) == 1 && overflow_delivered {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pre-mount reconcile must mount the scheduler and flush the overflow request");
+    }
+}
