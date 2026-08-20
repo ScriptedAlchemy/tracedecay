@@ -33,10 +33,7 @@ pub(crate) async fn daemon_tool_json_until(
         false,
     )?;
     let result = tracedecay::daemon::call_default_tool_awaiting_project_open(
-        &handshake,
-        tool_name,
-        arguments,
-        deadline,
+        &handshake, tool_name, arguments, deadline,
     )
     .await?;
     recover_truncated_payload(&handshake, tool_name, result, Some(deadline)).await

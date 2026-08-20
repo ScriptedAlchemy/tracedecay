@@ -3,8 +3,8 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use tracedecay_application::DirectorySyncPolicy;
 use tracedecay_domain::{GitFileModeV1, GitOidV1, GitOperationStateV1};
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
 use super::NativeGitIndexError;
 use super::patch::ValidatedIndexPatch;
@@ -103,7 +103,7 @@ pub(super) fn sync_parent_directory(path: &Path) -> Result<(), NativeGitIndexErr
     let parent = path
         .parent()
         .ok_or_else(|| NativeGitIndexError::Io("Git index has no parent directory".to_owned()))?;
-    tracedecay_application::sync_directory(parent, DirectorySyncPolicy::Strict)
+    sync_directory(parent, DirectorySyncPolicy::Strict)
         .map_err(|error| NativeGitIndexError::Io(error.to_string()))
 }
 

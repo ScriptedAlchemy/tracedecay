@@ -623,9 +623,9 @@ fn sync_parent(path: &Path) -> Result<(), GraphDbError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), GraphDbError> {
-    tracedecay_domain::framed_log::sync_directory(
+    tracedecay_private_fs::framed_log::sync_directory(
         path,
-        tracedecay_domain::framed_log::DirectorySyncPolicy::Strict,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
     )
     .map_err(|error| unavailable_io("sync graph backup directory", path, error))
 }

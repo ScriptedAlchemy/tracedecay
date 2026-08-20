@@ -318,7 +318,10 @@ impl Worker {
                 );
                 continue;
             }
-            if let Some(command) = checkpoint_queue.pop_front() {
+            let requested_checkpoint_ready = checkpoint_queue.front().is_some_and(|command| {
+                queue.is_empty() || matches!(&command.kind, CheckpointCommandKind::Passive { .. })
+            });
+            if requested_checkpoint_ready && let Some(command) = checkpoint_queue.pop_front() {
                 latest_blockers = command.snapshot_blockers.clone();
                 self.run_requested_checkpoint(&mut checkpoint, command);
                 continue;

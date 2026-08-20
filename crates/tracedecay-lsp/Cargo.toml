@@ -4,7 +4,7 @@ version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
-description = "Store-free LSP framing, protocol, and session contracts for TraceDecay"
+description = "Store-free LSP diagnostics support for TraceDecay"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]

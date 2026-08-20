@@ -322,12 +322,12 @@ fn publish_exact_run_spool(
     publication: &ExactRunPublication,
     publish_file: &AtomicFilePublisher<'_>,
 ) -> Result<()> {
-    tracedecay_domain::with_owned_temp_publish(
+    tracedecay_private_fs::framed_log::with_owned_temp_publish(
         path,
         "automation-run-exact-spool",
         |temporary, destination| publish_file(temporary, destination, "automation run exact spool"),
         |output| serde_json::to_writer(output, record).map_err(std::io::Error::other),
-        tracedecay_application::DirectorySyncPolicy::Strict,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
     )
     .map_err(TraceDecayError::from)?;
     let (actual, actual_len) = digest_regular_file(path)?.ok_or_else(|| {
@@ -1018,7 +1018,7 @@ fn publish_append_intent_bytes(
     publish_file: &AtomicFilePublisher<'_>,
 ) -> Result<()> {
     let path = append_intent_path(dashboard_root);
-    tracedecay_domain::with_owned_temp_publish(
+    tracedecay_private_fs::framed_log::with_owned_temp_publish(
         &path,
         "automation-run-append-intent",
         |temporary, destination| {
@@ -1029,7 +1029,7 @@ fn publish_append_intent_bytes(
             )
         },
         |output| output.write_all(bytes),
-        tracedecay_application::DirectorySyncPolicy::Strict,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
     )
     .map_err(TraceDecayError::from)?;
     let actual = read_append_intent_bytes(dashboard_root)?.ok_or_else(|| {
@@ -1254,7 +1254,7 @@ fn publish_corrupt_append_intent_quarantine_with_publisher(
     bytes: &[u8],
     publish_file: &AtomicFilePublisher<'_>,
 ) -> Result<()> {
-    tracedecay_domain::with_owned_temp_publish(
+    tracedecay_private_fs::framed_log::with_owned_temp_publish(
         path,
         "automation-run-corrupt-append-intent",
         |temporary, destination| {
@@ -1265,7 +1265,7 @@ fn publish_corrupt_append_intent_quarantine_with_publisher(
             )
         },
         |output| output.write_all(bytes),
-        tracedecay_application::DirectorySyncPolicy::Strict,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
     )
     .map_err(TraceDecayError::from)?;
     verify_exact_corrupt_append_intent_quarantine(path, bytes)
