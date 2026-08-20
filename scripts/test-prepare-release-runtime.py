@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import subprocess
 import tarfile
 import tempfile
@@ -65,6 +66,9 @@ def run_preparer(
     github_env: Path,
     github_output: Path,
 ) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment.pop("LD_LIBRARY_PATH", None)
+    environment.pop("RUSTFLAGS", None)
     return subprocess.run(
         [
             "python3",
@@ -82,6 +86,7 @@ def run_preparer(
         ],
         text=True,
         capture_output=True,
+        env=environment,
     )
 
 
