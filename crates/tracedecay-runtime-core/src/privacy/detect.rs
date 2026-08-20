@@ -404,14 +404,14 @@ pub enum DetectionError {
     ScanLimitExceeded,
     #[error("privacy sanitizer receipt construction failed")]
     Receipt,
-    /// The sanitizer refused a structured document fail-closed: either it
-    /// declared a structured data format but could not be parsed without
-    /// ambiguity, or it parsed but carries credential material where redaction
-    /// cannot rewrite it (an object key). Field semantics cannot be proven
-    /// safely scanned either way. This is the sanitizer's own fail-closed
-    /// refusal, not a construction fault.
+    /// The document declared a structured data format but could not be parsed
+    /// without ambiguity, so field semantics cannot be proven scanned.
     #[error("privacy sanitizer quarantined an ambiguous structured document")]
     StructuredQuarantine,
+    /// The document parsed, but an object key carries credential material that
+    /// cannot be redacted in place. Fail-closed quarantine, not a receipt fault.
+    #[error("privacy sanitizer quarantined credential-bearing keys")]
+    CredentialKeyQuarantine,
 }
 
 pub enum MemoryFactSanitizationV1 {
