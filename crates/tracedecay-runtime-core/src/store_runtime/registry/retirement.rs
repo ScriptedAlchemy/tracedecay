@@ -6,8 +6,9 @@ use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1};
 
 use super::capacity::drain_and_close_physical;
 use super::{
-    CommittingRuntime, FaultedRuntime, ReadyRuntime, RegistryEntry, RetiringRuntime,
-    StoreRuntimeKey, StoreRuntimeOwnerAttachment, StoreRuntimeRegistry,
+    CommittingRuntime, DatabaseRuntimeOwnerAttachmentReservationIdentityV1, FaultedRuntime,
+    ReadyRuntime, RegistryEntry, RetiringRuntime, StoreRuntimeKey, StoreRuntimeOwnerAttachment,
+    StoreRuntimeOwnerAttachmentRetirementReservationV1, StoreRuntimeRegistry,
     StoreRuntimeRegistryFailure,
 };
 use crate::db::DatabaseAuthority;
@@ -16,16 +17,32 @@ use crate::db::DatabaseAuthority;
 ///
 /// The authority is part of target identity: a matching shard/incarnation with
 /// a foreign authority never reserves the live attachment.
-#[derive(Clone)]
 pub struct StoreRuntimeRetirementTarget {
     binding: StoreRuntimeBindingV1,
     authority: DatabaseAuthority,
+    owner_attachment: Option<Box<dyn StoreRuntimeOwnerAttachmentRetirementReservationV1>>,
 }
 
 impl StoreRuntimeRetirementTarget {
     #[must_use]
     pub fn new(binding: StoreRuntimeBindingV1, authority: DatabaseAuthority) -> Self {
-        Self { binding, authority }
+        Self {
+            binding,
+            authority,
+            owner_attachment: None,
+        }
+    }
+
+    pub(crate) fn with_database_owner_attachment(
+        binding: StoreRuntimeBindingV1,
+        authority: DatabaseAuthority,
+        owner_attachment: Box<dyn StoreRuntimeOwnerAttachmentRetirementReservationV1>,
+    ) -> Self {
+        Self {
+            binding,
+            authority,
+            owner_attachment: Some(owner_attachment),
+        }
     }
 
     #[must_use]
@@ -36,6 +53,31 @@ impl StoreRuntimeRetirementTarget {
     #[must_use]
     pub fn authority(&self) -> &DatabaseAuthority {
         &self.authority
+    }
+
+    fn owner_attachment_identity(
+        &self,
+    ) -> Option<&DatabaseRuntimeOwnerAttachmentReservationIdentityV1> {
+        self.owner_attachment
+            .as_ref()
+            .map(|reservation| reservation.identity())
+    }
+
+    fn outcome_target(&self) -> Self {
+        Self::new(self.binding.clone(), self.authority.clone())
+    }
+
+    fn commit_owner_attachment(&mut self) -> Result<(), StoreRuntimeRegistryFailure> {
+        match self.owner_attachment.as_mut() {
+            Some(reservation) => reservation.commit(),
+            None => Ok(()),
+        }
+    }
+
+    fn terminalize_after_commit_failure(&mut self) {
+        if let Some(reservation) = self.owner_attachment.as_mut() {
+            reservation.terminalize_after_commit_failure();
+        }
     }
 }
 
@@ -73,7 +115,11 @@ pub enum StoreRuntimeRetirementBlocker {
         binding: Box<StoreRuntimeBindingV1>,
         message: String,
     },
-    DatabaseFacades {
+    OwnerAttachmentReservation {
+        binding: Box<StoreRuntimeBindingV1>,
+        message: String,
+    },
+    DatabaseAttachments {
         binding: Box<StoreRuntimeBindingV1>,
         count: usize,
     },
@@ -267,18 +313,52 @@ impl StoreRuntimeRegistry {
                 continue;
             }
 
-            let database_facades = ready.owner.database_facades.load(Ordering::Acquire);
-            if database_facades != 0 {
-                blockers.push(StoreRuntimeRetirementBlocker::DatabaseFacades {
+            let owner_attachment = target.owner_attachment_identity();
+            if let Some(owner_attachment) = owner_attachment {
+                let reservation_matches_binding = owner_attachment.binding() == binding
+                    && owner_attachment.binding() == &target.binding;
+                let reservation_matches_locator =
+                    owner_attachment.locator().verified() == ready.owner.locator().verified();
+                let reservation_is_live = ready
+                    .owner
+                    .source
+                    .validate_database_owner_attachment_reservation(owner_attachment);
+                if !reservation_matches_binding
+                    || !reservation_matches_locator
+                    || reservation_is_live.is_err()
+                {
+                    blockers.push(StoreRuntimeRetirementBlocker::OwnerAttachmentReservation {
+                        binding: Box::new(binding.clone()),
+                        message: match reservation_is_live {
+                            Ok(()) => {
+                                "database owner attachment did not match the exact binding and locator"
+                                    .to_owned()
+                            }
+                            Err(error) => format!("{error:?}"),
+                        },
+                    });
+                    continue;
+                }
+            }
+            let database_attachments = ready
+                .owner
+                .source
+                .retirement_database_attachment_blockers(owner_attachment);
+            if database_attachments != 0 {
+                blockers.push(StoreRuntimeRetirementBlocker::DatabaseAttachments {
                     binding: Box::new(binding.clone()),
-                    count: database_facades,
+                    count: database_attachments,
                 });
             }
             let leases = ready.owner.runtime().retirement_lease_counts();
-            if leases.clients != 0 {
+            let client_leases = ready
+                .owner
+                .source
+                .retirement_client_lease_blockers(&leases.client_tokens);
+            if client_leases != 0 {
                 blockers.push(StoreRuntimeRetirementBlocker::ClientLeases {
                     binding: Box::new(binding.clone()),
-                    count: leases.clients,
+                    count: client_leases,
                 });
             }
             if leases.operations != 0 {
@@ -341,10 +421,10 @@ impl StoreRuntimeRegistry {
 
     fn begin_retirement_commit(
         &self,
-        pending: &[PendingRetirement],
-    ) -> Result<(), StoreRuntimeRegistryFailure> {
-        let mut state = self.lock_state();
-        for retirement in pending {
+        pending: &mut [PendingRetirement],
+    ) -> Result<Option<String>, StoreRuntimeRegistryFailure> {
+        let state = self.lock_state();
+        for retirement in pending.iter() {
             let Some(RegistryEntry::Retiring(retiring)) = state.entries.get(&retirement.key) else {
                 return Err(StoreRuntimeRegistryFailure::RetirementReservationLost {
                     key: Box::new(retirement.key.clone()),
@@ -358,7 +438,36 @@ impl StoreRuntimeRegistry {
                 });
             }
         }
-        for retirement in pending {
+        drop(state);
+
+        for retirement in pending.iter() {
+            if let Some(owner_attachment) = retirement.target.owner_attachment.as_ref() {
+                owner_attachment.preflight_commit()?;
+            }
+        }
+
+        // The owner attachment is the irreversible authority fence. Keep the
+        // registry in `Retiring` until every fallible owner commit has either
+        // succeeded or yielded terminal truth; a global `Committing` state
+        // must never race ahead of that exact attachment decision.
+        let mut commit_failure = None;
+        for retirement in pending.iter_mut() {
+            if let Err(error) = retirement.target.commit_owner_attachment() {
+                commit_failure = Some(format!("{error:?}"));
+                break;
+            }
+        }
+        if let Some(message) = commit_failure {
+            for terminal in pending.iter_mut() {
+                terminal.target.terminalize_after_commit_failure();
+            }
+        }
+
+        // The reservation exclusively owns the `Retiring` entries it placed.
+        // Do not introduce a post-owner-commit fallible path that could leave
+        // terminal attachment truth paired with a rollback-capable registry.
+        let mut state = self.lock_state();
+        for retirement in pending.iter() {
             state.entries.insert(
                 retirement.key.clone(),
                 RegistryEntry::Committing(CommittingRuntime {
@@ -366,19 +475,19 @@ impl StoreRuntimeRegistry {
                 }),
             );
         }
-        Ok(())
+        Ok(commit_failure)
     }
 
     fn finish_retirement_target(
         &self,
-        retirement: PendingRetirement,
+        retirement: &PendingRetirement,
         success: bool,
         durability_uncertain: bool,
     ) -> Result<(), StoreRuntimeRegistryFailure> {
         let mut state = self.lock_state();
         let Some(RegistryEntry::Committing(committing)) = state.entries.get(&retirement.key) else {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationLost {
-                key: Box::new(retirement.key),
+                key: Box::new(retirement.key.clone()),
             });
         };
         if !Arc::ptr_eq(&committing.owner, &retirement.owner) {
@@ -398,14 +507,14 @@ impl StoreRuntimeRegistry {
             }
         } else {
             let faulted = FaultedRuntime {
-                owner: retirement.owner,
+                owner: Arc::clone(&retirement.owner),
             };
             let entry = if durability_uncertain {
                 RegistryEntry::DurabilityUncertain(faulted)
             } else {
                 RegistryEntry::Faulted(faulted)
             };
-            state.entries.insert(retirement.key, entry);
+            state.entries.insert(retirement.key.clone(), entry);
         }
         Ok(())
     }
@@ -450,7 +559,25 @@ impl StoreRuntimeRetirementReservation {
         if !self.armed {
             return Err(StoreRuntimeRegistryFailure::RetirementReservationConsumed);
         }
-        self.registry.begin_retirement_commit(&self.pending)?;
+        if let Some(message) = self.registry.begin_retirement_commit(&mut self.pending)? {
+            let pending = std::mem::take(&mut self.pending);
+            self.armed = false;
+            let mut outcomes = Vec::with_capacity(pending.len());
+            for retirement in pending {
+                let target = retirement.target.outcome_target();
+                let error = match self
+                    .registry
+                    .finish_retirement_target(&retirement, false, false)
+                {
+                    Ok(()) => StoreRuntimeRegistryFailure::OwnerRetirementCommitFailed {
+                        message: message.clone(),
+                    },
+                    Err(error) => error,
+                };
+                outcomes.push(StoreRuntimeRetirementOutcome::Faulted { target, error });
+            }
+            return Ok(StoreRuntimeRetirementCommit { outcomes });
+        }
         let pending = std::mem::take(&mut self.pending);
         self.armed = false;
 
@@ -496,22 +623,29 @@ impl StoreRuntimeRetirementReservation {
             };
             match close {
                 Ok(()) => {
-                    let target = retirement.target.clone();
-                    self.registry
-                        .finish_retirement_target(retirement, true, false)?;
-                    outcomes.push(StoreRuntimeRetirementOutcome::Closed { target });
+                    let target = retirement.target.outcome_target();
+                    match self
+                        .registry
+                        .finish_retirement_target(&retirement, true, false)
+                    {
+                        Ok(()) => outcomes.push(StoreRuntimeRetirementOutcome::Closed { target }),
+                        Err(error) => {
+                            outcomes.push(StoreRuntimeRetirementOutcome::Faulted { target, error })
+                        }
+                    }
                 }
                 Err((error, durability_uncertain)) => {
                     let _ = retirement
                         .owner
                         .runtime()
                         .transition(RuntimeMaintenanceStateV1::Faulted);
-                    let target = retirement.target.clone();
-                    self.registry.finish_retirement_target(
-                        retirement,
+                    let target = retirement.target.outcome_target();
+                    let terminal_error = self.registry.finish_retirement_target(
+                        &retirement,
                         false,
                         durability_uncertain,
-                    )?;
+                    );
+                    let error = terminal_error.unwrap_or(error);
                     if durability_uncertain {
                         outcomes.push(StoreRuntimeRetirementOutcome::DurabilityUncertain {
                             target,
@@ -546,6 +680,7 @@ fn authorities_match(left: &DatabaseAuthority, right: &DatabaseAuthority) -> boo
 mod tests {
     use std::fmt::Debug;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
     use tracedecay_store::{
@@ -652,6 +787,52 @@ mod tests {
         }
     }
 
+    struct FailingOwnerAttachmentReservation {
+        identity: super::super::DatabaseRuntimeOwnerAttachmentReservationIdentityV1,
+        _attachment: super::super::DatabaseRuntimeAttachment,
+        fail_preflight: bool,
+        fail_commit: bool,
+        terminalized: Arc<AtomicBool>,
+    }
+
+    impl Drop for FailingOwnerAttachmentReservation {
+        fn drop(&mut self) {
+            if !self.terminalized.load(Ordering::SeqCst) {
+                let _ = self.identity.restore();
+            }
+        }
+    }
+
+    impl StoreRuntimeOwnerAttachmentRetirementReservationV1 for FailingOwnerAttachmentReservation {
+        fn identity(&self) -> &super::super::DatabaseRuntimeOwnerAttachmentReservationIdentityV1 {
+            &self.identity
+        }
+
+        fn preflight_commit(&self) -> Result<(), StoreRuntimeRegistryFailure> {
+            self.identity.validate()?;
+            if self.fail_preflight {
+                return Err(StoreRuntimeRegistryFailure::OwnerRetirementCommitFailed {
+                    message: "injected owner preflight failure".to_owned(),
+                });
+            }
+            Ok(())
+        }
+
+        fn commit(&mut self) -> Result<(), StoreRuntimeRegistryFailure> {
+            self.identity.commit()?;
+            if self.fail_commit {
+                return Err(StoreRuntimeRegistryFailure::OwnerRetirementCommitFailed {
+                    message: "injected owner commit failure".to_owned(),
+                });
+            }
+            Ok(())
+        }
+
+        fn terminalize_after_commit_failure(&mut self) {
+            self.terminalized.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn id<T>(value: &str) -> T
     where
         T: TryFrom<String>,
@@ -729,7 +910,10 @@ mod tests {
             )
             .unwrap(),
             database_authority: Some(authority),
-            database_facades: std::sync::atomic::AtomicUsize::new(0),
+            database_attachments: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            next_database_attachment_id: std::sync::atomic::AtomicU64::new(1),
+            next_database_owner_id: std::sync::atomic::AtomicU64::new(1),
+            next_database_attachment_reservation_id: std::sync::atomic::AtomicU64::new(1),
         });
         let owner = Arc::new(StoreRuntimeOwnerAttachment { source });
         let mut state = registry.lock_state();
@@ -757,6 +941,59 @@ mod tests {
                 .database_authority
                 .clone()
                 .expect("retirement fixture installs an authority"),
+        )
+    }
+
+    fn failing_owner_target(
+        binding: &StoreRuntimeBindingV1,
+        owner: &StoreRuntimeOwnerAttachment,
+        fail_preflight: bool,
+        fail_commit: bool,
+        terminalized: Arc<AtomicBool>,
+    ) -> StoreRuntimeRetirementTarget {
+        let attachment = owner
+            .issue_client_lease()
+            .unwrap()
+            .into_database_attachment()
+            .unwrap();
+        let owner_id = attachment.allocate_owner_identity().unwrap();
+        let identity = attachment.reserve_for_owner(owner_id).unwrap();
+        StoreRuntimeRetirementTarget::with_database_owner_attachment(
+            binding.clone(),
+            owner.database_authority.clone().unwrap(),
+            Box::new(FailingOwnerAttachmentReservation {
+                identity,
+                _attachment: attachment,
+                fail_preflight,
+                fail_commit,
+                terminalized,
+            }),
+        )
+    }
+
+    fn stale_owner_target(
+        binding: &StoreRuntimeBindingV1,
+        owner: &StoreRuntimeOwnerAttachment,
+    ) -> StoreRuntimeRetirementTarget {
+        let attachment = owner
+            .issue_client_lease()
+            .unwrap()
+            .into_database_attachment()
+            .unwrap();
+        let owner_id = attachment.allocate_owner_identity().unwrap();
+        let mut identity = attachment.reserve_for_owner(owner_id).unwrap();
+        identity.owner_id =
+            super::super::DatabaseRuntimeOwnerIdentityV1(owner_id.0.checked_add(1).unwrap());
+        StoreRuntimeRetirementTarget::with_database_owner_attachment(
+            binding.clone(),
+            owner.database_authority.clone().unwrap(),
+            Box::new(FailingOwnerAttachmentReservation {
+                identity,
+                _attachment: attachment,
+                fail_preflight: false,
+                fail_commit: false,
+                terminalized: Arc::new(AtomicBool::new(false)),
+            }),
         )
     }
 
@@ -810,6 +1047,136 @@ mod tests {
             panic!("all-or-none preflight must leave the matching runtime ready");
         };
         drop(lease);
+    }
+
+    #[test]
+    fn owner_preflight_failure_rolls_back_every_target_before_committing_any() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = registry();
+        let first_authority = authority(directory.path(), "preflight-first");
+        let second_authority = authority(directory.path(), "preflight-second");
+        let (first_binding, first_owner) = install_ready(
+            &registry,
+            profile_shard("profile.preflight-first"),
+            first_authority,
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let (second_binding, second_owner) = install_ready(
+            &registry,
+            profile_shard("profile.preflight-second"),
+            second_authority,
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let terminalized = Arc::new(AtomicBool::new(false));
+        let StoreRuntimeRetirementResult::Reserved(mut reservation) = registry
+            .reserve_retirement_batch(vec![
+                failing_owner_target(
+                    &first_binding,
+                    &first_owner,
+                    true,
+                    false,
+                    Arc::clone(&terminalized),
+                ),
+                target(&second_binding, &second_owner),
+            ])
+        else {
+            panic!("preflight fixture must reserve both targets before commit");
+        };
+
+        assert!(matches!(
+            reservation.commit(),
+            Err(StoreRuntimeRegistryFailure::OwnerRetirementCommitFailed { .. })
+        ));
+        assert!(!terminalized.load(Ordering::SeqCst));
+        drop(reservation);
+        assert!(matches!(
+            registry.lookup(&first_binding),
+            StoreRuntimeLookup::Ready(_)
+        ));
+        assert!(matches!(
+            registry.lookup(&second_binding),
+            StoreRuntimeLookup::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn stale_foreign_owner_identity_cannot_reclassify_the_canonical_attachment() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = registry();
+        let authority = authority(directory.path(), "foreign-owner");
+        let (binding, owner) = install_ready(
+            &registry,
+            profile_shard("profile.foreign-owner"),
+            authority,
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+
+        let result = registry.reserve_retirement_batch(vec![stale_owner_target(&binding, &owner)]);
+        assert!(matches!(
+            result,
+            StoreRuntimeRetirementResult::Blocked(blockers)
+                if blockers.iter().any(|blocker| matches!(
+                    blocker,
+                    StoreRuntimeRetirementBlocker::OwnerAttachmentReservation { .. }
+                ))
+        ));
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn owner_commit_failure_is_terminal_truth_for_the_entire_batch() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = registry();
+        let first_authority = authority(directory.path(), "commit-first");
+        let second_authority = authority(directory.path(), "commit-second");
+        let (first_binding, first_owner) = install_ready(
+            &registry,
+            profile_shard("profile.commit-first"),
+            first_authority,
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let (second_binding, second_owner) = install_ready(
+            &registry,
+            profile_shard("profile.commit-second"),
+            second_authority,
+            Box::new(EmptyPhysicalRuntimeAttachment),
+        );
+        let terminalized = Arc::new(AtomicBool::new(false));
+        let StoreRuntimeRetirementResult::Reserved(mut reservation) = registry
+            .reserve_retirement_batch(vec![
+                failing_owner_target(
+                    &first_binding,
+                    &first_owner,
+                    false,
+                    true,
+                    Arc::clone(&terminalized),
+                ),
+                target(&second_binding, &second_owner),
+            ])
+        else {
+            panic!("commit fixture must reserve both targets");
+        };
+
+        let commit = reservation.commit().unwrap();
+        assert!(terminalized.load(Ordering::SeqCst));
+        assert!(commit.outcomes().iter().all(|outcome| matches!(
+            outcome,
+            StoreRuntimeRetirementOutcome::Faulted {
+                error: StoreRuntimeRegistryFailure::OwnerRetirementCommitFailed { .. },
+                ..
+            }
+        )));
+        assert!(matches!(
+            registry.lookup(&first_binding),
+            StoreRuntimeLookup::Faulted { .. }
+        ));
+        assert!(matches!(
+            registry.lookup(&second_binding),
+            StoreRuntimeLookup::Faulted { .. }
+        ));
     }
 
     #[test]
@@ -871,7 +1238,8 @@ mod tests {
         let facade = owner
             .issue_client_lease()
             .unwrap()
-            .into_database_attachment();
+            .into_database_attachment()
+            .unwrap();
 
         let blocked = registry.reserve_retirement_batch(vec![target(&binding, &owner)]);
         assert!(matches!(
@@ -879,7 +1247,7 @@ mod tests {
             StoreRuntimeRetirementResult::Blocked(blockers)
                 if blockers.iter().any(|blocker| matches!(
                     blocker,
-                    StoreRuntimeRetirementBlocker::DatabaseFacades { count: 1, .. }
+                    StoreRuntimeRetirementBlocker::DatabaseAttachments { count: 1, .. }
                 ))
         ));
 

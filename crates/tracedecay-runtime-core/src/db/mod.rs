@@ -29,11 +29,21 @@ pub use access::{
     WriterOwnership, enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
 pub use connection::Database;
+pub(crate) use connection::DatabaseRuntimeClientLeaseV1;
 pub use connection::MemoryGraphReconciliationTaskOwnerV1;
 pub(crate) use connection::MemoryGraphReconciliationTaskScheduleV1;
 pub use connection::{
-    DatabaseAccessMode, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
-    DatabaseMemoryTransaction, DatabaseWriteTransaction,
+    DatabaseAccessMode, DatabaseClientGuardV1, DatabaseEngineConnection,
+    DatabaseEngineReadSnapshot, DatabaseMemoryTransaction, DatabaseStorageTelemetryHandle,
+    DatabaseWriteTransaction,
+};
+pub use connection::{DatabaseOwnerErrorV1, DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1};
+pub use connection::{
+    MemoryGraphReconciliationCancelErrorV1, MemoryGraphReconciliationRetirementStartErrorV1,
+    MemoryGraphReconciliationRetirementTerminalV1,
+};
+pub(in crate::db) use connection::{
+    MemoryGraphReconciliationRetirementReceiptV1, MemoryGraphReconciliationRetirementReservationV1,
 };
 pub use connection::{
     ProjectMemoryReconciliationTelemetryObserverV1, ProjectMemoryReconciliationTelemetrySnapshotV1,

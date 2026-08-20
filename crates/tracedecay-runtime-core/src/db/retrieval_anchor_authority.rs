@@ -783,7 +783,7 @@ mod tests {
         );
         assert!(
             database
-                .conn()
+                .engine_conn()
                 .execute(
                     "UPDATE retrieval_anchor_dispositions
                      SET reason_class = 'rewritten'
@@ -795,7 +795,7 @@ mod tests {
         );
         assert!(
             database
-                .conn()
+                .engine_conn()
                 .execute(
                     "DELETE FROM retrieval_anchor_reverse_lineage
                      WHERE source_anchor_id = 'anchor-1'",

@@ -408,7 +408,7 @@ pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
 }
 
 fn bound_owner(db: &Database) -> FactStoreResult<FactOwnerV1> {
-    match &db.retained_runtime().binding().shard_id.scope {
+    match &db.registered_binding().shard_id.scope {
         StoreShardScopeV1::ProfileMemory => Ok(FactOwnerV1::Profile),
         StoreShardScopeV1::Project { project_id } => Ok(FactOwnerV1::Project {
             project_id: project_id.clone(),

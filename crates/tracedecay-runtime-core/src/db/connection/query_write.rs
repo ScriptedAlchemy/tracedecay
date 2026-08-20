@@ -1,7 +1,7 @@
 use super::{
     Connection, Database, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
-    DatabaseMemoryTransaction, DatabaseWriteTransaction, DatabaseWriterConnection, ReadSnapshot,
-    Result, TraceDecayError, TransactionBehavior, database_query_error, integrity,
+    DatabaseMemoryTransaction, DatabaseWriteTransaction, DatabaseWriterConnection, Result,
+    TraceDecayError, TransactionBehavior, database_query_error, integrity,
 };
 
 impl Database {
@@ -62,6 +62,7 @@ impl Database {
     pub fn engine_conn(&self) -> DatabaseEngineConnection {
         DatabaseEngineConnection {
             conn: self.inner.conn.clone(),
+            _client_guard: self.client_guard(),
         }
     }
 
@@ -156,6 +157,7 @@ impl Database {
         Ok(DatabaseWriterConnection {
             _guard: guard,
             conn,
+            _client_guard: self.client_guard(),
         })
     }
 
@@ -164,24 +166,27 @@ impl Database {
     pub(crate) async fn begin_isolated_read_snapshot(
         &self,
         operation: &str,
-    ) -> Result<ReadSnapshot> {
-        self.inner
-            .conn
-            .read_snapshot()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to begin isolated read snapshot: {error}"),
-                operation: operation.to_string(),
-            })
+    ) -> Result<DatabaseEngineReadSnapshot> {
+        let snapshot =
+            self.inner
+                .conn
+                .read_snapshot()
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to begin isolated read snapshot: {error}"),
+                    operation: operation.to_string(),
+                })?;
+        Ok(DatabaseEngineReadSnapshot {
+            snapshot,
+            _client_guard: self.client_guard(),
+        })
     }
 
     pub async fn begin_engine_read_snapshot(
         &self,
         operation: &str,
     ) -> Result<DatabaseEngineReadSnapshot> {
-        self.begin_isolated_read_snapshot(operation)
-            .await
-            .map(|snapshot| DatabaseEngineReadSnapshot { snapshot })
+        self.begin_isolated_read_snapshot(operation).await
     }
 
     pub async fn begin_memory_read_transaction(
@@ -208,7 +213,11 @@ impl Database {
                 message: format!("failed to begin isolated writer transaction: {error}"),
                 operation: operation.to_string(),
             })?;
-        Ok(DatabaseWriteTransaction { transaction, guard })
+        Ok(DatabaseWriteTransaction {
+            transaction,
+            guard,
+            _client_guard: self.client_guard(),
+        })
     }
 
     /// Starts an atomic bulk-replacement transaction on the canonical writer.
@@ -231,7 +240,11 @@ impl Database {
                 message: format!("failed to begin bulk writer transaction: {error}"),
                 operation: operation.to_string(),
             })?;
-        Ok(DatabaseWriteTransaction { transaction, guard })
+        Ok(DatabaseWriteTransaction {
+            transaction,
+            guard,
+            _client_guard: self.client_guard(),
+        })
     }
 
     pub async fn begin_memory_write_transaction(

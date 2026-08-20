@@ -621,7 +621,13 @@ impl OpenAttemptGuard {
                             locator,
                             opened_file_identity,
                             database_authority,
-                            database_facades: std::sync::atomic::AtomicUsize::new(0),
+                            database_attachments: std::sync::Mutex::new(
+                                std::collections::BTreeMap::new(),
+                            ),
+                            next_database_attachment_id: std::sync::atomic::AtomicU64::new(1),
+                            next_database_owner_id: std::sync::atomic::AtomicU64::new(1),
+                            next_database_attachment_reservation_id:
+                                std::sync::atomic::AtomicU64::new(1),
                         });
                         let owner = Arc::new(StoreRuntimeOwnerAttachment { source });
                         if self.key.is_profile() {

@@ -9,7 +9,7 @@ impl Database {
         &self,
     ) -> Result<tracedecay_rusqlite_runtime::repository::GraphPublicationExactSqlStorage> {
         if !matches!(
-            &self.retained_runtime().binding().shard_id.scope,
+            &self.registered_binding().shard_id.scope,
             tracedecay_store::StoreShardScopeV1::Project { .. }
                 | tracedecay_store::StoreShardScopeV1::ProfileMemory
         ) {
@@ -21,14 +21,13 @@ impl Database {
         }
         let authority = self.write_authority()?;
         let handle = self
-            .retained_runtime()
             .authorized_exact_sql_handle(authority)
             .map_err(|error| TraceDecayError::Database {
                 message: format!("failed to attach graph publication storage: {error:?}"),
                 operation: "attach graph publication storage".to_owned(),
             })?;
-        if handle.binding() != self.retained_runtime().binding()
-            || handle.verified_locator() != self.retained_runtime().locator().verified()
+        if handle.binding() != self.registered_binding()
+            || handle.verified_locator() != self.registered_verified_locator()
         {
             return Err(TraceDecayError::Database {
                 message:
@@ -37,12 +36,15 @@ impl Database {
                 operation: "attach graph publication storage".to_owned(),
             });
         }
-        tracedecay_rusqlite_runtime::repository::GraphPublicationExactSqlStorage::from_authorized_handle(handle)
-            .map_err(|error| TraceDecayError::Database {
+        tracedecay_rusqlite_runtime::repository::GraphPublicationExactSqlStorage::from_authorized_handle_with_guard(
+            handle,
+            self.client_guard(),
+        )
+        .map_err(|error| TraceDecayError::Database {
                 message: format!(
                     "failed to bind project graph publication storage: {error}"
                 ),
                 operation: "attach graph publication storage".to_owned(),
-            })
+        })
     }
 }

@@ -1,11 +1,15 @@
 use super::{
-    Connection, DatabaseEngineConnection, DatabaseEngineReadSnapshot, DatabaseMemoryTransaction,
-    DatabaseWriteTransaction, DatabaseWriterConnection, Path, Result, TraceDecayError,
+    Connection, DatabaseEngineConnection, DatabaseEngineLongLeaseTransaction,
+    DatabaseEngineReadSnapshot, DatabaseMemoryTransaction, DatabaseWriteTransaction,
+    DatabaseWriterConnection, Path, Result, TraceDecayError,
 };
 
 impl DatabaseWriterConnection<'_> {
-    pub fn engine_connection(&self) -> &Connection {
-        &self.conn
+    pub fn engine_connection(&self) -> DatabaseEngineConnection {
+        DatabaseEngineConnection {
+            conn: self.conn.clone(),
+            _client_guard: self._client_guard.clone(),
+        }
     }
 
     #[cfg(test)]
@@ -53,6 +57,29 @@ impl DatabaseEngineConnection {
     {
         self.conn.query(sql, params).await
     }
+
+    pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.conn.execute(sql, params).await
+    }
+
+    pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        self.conn.execute_batch(sql).await
+    }
+
+    pub(crate) async fn authorized_long_lease_transaction(
+        &self,
+    ) -> crate::db::engine::Result<DatabaseEngineLongLeaseTransaction> {
+        self.conn
+            .authorized_long_lease_transaction()
+            .await
+            .map(|transaction| DatabaseEngineLongLeaseTransaction {
+                transaction,
+                _client_guard: self._client_guard.clone(),
+            })
+    }
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseEngineConnection {
@@ -65,6 +92,19 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineConnection {
         P: crate::db::engine::IntoParams,
     {
         DatabaseEngineConnection::query(self, sql, params).await
+    }
+}
+
+impl crate::db::engine::Executor for DatabaseEngineConnection {
+    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        DatabaseEngineConnection::execute(self, sql, params).await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        DatabaseEngineConnection::execute_batch(self, sql).await
     }
 }
 
@@ -101,6 +141,42 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineReadSnapshot {
         P: crate::db::engine::IntoParams,
     {
         DatabaseEngineReadSnapshot::query(self, sql, params).await
+    }
+}
+
+impl DatabaseEngineLongLeaseTransaction {
+    pub(crate) async fn commit(self) -> crate::db::engine::Result<()> {
+        self.transaction.commit().await
+    }
+
+    pub(crate) async fn rollback(self) -> crate::db::engine::Result<()> {
+        self.transaction.rollback().await
+    }
+}
+
+impl crate::db::engine::QueryExecutor for DatabaseEngineLongLeaseTransaction {
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.transaction.query(sql, params).await
+    }
+}
+
+impl crate::db::engine::Executor for DatabaseEngineLongLeaseTransaction {
+    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.transaction.execute(sql, params).await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+        self.transaction.execute_batch(sql).await
     }
 }
 
@@ -271,7 +347,11 @@ impl DatabaseWriteTransaction<'_> {
     }
 
     pub async fn commit(self) -> Result<()> {
-        let Self { transaction, guard } = self;
+        let Self {
+            transaction,
+            guard,
+            _client_guard,
+        } = self;
         let tracks_graph_generation = {
             let mut rows = transaction
                 .query(
@@ -349,6 +429,7 @@ impl DatabaseWriteTransaction<'_> {
         }
         let transaction = transaction.commit().await;
         drop(guard);
+        drop(_client_guard);
         transaction.map_err(|error| TraceDecayError::Database {
             message: format!("failed to commit isolated writer transaction: {error}"),
             operation: "commit write transaction".to_string(),
@@ -356,9 +437,14 @@ impl DatabaseWriteTransaction<'_> {
     }
 
     pub async fn rollback(self) -> Result<()> {
-        let Self { transaction, guard } = self;
+        let Self {
+            transaction,
+            guard,
+            _client_guard,
+        } = self;
         let transaction = transaction.rollback().await;
         drop(guard);
+        drop(_client_guard);
         transaction.map_err(|error| TraceDecayError::Database {
             message: format!("failed to roll back isolated writer transaction: {error}"),
             operation: "rollback write transaction".to_string(),

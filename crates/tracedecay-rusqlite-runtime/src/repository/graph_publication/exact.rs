@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_store::{
@@ -94,13 +95,49 @@ impl ExactQueryAuthority for ExactSqlReadSnapshot {
 /// Relational graph publication authority over one already-attached canonical
 /// exact-SQL writer. The handle carries the owner shard's validated locator,
 /// binding, and live write authority; no path is accepted or reopened here.
+///
+/// `()` represents only standalone repository ownership. Daemon-owned
+/// databases must call `from_authorized_handle_with_guard` with their counted
+/// client guard.
+pub(crate) struct ExactSqlRetainedGuard<Guard = ()> {
+    _guard: Guard,
+}
+
+type ErasedExactSqlRetainedGuard = ExactSqlRetainedGuard<Arc<dyn Send + Sync>>;
+
+impl<Guard> ExactSqlRetainedGuard<Guard>
+where
+    Guard: Send + Sync + 'static,
+{
+    pub(crate) fn new(guard: Guard) -> Self {
+        Self { _guard: guard }
+    }
+
+    fn erase(self) -> ErasedExactSqlRetainedGuard {
+        ExactSqlRetainedGuard {
+            _guard: Arc::new(self._guard),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct GraphPublicationExactSqlStorage {
     handle: ExactSqlHandle,
+    _retained_guard: Arc<ErasedExactSqlRetainedGuard>,
 }
 
 impl GraphPublicationExactSqlStorage {
     pub fn from_authorized_handle(handle: ExactSqlHandle) -> GraphPublicationStoreResultV1<Self> {
+        Self::from_authorized_handle_with_guard(handle, ())
+    }
+
+    pub fn from_authorized_handle_with_guard<Guard>(
+        handle: ExactSqlHandle,
+        guard: Guard,
+    ) -> GraphPublicationStoreResultV1<Self>
+    where
+        Guard: Send + Sync + 'static,
+    {
         if !matches!(
             &handle.binding().shard_id.scope,
             tracedecay_store::StoreShardScopeV1::Project { .. }
@@ -113,7 +150,10 @@ impl GraphPublicationExactSqlStorage {
                 },
             ));
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            _retained_guard: Arc::new(ExactSqlRetainedGuard::new(guard).erase()),
+        })
     }
 }
 

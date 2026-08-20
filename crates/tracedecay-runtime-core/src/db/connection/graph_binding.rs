@@ -18,8 +18,8 @@ impl Database {
                 message: "read-only memory databases cannot bind a graph publisher".to_owned(),
             });
         }
-        if runtime.relational_binding() != self.retained_runtime().binding()
-            || runtime.relational_verified_locator() != self.retained_runtime().locator().verified()
+        if runtime.relational_binding() != self.registered_binding()
+            || runtime.relational_verified_locator() != self.registered_verified_locator()
         {
             return Err(TraceDecayError::Database {
                 operation: "bind verified memory graph runtime".to_owned(),
@@ -128,8 +128,8 @@ mod tests {
         .expect("database runtime");
         let database = Arc::new(database);
         let runtime: Arc<dyn VerifiedGraphRuntimePortV1> = Arc::new(TestGraphRuntime {
-            binding: database.retained_runtime().binding().clone(),
-            locator: database.retained_runtime().locator().verified().clone(),
+            binding: database.registered_binding().clone(),
+            locator: database.registered_verified_locator().clone(),
         });
         let barrier = Arc::new(std::sync::Barrier::new(17));
         std::thread::scope(|scope| {
@@ -172,11 +172,11 @@ mod tests {
         )
         .await
         .expect("database runtime");
-        let mut locator = database.retained_runtime().locator().verified().clone();
+        let mut locator = database.registered_verified_locator().clone();
         locator.locator_digest =
             LocatorDigest::new(format!("sha256:{}", "f".repeat(64))).expect("foreign locator");
         let runtime: Arc<dyn VerifiedGraphRuntimePortV1> = Arc::new(TestGraphRuntime {
-            binding: database.retained_runtime().binding().clone(),
+            binding: database.registered_binding().clone(),
             locator,
         });
 

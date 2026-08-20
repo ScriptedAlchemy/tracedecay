@@ -10,7 +10,7 @@ use tracedecay_store::{
 };
 
 use super::{
-    Database, DatabaseAccessMode, DatabaseAuthority, StoreRuntimeClientLease, database_slot,
+    Database, DatabaseAccessMode, DatabaseAuthority, DatabaseOwnerV1, StoreRuntimeClientLease,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::store_runtime::registry::{
@@ -35,7 +35,9 @@ pub enum TestDatabaseRuntimeMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TestDatabaseRuntimeScope {
     Profile,
+    ProfileMemory,
     ProfileSessions,
+    Project { project_id: ProjectId },
     ProjectSessions { project_id: ProjectId },
 }
 
@@ -111,7 +113,7 @@ impl RegisteredTestRuntimeRetirementControlV1 {
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub struct RegisteredTestRuntimeFixtureV1 {
-    database: Database,
+    owner: DatabaseOwnerV1,
     runtime: StoreRuntimeClientLease,
     retirement: RegisteredTestRuntimeRetirementControlV1,
 }
@@ -121,22 +123,19 @@ impl RegisteredTestRuntimeFixtureV1 {
     pub fn into_parts(
         self,
     ) -> (
-        Database,
+        DatabaseOwnerV1,
         StoreRuntimeClientLease,
         RegisteredTestRuntimeRetirementControlV1,
     ) {
-        (self.database, self.runtime, self.retirement)
+        (self.owner, self.runtime, self.retirement)
     }
 }
 
-enum FixtureRuntimePublication {
-    Existing(Database),
-    Published {
-        database: Database,
-        runtime: StoreRuntimeClientLease,
-        registry: StoreRuntimeRegistry,
-        authority: DatabaseAuthority,
-    },
+struct FixtureRuntimePublication {
+    owner: DatabaseOwnerV1,
+    runtime: StoreRuntimeClientLease,
+    registry: StoreRuntimeRegistry,
+    authority: DatabaseAuthority,
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -291,38 +290,30 @@ impl Database {
                 operation: "publish registered test runtime".to_owned(),
             });
         }
-        match Self::publish_fixture_runtime_publication(
+        let FixtureRuntimePublication {
+            owner,
+            runtime,
+            registry,
+            authority,
+        } = Self::publish_fixture_runtime_publication(
             db_path,
             authority,
             mode,
             test_registered_shard(scope)?,
         )
-        .await?
-        {
-            FixtureRuntimePublication::Published {
-                database,
-                runtime,
+        .await?;
+        let binding = runtime.binding().clone();
+        let locator = runtime.locator().verified().clone();
+        Ok(RegisteredTestRuntimeFixtureV1 {
+            owner,
+            runtime,
+            retirement: RegisteredTestRuntimeRetirementControlV1 {
                 registry,
                 authority,
-            } => {
-                let binding = runtime.binding().clone();
-                let locator = runtime.locator().verified().clone();
-                Ok(RegisteredTestRuntimeFixtureV1 {
-                    database,
-                    runtime,
-                    retirement: RegisteredTestRuntimeRetirementControlV1 {
-                        registry,
-                        authority,
-                        binding,
-                        locator,
-                    },
-                })
-            }
-            FixtureRuntimePublication::Existing(_) => Err(test_runtime_error(
-                "publish registered test runtime with retirement control",
-                "retirement fixtures require a fresh runtime publication".to_owned(),
-            )),
-        }
+                binding,
+                locator,
+            },
+        })
     }
 
     /// Publishes an isolated integration-test fixture with the retained
@@ -366,12 +357,25 @@ impl Database {
         mode: TestDatabaseRuntimeMode,
         target_shard: StoreShardIdV1,
     ) -> Result<(Self, bool)> {
-        match Self::publish_fixture_runtime_publication(db_path, authority, mode, target_shard)
-            .await?
-        {
-            FixtureRuntimePublication::Existing(database)
-            | FixtureRuntimePublication::Published { database, .. } => Ok((database, false)),
-        }
+        let FixtureRuntimePublication { owner, .. } =
+            Self::publish_fixture_runtime_publication(db_path, authority, mode, target_shard)
+                .await?;
+        let database = owner.issue_lease().map_err(|error| {
+            test_runtime_error("issue test database client lease", format!("{error:?}"))
+        })?;
+        Ok((database, false))
+    }
+
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    pub(super) async fn publish_fixture_owner_runtime(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        target_shard: StoreShardIdV1,
+    ) -> Result<DatabaseOwnerV1> {
+        Self::publish_fixture_runtime_publication(db_path, authority, mode, target_shard)
+            .await
+            .map(|publication| publication.owner)
     }
 
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -385,16 +389,6 @@ impl Database {
         let authority = authority.hold_for(db_path, "publish test database runtime")?;
         authority.require_active_write_scope("publish test database runtime")?;
         let path = authority.canonical_database_path().to_path_buf();
-        let existing_slot = database_slot(authority.database_identity_key());
-        if let Some(inner) = existing_slot.lock().await.upgrade() {
-            if mode == TestDatabaseRuntimeMode::ReadOnly {
-                let database =
-                    Self::publish_runtime(inner._runtime.clone(), DatabaseAccessMode::ReadOnly)
-                        .await?;
-                return Ok(FixtureRuntimePublication::Existing(database));
-            }
-            return Ok(FixtureRuntimePublication::Existing(Self { inner }));
-        }
         let profile_shard = StoreShardIdV1::profile(
             target_shard.brain_id.clone(),
             target_shard.profile_id.clone(),
@@ -506,7 +500,7 @@ impl Database {
             DatabaseAccessMode::ReadWrite
         };
         let retained_runtime = runtime.clone();
-        let database = Self::publish_runtime(runtime, access).await?;
+        let owner = Self::publish_runtime(runtime, access).await?;
         // Writable GRAPH test runtimes assert the store already carries the
         // schema this binary creates; there is no ladder to step, so nothing
         // is ever reported as migrated. Registered (global/session) shards are
@@ -518,12 +512,18 @@ impl Database {
             TestDatabaseRuntimeMode::Initialize | TestDatabaseRuntimeMode::Existing
                 if graph_shard =>
             {
+                let database = owner.issue_lease().map_err(|error| {
+                    test_runtime_error(
+                        "issue schema test database client lease",
+                        format!("{error:?}"),
+                    )
+                })?;
                 crate::db::migrations::ensure_schema_current(&database).await?;
             }
             _ => {}
         }
-        Ok(FixtureRuntimePublication::Published {
-            database,
+        Ok(FixtureRuntimePublication {
+            owner,
             runtime: retained_runtime,
             registry,
             authority,
@@ -595,8 +595,14 @@ fn test_registered_shard(scope: TestDatabaseRuntimeScope) -> Result<StoreShardId
     let (brain_id, profile_id) = test_runtime_identity()?;
     let shard = match scope {
         TestDatabaseRuntimeScope::Profile => StoreShardIdV1::profile(brain_id, profile_id),
+        TestDatabaseRuntimeScope::ProfileMemory => {
+            StoreShardIdV1::profile_memory(brain_id, profile_id)
+        }
         TestDatabaseRuntimeScope::ProfileSessions => {
             StoreShardIdV1::profile_sessions(brain_id, profile_id)
+        }
+        TestDatabaseRuntimeScope::Project { project_id } => {
+            StoreShardIdV1::project(brain_id, profile_id, project_id)
         }
         TestDatabaseRuntimeScope::ProjectSessions { project_id } => {
             StoreShardIdV1::project_sessions(brain_id, profile_id, project_id)

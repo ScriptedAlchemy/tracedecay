@@ -30,12 +30,20 @@ mod test_runtime;
 
 pub(crate) use memory_graph_reconciliation::MemoryGraphReconciliationTaskScheduleV1;
 pub use memory_graph_reconciliation::{
-    MemoryGraphReconciliationTaskOwnerV1, ProjectMemoryReconciliationTelemetryObserverV1,
-    ProjectMemoryReconciliationTelemetrySnapshotV1,
+    MemoryGraphReconciliationCancelErrorV1, MemoryGraphReconciliationRetirementStartErrorV1,
+    MemoryGraphReconciliationRetirementTerminalV1, MemoryGraphReconciliationTaskOwnerV1,
+    ProjectMemoryReconciliationTelemetryObserverV1, ProjectMemoryReconciliationTelemetrySnapshotV1,
+};
+pub(in crate::db) use memory_graph_reconciliation::{
+    MemoryGraphReconciliationRetirementReceiptV1, MemoryGraphReconciliationRetirementReservationV1,
 };
 #[cfg(test)]
 pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
-use registry::{DatabaseInner, database_slot};
+pub use registry::{
+    DatabaseClientGuardV1, DatabaseOwnerErrorV1, DatabaseOwnerRetirementReservationV1,
+    DatabaseOwnerV1,
+};
+use registry::{DatabaseClientLeaseV1, DatabaseInner};
 
 /// `SQLite` database backed by one daemon-owned native runtime attachment.
 #[cfg_attr(
@@ -53,16 +61,20 @@ let _ = (Database::publish_test_runtime, TestDatabaseRuntimeMode::Initialize);
 #[derive(Clone)]
 pub struct Database {
     inner: Arc<DatabaseInner>,
+    client: Arc<DatabaseClientLeaseV1>,
 }
 
 #[derive(Clone)]
 pub(crate) struct WeakDatabase {
     inner: Weak<DatabaseInner>,
+    client: Weak<DatabaseClientLeaseV1>,
 }
 
 impl WeakDatabase {
     pub(crate) fn upgrade(&self) -> Option<Database> {
-        self.inner.upgrade().map(|inner| Database { inner })
+        let inner = self.inner.upgrade()?;
+        let client = self.client.upgrade()?;
+        Some(Database { inner, client })
     }
 }
 
@@ -114,6 +126,7 @@ static DATABASE_HEALTH_GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 pub struct DatabaseWriterConnection<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
     conn: Connection,
+    _client_guard: DatabaseClientGuardV1,
 }
 
 /// Driver-neutral graph query facade.
@@ -123,10 +136,75 @@ pub struct DatabaseWriterConnection<'a> {
 #[derive(Clone)]
 pub struct DatabaseEngineConnection {
     conn: Connection,
+    _client_guard: DatabaseClientGuardV1,
 }
 
 pub struct DatabaseEngineReadSnapshot {
     snapshot: ReadSnapshot,
+    _client_guard: DatabaseClientGuardV1,
+}
+
+/// A long-lived engine transaction that retains the exact client issuance
+/// through commit, rollback, or drop. The raw engine transaction never leaves
+/// the database capability boundary.
+pub(crate) struct DatabaseEngineLongLeaseTransaction {
+    transaction: Transaction,
+    _client_guard: DatabaseClientGuardV1,
+}
+
+/// Read-only telemetry channel retaining the exact client issuance that
+/// produced it. It cannot extend a physical runtime after client retirement.
+#[derive(Clone)]
+pub struct DatabaseStorageTelemetryHandle {
+    handle: tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle,
+    _client_guard: DatabaseClientGuardV1,
+}
+
+impl DatabaseStorageTelemetryHandle {
+    #[must_use]
+    pub fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
+        self.handle.binding()
+    }
+
+    #[must_use]
+    pub fn verified_locator(&self) -> &tracedecay_store::VerifiedStoreLocatorV1 {
+        self.handle.verified_locator()
+    }
+
+    #[must_use]
+    pub fn reader_pool_occupancy(
+        &self,
+    ) -> Option<tracedecay_rusqlite_runtime::reader::ReaderPoolSnapshot> {
+        self.handle.reader_pool_occupancy()
+    }
+
+    pub fn store_size_telemetry<F>(
+        &self,
+        reader_wait: std::time::Duration,
+        interrupted: F,
+    ) -> std::result::Result<
+        tracedecay_rusqlite_runtime::reader::StoreSizeTelemetrySample,
+        tracedecay_rusqlite_runtime::reader::ReaderAcquireError,
+    >
+    where
+        F: FnMut() -> Option<tracedecay_store::UnavailableReasonV1>,
+    {
+        self.handle.store_size_telemetry(reader_wait, interrupted)
+    }
+
+    pub fn table_size_telemetry<F>(
+        &self,
+        reader_wait: std::time::Duration,
+        interrupted: F,
+    ) -> std::result::Result<
+        Vec<tracedecay_rusqlite_runtime::reader::TableSizeTelemetrySample>,
+        tracedecay_rusqlite_runtime::reader::ReaderAcquireError,
+    >
+    where
+        F: FnMut() -> Option<tracedecay_store::UnavailableReasonV1>,
+    {
+        self.handle.table_size_telemetry(reader_wait, interrupted)
+    }
 }
 
 /// Driver-neutral transaction used by the canonical memory store during the
@@ -141,16 +219,7 @@ pub enum DatabaseMemoryTransaction<'a> {
 pub struct DatabaseWriteTransaction<'a> {
     transaction: Transaction,
     guard: tokio::sync::MutexGuard<'a, ()>,
-}
-
-fn registered_attachment_required(operation: &str, db_path: &Path) -> TraceDecayError {
-    TraceDecayError::Database {
-        operation: operation.to_owned(),
-        message: format!(
-            "database '{}' is not mounted in the canonical runtime registry",
-            db_path.display()
-        ),
-    }
+    _client_guard: DatabaseClientGuardV1,
 }
 
 fn database_checkpoint_probe() -> Result<DatabaseCheckpointProbe> {
