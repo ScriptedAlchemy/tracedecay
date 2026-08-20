@@ -152,7 +152,16 @@ impl VerifiedGraphRuntimePortV1 for RecordingGraphRuntime {
         if self.hold_reconcile_armed.swap(false, Ordering::AcqRel) {
             self.hold_reconcile_entered.store(true, Ordering::Release);
             self.reconciliation_notify.notify_one();
+            // Bounded: if the test panics before releasing the hold, this
+            // parked blocking-pool thread must fail loudly instead of
+            // spinning forever and hanging the runtime drop.
+            let hold_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !self.hold_reconcile_release.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < hold_deadline,
+                    "held reconcile was never released within 30s; \
+                     a test assertion likely failed while the hold was parked"
+                );
                 std::thread::yield_now();
             }
         }
