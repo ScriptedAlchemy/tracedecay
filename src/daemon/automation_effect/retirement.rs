@@ -13,7 +13,10 @@ use tracedecay_agent_hosts::automation::automatic_facts::{
     MAX_SHIPPED_FACT_PROPOSAL_BYTES, ShippedFactProposalDisposition,
     read_shipped_fact_proposal_bytes,
 };
-use tracedecay_application::{DirectorySyncPolicy, retained_surfaces::AutomationTaskV1};
+use tracedecay_application::retained_surfaces::AutomationTaskV1;
+use tracedecay_private_fs::framed_log::{
+    DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
+};
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -338,11 +341,8 @@ fn complete_after_pending_removal_with(
                         "captured shipped proposal source retirement failed: {error}"
                     ))
                 })?;
-                tracedecay_application::sync_parent_directory(
-                    &closure.source_path,
-                    DirectorySyncPolicy::Strict,
-                )
-                .map_err(contract_error)?;
+                sync_parent_directory(&closure.source_path, DirectorySyncPolicy::Strict)
+                    .map_err(contract_error)?;
                 after_retirement(&retired_path)?;
                 let retired = read_retirement_bytes(&retired_path, "retired source witness")?
                     .ok_or_else(|| {
@@ -461,8 +461,7 @@ fn retirement_witness_digest_name(name: &str) -> Result<(&str, RetirementWitness
 fn remove_retired_witness(retired_path: &Path, source_path: &Path) -> Result<()> {
     let removal = std::fs::remove_file(retired_path);
     let sync =
-        tracedecay_application::sync_parent_directory(source_path, DirectorySyncPolicy::Strict)
-            .map_err(contract_error);
+        sync_parent_directory(source_path, DirectorySyncPolicy::Strict).map_err(contract_error);
     let absent = read_retirement_bytes(retired_path, "retired source witness")?.is_none();
     if absent && sync.is_ok() {
         return Ok(());
@@ -548,7 +547,7 @@ fn publish_archive_bytes_with(
             "shipped proposal archive directory creation failed: {error}"
         ))
     })?;
-    tracedecay_domain::with_owned_temp_publish(
+    with_owned_temp_publish(
         path,
         "shipped-proposal-retirement-archive",
         publish,
@@ -697,8 +696,7 @@ fn capture_exact_source_with_capture(
         match rename_noreplace(&parent, source_name, &tombstone_name) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                tracedecay_application::sync_parent_directory(path, DirectorySyncPolicy::Strict)
-                    .map_err(contract_error)?;
+                sync_parent_directory(path, DirectorySyncPolicy::Strict).map_err(contract_error)?;
                 return Ok(None);
             }
             Err(error) => {
@@ -707,8 +705,7 @@ fn capture_exact_source_with_capture(
                 )));
             }
         }
-        tracedecay_application::sync_parent_directory(path, DirectorySyncPolicy::Strict)
-            .map_err(contract_error)?;
+        sync_parent_directory(path, DirectorySyncPolicy::Strict).map_err(contract_error)?;
         after_capture(&tombstone_path)?;
         let captured = match read_retirement_bytes(&tombstone_path, "captured source") {
             Ok(Some(captured)) => captured,
@@ -774,8 +771,7 @@ fn restore_captured_source(
             "captured shipped proposal source conflicts with a replacement and could not be restored: {error}"
         ))
     })?;
-    tracedecay_application::sync_parent_directory(source_path, DirectorySyncPolicy::Strict)
-        .map_err(contract_error)
+    sync_parent_directory(source_path, DirectorySyncPolicy::Strict).map_err(contract_error)
 }
 
 /// Atomically renames sibling paths without replacing an occupied destination.

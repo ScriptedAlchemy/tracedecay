@@ -32,6 +32,20 @@ fn malformed_json_is_scanned_without_claiming_structural_parse() {
 }
 
 #[test]
+fn credential_bearing_object_keys_are_a_typed_quarantine_state() {
+    // A key carrying credential material cannot be redacted without rewriting
+    // the document's structure, so the sanitizer quarantines the payload. The
+    // typed state must say so — collapsing it into "sanitizer unavailable"
+    // made real quarantines surface as construction faults downstream.
+    let input = format!(r#"{{"{SECRET}":"ordinary-value"}}"#);
+    let quarantined = sanitize_structured_payload(input.as_bytes(), limits());
+    assert_eq!(
+        quarantined.unwrap_err(),
+        StructuredSanitizationError::CredentialKeyQuarantine
+    );
+}
+
+#[test]
 fn structured_limits_deny_raw_expansion_depth_and_item_overruns() {
     let raw = sanitize_structured_payload(
         br#"{"safe":"payload"}"#,

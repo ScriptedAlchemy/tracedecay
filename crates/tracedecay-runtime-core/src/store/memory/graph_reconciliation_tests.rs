@@ -50,6 +50,9 @@ struct RecordingGraphRuntime {
     reconciliation_finished: AtomicBool,
     reconciliation_observed: AtomicBool,
     reconciliation_notify: Notify,
+    hold_reconcile_armed: AtomicBool,
+    hold_reconcile_entered: AtomicBool,
+    hold_reconcile_release: AtomicBool,
     publish_calls: AtomicUsize,
     reconcile_calls: AtomicUsize,
     snapshot_calls: AtomicUsize,
@@ -67,10 +70,35 @@ impl RecordingGraphRuntime {
             reconciliation_finished: AtomicBool::new(false),
             reconciliation_observed: AtomicBool::new(false),
             reconciliation_notify: Notify::new(),
+            hold_reconcile_armed: AtomicBool::new(false),
+            hold_reconcile_entered: AtomicBool::new(false),
+            hold_reconcile_release: AtomicBool::new(false),
             publish_calls: AtomicUsize::new(0),
             reconcile_calls: AtomicUsize::new(0),
             snapshot_calls: AtomicUsize::new(0),
         }
+    }
+
+    /// Parks the next reconcile inside the verified-graph runtime until
+    /// [`Self::release_held_reconcile`], so a test can land a canonical
+    /// source mutation between a publication's source load and its
+    /// settlement decision.
+    fn arm_reconcile_hold(&self) {
+        self.hold_reconcile_armed.store(true, Ordering::Release);
+    }
+
+    fn release_held_reconcile(&self) {
+        self.hold_reconcile_release.store(true, Ordering::Release);
+    }
+
+    async fn wait_for_held_reconcile(&self) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !self.hold_reconcile_entered.load(Ordering::Acquire) {
+                self.reconciliation_notify.notified().await;
+            }
+        })
+        .await
+        .expect("armed publication never reached the verified-graph reconcile");
     }
 
     fn blocking(database: &Database) -> Self {
@@ -121,6 +149,22 @@ impl VerifiedGraphRuntimePortV1 for RecordingGraphRuntime {
         _idempotency_key: GraphIdempotencyKey,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
         self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
+        if self.hold_reconcile_armed.swap(false, Ordering::AcqRel) {
+            self.hold_reconcile_entered.store(true, Ordering::Release);
+            self.reconciliation_notify.notify_one();
+            // Bounded: if the test panics before releasing the hold, this
+            // parked blocking-pool thread must fail loudly instead of
+            // spinning forever and hanging the runtime drop.
+            let hold_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !self.hold_reconcile_release.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < hold_deadline,
+                    "held reconcile was never released within 30s; \
+                     a test assertion likely failed while the hold was parked"
+                );
+                std::thread::yield_now();
+            }
+        }
         if self.block_reconciliation {
             self.reconciliation_started.store(true, Ordering::Release);
             self.reconciliation_observed.store(true, Ordering::Release);
@@ -593,6 +637,195 @@ async fn committed_low_level_fact_batch_schedules_lifecycle_reconciliation() {
 
     assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
     assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+async fn seed_large_payload_fact(store: &DatabaseFactStore<'_>, label: &str, index: i64) {
+    let sanitized = sanitize_payload(
+        &format!("canonical {label} large payload source fact {index}"),
+        FactCategoryV1::General,
+        &[],
+        &[],
+        &json!({"filler": "x".repeat(16 * 1024), "index": index}),
+        None,
+    )
+    .expect("sanitize large payload source fixture")
+    .expect("large payload source fixture remains durable");
+    let batch = initial_batch(
+        &FactOwnerV1::Profile,
+        &ProvenanceId::new(format!("graph.reconciliation.{label}.{index}"))
+            .expect("large payload fixture operation id"),
+        sanitized.payload,
+        sanitized.access,
+        Confidence::new(0.8).expect("large payload fixture confidence"),
+        None,
+        UtcMicros(1_000_000 + index),
+    )
+    .expect("large payload fixture batch");
+    let outcome = store
+        .commit_fact(batch, &write_control())
+        .await
+        .expect("commit large payload fixture fact");
+    assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+}
+
+async fn wait_for_settled_passes(
+    observer: &ProjectMemoryReconciliationTelemetryObserverV1,
+    expected_passes: u64,
+) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = observer.snapshot();
+            if snapshot.reconciliation_passes >= expected_passes
+                && snapshot.active_reconciliation_pass_count == 0
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("scheduled republication did not settle");
+    assert_eq!(
+        observer.snapshot().reconciliation_passes,
+        expected_passes,
+        "reconciliation ran more passes than the journey scheduled"
+    );
+}
+
+#[tokio::test]
+async fn reconciliation_pass_loads_large_payload_source_once() {
+    let (_directory, database) = database("single-pass-source-load").await;
+    let store = DatabaseFactStore::new(&database);
+    // Seed with no graph runtime bound: each write-side publication pass
+    // stops as unavailable at the graph mount, after its source load and
+    // before any settlement work, and its follow-up schedule is NotMounted.
+    for index in 0..8 {
+        seed_large_payload_fact(&store, "single-pass-source-load", index).await;
+    }
+
+    // Baseline: one unmounted publication pass records exactly one canonical
+    // source load through the same telemetry a settled pass records.
+    let observer = database.project_memory_reconciliation_telemetry_observer();
+    let before_single = observer.snapshot();
+    super::graph::publish_project_memory_graph_after_write(database.clone()).await;
+    let single = observer.snapshot();
+    assert_eq!(
+        single.reconciliation_passes,
+        before_single.reconciliation_passes + 1
+    );
+    assert_eq!(
+        single.publication_attempts,
+        before_single.publication_attempts + 1
+    );
+    let single_rows = single.source_rows_loaded - before_single.source_rows_loaded;
+    let single_bytes = single.source_bytes_loaded - before_single.source_bytes_loaded;
+    assert!(
+        single_bytes > 8 * 16 * 1024,
+        "seeded payload_json must dominate one source load ({single_bytes} bytes)"
+    );
+
+    let runtime = bind_runtime(&database);
+    let before_pass = observer.snapshot();
+    super::graph::publish_project_memory_graph_after_write(database.clone()).await;
+    let after_pass = observer.snapshot();
+
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        after_pass.reconciliation_passes,
+        before_pass.reconciliation_passes + 1
+    );
+    assert_eq!(
+        after_pass.publication_attempts,
+        before_pass.publication_attempts + 1
+    );
+    assert_eq!(
+        after_pass.active_reconciliation_pass_count, 0,
+        "publication pass must settle before its work is measured"
+    );
+    assert_eq!(
+        after_pass.source_rows_loaded - before_pass.source_rows_loaded,
+        single_rows,
+        "a settled reconciliation pass must load the canonical source exactly once"
+    );
+    assert_eq!(
+        after_pass.source_bytes_loaded - before_pass.source_bytes_loaded,
+        single_bytes,
+        "a settled reconciliation pass must parse each payload_json exactly once"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_mutation_during_publication_conflicts_and_republishes() {
+    let (_directory, database) = database("mid-publication-source-mutation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    seed_large_payload_fact(&store, "mid-publication-source-mutation", 0).await;
+    wait_for_reconciliation(&runtime).await;
+    reset_reconciliation(&runtime);
+    let observer = database.project_memory_reconciliation_telemetry_observer();
+    let start = observer.snapshot();
+
+    // Park the next publication inside the verified-graph reconcile so a
+    // canonical source mutation can land between its source load and its
+    // settlement decision.
+    runtime.arm_reconcile_hold();
+    let publisher_database = database.clone();
+    let held_publisher = tokio::spawn(async move {
+        super::graph::publish_project_memory_graph_after_write(publisher_database).await;
+    });
+    runtime.wait_for_held_reconcile().await;
+    let held = observer.snapshot();
+    assert_eq!(held.reconciliation_passes, start.reconciliation_passes + 1);
+    assert!(
+        held.source_rows_loaded > start.source_rows_loaded,
+        "the held publication must have loaded its source before parking"
+    );
+
+    // A second fact settles through the ordinary write journey while the
+    // first publication is parked: exactly one source load, no reload.
+    seed_large_payload_fact(&store, "mid-publication-source-mutation", 1).await;
+    let settled_write = observer.snapshot();
+    assert_eq!(
+        settled_write.reconciliation_passes,
+        held.reconciliation_passes + 1
+    );
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 2);
+    let mutated_source_rows = settled_write.source_rows_loaded - held.source_rows_loaded;
+    let mutated_source_bytes = settled_write.source_bytes_loaded - held.source_bytes_loaded;
+    assert!(mutated_source_rows > 0);
+    assert!(
+        !database.memory_graph_reconciliation_pending(),
+        "no follow-up publication is queued before the held pass resumes"
+    );
+
+    // Releasing the held pass exposes a stale stamp and a stale watermark
+    // with nothing pending: its finish must reload the canonical source,
+    // surface the conflict, and its publisher must schedule the follow-up
+    // pass that republishes the mutated source. The tail is therefore
+    // exactly two loads of the mutated source — the conflicted finish's
+    // fallback reload plus the scheduled republication's own load.
+    runtime.release_held_reconcile();
+    held_publisher
+        .await
+        .expect("held publication task completes");
+    wait_for_settled_passes(&observer, settled_write.reconciliation_passes + 1).await;
+    let republished = observer.snapshot();
+    assert_eq!(
+        runtime.reconcile_calls.load(Ordering::SeqCst),
+        3,
+        "the conflicted publication must schedule exactly one republication"
+    );
+    assert!(!database.memory_graph_reconciliation_pending());
+    assert_eq!(
+        republished.source_rows_loaded - settled_write.source_rows_loaded,
+        2 * mutated_source_rows,
+        "the conflicted finish reloads the mutated source once and the \
+         scheduled republication loads it once"
+    );
+    assert_eq!(
+        republished.source_bytes_loaded - settled_write.source_bytes_loaded,
+        2 * mutated_source_bytes
+    );
 }
 
 #[tokio::test]

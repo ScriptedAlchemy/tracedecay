@@ -4,10 +4,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_application::{
-    CancellationObservation, DirectorySyncPolicy, EffectId, EffectResult,
-    SourceEditVerificationStateV1, SourceEditVerificationV1, sync_parent_directory,
+    CancellationObservation, EffectId, EffectResult, SourceEditVerificationStateV1,
+    SourceEditVerificationV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 
 use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::Result;

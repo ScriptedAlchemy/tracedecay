@@ -76,6 +76,12 @@ pub struct AutomationTaskPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub stale_lock_secs: Option<Option<u64>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_clearable_field",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session_evidence_budget_backoff_secs: Option<Option<u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -216,6 +222,9 @@ fn apply_task_patch(config: &mut AutomationTaskConfig, patch: &AutomationTaskPat
     if let Some(stale_lock_secs) = patch.stale_lock_secs {
         config.stale_lock_secs = stale_lock_secs;
     }
+    if let Some(session_evidence_budget_backoff_secs) = patch.session_evidence_budget_backoff_secs {
+        config.session_evidence_budget_backoff_secs = session_evidence_budget_backoff_secs;
+    }
 }
 
 fn merge_patch(config: &mut AutomationConfigPatch, patch: AutomationConfigPatch) {
@@ -245,6 +254,10 @@ fn merge_task_patch(config: &mut AutomationTaskPatch, patch: AutomationTaskPatch
     merge_optional_field(&mut config.cooldown_secs, patch.cooldown_secs);
     merge_optional_field(&mut config.min_idle_secs, patch.min_idle_secs);
     merge_optional_field(&mut config.stale_lock_secs, patch.stale_lock_secs);
+    merge_optional_field(
+        &mut config.session_evidence_budget_backoff_secs,
+        patch.session_evidence_budget_backoff_secs,
+    );
 }
 
 fn merge_optional_field<T>(current: &mut Option<T>, patch: Option<T>) {
@@ -272,6 +285,11 @@ fn validate_task_config(task: &str, config: &AutomationTaskConfig) -> Result<()>
     if matches!(config.stale_lock_secs, Some(0)) {
         return Err(config_error(format!(
             "{task} stale_lock_secs must be greater than zero"
+        )));
+    }
+    if matches!(config.session_evidence_budget_backoff_secs, Some(0)) {
+        return Err(config_error(format!(
+            "{task} session_evidence_budget_backoff_secs must be greater than zero"
         )));
     }
     let schedule = parse_schedule(config.schedule.as_deref())
@@ -585,6 +603,67 @@ mod tests {
         assert_eq!(merged.scheduler_tick_secs, Some(20));
         assert_eq!(merged.memory_curator.enabled, Some(true));
         assert_eq!(merged.memory_curator.schedule, Some(None));
+    }
+
+    #[test]
+    fn session_evidence_budget_backoff_is_patchable_clearable_and_nonzero() {
+        let base = AutomationConfig::default();
+        assert_eq!(
+            base.tasks
+                .session_reflector
+                .session_evidence_budget_backoff_secs,
+            None,
+            "the window must default to unset so the typed contract's default applies"
+        );
+
+        let override_patch = AutomationConfigPatch {
+            session_reflector: AutomationTaskPatch {
+                session_evidence_budget_backoff_secs: Some(Some(120)),
+                ..AutomationTaskPatch::default()
+            },
+            ..AutomationConfigPatch::default()
+        };
+        let effective = effective_config(&base, Some(&override_patch)).unwrap();
+        assert_eq!(
+            effective
+                .tasks
+                .session_reflector
+                .session_evidence_budget_backoff_secs,
+            Some(120)
+        );
+
+        let clear_patch = AutomationConfigPatch {
+            session_reflector: AutomationTaskPatch {
+                session_evidence_budget_backoff_secs: Some(None),
+                ..AutomationTaskPatch::default()
+            },
+            ..AutomationConfigPatch::default()
+        };
+        let merged = merge_project_config(Some(override_patch.clone()), clear_patch);
+        assert_eq!(
+            merged
+                .session_reflector
+                .session_evidence_budget_backoff_secs,
+            Some(None),
+            "a later clear must override the earlier value in the merged project patch"
+        );
+
+        let zero_patch = AutomationConfigPatch {
+            session_reflector: AutomationTaskPatch {
+                session_evidence_budget_backoff_secs: Some(Some(0)),
+                ..AutomationTaskPatch::default()
+            },
+            ..AutomationConfigPatch::default()
+        };
+        // The domain settings validation rejects the zero duration before the
+        // task-level check can render its field-specific message.
+        let error = effective_config(&base, Some(&zero_patch)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("automation task duration is not canonical"),
+            "zero windows must be rejected: {error}"
+        );
     }
 
     #[test]

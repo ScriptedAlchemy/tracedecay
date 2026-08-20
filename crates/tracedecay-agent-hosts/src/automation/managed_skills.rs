@@ -7,7 +7,7 @@ use super::config_error;
 use crate::errors::Result;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use tracedecay_application::DirectorySyncPolicy;
+use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 
 pub use super::managed_skill_model::{
     MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES,
@@ -122,7 +122,7 @@ fn clean_staged_entries(entries: &[SkillTransactionEntry]) {
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
-    tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict)
+    tracedecay_private_fs::framed_log::sync_directory(path, DirectorySyncPolicy::Strict)
         .map_err(|error| config_error(format!("failed to sync '{}': {error}", path.display())))
 }
 

@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "description": "TraceDecay dashboard for code intelligence, project memory, session context, and usage insights.",
   "scripts": {
     "dev": "rsbuild dev",
     "build": "rsbuild build",

@@ -72,6 +72,19 @@ fn measure_allocation<T>(work: impl FnOnce() -> T) -> (T, usize) {
 const BODY_LINES: usize = 640;
 const PAD_WIDTH: usize = 960;
 
+/// Bytes in the single-line string-literal bodies below. Those items (a
+/// TypeScript expression-bodied arrow, a Python one-line suite) contain no
+/// `{` and no `=>` after the header, so the signature helpers must cut at
+/// the body child; a helper that copies the whole item instead busts the
+/// allocation budget and changes the pinned signature.
+const INLINE_LITERAL_WIDTH: usize = 200_000;
+
+fn push_inline_literal(source: &mut String) {
+    for _ in 0..INLINE_LITERAL_WIDTH {
+        source.push('x');
+    }
+}
+
 fn push_padded_statement(source: &mut String, statement: &str, comment_marker: &str) {
     source.push_str(statement);
     source.push(' ');
@@ -113,6 +126,9 @@ fn typescript_fixture() -> String {
         push_padded_statement(&mut source, "  acc = (acc ^ 251) >>> 0;", "//");
     }
     source.push_str("  return acc;\n};\n\n");
+    source.push_str("export const hotExpr = (seed: number): string => \"");
+    push_inline_literal(&mut source);
+    source.push_str("\";\n\n");
     source.push_str("export type MarkerAlias = number;\n");
     source
 }
@@ -126,6 +142,9 @@ fn python_fixture() -> String {
         push_padded_statement(&mut source, "    acc = (acc ^ 251) & 1023", "#");
     }
     source.push_str("    return acc\n\n\n");
+    source.push_str("def hot_inline(seed): return \"");
+    push_inline_literal(&mut source);
+    source.push_str("\"\n\n\n");
     source.push_str("class Marker:\n");
     source.push_str("    \"\"\"Marker class after the hot function.\"\"\"\n\n");
     source.push_str("    def tiny(self):\n");
@@ -286,6 +305,10 @@ fn typescript_hot_walk_owns_only_signature_prefixes() {
         "hotArrow = (seed: number): number =>"
     );
     assert_eq!(
+        signature_of(&parsed.result, NodeKind::ArrowFunction, "hotExpr"),
+        "hotExpr = (seed: number): string =>"
+    );
+    assert_eq!(
         signature_of(&parsed.result, NodeKind::TypeAlias, "MarkerAlias"),
         "type MarkerAlias = number;"
     );
@@ -317,6 +340,10 @@ fn python_hot_walk_owns_only_signature_prefixes() {
     assert_eq!(
         signature_of(&parsed.result, NodeKind::Function, "hot_path"),
         "def hot_path(seed)"
+    );
+    assert_eq!(
+        signature_of(&parsed.result, NodeKind::Function, "hot_inline"),
+        "def hot_inline(seed)"
     );
     assert_eq!(
         signature_of(&parsed.result, NodeKind::Class, "Marker"),

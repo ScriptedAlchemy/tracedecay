@@ -20,15 +20,15 @@ use tracedecay_store::{
     StoreShardScopeV1,
 };
 
-use crate::db::Database;
 use crate::db::engine::params;
+use crate::db::{Database, DatabaseMemoryTransaction};
 
 use super::envelope::finish_read_snapshot;
 use super::graph_manifest::{
     MemoryGraphSource, SourceRelation, build_manifest, ensure_source_read_active, source_watermark,
 };
 use super::primitives::{
-    OwnerKey, row_optional_string, row_string, storage_error, storage_message,
+    OwnerKey, row_i64, row_optional_string, row_string, storage_error, storage_message,
 };
 use super::projection::load_project_memory_projections_controlled_tx;
 
@@ -53,6 +53,18 @@ impl tracedecay_graph_db::GraphCancellation for SharedGraphCancellation {
     fn is_cancelled(&self) -> bool {
         self.0.interrupted()
     }
+}
+
+/// Canonical source rows paired with the lineage-append stamp observed in the
+/// same read snapshot.
+#[derive(Debug)]
+struct LoadedMemoryGraphSource {
+    source: MemoryGraphSource,
+    /// Highest `memory_v2_lineage_events.event_sequence` visible to the
+    /// snapshot that produced [`Self::source`], or `None` when no lineage
+    /// event exists yet. See [`source_unchanged_since`] for the invariant
+    /// that makes this a change token for the projected source.
+    lineage_stamp: Option<i64>,
 }
 
 #[derive(Default)]
@@ -102,15 +114,16 @@ pub(super) async fn project_memory_graph(
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?;
     let projection_identity = GraphProjectionIdentity::new(namespace.clone(), projection.clone());
     ensure_not_cancelled(read_control)?;
-    let source = load_source(db, &owner, Some(read_control), None).await?;
-    let expected_watermark = source_watermark(&owner, &source, Some(read_control))?;
+    let loaded = load_source(db, &owner, Some(read_control), None).await?;
+    let expected_watermark = source_watermark(&owner, &loaded.source, Some(read_control))?;
     let expected_manifest = build_manifest(
         &owner,
         projection_identity.clone(),
-        &source,
+        &loaded.source,
         expected_watermark.clone(),
         Some(read_control),
     )?;
+    let source_stamp = loaded.lineage_stamp;
     let expected_generation = expected_manifest.generation;
     ensure_source_read_active(Some(read_control))?;
     let control_for_snapshot = read_control.clone();
@@ -246,11 +259,14 @@ pub(super) async fn project_memory_graph(
 
     ensure_not_cancelled(read_control)?;
     let hydrated = hydrate_page(db, owner.clone(), &hydration_roots, page, read_control).await?;
-    if source_watermark(
-        &owner,
-        &load_source(db, &owner, Some(read_control), None).await?,
-        Some(read_control),
-    )? != expected_watermark
+    if !source_unchanged_since(db, source_stamp, Some(read_control)).await?
+        && source_watermark(
+            &owner,
+            &load_source(db, &owner, Some(read_control), None)
+                .await?
+                .source,
+            Some(read_control),
+        )? != expected_watermark
     {
         return Err(FactStoreError::GraphConflict);
     }
@@ -310,9 +326,16 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
         namespace(&owner)?,
         GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?,
     );
-    let source = load_source(db, &owner, None, Some(db)).await?;
-    let watermark = source_watermark(&owner, &source, None)?;
-    let manifest = build_manifest(&owner, projection.clone(), &source, watermark.clone(), None)?;
+    let loaded = load_source(db, &owner, None, Some(db)).await?;
+    let watermark = source_watermark(&owner, &loaded.source, None)?;
+    let manifest = build_manifest(
+        &owner,
+        projection.clone(),
+        &loaded.source,
+        watermark.clone(),
+        None,
+    )?;
+    let source_stamp = loaded.lineage_stamp;
     let expected_generation = manifest.generation.clone();
     let idempotency_key =
         GraphIdempotencyKey::new(format!("publish:{}", expected_generation.as_str()))
@@ -341,26 +364,34 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
                 && verified_head_matches_expected(db, &projection, &expected_generation, &owner)
                     .await?
             {
-                return finish_reconciliation_watermark(db, &owner, watermark).await;
+                return finish_reconciliation_watermark(db, &owner, watermark, source_stamp).await;
             }
             return Err(mapped);
         }
     };
     if snapshot.projection() != &projection || snapshot.generation() != &expected_generation {
         if verified_head_matches_expected(db, &projection, &expected_generation, &owner).await? {
-            return finish_reconciliation_watermark(db, &owner, watermark).await;
+            return finish_reconciliation_watermark(db, &owner, watermark, source_stamp).await;
         }
         return Err(FactStoreError::GraphConflict);
     }
-    finish_reconciliation_watermark(db, &owner, watermark).await
+    finish_reconciliation_watermark(db, &owner, watermark, source_stamp).await
 }
 
 async fn finish_reconciliation_watermark(
     db: &Database,
     owner: &FactOwnerV1,
     watermark: tracedecay_graph_db::GraphWatermark,
+    source_stamp: Option<i64>,
 ) -> FactStoreResult<()> {
-    if source_watermark(owner, &load_source(db, owner, None, Some(db)).await?, None)? != watermark
+    if source_unchanged_since(db, source_stamp, None).await? {
+        return Ok(());
+    }
+    if source_watermark(
+        owner,
+        &load_source(db, owner, None, Some(db)).await?.source,
+        None,
+    )? != watermark
         && !db.memory_graph_reconciliation_pending()
     {
         return Err(FactStoreError::GraphConflict);
@@ -461,12 +492,66 @@ fn ensure_not_cancelled(read_control: &FactReadControl) -> FactStoreResult<()> {
     Ok(())
 }
 
+/// Reports whether the projected memory-graph source is provably unchanged
+/// since a prior [`load_source`] observed `source_stamp`.
+///
+/// `memory_v2_lineage_events` is append-only — schema triggers reject updates
+/// and deletes — and its `event_sequence` is an `AUTOINCREMENT` key that is
+/// never reused. Every committed mutation that can change the projected
+/// source (new facts, assertions, evidence, payload rows, curated relations,
+/// active-assertion or payload-access transitions) records at least one
+/// lineage event in the same transaction on both fact write paths, while
+/// source-neutral writes (retrieval/feedback counters, superseded-payload
+/// purges) never touch rows the source reads. Two snapshots observing the
+/// same maximum sequence therefore saw an identical source. An absent or
+/// advanced stamp proves nothing: callers must fall back to a full source
+/// reload and watermark compare.
+async fn source_unchanged_since(
+    db: &Database,
+    source_stamp: Option<i64>,
+    read_control: Option<&FactReadControl>,
+) -> FactStoreResult<bool> {
+    let Some(source_stamp) = source_stamp else {
+        return Ok(false);
+    };
+    ensure_source_read_active(read_control)?;
+    let transaction = db
+        .begin_memory_read_transaction(OPERATION)
+        .await
+        .map_err(|error| storage_error(OPERATION, error))?;
+    let result = lineage_stamp_tx(&transaction).await;
+    let current = finish_read_snapshot(transaction, result).await?;
+    ensure_source_read_active(read_control)?;
+    Ok(current == Some(source_stamp))
+}
+
+async fn lineage_stamp_tx(
+    transaction: &DatabaseMemoryTransaction<'_>,
+) -> FactStoreResult<Option<i64>> {
+    let mut rows = transaction
+        .query(
+            "SELECT event_sequence FROM memory_v2_lineage_events
+             ORDER BY event_sequence DESC LIMIT 1",
+            (),
+        )
+        .await
+        .map_err(|error| storage_error(OPERATION, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(OPERATION, error))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(row_i64(&row, 0, OPERATION)?))
+}
+
 async fn load_source(
     db: &Database,
     owner: &FactOwnerV1,
     read_control: Option<&FactReadControl>,
     telemetry_database: Option<&Database>,
-) -> FactStoreResult<MemoryGraphSource> {
+) -> FactStoreResult<LoadedMemoryGraphSource> {
     ensure_source_read_active(read_control)?;
     let key = OwnerKey::new(owner)?;
     let transaction = db
@@ -475,6 +560,7 @@ async fn load_source(
         .map_err(|error| storage_error(OPERATION, error))?;
     let mut source_load = SourceLoadMeasurement::default();
     let result = async {
+        let lineage_stamp = lineage_stamp_tx(&transaction).await?;
         let mut entities = Vec::new();
         let mut all_fact_ids = BTreeSet::new();
         let mut fact_ids = BTreeSet::new();
@@ -753,10 +839,13 @@ async fn load_source(
             }
         }
         ensure_source_read_active(read_control)?;
-        Ok(MemoryGraphSource {
-            owner: key.json,
-            entities,
-            relations,
+        Ok(LoadedMemoryGraphSource {
+            source: MemoryGraphSource {
+                owner: key.json,
+                entities,
+                relations,
+            },
+            lineage_stamp,
         })
     }
     .await;
@@ -811,6 +900,7 @@ pub(in crate::store::memory) async fn relation_kinds_from_canonical_source_for_t
 ) -> FactStoreResult<BTreeSet<FactRelationKindV1>> {
     load_source(db, owner, Some(read_control), None)
         .await?
+        .source
         .relations
         .iter()
         .filter_map(|relation| match relation.kind.as_str() {

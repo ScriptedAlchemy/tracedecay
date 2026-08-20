@@ -13,10 +13,11 @@ use tracedecay_application::retained_surfaces::{
 };
 use tracedecay_application::{
     ApplicationOperation, ApplicationProblemEnvelope, CancellationSignal, CapabilityGrantId,
-    DirectorySyncPolicy, DisclosureClass, EffectReceipt, ProblemOwningLayer, RequestId,
-    ResolvedScope, retained_surface_application_operation, retained_surface_execution_problem,
+    DisclosureClass, EffectReceipt, ProblemOwningLayer, RequestId, ResolvedScope,
+    retained_surface_application_operation, retained_surface_execution_problem,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RunId};
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, with_owned_temp_publish};
 use tracedecay_store::FactReadControl;
 
 use super::{
@@ -1088,7 +1089,7 @@ pub(super) fn write_pending_index_with_publisher(
     publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<()> {
     let expected: PendingIndex = serde_json::from_slice(bytes).map_err(contract_error)?;
-    tracedecay_domain::with_owned_temp_publish(
+    with_owned_temp_publish(
         path,
         "automation-run-pending-index",
         publish,
