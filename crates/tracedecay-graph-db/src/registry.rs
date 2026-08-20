@@ -184,6 +184,98 @@ enum CloseReservation {
     Closing(Box<Eviction>),
 }
 
+/// Exact identity admitted into a multi-graph retirement fence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphDbRetirementTargetV1 {
+    binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
+}
+
+impl GraphDbRetirementTargetV1 {
+    pub fn new(binding: StoreRuntimeBindingV1, verified_locator: VerifiedStoreLocatorV1) -> Self {
+        Self {
+            binding,
+            verified_locator,
+        }
+    }
+
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    pub fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphDbRetirementBlockerKindV1 {
+    Missing,
+    Opening,
+    Closing,
+    Faulted,
+    IdentityMismatch,
+    ActiveLease,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphDbRetirementBlockerV1 {
+    binding: StoreRuntimeBindingV1,
+    kind: GraphDbRetirementBlockerKindV1,
+}
+
+impl GraphDbRetirementBlockerV1 {
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    pub const fn kind(&self) -> GraphDbRetirementBlockerKindV1 {
+        self.kind
+    }
+}
+
+pub enum GraphDbRetirementAdmissionV1 {
+    Reserved(GraphDbRetirementReservationV1),
+    Blocked(Vec<GraphDbRetirementBlockerV1>),
+}
+
+/// Fences all exact graph entries at once. Dropping this guard before commit
+/// restores every entry to Ready; committing starts native close and any
+/// durability failure is therefore terminal rather than a fabricated rollback.
+pub struct GraphDbRetirementReservationV1 {
+    registry: GraphDbRegistry,
+    evictions: Vec<Eviction>,
+    armed: bool,
+}
+
+impl GraphDbRetirementReservationV1 {
+    pub fn bindings(&self) -> impl Iterator<Item = &StoreRuntimeBindingV1> {
+        self.evictions.iter().map(|eviction| &eviction.binding)
+    }
+
+    pub fn commit_close(mut self) -> Result<Vec<StoreRuntimeBindingV1>, GraphDbError> {
+        self.armed = false;
+        let mut closed = Vec::with_capacity(self.evictions.len());
+        for eviction in std::mem::take(&mut self.evictions) {
+            let binding = eviction.binding.clone();
+            let outcome = eviction.owner.close();
+            self.registry.complete_close(eviction, outcome.clone())?;
+            outcome?;
+            closed.push(binding);
+        }
+        Ok(closed)
+    }
+}
+
+impl Drop for GraphDbRetirementReservationV1 {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _restored = self.registry.restore_retirement_ready(&self.evictions);
+    }
+}
+
 impl GraphDbRegistry {
     pub fn new(config: GraphDbRegistryConfig) -> Result<Self, GraphDbError> {
         Self::new_with_manifest_provider(
@@ -526,6 +618,121 @@ impl GraphDbRegistry {
         Ok(true)
     }
 
+    /// Performs one linearizable preflight for all exact retained graphs and
+    /// fences the whole set before any native owner is closed.
+    pub fn reserve_exact_retirement(
+        &self,
+        targets: &[GraphDbRetirementTargetV1],
+    ) -> GraphDbRetirementAdmissionV1 {
+        let mut unique = BTreeMap::new();
+        for target in targets {
+            unique
+                .entry(target.binding.shard_id.clone())
+                .or_insert_with(|| target.clone());
+        }
+        let mut state = match self.state_lock() {
+            Ok(state) => state,
+            Err(_) => {
+                return GraphDbRetirementAdmissionV1::Blocked(
+                    unique
+                        .into_values()
+                        .map(|target| GraphDbRetirementBlockerV1 {
+                            binding: target.binding,
+                            kind: GraphDbRetirementBlockerKindV1::Faulted,
+                        })
+                        .collect(),
+                );
+            }
+        };
+        let mut blockers = Vec::new();
+        for target in unique.values() {
+            let Some(entry) = state.entries.get(&target.binding.shard_id) else {
+                blockers.push(GraphDbRetirementBlockerV1 {
+                    binding: target.binding.clone(),
+                    kind: GraphDbRetirementBlockerKindV1::Missing,
+                });
+                continue;
+            };
+            let (binding, locator, _, _) = identity::binding(entry);
+            if binding != &target.binding || locator != &target.verified_locator {
+                blockers.push(GraphDbRetirementBlockerV1 {
+                    binding: target.binding.clone(),
+                    kind: GraphDbRetirementBlockerKindV1::IdentityMismatch,
+                });
+                continue;
+            }
+            match entry {
+                RegistryEntry::Opening { .. } => blockers.push(GraphDbRetirementBlockerV1 {
+                    binding: target.binding.clone(),
+                    kind: GraphDbRetirementBlockerKindV1::Opening,
+                }),
+                RegistryEntry::Closing { .. } => blockers.push(GraphDbRetirementBlockerV1 {
+                    binding: target.binding.clone(),
+                    kind: GraphDbRetirementBlockerKindV1::Closing,
+                }),
+                RegistryEntry::Faulted { .. } => blockers.push(GraphDbRetirementBlockerV1 {
+                    binding: target.binding.clone(),
+                    kind: GraphDbRetirementBlockerKindV1::Faulted,
+                }),
+                RegistryEntry::Ready { owner, .. } if !owner.is_unleased() => {
+                    blockers.push(GraphDbRetirementBlockerV1 {
+                        binding: target.binding.clone(),
+                        kind: GraphDbRetirementBlockerKindV1::ActiveLease,
+                    });
+                }
+                RegistryEntry::Ready { .. } => {}
+            }
+        }
+        if !blockers.is_empty() {
+            return GraphDbRetirementAdmissionV1::Blocked(blockers);
+        }
+        let mut evictions = Vec::with_capacity(unique.len());
+        for target in unique.values() {
+            let Some(RegistryEntry::Ready {
+                authority_lease,
+                binding,
+                verified_locator,
+                path,
+                expected_format,
+                owner,
+                last_used,
+            }) = state.entries.get(&target.binding.shard_id)
+            else {
+                return GraphDbRetirementAdmissionV1::Blocked(vec![GraphDbRetirementBlockerV1 {
+                    binding: target.binding.clone(),
+                    kind: GraphDbRetirementBlockerKindV1::Closing,
+                }]);
+            };
+            let eviction = Eviction {
+                authority_lease: Arc::clone(authority_lease),
+                binding: binding.clone(),
+                verified_locator: verified_locator.clone(),
+                path: path.clone(),
+                expected_format: *expected_format,
+                owner: Arc::clone(owner),
+                prior_fault: None,
+                last_used: *last_used,
+            };
+            state.entries.insert(
+                target.binding.shard_id.clone(),
+                RegistryEntry::Closing {
+                    authority_lease: Arc::clone(&eviction.authority_lease),
+                    binding: eviction.binding.clone(),
+                    verified_locator: eviction.verified_locator.clone(),
+                    path: eviction.path.clone(),
+                    expected_format: eviction.expected_format,
+                    owner: Arc::clone(&eviction.owner),
+                },
+            );
+            evictions.push(eviction);
+        }
+        GraphDbRetirementAdmissionV1::Reserved(GraphDbRetirementReservationV1 {
+            registry: self.clone(),
+            evictions,
+            armed: true,
+        })
+    }
+
     /// Closes an already-retained graph by its complete store identity.
     ///
     /// Destructive lifecycle recovery uses this after an external actor has
@@ -814,6 +1021,35 @@ impl GraphDbRegistry {
         state
             .entries
             .insert(entry_binding(&restored).shard_id.clone(), restored);
+        self.inner.changed.notify_all();
+        Ok(())
+    }
+
+    fn restore_retirement_ready(&self, evictions: &[Eviction]) -> Result<(), GraphDbError> {
+        let mut state = self.state_lock()?;
+        for eviction in evictions {
+            let entry = state
+                .entries
+                .get(&eviction.binding.shard_id)
+                .ok_or_else(|| {
+                    GraphDbError::unavailable("graph retirement reservation disappeared")
+                })?;
+            require_closing(entry, eviction)?;
+        }
+        for eviction in evictions {
+            state.entries.insert(
+                eviction.binding.shard_id.clone(),
+                RegistryEntry::Ready {
+                    authority_lease: Arc::clone(&eviction.authority_lease),
+                    binding: eviction.binding.clone(),
+                    verified_locator: eviction.verified_locator.clone(),
+                    path: eviction.path.clone(),
+                    expected_format: eviction.expected_format,
+                    owner: Arc::clone(&eviction.owner),
+                    last_used: eviction.last_used,
+                },
+            );
+        }
         self.inner.changed.notify_all();
         Ok(())
     }

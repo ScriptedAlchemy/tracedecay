@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_runtime_core::db::{Database, MemoryGraphReconciliationTaskOwnerV1};
@@ -9,6 +9,7 @@ use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
 #[derive(Default)]
 struct RetainedMemoryGraphReconciliationTaskStateV1 {
     accepting: bool,
+    retiring: BTreeSet<StoreShardIdV1>,
     tasks: BTreeMap<StoreShardIdV1, MemoryGraphReconciliationTaskOwnerV1>,
 }
 
@@ -17,11 +18,33 @@ pub(super) struct RetainedMemoryGraphReconciliationTasksV1 {
     state: Arc<Mutex<RetainedMemoryGraphReconciliationTaskStateV1>>,
 }
 
+pub(super) struct MemoryGraphReconciliationRetirementReservationV1 {
+    state: Arc<Mutex<RetainedMemoryGraphReconciliationTaskStateV1>>,
+    shards: Vec<StoreShardIdV1>,
+    task_reservations:
+        Vec<tracedecay_runtime_core::db::MemoryGraphReconciliationRetirementReservationV1>,
+    armed: bool,
+}
+
+impl Drop for MemoryGraphReconciliationRetirementReservationV1 {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            for shard in &self.shards {
+                state.retiring.remove(shard);
+            }
+        }
+    }
+}
+
 impl RetainedMemoryGraphReconciliationTasksV1 {
     pub(super) fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(RetainedMemoryGraphReconciliationTaskStateV1 {
                 accepting: true,
+                retiring: BTreeSet::new(),
                 tasks: BTreeMap::new(),
             })),
         }
@@ -38,7 +61,7 @@ impl RetainedMemoryGraphReconciliationTasksV1 {
                 "memory graph task registry lock is poisoned".to_owned(),
             )
         })?;
-        if !state.accepting {
+        if !state.accepting || state.retiring.contains(&shard_id) {
             return Err(session_registry_error(
                 "retain memory graph reconciliation task",
                 "memory graph task registry is shutting down".to_owned(),
@@ -135,6 +158,85 @@ impl RetainedMemoryGraphReconciliationTasksV1 {
             state.tasks.remove(shard_id);
         }
         Ok(())
+    }
+
+    pub(super) fn reserve_retirement(
+        &self,
+        shards: impl IntoIterator<Item = StoreShardIdV1>,
+    ) -> Result<MemoryGraphReconciliationRetirementReservationV1> {
+        let shards = shards
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let owners = {
+            let state = self.state.lock().map_err(|_| {
+                session_registry_error(
+                    "reserve memory graph reconciliation retirement",
+                    "memory graph task registry lock is poisoned".to_owned(),
+                )
+            })?;
+            if !state.accepting {
+                return Err(session_registry_error(
+                    "reserve memory graph reconciliation retirement",
+                    "memory graph task registry is shutting down".to_owned(),
+                ));
+            }
+            let mut owners = Vec::with_capacity(shards.len());
+            for shard in &shards {
+                if state.retiring.contains(shard) {
+                    return Err(session_registry_error(
+                        "reserve memory graph reconciliation retirement",
+                        "memory graph shard is already retiring".to_owned(),
+                    ));
+                }
+                let owner = state.tasks.get(shard).cloned().ok_or_else(|| {
+                    session_registry_error(
+                        "reserve memory graph reconciliation retirement",
+                        "memory graph shard has no retained task coordinator".to_owned(),
+                    )
+                })?;
+                owners.push(owner);
+            }
+            owners
+        };
+        let task_reservations = owners
+            .iter()
+            .map(MemoryGraphReconciliationTaskOwnerV1::reserve_retirement)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| {
+                session_registry_error("reserve memory graph reconciliation retirement", error)
+            })?;
+        let mut state = self.state.lock().map_err(|_| {
+            session_registry_error(
+                "reserve memory graph reconciliation retirement",
+                "memory graph task registry lock is poisoned".to_owned(),
+            )
+        })?;
+        if !state.accepting
+            || shards.iter().any(|shard| {
+                state.retiring.contains(shard)
+                    || state
+                        .tasks
+                        .get(shard)
+                        .zip(owners.iter())
+                        .is_none_or(|(retained, expected)| !retained.same_coordinator(expected))
+            })
+        {
+            return Err(session_registry_error(
+                "reserve memory graph reconciliation retirement",
+                "memory graph task authority changed during reservation".to_owned(),
+            ));
+        }
+        for shard in &shards {
+            state.retiring.insert(shard.clone());
+        }
+        Ok(MemoryGraphReconciliationRetirementReservationV1 {
+            state: Arc::clone(&self.state),
+            shards,
+            task_reservations,
+            armed: true,
+        })
     }
 }
 

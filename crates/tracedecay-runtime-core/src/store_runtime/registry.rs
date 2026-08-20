@@ -47,7 +47,11 @@ pub use attachment::{
 };
 pub use capacity::StoreRuntimeRegistryConfig;
 pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
-pub use close::ClosedStoreRuntime;
+pub use close::{
+    ClosedStoreRuntime, StoreRuntimeRetirementAdmissionV1, StoreRuntimeRetirementBlockerKindV1,
+    StoreRuntimeRetirementBlockerV1, StoreRuntimeRetirementReservationV1,
+    StoreRuntimeRetirementTargetV1,
+};
 pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
 pub use graph::{CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreLeaseV1};
 pub use leases::{
@@ -610,6 +614,9 @@ pub enum StoreRuntimeRegistryFailure {
     RuntimeEvictionInProgress {
         key: Box<StoreRuntimeKey>,
     },
+    RuntimeRetirementInProgress {
+        key: Box<StoreRuntimeKey>,
+    },
     DatabaseRuntimeIdentityConflict {
         requested: Box<StoreRuntimeKey>,
         retained: Box<StoreRuntimeKey>,
@@ -767,11 +774,13 @@ enum RegistryEntry {
 struct RegistryState {
     entries: BTreeMap<StoreRuntimeKey, RegistryEntry>,
     graph_publications: BTreeMap<StoreRuntimeKey, RetainedGraphPublication>,
+    retiring: BTreeMap<StoreRuntimeKey, u64>,
     destructive_paths: BTreeMap<u64, DestructivePathReservation>,
     profile_authorities: BTreeMap<StoreShardIdV1, StoreRuntimeBindingV1>,
     next_destructive_attempt: u64,
     next_open_attempt: u64,
     next_eviction_attempt: u64,
+    next_retirement_attempt: u64,
     next_publication: u64,
 }
 

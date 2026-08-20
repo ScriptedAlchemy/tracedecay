@@ -125,7 +125,8 @@ impl StoreRuntimeRegistry {
             let RegistryEntry::Ready(ready) = entry else {
                 return None;
             };
-            (!key.is_project_code_capacity_exempt()
+            (!state.retiring.contains_key(key)
+                && !key.is_project_code_capacity_exempt()
                 && ready.handle.is_exclusively_held_by_registry()
                 && Arc::strong_count(ready.handle.runtime()) == 1
                 && ready

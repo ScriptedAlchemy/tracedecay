@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
+use tokio::sync::Barrier;
 use tracedecay_domain::{
     BrainNodeId, Confidence, FactCategoryV1, FactCurationActionV1, FactLineageEventKindV1,
     FactOwnerV1, FactRelationKindV1,
@@ -154,6 +155,19 @@ async fn mount_retention_project(
     Arc<crate::db::Database>,
     Arc<crate::global_db::RegisteredGlobalDb>,
 ) {
+    let (project_id, project_root) = register_retention_project(root, label);
+    let memory = registry
+        .project_memory(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("project memory runtime");
+    let sessions = registry
+        .project_sessions(project_id.clone(), [project_root])
+        .await
+        .expect("project session runtime");
+    (project_id, memory, sessions)
+}
+
+fn register_retention_project(root: &std::path::Path, label: &str) -> (ProjectId, PathBuf) {
     let project_id =
         ProjectId::new(format!("runtime-retention-{label}")).expect("typed project identity");
     let project_root = root.join(label);
@@ -166,23 +180,15 @@ async fn mount_retention_project(
         },
     )
     .expect("project enrollment");
-    let memory = registry
-        .project_memory(project_id.clone(), [project_root.clone()])
-        .await
-        .expect("project memory runtime");
-    let sessions = registry
-        .project_sessions(project_id.clone(), [project_root])
-        .await
-        .expect("project session runtime");
-    (project_id, memory, sessions)
+    (project_id, project_root)
 }
 
-async fn add_profile_schema_fact(
+async fn add_schema_fact(
     database: &crate::db::Database,
+    owner: FactOwnerV1,
     label: &str,
 ) -> ProjectMemoryCurationMutationTarget {
-    let memory = memory_application_for_db(FactOwnerV1::Profile, database)
-        .expect("profile memory application");
+    let memory = memory_application_for_db(owner, database).expect("profile memory application");
     let preflight = memory
         .preflight_project_memory_fact_add(
             ProjectMemoryFactAddRequest {
@@ -321,9 +327,9 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
         .profile_memory()
         .await
         .expect("mounted profile memory");
-    let source = add_profile_schema_fact(&database, "source").await;
-    let target = add_profile_schema_fact(&database, "target").await;
-    let evidence = add_profile_schema_fact(&database, "evidence").await;
+    let source = add_schema_fact(&database, FactOwnerV1::Profile, "source").await;
+    let target = add_schema_fact(&database, FactOwnerV1::Profile, "target").await;
+    let evidence = add_schema_fact(&database, FactOwnerV1::Profile, "evidence").await;
     let owner = FactOwnerV1::Profile;
     let memory = memory_application_for_db(owner.clone(), &database)
         .expect("mounted profile memory application");
@@ -1282,6 +1288,17 @@ async fn project_runtime_capacity_never_evicts_a_live_project_pair() {
     let (temporary, registry, _database_scope) = retention_fixture(1).await;
     let (first_id, first_memory, first_sessions) =
         mount_retention_project(&registry, temporary.path(), "live-first").await;
+    let owner = FactOwnerV1::Project {
+        project_id: first_id.clone(),
+    };
+    let fact = add_schema_fact(&first_memory, owner.clone(), "retention-refusal").await;
+    let runtime_client = first_memory.retained_runtime().clone();
+    let graph_lease = first_memory
+        .memory_graph_runtime()
+        .expect("project memory graph lease");
+    let reconciliation_lease = first_memory
+        .memory_graph_reconciliation_task_owner()
+        .expect("project memory reconciliation lease");
 
     let blocked = registry
         .project_memory(
@@ -1298,8 +1315,55 @@ async fn project_runtime_capacity_never_evicts_a_live_project_pair() {
     );
     assert!(first_memory.is_writable());
     assert_eq!(
+        first_memory.retained_runtime().binding(),
+        runtime_client.binding()
+    );
+    assert_eq!(
         first_sessions.binding().shard_id.scope.project_id(),
         Some(&first_id)
+    );
+    let graph_projection = GraphProjectionIdentity::new(
+        GraphNamespace::new("journey:retention-refusal").expect("graph namespace"),
+        GraphProjectionId::new("projection.retention-refusal").expect("graph projection"),
+    );
+    assert!(
+        graph_lease
+            .verified_snapshot(&graph_projection, FactReadControl::new(Arc::new(|| false)))
+            .expect("retained graph lease remains readable after refusal")
+            .is_none(),
+        "the retained graph lease must report a typed empty graph, not cancellation or closure"
+    );
+    registry
+        .retain_memory_graph_reconciliation_task(
+            &first_memory.retained_runtime().binding().shard_id,
+            first_memory.as_ref(),
+        )
+        .expect("retained reconciliation lease remains admitted after refusal");
+    let retained_reconciliation_lease = first_memory
+        .memory_graph_reconciliation_task_owner()
+        .expect("retained project memory reconciliation lease");
+    assert!(
+        reconciliation_lease.same_coordinator(&retained_reconciliation_lease),
+        "capacity refusal must preserve the exact reconciliation coordinator"
+    );
+    let memory = memory_application_for_db(owner.clone(), first_memory.as_ref())
+        .expect("live project memory application");
+    let history = memory
+        .get_project_memory_history(
+            ProjectMemoryFactHistoryQueryV1::new(
+                ProjectMemoryFactIdV1::new(owner, fact.fact_id().clone())
+                    .expect("owner-bound retained fact"),
+                None,
+                16,
+            )
+            .expect("bounded retained fact history"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("durable fact remains readable after refusal");
+    assert!(
+        !history.events().is_empty(),
+        "capacity refusal must preserve the durable retained fact"
     );
     let telemetry = registry
         .session_runtime_retention_telemetry()
@@ -1308,6 +1372,169 @@ async fn project_runtime_capacity_never_evicts_a_live_project_pair() {
     assert_eq!(telemetry.project_memory_runtimes, 1);
     assert_eq!(telemetry.project_session_runtimes, 1);
     assert_eq!(telemetry.retirement_refusals, 1);
+}
+
+#[tokio::test]
+async fn runtime_close_refusal_preserves_the_exact_memory_graph_and_reconciliation_leases() {
+    let (temporary, registry, _database_scope) = retention_fixture(1).await;
+    let (project_id, project_root) = register_retention_project(temporary.path(), "rollback");
+    let database = registry
+        .project_memory(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("project memory runtime");
+    let owner = FactOwnerV1::Project {
+        project_id: project_id.clone(),
+    };
+    let fact = add_schema_fact(&database, owner.clone(), "retirement-rollback").await;
+    let runtime_client = database.retained_runtime().clone();
+    let graph_lease = database
+        .memory_graph_runtime()
+        .expect("project memory graph lease");
+    let reconciliation_lease = database
+        .memory_graph_reconciliation_task_owner()
+        .expect("project memory reconciliation lease");
+    drop(database);
+
+    let refusal = registry
+        .retire_project_memory_graph(&project_id)
+        .await
+        .expect_err("a retained runtime client must refuse exact memory retirement");
+    assert!(
+        refusal.to_string().contains("close project memory runtime"),
+        "unexpected runtime-close refusal: {refusal}"
+    );
+    let graph_projection = GraphProjectionIdentity::new(
+        GraphNamespace::new("journey:retention-rollback").expect("graph namespace"),
+        GraphProjectionId::new("projection.retention-rollback").expect("graph projection"),
+    );
+    assert!(
+        graph_lease
+            .verified_snapshot(&graph_projection, FactReadControl::new(Arc::new(|| false)))
+            .expect("exact graph lease remains readable after runtime-close refusal")
+            .is_none(),
+        "the exact graph lease must remain an available empty graph after refusal"
+    );
+
+    let reopened = registry
+        .project_memory(project_id.clone(), [project_root])
+        .await
+        .expect("exact project memory route remains available after refusal");
+    assert_eq!(
+        reopened.retained_runtime().binding(),
+        runtime_client.binding()
+    );
+    let reopened_reconciliation_lease = reopened
+        .memory_graph_reconciliation_task_owner()
+        .expect("restored project memory reconciliation lease");
+    assert!(
+        reconciliation_lease.same_coordinator(&reopened_reconciliation_lease),
+        "runtime-close refusal must not replace the exact reconciliation coordinator"
+    );
+    let memory = memory_application_for_db(owner.clone(), reopened.as_ref())
+        .expect("reopened project memory application");
+    let history = memory
+        .get_project_memory_history(
+            ProjectMemoryFactHistoryQueryV1::new(
+                ProjectMemoryFactIdV1::new(owner, fact.fact_id().clone())
+                    .expect("owner-bound rollback fact"),
+                None,
+                16,
+            )
+            .expect("bounded rollback fact history"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("durable fact remains readable after rollback refusal");
+    assert!(
+        !history.events().is_empty(),
+        "runtime-close refusal must preserve the durable fact"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_distinct_project_memory_opens_never_overflow_retained_capacity() {
+    let (temporary, registry, _database_scope) = retention_fixture(1).await;
+    let registry = Arc::new(registry);
+    let projects = ["memory-race-a", "memory-race-b", "memory-race-c"]
+        .into_iter()
+        .map(|label| register_retention_project(temporary.path(), label))
+        .collect::<Vec<_>>();
+    let barrier = Arc::new(Barrier::new(projects.len()));
+    let mut opens = tokio::task::JoinSet::new();
+    for (project_id, project_root) in projects {
+        let registry = Arc::clone(&registry);
+        let barrier = Arc::clone(&barrier);
+        opens.spawn(async move {
+            barrier.wait().await;
+            registry.project_memory(project_id, [project_root]).await
+        });
+    }
+
+    let mut admitted = Vec::new();
+    while let Some(open) = opens.join_next().await {
+        if let Ok(database) = open.expect("project memory open task") {
+            admitted.push(database);
+        }
+    }
+
+    let telemetry = registry
+        .session_runtime_retention_telemetry()
+        .await
+        .expect("retention telemetry after concurrent project-memory opens");
+    assert!(
+        admitted.len() <= 1,
+        "simultaneous live project-memory opens exceeded the capacity: {}",
+        admitted.len()
+    );
+    assert!(
+        telemetry.project_memory_runtimes <= telemetry.project_runtime_capacity,
+        "project-memory registry cardinality {} exceeded capacity {}",
+        telemetry.project_memory_runtimes,
+        telemetry.project_runtime_capacity
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_distinct_project_session_opens_never_overflow_retained_capacity() {
+    let (temporary, registry, _database_scope) = retention_fixture(1).await;
+    let registry = Arc::new(registry);
+    let projects = ["sessions-race-a", "sessions-race-b", "sessions-race-c"]
+        .into_iter()
+        .map(|label| register_retention_project(temporary.path(), label))
+        .collect::<Vec<_>>();
+    let barrier = Arc::new(Barrier::new(projects.len()));
+    let mut opens = tokio::task::JoinSet::new();
+    for (project_id, project_root) in projects {
+        let registry = Arc::clone(&registry);
+        let barrier = Arc::clone(&barrier);
+        opens.spawn(async move {
+            barrier.wait().await;
+            registry.project_sessions(project_id, [project_root]).await
+        });
+    }
+
+    let mut admitted = Vec::new();
+    while let Some(open) = opens.join_next().await {
+        if let Ok(database) = open.expect("project session open task") {
+            admitted.push(database);
+        }
+    }
+
+    let telemetry = registry
+        .session_runtime_retention_telemetry()
+        .await
+        .expect("retention telemetry after concurrent project-session opens");
+    assert!(
+        admitted.len() <= 1,
+        "simultaneous live project-session opens exceeded the capacity: {}",
+        admitted.len()
+    );
+    assert!(
+        telemetry.project_session_runtimes <= telemetry.project_runtime_capacity,
+        "project-session registry cardinality {} exceeded capacity {}",
+        telemetry.project_session_runtimes,
+        telemetry.project_runtime_capacity
+    );
 }
 
 #[tokio::test]

@@ -145,6 +145,11 @@ impl StoreRuntimeRegistry {
         }
 
         let mut state = self.lock_state();
+        if state.retiring.contains_key(&key) {
+            return Err(StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                key: Box::new(key),
+            });
+        }
         if let Some(retained) = state
             .graph_publications
             .iter()

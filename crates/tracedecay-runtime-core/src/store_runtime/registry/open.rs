@@ -122,6 +122,11 @@ impl StoreRuntimeRegistry {
         let key = request.key.clone();
         let (binding, attempt, updates, join, eviction) = {
             let mut state = self.lock_state();
+            if state.retiring.contains_key(&key) {
+                return StoreRuntimeOpenBegin::Rejected(
+                    StoreRuntimeRegistryFailure::RuntimeRetirementInProgress { key: Box::new(key) },
+                );
+            }
             if let Some(path) = request
                 .database_authority
                 .as_ref()

@@ -148,6 +148,7 @@ fn decrement_counter(counter: &AtomicU64, counter_name: &'static str) -> Result<
 #[derive(Default)]
 struct MemoryGraphReconciliationTaskStateV1 {
     accepting: bool,
+    retirement_fences: usize,
     pending: bool,
     running: bool,
     current_identity: Option<Arc<()>>,
@@ -203,6 +204,25 @@ pub struct MemoryGraphReconciliationTaskOwnerV1 {
     close_reconciliation: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
 }
 
+/// Temporarily denies new reconciliation schedules for one idle coordinator.
+/// Dropping the guard restores only this admission fence; shutdown/cancellation
+/// remains owned by the caller's later irreversible retirement commit.
+pub struct MemoryGraphReconciliationRetirementReservationV1 {
+    shared: Arc<MemoryGraphReconciliationSharedV1>,
+    armed: bool,
+}
+
+impl Drop for MemoryGraphReconciliationRetirementReservationV1 {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut state) = self.shared.state.lock() {
+            state.retirement_fences = state.retirement_fences.saturating_sub(1);
+        }
+    }
+}
+
 impl MemoryGraphReconciliationCoordinatorV1 {
     pub(super) fn task_owner(
         &self,
@@ -242,7 +262,7 @@ impl MemoryGraphReconciliationCoordinatorV1 {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !state.accepting {
+        if !state.accepting || state.retirement_fences != 0 {
             return MemoryGraphReconciliationTaskScheduleV1::Closed;
         }
         state.pending = true;
@@ -415,6 +435,29 @@ async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
 }
 
 impl MemoryGraphReconciliationTaskOwnerV1 {
+    pub fn reserve_retirement(
+        &self,
+    ) -> Result<MemoryGraphReconciliationRetirementReservationV1, String> {
+        let mut state =
+            self.shared.state.lock().map_err(|_| {
+                "memory graph reconciliation task state lock is poisoned".to_owned()
+            })?;
+        if !state.accepting {
+            return Err("memory graph reconciliation task is closed".to_owned());
+        }
+        if state.pending || state.running || state.joining || state.joining_task_count != 0 {
+            return Err("memory graph reconciliation task is active".to_owned());
+        }
+        state.retirement_fences = state
+            .retirement_fences
+            .checked_add(1)
+            .ok_or_else(|| "memory graph reconciliation retirement fence overflowed".to_owned())?;
+        Ok(MemoryGraphReconciliationRetirementReservationV1 {
+            shared: Arc::clone(&self.shared),
+            armed: true,
+        })
+    }
+
     pub fn same_coordinator(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
     }

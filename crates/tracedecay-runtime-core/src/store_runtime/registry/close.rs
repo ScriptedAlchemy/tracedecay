@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -38,6 +39,145 @@ impl ClosedStoreRuntime {
     }
 }
 
+/// One exact runtime identity and originating database authority that must be
+/// retired together with the other members of its reservation.
+#[derive(Clone)]
+pub struct StoreRuntimeRetirementTargetV1 {
+    binding: StoreRuntimeBindingV1,
+    authority: DatabaseAuthority,
+}
+
+impl StoreRuntimeRetirementTargetV1 {
+    pub fn new(binding: StoreRuntimeBindingV1, authority: DatabaseAuthority) -> Self {
+        Self { binding, authority }
+    }
+
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+}
+
+/// A non-mutating reason an exact retirement could not be admitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoreRuntimeRetirementBlockerKindV1 {
+    Missing,
+    Opening,
+    Evicting,
+    Retiring,
+    BindingMismatch,
+    AuthorityMismatch,
+    ActiveRuntime {
+        external_handles: usize,
+        external_runtime_references: usize,
+        client_leases: u32,
+    },
+    RetainedGraphLease {
+        leases: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreRuntimeRetirementBlockerV1 {
+    binding: StoreRuntimeBindingV1,
+    kind: StoreRuntimeRetirementBlockerKindV1,
+}
+
+impl StoreRuntimeRetirementBlockerV1 {
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    pub fn kind(&self) -> &StoreRuntimeRetirementBlockerKindV1 {
+        &self.kind
+    }
+}
+
+/// Linearizable result of an exact multi-runtime retirement preflight.
+pub enum StoreRuntimeRetirementAdmissionV1 {
+    Reserved(StoreRuntimeRetirementReservationV1),
+    Blocked(Vec<StoreRuntimeRetirementBlockerV1>),
+}
+
+struct RetirementReservationTarget {
+    key: StoreRuntimeKey,
+    binding: StoreRuntimeBindingV1,
+    authority: DatabaseAuthority,
+}
+
+/// Fences a complete exact runtime set against new opens, leases, and graph
+/// retention. Dropping it before [`Self::commit_close`] restores every target
+/// to its previous ready state without closing any physical attachment.
+pub struct StoreRuntimeRetirementReservationV1 {
+    registry: StoreRuntimeRegistry,
+    attempt: u64,
+    targets: Vec<RetirementReservationTarget>,
+    armed: bool,
+}
+
+impl StoreRuntimeRetirementReservationV1 {
+    pub fn bindings(&self) -> impl Iterator<Item = &StoreRuntimeBindingV1> {
+        self.targets.iter().map(|target| &target.binding)
+    }
+
+    /// Begins the irreversible close phase for the complete reserved set.
+    ///
+    /// Identity and lease admission already happened under the registry lock.
+    /// A later native close failure therefore leaves its exact entry terminal
+    /// (`Evicting`/faulted) rather than fabricating a usable rollback.
+    pub async fn commit_close(
+        mut self,
+    ) -> Result<Vec<ClosedStoreRuntime>, StoreRuntimeRegistryFailure> {
+        let reservations = self
+            .registry
+            .begin_retirement_close(&self.targets, self.attempt)?;
+        self.armed = false;
+        let mut closed = Vec::with_capacity(reservations.len());
+        for reservation in reservations {
+            let physical = reservation.handle.clone();
+            let mut outcome =
+                tokio::task::spawn_blocking(move || drain_and_close_physical(&physical))
+                    .await
+                    .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "join committed registered runtime retirement",
+                        message: error.to_string(),
+                    })
+                    .and_then(|result| result);
+            if outcome.is_ok() {
+                outcome = reservation
+                    .handle
+                    .runtime()
+                    .transition(RuntimeMaintenanceStateV1::Closed)
+                    .map_err(
+                        |error| StoreRuntimeRegistryFailure::RuntimeLifecycleFailed {
+                            message: error.to_string(),
+                        },
+                    );
+            } else {
+                let _ = reservation
+                    .handle
+                    .runtime()
+                    .transition(RuntimeMaintenanceStateV1::Faulted);
+            }
+            closed.push(self.registry.finish_exact_close(reservation, outcome)?);
+        }
+        Ok(closed)
+    }
+}
+
+impl Drop for StoreRuntimeRetirementReservationV1 {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut state = self.registry.lock_state();
+        for target in &self.targets {
+            if state.retiring.get(&target.key) == Some(&self.attempt) {
+                state.retiring.remove(&target.key);
+            }
+        }
+    }
+}
+
 struct CloseReservation {
     key: StoreRuntimeKey,
     attempt: u64,
@@ -45,6 +185,213 @@ struct CloseReservation {
 }
 
 impl StoreRuntimeRegistry {
+    /// Admits an all-or-nothing exact runtime retirement without closing any
+    /// attachment. The state lock observes every target before writing a
+    /// retirement mark, so a refusal leaves the prior registry untouched.
+    pub fn reserve_exact_retirement(
+        &self,
+        targets: &[StoreRuntimeRetirementTargetV1],
+    ) -> StoreRuntimeRetirementAdmissionV1 {
+        let mut unique = BTreeMap::new();
+        for target in targets {
+            unique
+                .entry(StoreRuntimeKey::from_binding(&target.binding))
+                .or_insert_with(|| target.clone());
+        }
+        let mut state = self.lock_state();
+        let mut blockers = Vec::new();
+        for (key, target) in &unique {
+            let binding = target.binding.clone();
+            if state.retiring.contains_key(key) {
+                blockers.push(StoreRuntimeRetirementBlockerV1 {
+                    binding,
+                    kind: StoreRuntimeRetirementBlockerKindV1::Retiring,
+                });
+                continue;
+            }
+            let Some(entry) = state.entries.get(key) else {
+                blockers.push(StoreRuntimeRetirementBlockerV1 {
+                    binding,
+                    kind: StoreRuntimeRetirementBlockerKindV1::Missing,
+                });
+                continue;
+            };
+            let ready = match entry {
+                RegistryEntry::Ready(ready) => ready,
+                RegistryEntry::Opening(_) => {
+                    blockers.push(StoreRuntimeRetirementBlockerV1 {
+                        binding,
+                        kind: StoreRuntimeRetirementBlockerKindV1::Opening,
+                    });
+                    continue;
+                }
+                RegistryEntry::Evicting(_) => {
+                    blockers.push(StoreRuntimeRetirementBlockerV1 {
+                        binding,
+                        kind: StoreRuntimeRetirementBlockerKindV1::Evicting,
+                    });
+                    continue;
+                }
+            };
+            if ready.handle.binding() != &target.binding {
+                blockers.push(StoreRuntimeRetirementBlockerV1 {
+                    binding,
+                    kind: StoreRuntimeRetirementBlockerKindV1::BindingMismatch,
+                });
+                continue;
+            }
+            let retained_authority = ready.handle.inner.database_authority.as_ref();
+            let authority_matches = retained_authority.is_some_and(|retained| {
+                retained.token() == target.authority.token()
+                    && retained.role() == target.authority.role()
+                    && retained.database_identity_key() == target.authority.database_identity_key()
+            });
+            if !authority_matches
+                || ready
+                    .handle
+                    .validate_database_write_authority(
+                        &target.authority,
+                        "reserve exact registered runtime retirement",
+                    )
+                    .is_err()
+            {
+                blockers.push(StoreRuntimeRetirementBlockerV1 {
+                    binding,
+                    kind: StoreRuntimeRetirementBlockerKindV1::AuthorityMismatch,
+                });
+                continue;
+            }
+            let external_handles = Arc::strong_count(&ready.handle.inner).saturating_sub(1);
+            let external_runtime_references =
+                Arc::strong_count(ready.handle.runtime()).saturating_sub(1);
+            let client_leases = ready.handle.runtime().health_snapshot().client_leases;
+            if external_handles != 0 || external_runtime_references != 0 || client_leases != 0 {
+                blockers.push(StoreRuntimeRetirementBlockerV1 {
+                    binding,
+                    kind: StoreRuntimeRetirementBlockerKindV1::ActiveRuntime {
+                        external_handles,
+                        external_runtime_references,
+                        client_leases,
+                    },
+                });
+                continue;
+            }
+            if let Some(retained) = state.graph_publications.get(key)
+                && retained.leases != 0
+            {
+                blockers.push(StoreRuntimeRetirementBlockerV1 {
+                    binding,
+                    kind: StoreRuntimeRetirementBlockerKindV1::RetainedGraphLease {
+                        leases: retained.leases,
+                    },
+                });
+            }
+        }
+        if !blockers.is_empty() {
+            return StoreRuntimeRetirementAdmissionV1::Blocked(blockers);
+        }
+        let Some(attempt) = state.next_retirement_attempt.checked_add(1) else {
+            return StoreRuntimeRetirementAdmissionV1::Blocked(
+                unique
+                    .into_values()
+                    .map(|target| StoreRuntimeRetirementBlockerV1 {
+                        binding: target.binding,
+                        kind: StoreRuntimeRetirementBlockerKindV1::Retiring,
+                    })
+                    .collect(),
+            );
+        };
+        state.next_retirement_attempt = attempt;
+        let targets = unique
+            .into_iter()
+            .map(|(key, target)| {
+                state.retiring.insert(key.clone(), attempt);
+                RetirementReservationTarget {
+                    key,
+                    binding: target.binding,
+                    authority: target.authority,
+                }
+            })
+            .collect();
+        StoreRuntimeRetirementAdmissionV1::Reserved(StoreRuntimeRetirementReservationV1 {
+            registry: self.clone(),
+            attempt,
+            targets,
+            armed: true,
+        })
+    }
+
+    fn begin_retirement_close(
+        &self,
+        targets: &[RetirementReservationTarget],
+        attempt: u64,
+    ) -> Result<Vec<CloseReservation>, StoreRuntimeRegistryFailure> {
+        let mut state = self.lock_state();
+        for target in targets {
+            if state.retiring.get(&target.key) != Some(&attempt) {
+                return Err(StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                    key: Box::new(target.key.clone()),
+                });
+            }
+            let Some(RegistryEntry::Ready(ready)) = state.entries.get(&target.key) else {
+                return Err(StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                    key: Box::new(target.key.clone()),
+                });
+            };
+            if ready.handle.binding() != &target.binding {
+                return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
+                    expected: Box::new(target.binding.clone()),
+                    actual: Box::new(ready.handle.binding().clone()),
+                });
+            }
+            let retained_authority = ready.handle.inner.database_authority.as_ref();
+            let authority_matches = retained_authority.is_some_and(|retained| {
+                retained.token() == target.authority.token()
+                    && retained.role() == target.authority.role()
+                    && retained.database_identity_key() == target.authority.database_identity_key()
+            });
+            if !authority_matches {
+                return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "commit exact registered runtime retirement",
+                    message: "reserved runtime authority changed before retirement commit"
+                        .to_owned(),
+                });
+            }
+        }
+        let mut reservations = Vec::with_capacity(targets.len());
+        for target in targets {
+            let Some(RegistryEntry::Ready(ready)) = state.entries.remove(&target.key) else {
+                return Err(StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                    key: Box::new(target.key.clone()),
+                });
+            };
+            ready
+                .handle
+                .runtime()
+                .transition(RuntimeMaintenanceStateV1::Draining)
+                .map_err(
+                    |error| StoreRuntimeRegistryFailure::RuntimeLifecycleFailed {
+                        message: error.to_string(),
+                    },
+                )?;
+            let handle = ready.handle;
+            state.entries.insert(
+                target.key.clone(),
+                RegistryEntry::Evicting(EvictingRuntime {
+                    attempt,
+                    handle: handle.clone(),
+                }),
+            );
+            state.retiring.remove(&target.key);
+            reservations.push(CloseReservation {
+                key: target.key.clone(),
+                attempt,
+                handle,
+            });
+        }
+        Ok(reservations)
+    }
+
     pub async fn close_path(
         &self,
         path: &Path,
@@ -181,6 +528,11 @@ impl StoreRuntimeRegistry {
     ) -> Result<CloseReservation, StoreRuntimeRegistryFailure> {
         let key = StoreRuntimeKey::from_binding(expected);
         let mut state = self.lock_state();
+        if state.retiring.contains_key(&key) {
+            return Err(StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
+                key: Box::new(key),
+            });
+        }
         let Some(entry) = state.entries.remove(&key) else {
             return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "reserve exact registered runtime close",

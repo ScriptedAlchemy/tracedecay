@@ -257,6 +257,7 @@ fn session_runtime_admission_closed() -> TraceDecayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Barrier;
 
     async fn profile_identity(
         root: &std::path::Path,
@@ -333,5 +334,113 @@ mod tests {
             third.profile_identity().expect("identity").profile_id()
         );
         assert_eq!(third.session_runtime_registries.lock().await.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_distinct_profile_registry_opens_never_overflow_capacity() {
+        let temporary = tempfile::tempdir().expect("profile registry capacity fixture");
+        let (first_identity, _first_scope) = profile_identity(temporary.path(), "first").await;
+        let (second_identity, _second_scope) = profile_identity(temporary.path(), "second").await;
+        let (third_identity, _third_scope) = profile_identity(temporary.path(), "third").await;
+        let capacity = SessionRuntimeRegistryCapacityV1::for_test(1)
+            .expect("nonzero profile registry capacity");
+        let administration = StoreAdministration::default()
+            .with_session_runtime_registry_capacity_for_test(capacity);
+        let candidates = [first_identity, second_identity, third_identity]
+            .into_iter()
+            .map(|identity| administration.clone().with_profile_identity(identity))
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(Barrier::new(candidates.len()));
+        let mut opens = tokio::task::JoinSet::new();
+        for candidate in candidates {
+            let barrier = Arc::clone(&barrier);
+            opens.spawn(async move {
+                barrier.wait().await;
+                candidate.session_runtime_registry().await
+            });
+        }
+
+        let mut admitted = Vec::new();
+        while let Some(open) = opens.join_next().await {
+            if let Ok(registry) = open.expect("profile registry open task") {
+                admitted.push(registry);
+            }
+        }
+
+        assert!(
+            admitted.len() <= 1,
+            "simultaneous live profile-registry opens exceeded the capacity: {}",
+            admitted.len()
+        );
+        assert!(
+            administration.session_runtime_registries.lock().await.len() <= 1,
+            "profile registry cardinality exceeded its configured capacity"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aborting_profile_registry_open_releases_its_opening_reservation() {
+        let temporary = tempfile::tempdir().expect("profile registry cancellation fixture");
+        let (identity, _scope) = profile_identity(temporary.path(), "aborted").await;
+        let profile_root = authority::canonical_identity_path(identity.profile_root())
+            .expect("canonical profile root");
+        let capacity = SessionRuntimeRegistryCapacityV1::for_test(1)
+            .expect("nonzero profile registry capacity");
+        let administration = StoreAdministration::default()
+            .with_session_runtime_registry_capacity_for_test(capacity)
+            .with_profile_identity(identity);
+        let opening_administration = administration.clone();
+        let opening =
+            tokio::spawn(async move { opening_administration.session_runtime_registry().await });
+
+        let mut observed_opening = false;
+        for _ in 0..1024 {
+            if administration
+                .session_runtime_registries
+                .lock()
+                .await
+                .get(&profile_root)
+                .is_some_and(|entry| entry.opening.load(Ordering::Acquire) != 0)
+            {
+                observed_opening = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            observed_opening,
+            "the cancellation fixture must observe an admitted profile open before aborting it"
+        );
+        opening.abort();
+        assert!(
+            opening
+                .await
+                .expect_err("aborted profile open task")
+                .is_cancelled()
+        );
+
+        let reopened = administration
+            .session_runtime_registry()
+            .await
+            .expect("exact profile may reopen after an aborted open");
+        assert_eq!(
+            reopened.profile_id(),
+            administration
+                .profile_identity()
+                .expect("identity")
+                .profile_id()
+        );
+        let entry = administration
+            .session_runtime_registries
+            .lock()
+            .await
+            .get(&profile_root)
+            .cloned()
+            .expect("exact profile registry entry");
+        assert_eq!(
+            entry.opening.load(Ordering::Acquire),
+            0,
+            "an aborted profile open must not strand an opening reservation"
+        );
     }
 }

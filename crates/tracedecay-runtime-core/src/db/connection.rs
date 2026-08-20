@@ -30,8 +30,8 @@ mod test_runtime;
 
 pub(crate) use memory_graph_reconciliation::MemoryGraphReconciliationTaskScheduleV1;
 pub use memory_graph_reconciliation::{
-    MemoryGraphReconciliationTaskOwnerV1, ProjectMemoryReconciliationTelemetryObserverV1,
-    ProjectMemoryReconciliationTelemetrySnapshotV1,
+    MemoryGraphReconciliationRetirementReservationV1, MemoryGraphReconciliationTaskOwnerV1,
+    ProjectMemoryReconciliationTelemetryObserverV1, ProjectMemoryReconciliationTelemetrySnapshotV1,
 };
 #[cfg(test)]
 pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};

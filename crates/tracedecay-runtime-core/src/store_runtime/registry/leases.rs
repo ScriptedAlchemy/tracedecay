@@ -157,6 +157,11 @@ impl StoreRuntimeRegistry {
         let key = StoreRuntimeKey::from_binding(&expected);
         let runtime = {
             let state = self.lock_state();
+            if state.retiring.contains_key(&key) {
+                return StoreRuntimeLeaseAcquireResult::Rejected(
+                    StoreRuntimeRegistryFailure::RuntimeRetirementInProgress { key: Box::new(key) },
+                );
+            }
             match state.entries.get(&key) {
                 Some(RegistryEntry::Ready(ready)) => {
                     let actual = ready.handle.binding();
@@ -229,6 +234,14 @@ impl StoreRuntimeRegistry {
             );
         }
         let state = self.lock_state();
+        if let Some(key) = state.entries.keys().find_map(|key| {
+            (key.shard_id == *profile_shard && state.retiring.contains_key(key))
+                .then(|| key.clone())
+        }) {
+            return ProfileAuthorityPinResult::Rejected(
+                StoreRuntimeRegistryFailure::RuntimeRetirementInProgress { key: Box::new(key) },
+            );
+        }
         if let Some(binding) = state.profile_authorities.get(profile_shard) {
             if let Err(failure) = require_ready_profile_runtime(&state, binding) {
                 return ProfileAuthorityPinResult::Rejected(failure);
