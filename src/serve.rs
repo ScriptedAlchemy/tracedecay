@@ -184,23 +184,31 @@ fn proxy_serve_handshake(
     let path = sanitize_serve_path_arg(path_arg);
     let explicit_path = path.is_some();
     let mut project_path = if explicit_path {
-        crate::config::resolve_path(path)
+        Some(crate::config::resolve_path(path))
     } else {
-        crate::config::resolve_path_with_discovery(None)
+        original_cwd.and_then(crate::config::discover_project_root)
     };
 
-    let initialized = TraceDecay::is_initialized(&project_path);
-    let auto_init_root = (!initialized && crate::config::load_sync_config(&project_path).auto_init)
-        .then(|| crate::worktree::git_worktree_root(&project_path))
-        .flatten();
+    let initialized = project_path
+        .as_deref()
+        .is_some_and(TraceDecay::is_initialized);
+    let auto_init_candidate = project_path.as_deref().or(original_cwd);
+    let auto_init_root = auto_init_candidate
+        .filter(|candidate| !initialized && crate::config::load_sync_config(candidate).auto_init)
+        .and_then(crate::worktree::git_worktree_root);
     if let Some(root) = auto_init_root.as_ref() {
-        project_path.clone_from(root);
+        project_path = Some(root.clone());
     }
 
-    let scope_prefix = serve_scope_prefix(original_cwd, &project_path);
-    let telemetry_timings = timings || crate::config::load_telemetry_config(&project_path).timings;
+    let scope_prefix = project_path
+        .as_deref()
+        .and_then(|project_path| serve_scope_prefix(original_cwd, project_path));
+    let telemetry_timings = timings
+        || project_path
+            .as_deref()
+            .is_some_and(|path| crate::config::load_telemetry_config(path).timings);
     let mut handshake = crate::daemon::DaemonHandshake::for_current_client(
-        Some(project_path),
+        project_path,
         scope_prefix,
         telemetry_timings,
         auto_init_root.is_some(),
@@ -233,6 +241,19 @@ pub const DEGRADED_SERVE_STDERR_MARKER: &str =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projectless_cwd_does_not_become_a_daemon_project() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let cwd = tempfile::tempdir().unwrap();
+
+        let handshake = proxy_serve_handshake(None, Some(cwd.path()), false)
+            .expect("build projectless proxy handshake");
+
+        assert_eq!(handshake.project_path, None);
+        assert!(!handshake.allow_init);
+        assert!(handshake.allow_initialize_root_routing);
+    }
 
     #[tokio::test]
     async fn direct_project_open_fails_closed() {

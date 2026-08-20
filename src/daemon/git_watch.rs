@@ -312,10 +312,14 @@ impl GitWatcher {
             None => crate::global_db::GlobalDb::open().await,
         };
         if let Some(db) = db {
+            let open_options = daemon_open_options(&self.inner);
             let projects = db.code_projects_seen_within(window, cap).await;
             for record in projects {
                 let root = PathBuf::from(&record.canonical_root);
-                if root.is_dir() {
+                if root.is_dir()
+                    && root.join(".git").exists()
+                    && TraceDecay::has_initialized_store_with_options(&root, &open_options).await
+                {
                     self.ensure_watching(&root).await;
                 }
             }

@@ -281,6 +281,80 @@ async fn disabled_watcher_never_registers() {
 }
 
 #[tokio::test]
+async fn spawn_skips_recent_registry_rows_without_an_initialized_store() {
+    let _profile = crate::config::PinnedUserDataDir::new();
+    let profile_root = crate::storage::default_profile_root().unwrap();
+    let global_db_path = profile_root.join("global.db");
+    let global_db = crate::global_db::GlobalDb::open_at(&global_db_path)
+        .await
+        .expect("open isolated global registry");
+
+    let valid = temp_repo();
+    crate::storage::write_enrollment_marker(
+        valid.path(),
+        &crate::storage::EnrollmentMarker {
+            project_id: "proj_valid_watch".to_string(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .expect("write valid enrollment marker");
+    let layout = crate::storage::resolve_layout_for_current_profile(valid.path())
+        .expect("resolve valid project layout");
+    std::fs::create_dir_all(layout.graph_db_path.parent().unwrap())
+        .expect("create valid graph directory");
+    std::fs::write(&layout.graph_db_path, b"").expect("create valid graph marker");
+    global_db
+        .upsert_code_project("proj_valid_watch", valid.path(), None, None, Some("main"))
+        .await
+        .expect("register valid project");
+
+    let invalid = tempfile::tempdir().unwrap();
+    crate::storage::write_enrollment_marker(
+        invalid.path(),
+        &crate::storage::EnrollmentMarker {
+            project_id: "proj_invalid_watch".to_string(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .expect("write stale enrollment marker");
+    let invalid_layout = crate::storage::resolve_layout_for_current_profile(invalid.path())
+        .expect("resolve stale project layout");
+    std::fs::create_dir_all(invalid_layout.graph_db_path.parent().unwrap())
+        .expect("create stale graph directory");
+    std::fs::write(&invalid_layout.graph_db_path, b"").expect("create stale graph marker");
+    global_db
+        .upsert_code_project(
+            "proj_invalid_watch",
+            invalid.path(),
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .expect("register stale directory-only project");
+
+    let watcher = GitWatcher::new(fast_watch_config());
+    watcher.spawn(Some(global_db_path)).await;
+
+    let watched = watcher
+        .health_report()
+        .await
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect::<HashSet<_>>();
+    assert!(
+        watched.contains(&valid.path().canonicalize().unwrap()),
+        "an initialized registered project must still be watched"
+    );
+    assert!(
+        !watched.contains(&invalid.path().canonicalize().unwrap()),
+        "a stale registry row for an existing non-project directory must not start a watcher"
+    );
+
+    watcher.shutdown().await;
+}
+
+#[tokio::test]
 async fn shutdown_cancels_and_joins_watcher_tasks() {
     let repo = temp_repo();
     let profile = tempfile::tempdir().unwrap();
