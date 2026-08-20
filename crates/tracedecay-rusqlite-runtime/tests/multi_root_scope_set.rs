@@ -1,10 +1,6 @@
-mod common;
-
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
-
-use common::fixture_abs_root;
 
 use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
