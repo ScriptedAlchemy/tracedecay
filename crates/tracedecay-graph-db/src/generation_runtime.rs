@@ -70,9 +70,10 @@ impl GraphDb {
     ///
     /// `sealed_digest` is an already-proven recovered digest bound to this
     /// exact manifest (a journaled publication's `expected_recovered_digest`).
-    /// The idempotent re-seat verification still streams every stored row
-    /// through the recovered-digest proof; the sealed digest only replaces a
-    /// second full canonicalization of the manifest itself.
+    /// A re-seat of already-stored rows streams them through the
+    /// recovered-digest proof and never rebuilds or re-hashes the canonical
+    /// batch; the sealed digest also replaces a second full canonicalization
+    /// of the manifest itself.
     pub(crate) fn apply_generation_unverified(
         &self,
         manifest: &GraphGenerationManifest,
@@ -83,6 +84,55 @@ impl GraphDb {
         manifest.validate_checked(check)?;
         let physical_namespace = manifest.physical_namespace()?;
         let dependency_namespaces = self.require_exact_dependencies(manifest)?;
+        let locator =
+            GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
+        // An upgradable claim admits concurrent snapshot readers while
+        // excluding writers, so the stored rows stay stable for the
+        // idempotent re-seat verification and the batch derivation below
+        // without stalling reads. The exclusive claim is deferred to the
+        // actual apply.
+        let snapshot_gate = self.inner.snapshot_gate.upgradable_read();
+        {
+            let guard = self.read_guard()?;
+            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+            if let Some(existing) = latest_projection(
+                database,
+                &physical_namespace,
+                &manifest.projection.projection,
+            )? {
+                let was_collected = self
+                    .inner
+                    .verified_generations
+                    .read()
+                    .map_err(|_| {
+                        GraphDbError::unavailable(
+                            "verified graph generation state lock is poisoned",
+                        )
+                    })?
+                    .collected
+                    .contains(&locator);
+                if !was_collected {
+                    // A retry re-seat proves the stored rows through the
+                    // recovered-digest stream alone; cloning the manifest
+                    // into a canonical batch and hashing it would be pure
+                    // duplicate work for rows that already exist.
+                    verify_recovered_generation(database, manifest, sealed_digest, check)?;
+                    let mut verified = self.inner.verified_generations.write().map_err(|_| {
+                        GraphDbError::unavailable(
+                            "verified graph generation state lock is poisoned",
+                        )
+                    })?;
+                    verified
+                        .stored
+                        .insert(locator, generation_dependency_locators(manifest));
+                    return Ok(existing.commit);
+                }
+                let mut verified = self.inner.verified_generations.write().map_err(|_| {
+                    GraphDbError::unavailable("verified graph generation state lock is poisoned")
+                })?;
+                verified.collected.remove(&locator);
+            }
+        }
         let mut endpoint_namespaces = mutation::RelationEndpointNamespaces::new();
         let mut mutations = Vec::with_capacity(
             manifest
@@ -124,55 +174,11 @@ impl GraphDb {
             mutations,
             check,
         )?;
-        // All hashing happens before any snapshot-gate claim: the canonical
-        // batch digest and the dependency-closure digest never make a reader
-        // wait.
+        // Hashing runs behind the upgradable claim: snapshot readers are
+        // never blocked for the canonical batch digest or the
+        // dependency-closure digest.
         let digest = batch.canonical_digest_checked(check)?;
         let dependency_digest = manifest.dependency_closure_digest(check)?;
-        let locator =
-            GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
-        // An upgradable claim admits concurrent snapshot readers while
-        // excluding writers, so the stored rows stay stable for the
-        // idempotent re-seat verification without stalling reads. The
-        // exclusive claim is deferred to the actual apply.
-        let snapshot_gate = self.inner.snapshot_gate.upgradable_read();
-        {
-            let guard = self.read_guard()?;
-            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-            if let Some(existing) = latest_projection(
-                database,
-                &physical_namespace,
-                &manifest.projection.projection,
-            )? {
-                let was_collected = self
-                    .inner
-                    .verified_generations
-                    .read()
-                    .map_err(|_| {
-                        GraphDbError::unavailable(
-                            "verified graph generation state lock is poisoned",
-                        )
-                    })?
-                    .collected
-                    .contains(&locator);
-                if !was_collected {
-                    verify_recovered_generation(database, manifest, sealed_digest, check)?;
-                    let mut verified = self.inner.verified_generations.write().map_err(|_| {
-                        GraphDbError::unavailable(
-                            "verified graph generation state lock is poisoned",
-                        )
-                    })?;
-                    verified
-                        .stored
-                        .insert(locator, generation_dependency_locators(manifest));
-                    return Ok(existing.commit);
-                }
-                let mut verified = self.inner.verified_generations.write().map_err(|_| {
-                    GraphDbError::unavailable("verified graph generation state lock is poisoned")
-                })?;
-                verified.collected.remove(&locator);
-            }
-        }
         let _snapshot_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -852,6 +858,7 @@ mod tests {
         manifest_canonicalizations, recovered_generation_enumerations,
         reset_manifest_canonicalizations, reset_recovered_generation_enumerations,
     };
+    use crate::projection::{batch_canonicalizations, reset_batch_canonicalizations};
     use crate::{
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
         GraphEntity, GraphEntityId, GraphFormatVersion, GraphGenerationDependency,
@@ -1028,9 +1035,15 @@ mod tests {
             vec![],
         )
         .unwrap();
+        reset_batch_canonicalizations();
         database
             .apply_generation_unverified(&manifest, None, &|| Ok(()))
             .unwrap();
+        assert_eq!(
+            batch_canonicalizations(),
+            1,
+            "a first apply hashes the canonical batch exactly once"
+        );
         (owner, database, manifest)
     }
 
@@ -1165,9 +1178,15 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let (owner, database, manifest) = large_persistent_generation(&temp, "sealed-reapply");
         let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        reset_batch_canonicalizations();
         let first = database
             .apply_generation_unverified(&manifest, Some(&sealed), &|| Ok(()))
             .unwrap();
+        assert_eq!(
+            batch_canonicalizations(),
+            0,
+            "a re-seat of stored rows must not rebuild or hash the canonical batch"
+        );
 
         let gate = Arc::clone(&database.inner.snapshot_gate);
         let admitted = Cell::new(0usize);
@@ -1184,6 +1203,7 @@ mod tests {
         };
         reset_recovered_generation_enumerations();
         reset_manifest_canonicalizations();
+        reset_batch_canonicalizations();
         let reapplied = database
             .apply_generation_unverified(&manifest, Some(&sealed), &check)
             .unwrap();
@@ -1194,6 +1214,11 @@ mod tests {
             manifest_canonicalizations(),
             0,
             "an idempotent re-apply with a sealed digest must not re-stream the manifest"
+        );
+        assert_eq!(
+            batch_canonicalizations(),
+            0,
+            "an idempotent re-apply must not re-hash the canonical batch"
         );
         assert_eq!(
             recovered_generation_enumerations(),

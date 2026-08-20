@@ -375,6 +375,8 @@ impl GraphWriteBatch {
         max_bytes: usize,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<String, GraphDbError> {
+        #[cfg(test)]
+        BATCH_CANONICALIZATIONS.with(|count| count.set(count.get() + 1));
         let mut digest = Sha256::new();
         let mut writer = CheckedProjectionDigestWriter {
             digest: &mut digest,
@@ -400,6 +402,21 @@ impl GraphWriteBatch {
         })?;
         Ok(hex::encode(digest.finalize()))
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BATCH_CANONICALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_batch_canonicalizations() {
+    BATCH_CANONICALIZATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn batch_canonicalizations() -> usize {
+    BATCH_CANONICALIZATIONS.with(std::cell::Cell::get)
 }
 
 struct CheckedProjectionDigestWriter<'a> {
