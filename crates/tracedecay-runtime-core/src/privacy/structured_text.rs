@@ -803,9 +803,9 @@ fn detection_error_from_structured_sanitization(
         | StructuredSanitizationError::NestingDepthExceeded
         | StructuredSanitizationError::ItemCountExceeded => DetectionError::ScanLimitExceeded,
         StructuredSanitizationError::UnsafeJsonStructure
-        | StructuredSanitizationError::InvalidEncoding
-        | StructuredSanitizationError::CredentialKeyQuarantine => {
-            DetectionError::StructuredQuarantine
+        | StructuredSanitizationError::InvalidEncoding => DetectionError::StructuredQuarantine,
+        StructuredSanitizationError::CredentialKeyQuarantine => {
+            DetectionError::CredentialKeyQuarantine
         }
         StructuredSanitizationError::InvalidLimits
         | StructuredSanitizationError::SanitizerUnavailable => DetectionError::Initialization,
