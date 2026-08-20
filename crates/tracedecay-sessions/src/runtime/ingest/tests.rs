@@ -513,7 +513,11 @@ async fn attribution_sweep_over_a_never_published_projection_is_a_typed_no_op() 
 fn concurrent_same_session_observations_merge_under_the_publication_lock() {
     let store_dir = tempfile::tempdir().unwrap();
     let graph = MemoryEvidenceGraphRuntime::default();
-    graph.set_snapshot_read_delay(std::time::Duration::from_millis(50));
+    // Hold the first recovery read at a gate so the publications overlap:
+    // one publisher sits inside its snapshot read while the other contends
+    // for the publication lock. Without the lock, both would read the empty
+    // projection and the merge below would lose an observation.
+    graph.gate_snapshot_reads();
     let store = std::sync::Arc::new(GraphBackedTestStore {
         connection: tracedecay_runtime_core::db::engine::TestConnection::open(
             &store_dir.path().join("sessions.db"),
@@ -549,6 +553,8 @@ fn concurrent_same_session_observations_merge_under_the_publication_lock() {
                 .unwrap();
             });
         }
+        store.graph.await_gated_snapshot_reader();
+        store.graph.release_gated_snapshot_reads();
     });
 
     let identity = git_correlation::git_evidence_projection_identity(
@@ -573,7 +579,7 @@ fn concurrent_same_session_observations_merge_under_the_publication_lock() {
 fn admitted_bounded_publication_observes_live_operation_cancellation() {
     let store_dir = tempfile::tempdir().unwrap();
     let graph = MemoryEvidenceGraphRuntime::default();
-    graph.set_snapshot_read_delay(std::time::Duration::from_millis(50));
+    graph.gate_snapshot_reads();
     let store = std::sync::Arc::new(GraphBackedTestStore {
         connection: tracedecay_runtime_core::db::engine::TestConnection::open(
             &store_dir.path().join("sessions.db"),
@@ -592,8 +598,14 @@ fn admitted_bounded_publication_observes_live_operation_cancellation() {
             publication_cancellation,
         )
     });
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    store.graph.await_gated_snapshot_reader();
+    assert_eq!(
+        store.graph.gated_snapshot_readers_entered(),
+        1,
+        "the publisher must be inside its recovery read before cancellation"
+    );
     cancellation.cancel();
+    store.graph.release_gated_snapshot_reads();
 
     assert_eq!(
         publisher.join().unwrap().unwrap_err(),
