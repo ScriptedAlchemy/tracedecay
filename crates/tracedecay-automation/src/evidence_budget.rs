@@ -10,19 +10,9 @@
 
 use std::num::NonZeroU64;
 
-/// Canonical ledger label for a session-evidence retrieval attempt that
-/// exhausted its budgets. The label is minted where the retrieval outcome is
-/// accepted and read back by the scheduler gate; both sides use this one
-/// authority.
-pub const SESSION_EVIDENCE_BUDGET_EXHAUSTED: &str = "session_evidence_budget_exhausted";
-
-/// Canonical ledger label for a tick suppressed by the budget backoff.
-///
-/// Suppressed ticks never attempted the retrieval, so they must not reuse
-/// the exhausted-attempt label (they would look like fresh attempts) nor the
-/// failure-cooldown label (exhaustion is a skip, not a failure). They also
-/// never advance the backoff anchor: only real exhausted attempts do.
-pub const SESSION_EVIDENCE_BUDGET_SUPPRESSED: &str = "session_evidence_budget_suppressed";
+pub use tracedecay_domain::{
+    SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
+};
 
 /// A budget-exhausted retrieval attempt observed by an automation task.
 ///

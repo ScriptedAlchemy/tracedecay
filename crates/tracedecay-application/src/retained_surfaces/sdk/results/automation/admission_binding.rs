@@ -1,8 +1,9 @@
 use serde_json::{Value, json};
+use tracedecay_domain::SESSION_EVIDENCE_BUDGET_SUPPRESSED;
 
 use super::{
-    AutomationRunResultV1, AutomationSkipReasonV1, AutomationTaskV1,
-    SESSION_EVIDENCE_BUDGET_SUPPRESSED, automation_request, with_request_digest, zero_terminal,
+    AutomationRunResultV1, AutomationSkipReasonV1, AutomationTaskV1, automation_request,
+    with_request_digest, zero_terminal,
 };
 
 #[test]
