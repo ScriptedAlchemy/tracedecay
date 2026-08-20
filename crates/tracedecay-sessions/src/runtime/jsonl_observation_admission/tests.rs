@@ -74,7 +74,10 @@ impl HostAdmission for SeamSpyAdmission {
         advance: ObservationCursorAdvance,
         cancellation: ObservationCancellation,
     ) -> AdmissionFuture<'a, CursorAdvanceOutcome> {
-        self.cover_past_advances.lock().unwrap().push(advance.clone());
+        self.cover_past_advances
+            .lock()
+            .unwrap()
+            .push(advance.clone());
         self.inner
             .advance_non_durable_source_cursor(advance, cancellation)
     }
@@ -193,7 +196,11 @@ async fn commit_failures_block_typed_and_never_cover_past() {
         spy.script_capture_error(HostAdmissionOutcome::degraded(reason));
 
         let error = try_admit_codex_jsonl_observations_for_profile_with_admission(
-            &path, None, &[], &spy, None,
+            &path,
+            None,
+            &[],
+            &spy,
+            None,
         )
         .await
         .expect_err("a commit failure must block the source instead of covering past it");
@@ -222,13 +229,14 @@ async fn commit_failures_block_typed_and_never_cover_past() {
 async fn retryable_admission_failures_keep_their_own_verdict() {
     let (_temp, path, _len) = rollout_fixture();
     let spy = SeamSpyAdmission::default();
-    spy.script_capture_error(HostAdmissionOutcome::retained_backpressured("cursor_conflict"));
+    spy.script_capture_error(HostAdmissionOutcome::retained_backpressured(
+        "cursor_conflict",
+    ));
 
-    let error = try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &path, None, &[], &spy, None,
-    )
-    .await
-    .expect_err("a retryable race must surface for another pass");
+    let error =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect_err("a retryable race must surface for another pass");
 
     assert!(
         matches!(
@@ -249,28 +257,33 @@ async fn retryable_admission_failures_keep_their_own_verdict() {
 async fn content_refusals_cover_past_so_the_stream_converges() {
     let (_temp, path, len) = rollout_fixture();
     let spy = SeamSpyAdmission::default();
-    spy.script_capture_error(HostAdmissionOutcome::degraded("invalid_observation_contract"));
+    spy.script_capture_error(HostAdmissionOutcome::degraded(
+        "invalid_observation_contract",
+    ));
 
-    let progress = try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &path, None, &[], &spy, None,
-    )
-    .await
-    .expect("deterministic content refusals must not block the source");
+    let progress =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("deterministic content refusals must not block the source");
 
     assert_eq!(progress.bytes_consumed, len);
     let advances = spy.cover_past_advances();
     assert_eq!(advances.len(), 2, "both refused frames must be covered");
     for advance in &advances {
-        assert_eq!(advance.reason(), ObservationCoverageReason::AdmissionRefused);
+        assert_eq!(
+            advance.reason(),
+            ObservationCoverageReason::AdmissionRefused
+        );
     }
-    let cursor = stored_cursor(&spy).await.expect("coverage must advance the frontier");
+    let cursor = stored_cursor(&spy)
+        .await
+        .expect("coverage must advance the frontier");
     assert_eq!(cursor.position(), len);
 
-    let replay = try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &path, None, &[], &spy, None,
-    )
-    .await
-    .expect("a covered stream must converge");
+    let replay =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("a covered stream must converge");
     assert_eq!(replay.bytes_consumed, 0);
     assert_eq!(
         spy.cover_past_advances().len(),
@@ -289,18 +302,19 @@ async fn exact_duplicates_are_idempotent_no_op_receipts() {
         .expect("initial admission must persist both records");
     assert_eq!(spy.inner.observations().len(), 2);
     assert!(spy.cover_past_advances().is_empty());
-    let committed = stored_cursor(&spy).await.expect("persist must advance the frontier");
+    let committed = stored_cursor(&spy)
+        .await
+        .expect("persist must advance the frontier");
     assert_eq!(committed.position(), len);
 
     // Replay the whole file against the already-durable rows, the state a
     // lost or stale frontier read produces: every frame is an exact
     // duplicate (same identity + digest) and must be a silent no-op receipt.
     spy.report_no_cursor.store(true, Ordering::SeqCst);
-    let replay = try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &path, None, &[], &spy, None,
-    )
-    .await
-    .expect("exact duplicates must be idempotent no-op receipts");
+    let replay =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("exact duplicates must be idempotent no-op receipts");
     spy.report_no_cursor.store(false, Ordering::SeqCst);
 
     assert_eq!(replay.bytes_consumed, len);
@@ -309,7 +323,9 @@ async fn exact_duplicates_are_idempotent_no_op_receipts() {
         spy.cover_past_advances().is_empty(),
         "an exact duplicate is not an admission refusal and writes no coverage"
     );
-    let unchanged = stored_cursor(&spy).await.expect("frontier must remain durable");
+    let unchanged = stored_cursor(&spy)
+        .await
+        .expect("frontier must remain durable");
     assert_eq!(
         unchanged, committed,
         "an exact duplicate replay performs no extra cursor write"

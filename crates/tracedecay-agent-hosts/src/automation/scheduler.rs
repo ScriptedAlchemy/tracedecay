@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
@@ -10,6 +11,10 @@ use cap_std::time::SystemClock;
 use serde::{Deserialize, Serialize};
 use tracedecay_automation::config::validate_schedule as validate_leaf_schedule;
 pub use tracedecay_automation::config::{AutomationSchedule, CronSchedule, parse_schedule};
+use tracedecay_automation::evidence_budget::{
+    SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
+    SessionEvidenceBudgetBackoff, SessionEvidenceBudgetExceeded, SessionEvidenceBudgetGate,
+};
 
 use super::backend::{AgentTaskKind, agent_task_failure_disposition, task_key};
 use super::config::{
@@ -18,6 +23,7 @@ use super::config::{
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     canonical_record_started_at_seconds, latest_record_by_canonical_completion,
+    latest_record_by_canonical_completion_key,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::ports::session_store::AutomationSessionStore;
@@ -428,6 +434,32 @@ fn schedule_decision_for_trigger(
                     .is_some_and(|last_activity| last_activity > started_at)
             });
 
+    // Budget exhaustion and failure cooldown are independent typed states.
+    // Evaluate the live budget anchor first so an older failed run whose
+    // ordinary cooldown has elapsed cannot bypass a still-active evidence
+    // backoff window. Suppressed ticks carry their own typed skip reason:
+    // the exhausted-attempt label stays reserved for runs that actually ran
+    // the retrieval, and the failure cooldown keeps its own label.
+    if task_consumes_session_evidence(task)
+        && let Some(exceeded) = live_session_evidence_budget_exhaustion(records, task)?
+    {
+        // Zero is rejected by settings validation and unrepresentable in the
+        // typed contract; a value that somehow bypassed validation saturates
+        // to the contract's default window rather than becoming "always try".
+        let backoff = task_config
+            .session_evidence_budget_backoff_secs
+            .and_then(NonZeroU64::new)
+            .map_or_else(
+                SessionEvidenceBudgetBackoff::default,
+                SessionEvidenceBudgetBackoff::new,
+            );
+        if let SessionEvidenceBudgetGate::Suppressed { .. } = backoff.gate(exceeded, now_secs) {
+            return Ok(AutomationScheduleDecision::skipped(
+                SESSION_EVIDENCE_BUDGET_SUPPRESSED,
+            ));
+        }
+    }
+
     if let Some((record, completed_at)) = latest_non_skipped_record(
         records,
         task,
@@ -497,6 +529,41 @@ fn schedule_decision_for_trigger(
     Ok(AutomationScheduleDecision::due())
 }
 
+/// The standing session-evidence budget-exhausted state for `task`, if any.
+///
+/// The state anchors on the most recent skip that actually attempted the
+/// retrieval and observed exhaustion. An effectful run (success or failure)
+/// completing at or after that attempt supersedes the state: retrieval
+/// demonstrably ran again, so the scheduler must not keep backing off from a
+/// stale anchor.
+fn live_session_evidence_budget_exhaustion(
+    records: &[AutomationRunLedgerRecord],
+    task: AgentTaskKind,
+) -> Result<Option<SessionEvidenceBudgetExceeded>> {
+    let Some((_, exhausted_key)) =
+        latest_record_by_canonical_completion_key(records.iter().filter(|record| {
+            record.task == task
+                && record.status == AutomationRunStatus::Skipped
+                && record.error.as_deref() == Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
+        }))?
+    else {
+        return Ok(None);
+    };
+    let effectful = latest_record_by_canonical_completion_key(records.iter().filter(|record| {
+        record.task == task
+            && matches!(
+                record.status,
+                AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
+            )
+    }))?;
+    if effectful.is_some_and(|(_, effectful_key)| effectful_key >= exhausted_key) {
+        return Ok(None);
+    }
+    Ok(Some(SessionEvidenceBudgetExceeded {
+        observed_at_secs: exhausted_key.0,
+    }))
+}
+
 /// Tasks whose evidence comes from the LCM session store; they are gated on
 /// new session activity since their last successful run.
 fn task_consumes_session_evidence(task: AgentTaskKind) -> bool {
@@ -537,6 +604,7 @@ const USER_JOB_TASK_CONFIG: AutomationTaskConfig = AutomationTaskConfig {
     cooldown_secs: None,
     min_idle_secs: None,
     stale_lock_secs: None,
+    session_evidence_budget_backoff_secs: None,
 };
 
 fn task_config(config: &AutomationConfig, task: AgentTaskKind) -> Option<&AutomationTaskConfig> {
@@ -1207,8 +1275,381 @@ fn windows_process_state(pid: u32) -> ProcessState {
 
 #[cfg(test)]
 mod tests {
+    use super::super::config::AutomationTaskSet;
     use super::*;
     use tempfile::tempdir;
+
+    fn session_evidence_task_config() -> AutomationTaskConfig {
+        AutomationTaskConfig {
+            enabled: true,
+            schedule: Some("interval".to_owned()),
+            interval_secs: Some(60),
+            ..AutomationTaskConfig::default()
+        }
+    }
+
+    fn session_evidence_config() -> AutomationConfig {
+        AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            tasks: AutomationTaskSet {
+                session_reflector: session_evidence_task_config(),
+                skill_writer: session_evidence_task_config(),
+                ..AutomationTaskSet::default()
+            },
+            ..AutomationConfig::default()
+        }
+    }
+
+    fn scheduler_ledger_record(
+        run_id: &str,
+        task: AgentTaskKind,
+        status: AutomationRunStatus,
+        error: Option<&str>,
+        completed_at: i64,
+    ) -> AutomationRunLedgerRecord {
+        AutomationRunLedgerRecord {
+            schema_version: 2,
+            run_id: run_id.to_owned(),
+            trigger: AutomationTrigger::Scheduler,
+            task,
+            task_key: None,
+            backend: "codex_app_server".to_owned(),
+            host_mode: None,
+            prompt_version: None,
+            response_schema: None,
+            strict_json: None,
+            model: None,
+            status,
+            evidence_hash: None,
+            input_hash: None,
+            output_hash: None,
+            proposed_ops: None,
+            applied_ops: None,
+            rejected_ops: None,
+            validation_report: None,
+            reviewed_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            skipped_count: 0,
+            error: error.map(str::to_owned),
+            error_classification: None,
+            error_retryable: None,
+            backend_attempt_count: 0,
+            backend_attempts: Vec::new(),
+            fallback_status: None,
+            report_ref: None,
+            artifacts: Vec::new(),
+            started_at: completed_at.to_string(),
+            completed_at: completed_at.to_string(),
+            completed_at_micros: None,
+        }
+    }
+
+    fn budget_exhausted_skip(
+        run_id: &str,
+        task: AgentTaskKind,
+        completed_at: i64,
+    ) -> AutomationRunLedgerRecord {
+        scheduler_ledger_record(
+            run_id,
+            task,
+            AutomationRunStatus::Skipped,
+            Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED),
+            completed_at,
+        )
+    }
+
+    #[test]
+    fn budget_exhausted_skip_holds_the_task_in_a_typed_backoff_window() {
+        let config = session_evidence_config();
+        for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
+            let records = vec![budget_exhausted_skip("run-exhausted", task, 2_000)];
+
+            // Every tick inside the window skips without a fresh attempt,
+            // under the dedicated suppression reason: not the exhausted
+            // label (no attempt ran) and not the failure cooldown.
+            for now_secs in [2_060, 2_120, 2_000 + 3_599] {
+                assert_eq!(
+                    schedule_decision(
+                        &config,
+                        task,
+                        &records,
+                        SessionActivity::at(2_500),
+                        now_secs
+                    )
+                    .skip_reason(),
+                    Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
+                    "tick at {now_secs} for {task:?} must stay suppressed"
+                );
+            }
+
+            // The window elapsing permits exactly the next attempt.
+            assert!(
+                schedule_decision(
+                    &config,
+                    task,
+                    &records,
+                    SessionActivity::at(2_500),
+                    2_000 + 3_600,
+                )
+                .is_due()
+            );
+        }
+    }
+
+    #[test]
+    fn configured_budget_backoff_window_overrides_the_one_hour_default() {
+        let mut config = session_evidence_config();
+        config
+            .tasks
+            .session_reflector
+            .session_evidence_budget_backoff_secs = Some(120);
+        let records = vec![budget_exhausted_skip(
+            "run-exhausted",
+            AgentTaskKind::SessionReflector,
+            2_000,
+        )];
+
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &records,
+                SessionActivity::at(2_500),
+                2_119,
+            )
+            .skip_reason(),
+            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
+            "the configured 120s window must still suppress its final second"
+        );
+        assert!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &records,
+                SessionActivity::at(2_500),
+                2_120,
+            )
+            .is_due(),
+            "the configured 120s window must end well before the 3600s default"
+        );
+    }
+
+    #[test]
+    fn budget_backoff_suppresses_host_receipt_triggers_too() {
+        let config = session_evidence_config();
+        let records = vec![budget_exhausted_skip(
+            "run-exhausted",
+            AgentTaskKind::SessionReflector,
+            2_000,
+        )];
+
+        assert_eq!(
+            host_receipt_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &records,
+                SessionActivity::at(2_500),
+                2_060,
+            )
+            .skip_reason(),
+            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
+        );
+    }
+
+    #[test]
+    fn effectful_run_after_exhaustion_supersedes_the_backoff_anchor() {
+        let config = session_evidence_config();
+        let records = vec![
+            budget_exhausted_skip("run-exhausted", AgentTaskKind::SessionReflector, 2_000),
+            scheduler_ledger_record(
+                "run-recovered",
+                AgentTaskKind::SessionReflector,
+                AutomationRunStatus::Succeeded,
+                None,
+                2_100,
+            ),
+        ];
+
+        // Fresh session activity after the successful run makes the task due
+        // again; the stale budget anchor must not keep suppressing it.
+        assert!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &records,
+                SessionActivity::at(2_500),
+                2_130,
+            )
+            .is_due()
+        );
+    }
+
+    #[test]
+    fn older_failure_cooldown_cannot_bypass_a_live_budget_backoff() {
+        let mut config = session_evidence_config();
+        config.tasks.session_reflector.cooldown_secs = Some(60);
+        let records = vec![
+            scheduler_ledger_record(
+                "run-failed",
+                AgentTaskKind::SessionReflector,
+                AutomationRunStatus::Failed,
+                Some("provider unavailable"),
+                1_900,
+            ),
+            budget_exhausted_skip("run-exhausted", AgentTaskKind::SessionReflector, 2_000),
+        ];
+
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &records,
+                SessionActivity::at(2_500),
+                2_100,
+            )
+            .skip_reason(),
+            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
+        );
+
+        // Without a live exhaustion anchor the failure state keeps its own
+        // distinct cooldown reason: the two typed states never share a label.
+        let failure_only = vec![scheduler_ledger_record(
+            "run-failed",
+            AgentTaskKind::SessionReflector,
+            AutomationRunStatus::Failed,
+            Some("timed out waiting for backend"),
+            1_900,
+        )];
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &failure_only,
+                SessionActivity::at(2_500),
+                1_930,
+            )
+            .skip_reason(),
+            Some("scheduler_cooldown_active")
+        );
+    }
+
+    #[test]
+    fn earlier_effectful_run_in_the_same_second_does_not_clear_exhaustion() {
+        let config = session_evidence_config();
+        let mut exhausted =
+            budget_exhausted_skip("run-exhausted", AgentTaskKind::SessionReflector, 2_000);
+        exhausted.completed_at_micros = Some(2_000_900_000);
+        let mut earlier_success = scheduler_ledger_record(
+            "run-success",
+            AgentTaskKind::SessionReflector,
+            AutomationRunStatus::Succeeded,
+            None,
+            2_000,
+        );
+        earlier_success.completed_at_micros = Some(2_000_100_000);
+
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &[exhausted, earlier_success],
+                SessionActivity::at(2_500),
+                2_060,
+            )
+            .skip_reason(),
+            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
+        );
+    }
+
+    #[test]
+    fn suppression_skips_do_not_advance_the_backoff_anchor() {
+        let config = session_evidence_config();
+        // A suppression skip persisted after the exhausted attempt must not
+        // extend the window: the anchor is the last real attempt.
+        let records = vec![
+            budget_exhausted_skip("run-exhausted", AgentTaskKind::SkillWriter, 2_000),
+            scheduler_ledger_record(
+                "run-suppressed",
+                AgentTaskKind::SkillWriter,
+                AutomationRunStatus::Skipped,
+                Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
+                2_060,
+            ),
+        ];
+
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SkillWriter,
+                &records,
+                SessionActivity::at(2_500),
+                2_120,
+            )
+            .skip_reason(),
+            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
+        );
+        assert!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SkillWriter,
+                &records,
+                SessionActivity::at(2_500),
+                2_000 + 3_600,
+            )
+            .is_due()
+        );
+    }
+
+    #[test]
+    fn suppression_skips_alone_never_anchor_a_backoff_window() {
+        let config = session_evidence_config();
+        // A lone suppression skip (no exhausted attempt in the ledger)
+        // carries no budget state of its own and must not suppress anything:
+        // only real exhausted attempts anchor the window.
+        let records = vec![scheduler_ledger_record(
+            "run-suppressed",
+            AgentTaskKind::SkillWriter,
+            AutomationRunStatus::Skipped,
+            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
+            2_000,
+        )];
+
+        assert!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SkillWriter,
+                &records,
+                SessionActivity::at(2_500),
+                2_060,
+            )
+            .is_due()
+        );
+    }
+
+    #[test]
+    fn other_evidence_skip_reasons_do_not_trigger_the_budget_backoff() {
+        let config = session_evidence_config();
+        let records = vec![scheduler_ledger_record(
+            "run-stale",
+            AgentTaskKind::SessionReflector,
+            AutomationRunStatus::Skipped,
+            Some("session_evidence_stale"),
+            2_000,
+        )];
+
+        assert!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SessionReflector,
+                &records,
+                SessionActivity::at(2_500),
+                2_060,
+            )
+            .is_due()
+        );
+    }
 
     #[test]
     fn schedule_validation_maps_leaf_errors_at_the_runtime_boundary() {
