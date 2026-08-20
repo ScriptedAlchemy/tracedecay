@@ -38,8 +38,8 @@ const BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1: usize = 512 * 1024 * 1024;
 /// must not let that build run unbounded on the daemon query path.
 pub const LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1: u64 = 30_000_000;
 
-/// Plan 20 / request-budget override. A set `deadline_micros` wins; otherwise
-/// the crate fallback applies.
+/// A set request/profile `deadline_micros` wins; otherwise the crate fallback
+/// applies. This is a `RetrievalBudget` override, not publication/activation.
 pub fn lexical_projection_build_deadline_micros(request_deadline_micros: Option<u64>) -> u64 {
     request_deadline_micros.unwrap_or(LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1)
 }
@@ -409,6 +409,8 @@ impl CodeLexicalProjectionAdapterV1 {
         Self::new_inner(metadata, chunks, false, None)
     }
 
+    /// Request/profile budget for raw builds. A set `deadline_micros` wins over
+    /// the crate fallback.
     pub fn new_with_budget(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<CodeSearchChunkV1>,
@@ -417,6 +419,8 @@ impl CodeLexicalProjectionAdapterV1 {
         Self::new_inner(metadata, chunks, false, budget.deadline_micros)
     }
 
+    /// Daemon `code_index_scheduler` entry. Hard-wires `deadline_micros = None`
+    /// (crate 30s fallback). A set request/profile budget does not win here.
     pub fn new_admitted<C>(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<C>,
@@ -427,6 +431,9 @@ impl CodeLexicalProjectionAdapterV1 {
         Self::new_admitted_with_deadline(metadata, chunks, None)
     }
 
+    /// Request/profile budget for admitted builds. A set `deadline_micros` wins.
+    /// Production first-query build is still [`Self::new_admitted`] until the
+    /// daemon switches this in.
     pub fn new_admitted_with_budget<C>(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<C>,

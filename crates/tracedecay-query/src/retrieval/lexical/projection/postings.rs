@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn lexical_projection_deadline_is_plan20_overridable() {
+    fn request_deadline_overrides_crate_lexical_fallback() {
         assert_eq!(
             super::super::lexical_projection_build_deadline_micros(None),
             super::super::LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1
