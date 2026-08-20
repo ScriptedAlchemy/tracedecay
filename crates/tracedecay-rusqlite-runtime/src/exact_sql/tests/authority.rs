@@ -181,8 +181,10 @@ fn long_lease_transaction_renews_its_lease_after_successful_bounded_steps() {
     let transaction = channel.begin_authorized_long_lease_immediate().unwrap();
     let started = Instant::now();
 
+    // Five bounded steps, each well inside a single lease, must together
+    // outlive the absolute transaction limit so success proves renewal.
     for value in 0..5 {
-        std::thread::sleep(Duration::from_millis(125));
+        std::thread::sleep(EXACT_SQL_TRANSACTION_LIMIT / 4);
         transaction
             .execute(statement(
                 "INSERT INTO lease_probe VALUES (?)",

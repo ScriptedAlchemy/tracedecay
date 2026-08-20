@@ -9,7 +9,11 @@
 //! and states that "retention expiry is eligibility for a fresh cleanup
 //! preflight, not delete authority".
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
+
+use common::fixture_abs_root;
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
@@ -26,8 +30,6 @@ use tracedecay_domain::{
     WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-
-const ROOT: &str = "/workspace/linked-placement";
 
 fn id<T>(value: &str) -> T
 where
@@ -89,7 +91,7 @@ fn authority_of(context: &RequestContext) -> WorkAuthority {
 fn linked() -> WorkPlacementTargetV1 {
     WorkPlacementTargetV1::new(
         WorkPlacementKindV1::LinkedWorktree,
-        Some(ROOT.to_owned()),
+        Some(fixture_abs_root("/workspace/linked-placement")),
         false,
         true,
     )

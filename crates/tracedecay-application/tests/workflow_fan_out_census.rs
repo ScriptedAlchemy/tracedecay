@@ -1,5 +1,8 @@
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 
+use common::fixture_abs_root;
 use tracedecay_application::{
     CancellationContext, WorkflowFailurePolicy, WorkflowFanOutCensusEvidenceV1,
     WorkflowFanOutRequest, WorkflowProviderAdmission, derive_workflow_fan_out_census,

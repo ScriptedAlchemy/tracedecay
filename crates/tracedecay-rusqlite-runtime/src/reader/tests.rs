@@ -73,6 +73,32 @@ impl ReaderQueryExecutor for SlowExecutor {
     }
 }
 
+/// An executor that parks inside the read until the test releases it, so a
+/// test can assert ordering against a worker that is provably still running
+/// instead of racing a wall-clock bound.
+#[derive(Clone, Default)]
+struct GateExecutor {
+    entered: Arc<AtomicU8>,
+    release: Arc<AtomicU8>,
+    finished: Arc<AtomicU8>,
+}
+
+impl ReaderQueryExecutor for GateExecutor {
+    fn execute_read(
+        &mut self,
+        snapshot: &Transaction<'_>,
+        request: &RuntimeReadRequestV1,
+    ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
+        self.entered.store(1, Ordering::SeqCst);
+        while self.release.load(Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let outcome = CountExecutor.execute_read(snapshot, request);
+        self.finished.store(1, Ordering::SeqCst);
+        outcome
+    }
+}
+
 struct TestStore {
     _directory: tempfile::TempDir,
     path: PathBuf,
@@ -818,27 +844,43 @@ fn dropping_snapshot_and_reader_lease_restores_capacity() {
 #[test]
 fn cancellation_bounds_query_return_even_when_the_executor_is_still_running() {
     let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        two_reader_budget(),
-        SlowExecutor {
-            delay: Duration::from_millis(250),
-        },
-    )
-    .unwrap();
+    let executor = GateExecutor::default();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), executor.clone()).unwrap();
     let read = request(&store.binding, OperationPriorityV1::Foreground);
     let probe = Probe::for_request(&read);
     let cancellation = Arc::clone(&probe.interruption);
+    let entered = Arc::clone(&executor.entered);
     let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
     let mut snapshot = lease.begin_snapshot().unwrap();
+    // Cancel only once the worker is provably inside the executor, so the
+    // return below can only be explained by the cancellation observation and
+    // never by the executor completing first.
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(10));
+        while entered.load(Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         cancellation.store(1, Ordering::SeqCst);
     });
+    // Watchdog: if cancellation regresses, `execute` blocks on the parked
+    // executor until the harness kills the test. Releasing the gate after a
+    // generous bound turns that hang into the clean assertion failures below.
+    let watchdog_release = Arc::clone(&executor.release);
+    let watchdog = std::thread::spawn(move || {
+        for _ in 0..300 {
+            if watchdog_release.load(Ordering::SeqCst) != 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        watchdog_release.store(1, Ordering::SeqCst);
+    });
 
-    let started = Instant::now();
     let outcome = snapshot.execute(read, &probe).unwrap();
-    assert!(started.elapsed() < Duration::from_millis(100));
+    assert_eq!(
+        executor.finished.load(Ordering::SeqCst),
+        0,
+        "the query must return on cancellation while the executor is still running"
+    );
     assert!(matches!(
         outcome.coverage(),
         RuntimeReadCoverageV1::Unavailable {
@@ -847,10 +889,15 @@ fn cancellation_bounds_query_return_even_when_the_executor_is_still_running() {
         }
     ));
 
-    let drop_started = Instant::now();
     drop(snapshot);
     drop(lease);
-    assert!(drop_started.elapsed() < Duration::from_millis(100));
+    assert_eq!(
+        executor.finished.load(Ordering::SeqCst),
+        0,
+        "snapshot and lease teardown must not wait for the abandoned executor"
+    );
+    executor.release.store(1, Ordering::SeqCst);
+    watchdog.join().unwrap();
 }
 
 #[test]

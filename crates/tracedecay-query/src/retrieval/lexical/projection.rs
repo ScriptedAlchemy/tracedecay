@@ -1,14 +1,16 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use roaring::RoaringBitmap;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
     ExtractionAdmittedChunkV1, FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1,
-    LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness, SourceOccurrenceId,
+    LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
+    SourceOccurrenceId,
 };
 
 use super::{
@@ -30,6 +32,34 @@ const FUZZY_SCORE_MILLIS: u64 = 500;
 const PHRASE_SCORE_MILLIS: u64 = 2_000;
 const ECHO_SCORE_MILLIS: u64 = 750;
 const BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1: usize = 512 * 1024 * 1024;
+
+/// Wall-clock bound for materializing one lexical generation's postings.
+/// First-query `new` / `new_admitted` is O(store); a missing caller deadline
+/// must not let that build run unbounded on the daemon query path.
+pub const LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1: u64 = 30_000_000;
+
+/// A set `deadline_micros`, including `Some(0)`, is used as-is. `None` uses the
+/// crate 30s fallback. This is not request-over-profile: a caller that has both
+/// a lane and a base deadline must pass the tighter value.
+pub fn lexical_projection_build_deadline_micros(request_deadline_micros: Option<u64>) -> u64 {
+    request_deadline_micros.unwrap_or(LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1)
+}
+
+fn map_postings_build_error(error: String) -> RetrievalPortError {
+    if error == postings::LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED {
+        RetrievalPortError::BudgetExceeded
+    } else {
+        RetrievalPortError::Contract(error)
+    }
+}
+
+fn check_projection_build_deadline(deadline: Instant) -> Result<(), RetrievalPortError> {
+    if Instant::now() >= deadline {
+        Err(RetrievalPortError::BudgetExceeded)
+    } else {
+        Ok(())
+    }
+}
 
 /// Generation and source metadata bound to one immutable lexical projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,13 +207,15 @@ struct LexicalGenerationPostingsV1 {
 }
 
 impl LexicalGenerationPostingsV1 {
-    fn from_rows(rows: &[ProjectedChunkV1]) -> Result<Self, RetrievalPortError> {
+    fn from_rows(rows: &[ProjectedChunkV1], deadline: Instant) -> Result<Self, RetrievalPortError> {
+        check_projection_build_deadline(deadline)?;
         let mut vocabulary = BTreeSet::new();
         let mut term_documents = BTreeMap::<LexicalFieldV1, BTreeMap<String, RoaringBitmap>>::new();
         let mut exact_documents = BTreeMap::<ExactFieldV1, BTreeMap<Vec<u8>, RoaringBitmap>>::new();
         let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
         let mut field_lengths = BTreeMap::<LexicalFieldV1, usize>::new();
         for (document, row) in rows.iter().enumerate() {
+            check_projection_build_deadline(deadline)?;
             let document = document as u32;
             for (field, terms) in &row.fields {
                 *field_lengths.entry(*field).or_default() += terms.len();
@@ -229,17 +261,20 @@ impl LexicalGenerationPostingsV1 {
             .into_iter()
             .map(|(field, total)| (field, total.div_ceil(divisor).max(1)))
             .collect();
+        check_projection_build_deadline(deadline)?;
         let mut ngram_budget = ByteNgramBudget::new(BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1);
         let normalized_text = Arc::new(
             ByteNgramPostings::from_documents(
                 rows.iter().map(|row| row.normalized_text.as_bytes()),
                 &mut ngram_budget,
+                Some(deadline),
             )
-            .map_err(RetrievalPortError::Contract)?,
+            .map_err(map_postings_build_error)?,
         );
         let raw_matches_normalized = rows.iter().all(|row| {
             row.chunk.sanitized_text.as_str().as_bytes() == row.normalized_text.as_bytes()
         });
+        check_projection_build_deadline(deadline)?;
         let raw_text = if raw_matches_normalized {
             Arc::clone(&normalized_text)
         } else {
@@ -248,17 +283,20 @@ impl LexicalGenerationPostingsV1 {
                     rows.iter()
                         .map(|row| row.chunk.sanitized_text.as_str().as_bytes()),
                     &mut ngram_budget,
+                    Some(deadline),
                 )
-                .map_err(RetrievalPortError::Contract)?,
+                .map_err(map_postings_build_error)?,
             )
         };
+        let fuzzy_terms = FuzzyTermIndex::from_terms(vocabulary, Some(deadline))
+            .map_err(map_postings_build_error)?;
+        check_projection_build_deadline(deadline)?;
         Ok(Self {
             term_documents,
             exact_documents,
             normalized_text,
             raw_text,
-            fuzzy_terms: FuzzyTermIndex::from_terms(vocabulary)
-                .map_err(RetrievalPortError::Contract)?,
+            fuzzy_terms,
             document_frequencies,
             average_field_lengths,
         })
@@ -369,12 +407,40 @@ impl CodeLexicalProjectionAdapterV1 {
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<CodeSearchChunkV1>,
     ) -> Result<Self, RetrievalPortError> {
-        Self::new_inner(metadata, chunks, false)
+        Self::new_inner(metadata, chunks, false, None)
     }
 
+    /// Hard-wires `deadline_micros = None` (crate 30s fallback). Live daemon
+    /// mount is [`Self::new_admitted_with_budget`].
     pub fn new_admitted<C>(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<C>,
+    ) -> Result<Self, RetrievalPortError>
+    where
+        C: ExtractionAdmittedChunkV1,
+    {
+        Self::new_admitted_with_deadline(metadata, chunks, None)
+    }
+
+    /// Budget-aware admitted build for the daemon mount. A set
+    /// `budget.deadline_micros`, including `Some(0)`, is used as-is; `None`
+    /// uses the crate 30s fallback. Callers with lane+base must pass the tighter
+    /// value on the budget they hand in.
+    pub fn new_admitted_with_budget<C>(
+        metadata: CodeLexicalProjectionMetadataV1,
+        chunks: Vec<C>,
+        budget: &RetrievalBudget,
+    ) -> Result<Self, RetrievalPortError>
+    where
+        C: ExtractionAdmittedChunkV1,
+    {
+        Self::new_admitted_with_deadline(metadata, chunks, budget.deadline_micros)
+    }
+
+    fn new_admitted_with_deadline<C>(
+        metadata: CodeLexicalProjectionMetadataV1,
+        chunks: Vec<C>,
+        deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError>
     where
         C: ExtractionAdmittedChunkV1,
@@ -386,6 +452,7 @@ impl CodeLexicalProjectionAdapterV1 {
                 .map(ExtractionAdmittedChunkV1::into_admitted_chunk)
                 .collect(),
             true,
+            deadline_micros,
         )
     }
 
@@ -393,8 +460,13 @@ impl CodeLexicalProjectionAdapterV1 {
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<CodeSearchChunkV1>,
         extraction_admitted: bool,
+        deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError> {
+        let deadline = Instant::now()
+            + Duration::from_micros(lexical_projection_build_deadline_micros(deadline_micros));
+        check_projection_build_deadline(deadline)?;
         metadata.validate()?;
+        check_projection_build_deadline(deadline)?;
         if chunks.len() > u32::MAX as usize {
             return Err(RetrievalPortError::Contract(
                 "lexical projection exceeds the posting document-id range".to_owned(),
@@ -403,6 +475,7 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut seen = BTreeSet::new();
         let mut rows = Vec::with_capacity(chunks.len());
         for chunk in chunks {
+            check_projection_build_deadline(deadline)?;
             chunk.validate().map_err(contract_error)?;
             if !extraction_admitted
                 && chunk
@@ -433,9 +506,11 @@ impl CodeLexicalProjectionAdapterV1 {
                     ))
                 })?;
             rows.push(ProjectedChunkV1::new(chunk, logical_path));
+            check_projection_build_deadline(deadline)?;
         }
         rows.sort_by(|left, right| left.chunk.id.cmp(&right.chunk.id));
-        let postings = Arc::new(LexicalGenerationPostingsV1::from_rows(&rows)?);
+        check_projection_build_deadline(deadline)?;
+        let postings = Arc::new(LexicalGenerationPostingsV1::from_rows(&rows, deadline)?);
         Ok(Self {
             metadata,
             rows: Arc::new(rows),
@@ -1163,5 +1238,58 @@ fn fuzzy_distance_bound(character_count: usize) -> usize {
         0..=4 => 0,
         5..=8 => 1,
         _ => 2,
+    }
+}
+
+#[cfg(test)]
+mod deadline_budget_tests {
+    use super::*;
+    use tracedecay_domain::{
+        ComponentRevision, ScoreDomainId, SourceInstanceKey, SourceNamespace, UtcMicros,
+    };
+
+    fn dummy_metadata() -> CodeLexicalProjectionMetadataV1 {
+        CodeLexicalProjectionMetadataV1 {
+            generation: CodeGenerationId::new("generation.deadline.v1").expect("generation"),
+            repository_id: None,
+            logical_paths: BTreeMap::new(),
+            freshness: SourceFreshness {
+                source_namespace: SourceNamespace::new("ns.deadline").expect("namespace"),
+                source_instance: SourceInstanceKey::new("instance.deadline").expect("instance"),
+                source_watermark: None,
+                projection_watermark: None,
+                observed_at: UtcMicros(0),
+                source_generation: None,
+                generation_lag: None,
+                compatibility: FreshnessCompatibilityV1::Unknown,
+                policy_revision: ComponentRevision::new("policy.deadline.v1").expect("policy"),
+            },
+            exact_retriever_revision: ComponentRevision::new("retriever.exact.v1").expect("exact"),
+            lexical_retriever_revision: ComponentRevision::new("retriever.lexical.v1")
+                .expect("lexical"),
+            exact_score_domain: ScoreDomainId::new("score.exact.v1").expect("score"),
+        }
+    }
+
+    #[test]
+    fn new_admitted_with_budget_zero_deadline_is_immediate_budget_exceeded() {
+        let budget = RetrievalBudget {
+            max_candidates_per_lane: 1,
+            max_fused_candidates: 1,
+            max_hydrated_results: 1,
+            max_hydration_bytes: 1,
+            deadline_micros: Some(0),
+        };
+        let error = CodeLexicalProjectionAdapterV1::new_inner(
+            dummy_metadata(),
+            Vec::<CodeSearchChunkV1>::new(),
+            true,
+            budget.deadline_micros,
+        )
+        .expect_err("Some(0) must expire before validate");
+        assert!(
+            matches!(error, RetrievalPortError::BudgetExceeded),
+            "Some(0) is a set deadline, not the crate fallback: {error:?}"
+        );
     }
 }

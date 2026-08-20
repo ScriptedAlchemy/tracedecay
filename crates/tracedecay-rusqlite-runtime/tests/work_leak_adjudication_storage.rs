@@ -1,5 +1,6 @@
 //! Durable Work leak adjudication replay and integrity checks.
 
+mod common;
 mod work_registered_store;
 
 use tracedecay_application::{
@@ -23,6 +24,7 @@ use tracedecay_domain::{
     WorktreeId, canonical_sha256,
 };
 
+use common::fixture_abs_root;
 use work_registered_store::RegisteredWorkStore;
 
 fn id<T>(value: &str) -> T
@@ -103,7 +105,7 @@ fn terminal_attempt() -> WorkAttemptV1 {
         id::<ProjectId>("project.leak-storage"),
         id::<RepositoryId>("repository.leak-storage"),
         id::<WorktreeId>("worktree.leak-storage"),
-        "/tmp/leak-storage".to_owned(),
+        fixture_abs_root("/tmp/leak-storage"),
         Some(id::<RefId>("refs/heads/leak-storage")),
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         "Execute the admitted provider step.".to_owned(),
