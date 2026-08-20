@@ -644,9 +644,9 @@ fn create_task_lock_file(
     let cleanup_result =
         tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&staging_path)
             .map(|_| ());
-    let sync_result = tracedecay_application::sync_parent_directory(
+    let sync_result = tracedecay_private_fs::framed_log::sync_parent_directory(
         path,
-        tracedecay_application::DirectorySyncPolicy::Strict,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
     );
     Ok(task_lock.settle_published_staging(&staging_path, cleanup_result, sync_result))
 }
@@ -993,9 +993,9 @@ fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File>
     };
     fs2::FileExt::lock_exclusive(&file)?;
     file.sync_all()?;
-    tracedecay_application::sync_parent_directory(
+    tracedecay_private_fs::framed_log::sync_parent_directory(
         &coordination_path,
-        tracedecay_application::DirectorySyncPolicy::Strict,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
     )?;
     Ok(file)
 }

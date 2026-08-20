@@ -375,9 +375,9 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
                 file.write_all(b"\n")?;
                 file.sync_all()?;
             }
-            tracedecay_application::sync_parent_directory(
+            tracedecay_private_fs::framed_log::sync_parent_directory(
                 path,
-                tracedecay_application::DirectorySyncPolicy::Strict,
+                tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
             )
         })();
         let unlock_result = fs2::FileExt::unlock(&lock);
@@ -748,9 +748,9 @@ pub(super) fn ensure_run_ledger_eof_guard(file: &mut std::fs::File) -> std::io::
 
 pub(super) fn sync_run_ledger_file_and_parent(path: &Path, file: &std::fs::File) -> Result<()> {
     file.sync_all().map_err(TraceDecayError::from)?;
-    tracedecay_application::sync_parent_directory(
+    tracedecay_private_fs::framed_log::sync_parent_directory(
         path,
-        tracedecay_application::DirectorySyncPolicy::Strict,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
     )
     .map_err(TraceDecayError::from)
 }

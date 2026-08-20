@@ -609,9 +609,9 @@ impl CatalogHostComponentRegistrationAuthority {
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
         let backup_dir = self.backup_dir(operation_id);
         fs::create_dir_all(&backup_dir).map_err(|_| host_bundle_storage_failure!())?;
-        tracedecay_application::sync_parent_directory(
+        tracedecay_private_fs::framed_log::sync_parent_directory(
             &backup_dir,
-            tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+            tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
         )
         .map_err(|_| host_bundle_storage_failure!())?;
         let identity = RegistrationBackupIdentityV1::new(
@@ -806,9 +806,9 @@ impl CatalogHostComponentRegistrationAuthority {
             fs::rename(&staging_path, path).map_err(|_| {
                 crate::agents::host_bundle_v2::HostBundleError::RecoveryDirectoryUnavailable
             })?;
-            tracedecay_application::sync_parent_directory(
+            tracedecay_private_fs::framed_log::sync_parent_directory(
                 path,
-                tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+                tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
             )
             .map_err(|_| host_bundle_storage_failure!())?;
         }
@@ -1146,9 +1146,9 @@ impl CatalogHostComponentRegistrationAuthority {
             fs::rename(&staging_path, path).map_err(|_| {
                 crate::agents::host_bundle_v2::HostBundleError::RecoveryDirectoryUnavailable
             })?;
-            tracedecay_application::sync_parent_directory(
+            tracedecay_private_fs::framed_log::sync_parent_directory(
                 path,
-                tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+                tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
             )
             .map_err(|_| host_bundle_storage_failure!())?;
         }
@@ -1772,9 +1772,9 @@ fn sync_registration_metadata(
     fs::File::open(path)
         .and_then(|file| file.sync_all())
         .and_then(|()| {
-            tracedecay_application::sync_parent_directory(
+            tracedecay_private_fs::framed_log::sync_parent_directory(
                 path,
-                tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+                tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
             )
         })
         .map_err(|_| host_bundle_storage_failure!())
@@ -1784,11 +1784,11 @@ fn write_registration_backup(
     path: &Path,
     bytes: &[u8],
 ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-    tracedecay_application::atomic_write(
+    tracedecay_private_fs::framed_log::atomic_write(
         path,
         "host-registration-state",
         bytes,
-        tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
     )
     .map_err(|_| host_bundle_storage_failure!())
 }
