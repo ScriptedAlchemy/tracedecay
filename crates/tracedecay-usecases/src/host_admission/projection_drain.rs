@@ -6,8 +6,10 @@ use tracedecay_store::ProjectionPersistOutcome;
 use super::*;
 
 /// One WARN per hour for a standing durable refusal, matching #538.
-/// The host re-ticks this queue on a 60s scheduler; skip is already
-/// cheaper (yield the rest of the batch). The storm is re-entry.
+/// The host re-ticks this queue on a 60s scheduler. The store already
+/// consumed the refused id (durable skip); the drain must keep going
+/// so later healthy items are not delayed until the next tick. The
+/// storm is re-entry, which this gate still holds.
 const DEFAULT_DETERMINISTIC_REFUSAL_WARN_SUPPRESSION_SECS: u64 = 3_600;
 
 static DETERMINISTIC_REFUSAL_WARN_STATE: OnceLock<Mutex<Option<DeterministicRefusalWarnAnchor>>> =
@@ -15,8 +17,8 @@ static DETERMINISTIC_REFUSAL_WARN_STATE: OnceLock<Mutex<Option<DeterministicRefu
 
 /// Whether to emit `deterministic projection rejection committed`.
 ///
-/// Skip + Deferred + yield still happen on every first durable refusal.
-/// This gate only holds back the repeat WARN.
+/// Durable skip still happens on every first refusal (store consumed
+/// the id). This gate only holds back the repeat WARN.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeterministicRefusalWarnGate {
     Emit,
@@ -43,7 +45,15 @@ impl Default for DeterministicRefusalWarnBackoff {
 impl DeterministicRefusalWarnBackoff {
     #[must_use]
     const fn new(suppression_secs: u64) -> Self {
-        Self { suppression_secs }
+        // 0 makes `now < now+0` false, so every tick would Emit.
+        // Treat 0 as the default window; do not silently re-WARN.
+        Self {
+            suppression_secs: if suppression_secs == 0 {
+                DEFAULT_DETERMINISTIC_REFUSAL_WARN_SUPPRESSION_SECS
+            } else {
+                suppression_secs
+            },
+        }
     }
 
     #[cfg(test)]
@@ -163,11 +173,13 @@ impl HostAdmissionFacade<'_> {
                     error @ (ProjectionStoreError::Contract(_)
                     | ProjectionStoreError::SanitizationRefused { .. }),
                 ) => {
-                    // Skip is already durable. Yield the rest of this drain so
-                    // we do not keep paying sanitization/receipt construction
-                    // on the same batch (Plan 23/26: typed skip + Deferred).
-                    // Always break: after_deterministic_rejection is stop=true,
-                    // and `if stop { break; }` types as () when stop is false.
+                    // Store already recorded a durable skip and consumed this
+                    // queue item (`persist_projection_rejection_on_database` via
+                    // `apply_skip_disposition` + `consume_projection_queue_item`).
+                    // Breaking here would stall later healthy items until the
+                    // next 60s host tick — a stall, not a cheaper path. Keep
+                    // draining. The warn gate still holds the Plan 26 log storm
+                    // (one WARN per observation_id per hour).
                     if record_deterministic_refusal_warn(observation_id.as_str(), unix_now_secs())
                         == DeterministicRefusalWarnGate::Emit
                     {
@@ -179,9 +191,9 @@ impl HostAdmissionFacade<'_> {
                     }
                     let (skipped, deferred, stop) = after_deterministic_rejection(outcome.skipped);
                     outcome.skipped = skipped;
-                    observation_deferred = deferred;
-                    debug_assert!(stop);
-                    break;
+                    debug_assert!(!deferred);
+                    debug_assert!(!stop);
+                    continue;
                 }
                 Err(error) => {
                     // The head-of-queue failure aborts the drain (fail-closed
@@ -252,8 +264,11 @@ impl HostAdmissionFacade<'_> {
     }
 }
 
+// Durable skip is already recorded by the store. Do not force Deferred
+// or stop the batch: later healthy items must still project. Yielding
+// them is a stall until the next 60s host tick.
 fn after_deterministic_rejection(skipped: u64) -> (u64, bool, bool) {
-    (skipped.saturating_add(1), true, true)
+    (skipped.saturating_add(1), false, false)
 }
 
 #[cfg(test)]
@@ -308,21 +323,34 @@ fn warn_gates_for_refusals(
 #[cfg(test)]
 mod tests {
     use super::{
-        DeterministicRefusalWarnBackoff, DeterministicRefusalWarnGate, SimulatedProjectOutcome,
-        after_deterministic_rejection, simulate_drain_project_calls, warn_gates_for_refusals,
+        DEFAULT_DETERMINISTIC_REFUSAL_WARN_SUPPRESSION_SECS, DeterministicRefusalWarnBackoff,
+        DeterministicRefusalWarnGate, SimulatedProjectOutcome, after_deterministic_rejection,
+        simulate_drain_project_calls, warn_gates_for_refusals,
     };
 
     #[test]
     fn first_deterministic_refusal_is_one_skip_and_yields_the_rest() {
-        let max = 8_u32;
         let (skipped, deferred, stop) = after_deterministic_rejection(0);
         assert_eq!(skipped, 1);
-        assert!(deferred);
-        assert!(stop);
-        let new_project_calls = 1_u32;
-        assert!(
-            new_project_calls < max,
-            "yielding must do less project/sanitization work than continuing the batch"
+        assert!(!deferred);
+        assert!(!stop);
+        let batch = [
+            SimulatedProjectOutcome::Refusal,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+        ];
+        let (skipped, deferred, project_calls) = simulate_drain_project_calls(&batch);
+        assert_eq!(skipped, 1);
+        assert!(!deferred);
+        assert_eq!(
+            project_calls,
+            batch.len(),
+            "first durable refusal is one skip; remaining healthy items still project"
         );
     }
 
@@ -340,12 +368,12 @@ mod tests {
         ];
         let (skipped, deferred, project_calls) = simulate_drain_project_calls(&batch);
         assert_eq!(skipped, 1);
-        assert!(deferred);
+        assert!(!deferred);
         assert_eq!(
-            project_calls, 1,
-            "first durable refusal must yield; remaining max-1 items are unpaid"
+            project_calls,
+            batch.len(),
+            "first durable refusal is one skip; remaining healthy items still project"
         );
-        assert!(project_calls < batch.len());
     }
 
     #[test]
@@ -387,6 +415,32 @@ mod tests {
         assert_eq!(
             DeterministicRefusalWarnBackoff::default().suppression_secs(),
             3_600
+        );
+    }
+
+    #[test]
+    fn zero_refusal_warn_suppression_secs_is_treated_as_default_not_always_emit() {
+        let backoff = DeterministicRefusalWarnBackoff::new(0);
+        assert_eq!(
+            backoff.suppression_secs(),
+            DEFAULT_DETERMINISTIC_REFUSAL_WARN_SUPPRESSION_SECS
+        );
+        let observed_at = 1_000_i64;
+        let gates = warn_gates_for_refusals(
+            backoff,
+            &[
+                ("obs-zero", observed_at),
+                ("obs-zero", observed_at + 1),
+                ("obs-zero", observed_at + 3_599),
+            ],
+        );
+        assert_eq!(
+            gates,
+            [
+                DeterministicRefusalWarnGate::Emit,
+                DeterministicRefusalWarnGate::Suppressed,
+                DeterministicRefusalWarnGate::Suppressed,
+            ]
         );
     }
 }
