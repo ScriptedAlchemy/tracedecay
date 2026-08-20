@@ -22,9 +22,12 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
+use clru::CLruCache;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::DashboardState;
 use super::util::query_rows;
@@ -129,20 +132,18 @@ struct CachedCount {
 }
 
 /// Content-identity fingerprint of displayed message text: byte length plus
-/// a full-content hash, so equal-length rewrites (e.g. redaction variants)
-/// never reuse a stale count.
+/// a SHA-256 digest, so equal-length rewrites (e.g. redaction variants) do
+/// not reuse a stale count based on a short, non-cryptographic hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ContentFingerprint {
-    len: u64,
-    hash: u64,
+    len: usize,
+    digest: [u8; 32],
 }
 
 pub(crate) fn content_fingerprint(text: &str) -> ContentFingerprint {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
     ContentFingerprint {
-        len: text.len() as u64,
-        hash: hasher.finish(),
+        len: text.len(),
+        digest: Sha256::digest(text.as_bytes()).into(),
     }
 }
 
@@ -151,6 +152,18 @@ pub(crate) fn content_fingerprint(text: &str) -> ContentFingerprint {
 struct DisplayedCount {
     fingerprint: ContentFingerprint,
     tokens: i64,
+}
+
+// Retain two maximum-sized timeline pages for each of the most recently used
+// providers. Older entries are derived data and can be recounted after eviction.
+const DISPLAYED_PROVIDER_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(15);
+const DISPLAYED_MESSAGE_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(4_095);
+
+type DisplayedMessageCache = CLruCache<String, DisplayedCount>;
+type DisplayedProviderCache = CLruCache<String, DisplayedMessageCache>;
+
+fn displayed_message_cache() -> DisplayedMessageCache {
+    CLruCache::new(DISPLAYED_MESSAGE_CACHE_CAPACITY)
 }
 
 /// Cached non-usage overlay plus the `session_messages` fingerprint it was
@@ -173,14 +186,16 @@ pub struct TokenCountCache {
     /// full `session_messages` scan + fold three times.
     overlay: tokio::sync::Mutex<Option<OverlayCache>>,
     /// Displayed-content counts for the LCM render path, keyed by provider
-    /// then message id and guarded by a content fingerprint. Two levels so
-    /// a hit borrows the caller's `&str` keys without allocating — every
-    /// polled search/session/overview/timeline message takes this path.
+    /// then message id and guarded by a content fingerprint. Bounded LRU
+    /// levels prevent a long-lived dashboard from retaining every message it
+    /// has ever rendered. Two levels let a hit borrow the caller's `&str`
+    /// keys without allocating — every polled search/session/overview/timeline
+    /// message takes this path.
     /// Kept apart from `map`: LCM counts canonically hydrated display
     /// content with `o200k_base` specifically, while `map` counts stored
     /// text with the model-mapped tokenizer, so entries are not
     /// interchangeable.
-    lcm_display: Mutex<HashMap<String, HashMap<String, DisplayedCount>>>,
+    lcm_display: Mutex<DisplayedProviderCache>,
 }
 
 impl TokenCountCache {
@@ -188,7 +203,7 @@ impl TokenCountCache {
         Self {
             map: Mutex::new(HashMap::new()),
             overlay: tokio::sync::Mutex::new(None),
-            lcm_display: Mutex::new(HashMap::new()),
+            lcm_display: Mutex::new(CLruCache::new(DISPLAYED_PROVIDER_CACHE_CAPACITY)),
         }
     }
 
@@ -200,11 +215,11 @@ impl TokenCountCache {
         message_id: &str,
         fingerprint: ContentFingerprint,
     ) -> Option<i64> {
-        let map = self
+        let mut map = self
             .lcm_display
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.get(provider)
+        map.get_mut(provider)
             .and_then(|inner| inner.get(message_id))
             .filter(|cached| cached.fingerprint == fingerprint)
             .map(|cached| cached.tokens)
@@ -221,7 +236,13 @@ impl TokenCountCache {
             .lcm_display
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.entry(provider.to_owned()).or_default().insert(
+        let provider_cache = map.put_or_modify(
+            provider.to_owned(),
+            |_, ()| displayed_message_cache(),
+            |_, _, ()| {},
+            (),
+        );
+        provider_cache.put(
             message_id.to_owned(),
             DisplayedCount {
                 fingerprint,
@@ -534,6 +555,54 @@ mod tests {
         assert_eq!(
             cache.displayed_tokens(provider, message_id, content_fingerprint("hell0")),
             None
+        );
+    }
+
+    #[test]
+    fn display_cache_evicts_least_recent_entries_at_both_identity_levels() {
+        let cache = TokenCountCache::new();
+        let fingerprint = content_fingerprint("content");
+
+        for index in 0..=DISPLAYED_MESSAGE_CACHE_CAPACITY.get() {
+            cache.store_displayed_tokens(
+                "codex",
+                &format!("message.{index}"),
+                fingerprint,
+                index as i64,
+            );
+        }
+        assert_eq!(
+            cache.displayed_tokens("codex", "message.0", fingerprint),
+            None
+        );
+        assert_eq!(
+            cache.displayed_tokens(
+                "codex",
+                &format!("message.{}", DISPLAYED_MESSAGE_CACHE_CAPACITY.get()),
+                fingerprint,
+            ),
+            Some(DISPLAYED_MESSAGE_CACHE_CAPACITY.get() as i64),
+        );
+
+        for index in 0..=DISPLAYED_PROVIDER_CACHE_CAPACITY.get() {
+            cache.store_displayed_tokens(
+                &format!("provider.{index}"),
+                "message",
+                fingerprint,
+                index as i64,
+            );
+        }
+        assert_eq!(
+            cache.displayed_tokens("provider.0", "message", fingerprint),
+            None,
+        );
+        assert_eq!(
+            cache.displayed_tokens(
+                &format!("provider.{}", DISPLAYED_PROVIDER_CACHE_CAPACITY.get()),
+                "message",
+                fingerprint,
+            ),
+            Some(DISPLAYED_PROVIDER_CACHE_CAPACITY.get() as i64),
         );
     }
 

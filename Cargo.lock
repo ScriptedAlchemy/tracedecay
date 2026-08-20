@@ -5788,9 +5788,11 @@ name = "tracedecay-dashboard-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "clru",
  "schemars",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tiktoken-rs",
  "tokio",
