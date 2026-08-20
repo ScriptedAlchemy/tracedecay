@@ -370,6 +370,64 @@ fn lcm_json_credential_bearing_keys_quarantine_instead_of_faulting_the_receipt()
 }
 
 #[test]
+fn lcm_non_json_credential_bearing_keys_are_key_quarantine_not_parse_ambiguity() {
+    // Same key-quarantine contract as the JSON container path, reached through
+    // the non-JSON structured-text route: a parsed TOML table whose *key* is
+    // itself credential material. (TOML rather than `key: value`, which the
+    // format probe reads as an HTTP header block whose line path never scans
+    // keys.) The refusal must name the key quarantine, not claim the document
+    // was ambiguous — it parsed fine.
+    let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
+    let raw = format!("{credential_key} = \"ordinary-value\"\nregion = \"us-east\"\n");
+
+    let error = sanitize_lcm_payload_text(&raw).expect_err("key quarantine");
+    assert_eq!(error, DetectionError::CredentialKeyQuarantine);
+    assert_eq!(
+        error.to_string(),
+        "privacy sanitizer quarantined credential-bearing keys"
+    );
+}
+
+#[test]
+fn lcm_non_json_parse_ambiguity_stays_a_structured_quarantine() {
+    // The routing split must not widen: a document that declared a structured
+    // format but failed to parse is still the parse-ambiguity quarantine.
+    let raw = format!("vault_passphrase: {PLACEHOLDER}\n  broken: [unclosed\n");
+
+    let error = sanitize_lcm_payload_text(&raw).expect_err("parse ambiguity quarantine");
+    assert_eq!(error, DetectionError::StructuredQuarantine);
+    assert_eq!(
+        error.to_string(),
+        "privacy sanitizer quarantined an ambiguous structured document"
+    );
+}
+
+#[test]
+fn code_source_credential_bearing_keys_are_key_quarantine_not_parse_ambiguity() {
+    let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
+    let raw = format!("{credential_key} = \"ordinary-value\"\nregion = \"us-east\"\n");
+
+    let error = sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData)
+        .map(|_| ())
+        .expect_err("key quarantine");
+    assert_eq!(error, DetectionError::CredentialKeyQuarantine);
+    assert_eq!(
+        error.to_string(),
+        "privacy sanitizer quarantined credential-bearing keys"
+    );
+}
+
+#[test]
+fn code_source_parse_ambiguity_stays_a_structured_quarantine() {
+    let raw = format!("vault_passphrase: {PLACEHOLDER}\n  broken: [unclosed\n");
+
+    let error = sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData)
+        .map(|_| ())
+        .expect_err("parse ambiguity quarantine");
+    assert_eq!(error, DetectionError::StructuredQuarantine);
+}
+
+#[test]
 fn lcm_json_credential_values_under_ordinary_keys_still_redact_durably() {
     // The quarantine above is specific to key positions. The same credential in
     // a *value* position is redactable, so sanitization must stay a durable
