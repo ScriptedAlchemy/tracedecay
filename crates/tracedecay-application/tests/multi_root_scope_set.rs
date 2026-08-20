@@ -3,7 +3,6 @@ mod common;
 use std::collections::BTreeSet;
 use std::fmt;
 
-use common::fixture_abs_root;
 use serde_json::json;
 use tracedecay_application::{
     AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
