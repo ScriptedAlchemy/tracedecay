@@ -9,11 +9,15 @@
 //! Codex CLI 0.147.0 publishes `codex plugin add` / `remove` as non-interactive
 //! commands (probed 2026-08-14). TraceDecay stages the plugin source tree and
 //! the personal marketplace entry, then drives those commands for Core
-//! activation. It never writes `~/.codex/config.toml` itself — Codex owns the
-//! `tracedecay@<marketplace>` activation keys and the `[hooks.state]` trust
-//! hashes recorded there. Hook trust still has no non-interactive surface
-//! (`/hooks` inside a session), so doctor reports untrusted hooks instead of
-//! forging hashes. See [`plugin_registry`] for the plugin adoption and
+//! activation. Codex owns the `tracedecay@<marketplace>` activation keys in
+//! `~/.codex/config.toml`; TraceDecay never writes those. Hook trust is
+//! different: `codex plugin add` does not record `[hooks.state]` hashes and
+//! `/hooks` is interactive-only, so after a successful install or
+//! update-plugin TraceDecay records trust for its own managed hooks itself
+//! ([`sync_codex_hook_trust`]) — but only for hooks whose installed command is
+//! byte-for-byte a generated tracedecay command
+//! ([`codex_hook_command_invokes_tracedecay`]); anything else keeps the manual
+//! `/hooks` review. See [`plugin_registry`] for the plugin adoption and
 //! [`mcp_registry`] for the MCP-only (non-plugin) registry.
 //!
 //! Codex's **MCP registry** remains the path for an MCP-only component set
@@ -40,8 +44,10 @@ use super::{
     safe_write_text_file,
 };
 
-/// The prefix every Codex activation key for this plugin starts with. TraceDecay
-/// reads this host-native state but never writes it.
+/// The prefix every Codex activation key for this plugin starts with.
+/// TraceDecay reads the `[plugins]` activation records but never writes them;
+/// the same prefix also names TraceDecay's own `[hooks.state]` trust records,
+/// which [`sync_codex_hook_trust`] does author.
 const CODEX_PLUGIN_ACTIVATION_KEY_PREFIX: &str = "tracedecay@";
 
 mod mcp_registry;
@@ -84,6 +90,11 @@ impl AgentIntegration for CodexIntegration {
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
         install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
+        // Trust the staged hooks now: `codex plugin add` copies this exact
+        // payload into its cache without writing `[hooks.state]`, so recording
+        // the content hashes here is what lets the hooks run without a manual
+        // `/hooks` approval once activation completes.
+        announce_codex_hook_trust(&ctx.home, &ctx.tracedecay_bin);
         Ok(NonInteractiveInstallOutcome::Ready)
     }
 
@@ -162,6 +173,15 @@ impl AgentIntegration for CodexIntegration {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
         self.activate_deployed_host_registration(ctx)?;
+        // Auto-trust the personal bundle's hooks whenever one is present, so a
+        // refresh (which may have changed hook content) re-pins trust without a
+        // manual /hooks approval. Repo-local-only installs ship no hooks and
+        // have no personal trust surface, so this is a no-op for them.
+        if codex_plugin_manifest_path(&ctx.home).exists()
+            || !codex_plugin_cached_install_dirs(&ctx.home).is_empty()
+        {
+            announce_codex_hook_trust(&ctx.home, &ctx.tracedecay_bin);
+        }
         Ok(UpdatePluginOutcome::Refreshed(staged))
     }
 
@@ -925,11 +945,15 @@ enum CodexHookTrustState {
 ///
 /// The `trust_key` is the fully-qualified `[hooks.state."…"]` table name and
 /// `hash` is the `sha256:<hex>` content hash Codex records as `trusted_hash`.
+/// `command` is the raw installed handler command, kept so the auto-trust
+/// safety valve ([`codex_hook_command_invokes_tracedecay`]) can verify it
+/// before recording trust.
 #[derive(Debug, Clone)]
 struct CodexHookTrustEntry {
     event_label: String,
     trust_key: String,
     hash: String,
+    command: String,
 }
 
 /// Convert a Codex `CamelCase` lifecycle event name to the `snake_case` label
@@ -1061,6 +1085,7 @@ fn codex_hook_trust_entries_for_marketplace(
                     event_label: event_label.clone(),
                     trust_key,
                     hash,
+                    command: command.to_string(),
                 });
             }
         }
@@ -1097,6 +1122,188 @@ fn codex_personal_marketplace_name(home: &Path) -> Result<String> {
             ),
         })?;
     Ok(validate_codex_marketplace_name(name)?.to_string())
+}
+
+/// The hooks payload Codex actually loads: the versioned cache entry when
+/// Codex has installed one, otherwise the staged personal source (what
+/// `codex plugin add` will copy into the cache verbatim).
+fn codex_runtime_hooks_path(home: &Path) -> PathBuf {
+    let cached = codex_plugin_current_cached_install_dir(home).join("hooks/hooks.json");
+    if cached.is_file() {
+        cached
+    } else {
+        codex_plugin_install_dir(home).join("hooks/hooks.json")
+    }
+}
+
+fn codex_installed_hook_trust_entries(home: &Path) -> Result<(String, Vec<CodexHookTrustEntry>)> {
+    let marketplace_name = codex_personal_marketplace_name(home)?;
+    let hooks_path = codex_runtime_hooks_path(home);
+    if !hooks_path.is_file() {
+        return Err(TraceDecayError::Config {
+            message: format!("Codex hooks file not found at {}", hooks_path.display()),
+        });
+    }
+    let hooks = load_json_file_strict(&hooks_path)?;
+    let entries = codex_hook_trust_entries_for_marketplace(&hooks, &marketplace_name)?;
+    Ok((marketplace_name, entries))
+}
+
+/// Safety valve: only auto-trust a hook whose command is byte-for-byte one of
+/// the commands the generator emits for our own managed lifecycle hooks. A
+/// prefix match is unsafe — `<quoted tracedecay> hook-codex-session-start &&
+/// rm -rf ~` starts with our binary token yet smuggles an arbitrary command, so
+/// it would get silently auto-trusted. Requiring full equality with a generated
+/// command (`hook_command(bin, subcommand)` for each known subcommand) rejects
+/// any appended, prepended, or altered payload.
+fn codex_hook_command_invokes_tracedecay(command: &str, tracedecay_bin: &str) -> bool {
+    CODEX_MANAGED_HOOKS
+        .iter()
+        .any(|hook| command == super::hook_command(tracedecay_bin, hook.subcommand))
+}
+
+/// Outcome of a hook-trust re-sync: how many hooks were recorded as trusted and
+/// which (if any) were skipped by the safety valve and still need manual review.
+struct CodexHookTrustSyncOutcome {
+    trusted: usize,
+    skipped: Vec<String>,
+}
+
+/// Record trust for the installed plugin's lifecycle hooks in
+/// `~/.codex/config.toml` so Codex runs them without a manual `/hooks` approval.
+///
+/// Uses the marketplace identity and hook payload actually installed on disk,
+/// pruning stale active/legacy-personal entries while preserving every other
+/// plugin's and the user's own config. Hooks whose command does not exactly
+/// match a generated `TraceDecay` command are skipped (see
+/// [`codex_hook_command_invokes_tracedecay`]). An unreadable/unparseable
+/// `config.toml` surfaces as `Err`, so callers leave it untouched and fall back
+/// to printed guidance.
+fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookTrustSyncOutcome> {
+    let (marketplace_name, entries) = codex_installed_hook_trust_entries(home)?;
+    let config_path = codex_config_path(home);
+    let mut config = load_toml_file(&config_path)?;
+    let table = config
+        .as_table_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("{} is not a TOML table", config_path.display()),
+        })?;
+    let hooks = table
+        .entry("hooks")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let hooks = hooks
+        .as_table_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("[hooks] in {} is not a table", config_path.display()),
+        })?;
+    let state = hooks
+        .entry("state")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let state = state
+        .as_table_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("[hooks.state] in {} is not a table", config_path.display()),
+        })?;
+
+    // Drop trust for the active marketplace plus the legacy hard-coded
+    // `personal` identity before adding the exact installed payload. Foreign
+    // plugin and repo-local marketplace records remain untouched.
+    let current_prefix = codex_plugin_hook_trust_prefix(&marketplace_name);
+    let legacy_prefix = codex_plugin_hook_trust_prefix(CODEX_DEFAULT_MARKETPLACE_NAME);
+    state.retain(|key, _| {
+        !key.starts_with(&current_prefix)
+            && (current_prefix == legacy_prefix || !key.starts_with(&legacy_prefix))
+    });
+
+    let mut trusted = 0usize;
+    let mut skipped = Vec::new();
+    for entry in &entries {
+        if !codex_hook_command_invokes_tracedecay(&entry.command, tracedecay_bin) {
+            skipped.push(entry.event_label.clone());
+            continue;
+        }
+        let mut record = toml::value::Table::new();
+        record.insert(
+            "trusted_hash".to_string(),
+            toml::Value::String(entry.hash.clone()),
+        );
+        state.insert(entry.trust_key.clone(), toml::Value::Table(record));
+        trusted += 1;
+    }
+
+    write_codex_hook_trust_config(&config_path, &config)?;
+    Ok(CodexHookTrustSyncOutcome { trusted, skipped })
+}
+
+/// Codex's hook loader requires the parent table to be explicit on disk. The
+/// `toml` serializer otherwise emits only `[hooks.state."..."]` child tables,
+/// which parses equivalently but still triggers Codex's hook-review prompt.
+fn write_codex_hook_trust_config(config_path: &Path, config: &toml::Value) -> Result<()> {
+    let backup = super::backup_config_file(config_path)?;
+    let contents = toml::to_string_pretty(config).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to serialize {}: {error}", config_path.display()),
+    })?;
+    let Some(child_offset) = contents.find("[hooks.state.\"") else {
+        return Err(TraceDecayError::Config {
+            message: "Codex hook trust state serialized without hook entries".to_string(),
+        });
+    };
+    let mut updated = String::with_capacity(contents.len() + "[hooks.state]\n\n".len());
+    updated.push_str(&contents[..child_offset]);
+    updated.push_str("[hooks.state]\n\n");
+    updated.push_str(&contents[child_offset..]);
+    super::safe_write_text_file(config_path, &updated, backup.as_deref())?;
+    eprintln!("\x1b[32m✔\x1b[0m Wrote {}", config_path.display());
+    Ok(())
+}
+
+/// Auto-trust the installed plugin's hooks, printing a concise confirmation on
+/// full success and falling back to [`print_hook_trust_guidance`] whenever a
+/// hook is skipped by the safety valve or the config could not be written.
+fn announce_codex_hook_trust(home: &Path, tracedecay_bin: &str) {
+    let config_path = codex_config_path(home);
+    match sync_codex_hook_trust(home, tracedecay_bin) {
+        Ok(outcome) if outcome.skipped.is_empty() => {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Trusted {} Codex hook(s) in {}",
+                outcome.trusted,
+                config_path.display()
+            );
+        }
+        Ok(outcome) => {
+            if outcome.trusted > 0 {
+                eprintln!(
+                    "\x1b[32m✔\x1b[0m Trusted {} Codex hook(s) in {}",
+                    outcome.trusted,
+                    config_path.display()
+                );
+            }
+            eprintln!(
+                "  Skipped auto-trust for {} (command does not invoke the tracedecay binary).",
+                outcome.skipped.join(", ")
+            );
+            print_hook_trust_guidance();
+        }
+        Err(err) => {
+            eprintln!("  Could not auto-trust Codex hooks: {err}");
+            print_hook_trust_guidance();
+        }
+    }
+}
+
+/// Codex requires non-managed command hooks to be trusted via `/hooks` before
+/// they run; newly installed/changed hooks are skipped until trusted. Printed
+/// only when auto-trust could not cover every managed hook.
+fn print_hook_trust_guidance() {
+    eprintln!();
+    eprintln!(
+        "\x1b[1mAction required:\x1b[0m Codex skips new/changed command hooks until you trust them."
+    );
+    eprintln!("  Run \x1b[1m/hooks\x1b[0m inside Codex to review and trust the tracedecay hooks.");
+    eprintln!(
+        "  (For one-off non-interactive runs you can pass --dangerously-bypass-hook-trust, \
+         but trusting via /hooks is recommended.)"
+    );
 }
 
 /// Whether Codex's host-native registration records identify TraceDecay. A
@@ -1812,8 +2019,7 @@ fn doctor_check_native_activation(dc: &mut DoctorCounters, home: &Path) {
             "Codex reports tracedecay@{marketplace_name} not installed — {} has no \
              `[plugins.\"tracedecay@{marketplace_name}\"] enabled = true`, so the MCP server, \
              skills, and hooks never load. Run `tracedecay install --agent codex` (drives \
-             `codex plugin add tracedecay@{marketplace_name}`), then `/hooks` inside Codex to \
-             trust the managed hooks",
+             `codex plugin add tracedecay@{marketplace_name}` and auto-trusts the managed hooks)",
             config_path.display()
         )),
         Err(()) => dc.fail(&format!(
@@ -1824,10 +2030,11 @@ fn doctor_check_native_activation(dc: &mut DoctorCounters, home: &Path) {
     }
 }
 
-/// The one Codex step TraceDecay cannot perform after a successful install:
-/// hook trust is Codex-owned (`/hooks` inside a session). Returns follow-up
+/// Install and update-plugin auto-trust the managed hooks
+/// ([`sync_codex_hook_trust`]), but the safety valve skips tampered commands
+/// and an unwritable config leaves trust unrecorded. Returns follow-up
 /// guidance while any managed hook is untrusted or stale, and `None` once
-/// Codex records explicit, current trust for every managed hook.
+/// explicit, current trust exists for every managed hook.
 pub fn codex_hook_trust_followup(home: &Path) -> Option<String> {
     let marketplace_name = codex_cached_marketplace_name(home);
     let hooks_path = [
@@ -1848,7 +2055,7 @@ pub fn codex_hook_trust_followup(home: &Path) -> Option<String> {
                 .is_ok_and(|contents| codex_hook_state_table_is_explicit(&contents))
     });
     (!trusted_and_explicit).then(|| {
-        "Codex hook trust is host-owned: run `/hooks` inside a Codex session to trust the \
+        "Codex hook trust is not yet recorded: run `/hooks` inside a Codex session to trust the \
          tracedecay lifecycle hooks (Codex silently skips untrusted hooks)"
             .to_string()
     })
