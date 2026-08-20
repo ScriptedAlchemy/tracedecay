@@ -189,6 +189,7 @@ jobs:
           python3 .release-automation/scripts/test-check-packaged-mcp-stdio.py
           python3 .release-automation/scripts/test-resolve-release-source-profile.py
           python3 .release-automation/scripts/test-package-release-archive.py
+          python3 .release-automation/scripts/test-prepare-release-runtime.py
           python3 .release-automation/scripts/test-plan-release-recovery.py
           python3 .release-automation/scripts/test-check-release-artifacts.py
 
@@ -206,6 +207,31 @@ jobs:
           python3 .release-automation/scripts/resolve-release-source-profile.py \
             --source . \
             --github-output "$GITHUB_OUTPUT"
+
+      - name: Prepare target release runtime
+        id: target-runtime
+        shell: bash
+        run: |
+          python3 .release-automation/scripts/prepare-release-runtime.py \
+            --manifest .github/release-targets.json \
+            --name "${{ matrix.name }}" \
+            --output "$RUNNER_TEMP/tracedecay-release-runtime" \
+            --github-env "$GITHUB_ENV" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Verify target runtime compatibility
+        if: steps.target-runtime.outputs.runtime_library != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime="${{ steps.target-runtime.outputs.runtime_library }}"
+          test "$(readelf -d "$runtime" | sed -n 's/.*SONAME.*\[\([^]]*\)\].*/\1/p')" = \
+            "${{ steps.target-runtime.outputs.runtime_entry_name }}"
+          max_glibc="$(readelf --version-info "$runtime" \
+            | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
+            | sort -Vu \
+            | tail -n 1)"
+          test "$max_glibc" = "${{ matrix.runtime.max_glibc }}"
 
       # make-default symlinks ld to mold, which works on this
       # runner's GCC 11 (unlike -fuse-ld=mold, which needs GCC 12+).
@@ -324,16 +350,35 @@ jobs:
             binary="${binary}.exe"
           fi
           bundle="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb"
+          runtime_args=()
+          if [[ -n "${{ steps.target-runtime.outputs.runtime_library }}" ]]; then
+            runtime_args+=(
+              --runtime-library "${{ steps.target-runtime.outputs.runtime_library }}"
+            )
+          fi
           python3 .release-automation/scripts/build-mcpb.py build \
             --binary "$binary" \
             --output "$bundle" \
             --version "${{ steps.version.outputs.version }}" \
-            --platform "${{ matrix.name }}"
+            --platform "${{ matrix.name }}" \
+            "${runtime_args[@]}"
           test -s "$bundle"
           python3 .release-automation/scripts/build-mcpb.py verify \
             --bundle "$bundle" \
             --version "${{ steps.version.outputs.version }}" \
             --platform "${{ matrix.name }}"
+
+      - name: Verify MCPB runtime (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb"
+          rm -rf verify-mcpb
+          python3 -m zipfile -e "$bundle" verify-mcpb
+          test -x verify-mcpb/server/tracedecay
+          env -u LD_LIBRARY_PATH verify-mcpb/server/tracedecay --version
+          env -u LD_LIBRARY_PATH verify-mcpb/server/tracedecay --help >/dev/null
 
       - name: Upload MCPB artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -354,12 +399,20 @@ jobs:
             binary="${binary}.exe"
             entry_name="${entry_name}.exe"
           fi
+          companion_args=()
+          if [[ -n "${{ steps.target-runtime.outputs.runtime_library }}" ]]; then
+            companion_args+=(
+              --companion
+              "${{ steps.target-runtime.outputs.runtime_library }}=${{ steps.target-runtime.outputs.runtime_entry_name }}"
+            )
+          fi
           python3 .release-automation/scripts/package-release-archive.py \
             --binary "$binary" \
             --output "tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}" \
             --format "${{ matrix.archive }}" \
             --entry-name "$entry_name" \
-            --epoch "${{ needs.validate-release.outputs.source_epoch }}"
+            --epoch "${{ needs.validate-release.outputs.source_epoch }}" \
+            "${companion_args[@]}"
 
       - name: Verify binary archive (unix)
         if: matrix.archive == 'tar.gz'
@@ -371,8 +424,8 @@ jobs:
           mkdir verify-binary
           tar xzf "$archive" -C verify-binary
           test -x verify-binary/tracedecay
-          verify-binary/tracedecay --version
-          verify-binary/tracedecay --help >/dev/null
+          env -u LD_LIBRARY_PATH verify-binary/tracedecay --version
+          env -u LD_LIBRARY_PATH verify-binary/tracedecay --help >/dev/null
 
       - name: Verify binary archive (windows)
         if: matrix.archive == 'zip'

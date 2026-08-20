@@ -13,6 +13,10 @@ PLATFORMS = {
     "x86_64-windows": ("win32", "tracedecay.exe"),
 }
 ZIP_TIMESTAMP = (2025, 1, 1, 0, 0, 0)
+RUNTIME_LIBRARY_ENTRIES = {
+    "aarch64-linux": "libonnxruntime.so.1",
+    "x86_64-linux": "libonnxruntime.so.1",
+}
 
 
 def fail(message: str) -> None:
@@ -62,7 +66,13 @@ def archive_entry(name: str, *, executable: bool = False) -> zipfile.ZipInfo:
     return entry
 
 
-def build_bundle(binary: Path, output: Path, version: str, platform: str) -> None:
+def build_bundle(
+    binary: Path,
+    output: Path,
+    version: str,
+    platform: str,
+    runtime_library: Path | None = None,
+) -> None:
     if not binary.is_file() or binary.stat().st_size == 0:
         fail(f"release binary is missing or empty: {binary}")
     try:
@@ -71,6 +81,14 @@ def build_bundle(binary: Path, output: Path, version: str, platform: str) -> Non
         fail(f"unsupported release platform {platform!r}")
     if binary.name != binary_name:
         fail(f"{platform} bundle requires binary named {binary_name!r}")
+    runtime_entry = RUNTIME_LIBRARY_ENTRIES.get(platform)
+    if runtime_entry is not None:
+        if runtime_library is None:
+            fail(f"{platform} bundle requires runtime library {runtime_entry!r}")
+        if not runtime_library.is_file() or runtime_library.stat().st_size == 0:
+            fail(f"runtime library is missing or empty: {runtime_library}")
+    elif runtime_library is not None:
+        fail(f"{platform} bundle does not accept a runtime library")
     output.parent.mkdir(parents=True, exist_ok=True)
     rendered_manifest = (
         json.dumps(manifest(version, platform), indent=2, sort_keys=True) + "\n"
@@ -81,6 +99,11 @@ def build_bundle(binary: Path, output: Path, version: str, platform: str) -> Non
             archive_entry(f"server/{binary_name}", executable=True),
             binary.read_bytes(),
         )
+        if runtime_entry is not None and runtime_library is not None:
+            archive.writestr(
+                archive_entry(f"server/{runtime_entry}"),
+                runtime_library.read_bytes(),
+            )
     verify_bundle(output, version, platform)
 
 
@@ -93,11 +116,16 @@ def verify_bundle(bundle: Path, version: str, platform: str) -> None:
         fail(f"unsupported release platform {platform!r}")
     with zipfile.ZipFile(bundle) as archive:
         expected = {"manifest.json", f"server/{binary_name}"}
+        runtime_entry = RUNTIME_LIBRARY_ENTRIES.get(platform)
+        if runtime_entry is not None:
+            expected.add(f"server/{runtime_entry}")
         if set(archive.namelist()) != expected:
             fail(f"{bundle} inventory is not exactly {sorted(expected)}")
         packaged_binary = archive.read(f"server/{binary_name}")
         if not packaged_binary:
             fail(f"{bundle} contains an empty server binary")
+        if runtime_entry is not None and not archive.read(f"server/{runtime_entry}"):
+            fail(f"{bundle} contains an empty runtime library")
         packaged_manifest = json.loads(archive.read("manifest.json"))
     if packaged_manifest != manifest(version, platform):
         fail(f"{bundle} manifest does not match canonical release metadata")
@@ -111,6 +139,7 @@ def main() -> None:
     build.add_argument("--output", required=True, type=Path)
     build.add_argument("--version", required=True)
     build.add_argument("--platform", required=True, choices=sorted(PLATFORMS))
+    build.add_argument("--runtime-library", type=Path)
     verify = subcommands.add_parser("verify")
     verify.add_argument("--bundle", required=True, type=Path)
     verify.add_argument("--version", required=True)
@@ -122,6 +151,7 @@ def main() -> None:
             arguments.output,
             arguments.version,
             arguments.platform,
+            arguments.runtime_library,
         )
     else:
         verify_bundle(arguments.bundle, arguments.version, arguments.platform)

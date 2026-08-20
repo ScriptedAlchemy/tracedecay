@@ -10,13 +10,29 @@
       "name": "x86_64-linux",
       "runner": "ubuntu-22.04",
       "target": "x86_64-unknown-linux-gnu",
-      "archive": "tar.gz"
+      "archive": "tar.gz",
+      "runtime": {
+        "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz",
+        "sha256": "43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6",
+        "archive_entry": "onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so.1.24.2",
+        "entry_name": "libonnxruntime.so.1",
+        "link_name": "libonnxruntime.so",
+        "max_glibc": "2.27"
+      }
     },
     {
       "name": "aarch64-linux",
       "runner": "ubuntu-22.04-arm",
       "target": "aarch64-unknown-linux-gnu",
-      "archive": "tar.gz"
+      "archive": "tar.gz",
+      "runtime": {
+        "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-aarch64-1.24.2.tgz",
+        "sha256": "6715b3d19965a2a6981e78ed4ba24f17a8c30d2d26420dbed10aac7ceca0085e",
+        "archive_entry": "onnxruntime-linux-aarch64-1.24.2/lib/libonnxruntime.so.1.24.2",
+        "entry_name": "libonnxruntime.so.1",
+        "link_name": "libonnxruntime.so",
+        "max_glibc": "2.27"
+      }
     },
     {
       "name": "x86_64-windows",
