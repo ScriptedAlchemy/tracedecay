@@ -121,7 +121,9 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12.13"
+          # 3.12.10 is the newest 3.12 patch published for every release
+          # matrix architecture, including macOS 14 ARM.
+          python-version: "3.12.10"
 
       - name: Build dashboard
         working-directory: dashboard
