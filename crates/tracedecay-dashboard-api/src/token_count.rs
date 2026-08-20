@@ -172,13 +172,15 @@ pub struct TokenCountCache {
     /// all need it, so without this every Savings-tab interaction re-ran the
     /// full `session_messages` scan + fold three times.
     overlay: tokio::sync::Mutex<Option<OverlayCache>>,
-    /// Displayed-content counts for the LCM render path, keyed by
-    /// `(provider, message_id)` and guarded by a content fingerprint.
+    /// Displayed-content counts for the LCM render path, keyed by provider
+    /// then message id and guarded by a content fingerprint. Two levels so
+    /// a hit borrows the caller's `&str` keys without allocating — every
+    /// polled search/session/overview/timeline message takes this path.
     /// Kept apart from `map`: LCM counts canonically hydrated display
     /// content with `o200k_base` specifically, while `map` counts stored
     /// text with the model-mapped tokenizer, so entries are not
     /// interchangeable.
-    lcm_display: Mutex<HashMap<(String, String), DisplayedCount>>,
+    lcm_display: Mutex<HashMap<String, HashMap<String, DisplayedCount>>>,
 }
 
 impl TokenCountCache {
@@ -202,7 +204,8 @@ impl TokenCountCache {
             .lcm_display
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.get(&(provider.to_owned(), message_id.to_owned()))
+        map.get(provider)
+            .and_then(|inner| inner.get(message_id))
             .filter(|cached| cached.fingerprint == fingerprint)
             .map(|cached| cached.tokens)
     }
@@ -218,9 +221,12 @@ impl TokenCountCache {
             .lcm_display
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.insert(
-            (provider.to_owned(), message_id.to_owned()),
-            DisplayedCount { fingerprint, tokens },
+        map.entry(provider.to_owned()).or_default().insert(
+            message_id.to_owned(),
+            DisplayedCount {
+                fingerprint,
+                tokens,
+            },
         );
     }
 }
@@ -504,16 +510,29 @@ mod tests {
     fn display_cache_is_guarded_by_content_fingerprint() {
         let cache = TokenCountCache::new();
         let fingerprint = content_fingerprint("hello");
-        assert_eq!(cache.displayed_tokens("codex", "m1", fingerprint), None);
-        cache.store_displayed_tokens("codex", "m1", fingerprint, 7);
-        assert_eq!(cache.displayed_tokens("codex", "m1", fingerprint), Some(7));
-        assert_eq!(cache.displayed_tokens("codex", "m2", fingerprint), None);
-        assert_eq!(cache.displayed_tokens("claude", "m1", fingerprint), None);
+        // Hits are looked up with `&str` keys borrowed from caller-owned
+        // data — the hit path must never require freshly owned Strings.
+        let composed = "codex m1".to_owned();
+        let (provider, message_id) = composed.split_once(' ').expect("two borrowed keys");
+        assert_eq!(
+            cache.displayed_tokens(provider, message_id, fingerprint),
+            None
+        );
+        cache.store_displayed_tokens(provider, message_id, fingerprint, 7);
+        assert_eq!(
+            cache.displayed_tokens(provider, message_id, fingerprint),
+            Some(7)
+        );
+        assert_eq!(cache.displayed_tokens(provider, "m2", fingerprint), None);
+        assert_eq!(
+            cache.displayed_tokens("claude", message_id, fingerprint),
+            None
+        );
         // Same-length rewrites must invalidate: length alone is not content
         // identity.
         assert_ne!(content_fingerprint("hell0"), fingerprint);
         assert_eq!(
-            cache.displayed_tokens("codex", "m1", content_fingerprint("hell0")),
+            cache.displayed_tokens(provider, message_id, content_fingerprint("hell0")),
             None
         );
     }
