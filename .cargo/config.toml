@@ -30,38 +30,30 @@ TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 # Enforced by tests/core_cli_suite/test_profile_isolation_test.rs.
 TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = false, relative = true }
 
-# Cheaper Linux links, scoped to the gnu triples so Windows (MSVC supports
-# only packed split-debuginfo) and macOS (already defaults to unpacked) keep
-# their platform defaults. `split-debuginfo=unpacked` leaves debuginfo in the
-# object files instead of linking it into every binary; it is a no-op for
-# profiles that build without debuginfo. The `-B` flags append the mold
-# linker's driver directories (Debian/Ubuntu/Fedora package and source-install
-# locations): GCC and clang silently skip nonexistent `-B` dirs, so hosts
-# without mold fall back to the toolchain default, and any GCC accepts `-B`
-# (unlike `-fuse-ld=mold`, which needs GCC >= 12 — see
-# .github/actions/setup-linux-mold). Search order keeps faster defaults
-# intact: on x86_64-unknown-linux-gnu, recent rustc already links with its
-# bundled rust-lld through an earlier `-B`, so mold engages only where that
-# self-contained lld default is absent (e.g. aarch64 gnu hosts or lld-less
-# toolchains) — never a regression, mold-or-better everywhere. CI separately
-# symlinks ld -> mold, which these flags do not disturb. A user-set RUSTFLAGS
-# env var replaces these flags entirely; these sections set no `linker` key.
+# Cheaper Linux debuginfo handling, scoped to the gnu triples so Windows
+# (MSVC supports only packed split-debuginfo) and macOS (already defaults to
+# unpacked) keep their platform defaults. `split-debuginfo=unpacked` leaves
+# debuginfo in the object files instead of linking it into every binary; it
+# is linker-agnostic and a no-op for profiles that build without debuginfo.
+# Deliberately no linker flags here: rustc already links
+# x86_64-unknown-linux-gnu with its bundled rust-lld, CI symlinks ld -> mold
+# (see .github/actions/setup-linux-mold; `-fuse-ld=mold` needs GCC >= 12),
+# and driver-only flags such as `-B` would land on the raw linker command
+# line — and fail — for anyone who sets `target.<triple>.linker` or
+# CARGO_TARGET_<TRIPLE>_LINKER to a linker executable directly. Developers
+# who want mold locally opt in through their own linker config or RUSTFLAGS
+# (a user-set RUSTFLAGS env var replaces these flags entirely).
 [target.x86_64-unknown-linux-gnu]
-rustflags = [
-  "-C", "split-debuginfo=unpacked",
-  "-C", "link-arg=-B/usr/libexec/mold",
-  "-C", "link-arg=-B/usr/local/libexec/mold",
-]
+rustflags = ["-C", "split-debuginfo=unpacked"]
 
 [target.aarch64-unknown-linux-gnu]
-rustflags = [
-  "-C", "split-debuginfo=unpacked",
-  "-C", "link-arg=-B/usr/libexec/mold",
-  "-C", "link-arg=-B/usr/local/libexec/mold",
-]
+rustflags = ["-C", "split-debuginfo=unpacked"]
 
 [alias]
 # Local default for the full Rust test suite. Requires cargo-nextest:
 # https://nexte.st/docs/installation/pre-built-binaries/
-test-all = "nextest run --workspace --all-features --no-fail-fast"
-test-ci = "nextest run --workspace --all-features --no-fail-fast"
+# The perf cargo profile keeps the critical-path kernels (code index, graph,
+# sha2, …) optimized for the generation-scale suites in the full run; see
+# [profile.perf] in the root Cargo.toml.
+test-all = "nextest run --workspace --all-features --no-fail-fast --cargo-profile perf"
+test-ci = "nextest run --workspace --all-features --no-fail-fast --cargo-profile perf"

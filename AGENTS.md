@@ -32,8 +32,9 @@ compiles.
 - Ordinary `cargo` commands; edition 2024, resolver 3. Scope checks to the
   smallest touched package/target during development.
 - Before handoff, run a broader gate from the repo root, e.g.
-  `cargo check --all-features` or
-  `cargo nextest run --workspace --all-features --no-fail-fast`.
+  `cargo check --all-features` or `cargo test-all` (alias for
+  `cargo nextest run --workspace --all-features --no-fail-fast
+  --cargo-profile perf`).
 - Dashboard: `npm run build` (rsbuild), `npm run typecheck` (`tsc --noEmit`),
   `npm test` (vitest) from `dashboard/`.
 - Default `cargo build` / `cargo test` compile every package at the base

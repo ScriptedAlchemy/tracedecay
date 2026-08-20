@@ -485,7 +485,9 @@ debug = 0
 # kernels below optimized. Default `cargo build` / `cargo test` no longer
 # optimize any specific package, so ordinary edit-compile loops stay cheap;
 # reach for this profile when running the generation-scale code-index or
-# graph-publication suites at production-like speed.
+# graph-publication suites at production-like speed. The full-suite gates
+# (`cargo test-all` / `cargo test-ci` in .cargo/config.toml) pin it via
+# `--cargo-profile perf` so those suites keep their kernel opt-levels.
 [profile.perf]
 inherits = "dev"
 
