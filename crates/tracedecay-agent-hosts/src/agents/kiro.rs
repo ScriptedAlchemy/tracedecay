@@ -953,9 +953,9 @@ fn uninstall_mcp_server(path: &Path) -> Result<()> {
         super::safe_remove_host_file(path).map_err(|error| TraceDecayError::Config {
             message: format!("failed to remove {}: {error}", path.display()),
         })?;
-        tracedecay_application::sync_parent_directory(
+        tracedecay_private_fs::framed_log::sync_parent_directory(
             path,
-            tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+            tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("failed to durably remove {}: {error}", path.display()),

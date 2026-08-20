@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use tracedecay::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
 use tracedecay::user_config::UserConfig;
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write, sync_parent_directory};
 
 mod automation;
 pub(crate) use automation::CodexAutomationInstall;
@@ -1624,16 +1625,14 @@ fn restore_feedback_registration(
             },
         }
         if removed {
-            tracedecay_application::sync_parent_directory(
-                path,
-                tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
-            )
-            .map_err(|error| tracedecay::errors::TraceDecayError::Config {
-                message: format!(
-                    "could not durably remove feedback registration {}: {error}",
-                    path.display()
-                ),
-            })?;
+            sync_parent_directory(path, DirectorySyncPolicy::TolerateUnsupported).map_err(
+                |error| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "could not durably remove feedback registration {}: {error}",
+                        path.display()
+                    ),
+                },
+            )?;
         }
     }
     Ok(())
@@ -1887,12 +1886,7 @@ fn restore_feedback_file_permissions(
     })?;
     fs::File::open(path)
         .and_then(|file| file.sync_all())
-        .and_then(|()| {
-            tracedecay_application::sync_parent_directory(
-                path,
-                tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
-            )
-        })
+        .and_then(|()| sync_parent_directory(path, DirectorySyncPolicy::TolerateUnsupported))
         .map_err(|error| tracedecay::errors::TraceDecayError::Config {
             message: format!(
                 "could not durably restore feedback registration {}: {error}",
@@ -1914,11 +1908,11 @@ fn write_feedback_state(
     fs::create_dir_all(parent).map_err(|error| tracedecay::errors::TraceDecayError::Config {
         message: format!("could not create feedback state directory: {error}"),
     })?;
-    tracedecay_application::atomic_write(
+    atomic_write(
         path,
         "feedback-rollback-state",
         &bytes,
-        tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+        DirectorySyncPolicy::TolerateUnsupported,
     )
     .map_err(|error| tracedecay::errors::TraceDecayError::Config {
         message: format!("could not durably publish feedback rollback state: {error}"),

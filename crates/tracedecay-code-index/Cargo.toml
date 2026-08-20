@@ -5,7 +5,7 @@ publish = false
 edition.workspace = true
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
-description = "TraceDecay language extraction and code-index kernel"
+description = "In-process structural code search for TraceDecay"
 include = ["/src/**"]
 
 [features]

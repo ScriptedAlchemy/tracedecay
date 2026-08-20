@@ -4,7 +4,7 @@ version = "0.1.0"
 publish = false
 edition = "2024"
 license = "MIT"
-description = "Automation contracts and state models for TraceDecay"
+description = "TraceDecay automation configuration and evidence contracts"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]

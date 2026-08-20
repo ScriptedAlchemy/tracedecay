@@ -30,6 +30,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ManifestDigest, UtcMicros};
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_store::FactReadControl;
 
 use crate::daemon::retained_owner::receipts::{PreparedRetainedEffect, prepare_retained_effect};
@@ -2376,9 +2377,9 @@ fn abandon_retained_once(state: &mut RetainedAbandonment) -> Result<()> {
         {
             match std::fs::symlink_metadata(&state.authority.journal_path) {
                 Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
-                    tracedecay_application::sync_parent_directory(
+                    sync_parent_directory(
                         &state.authority.journal_path,
-                        tracedecay_application::DirectorySyncPolicy::Strict,
+                        DirectorySyncPolicy::Strict,
                     )
                     .map_err(|sync_error| {
                         contract_error(format!(
