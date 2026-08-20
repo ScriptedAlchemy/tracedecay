@@ -535,9 +535,10 @@ impl RepositoryRuntimePhysicalAttachment {
     /// Admission is not reopened after Truncate — the exclusive window lasts
     /// until `drain` + `close_and_join`.
     ///
-    /// The permit binding and admission-stage authority are validated before
-    /// any lifecycle transition: draining is irreversible, so a misrouted
-    /// permit or revoked authority must leave admission open and the writer
+    /// The permit binding, admission-stage authority, and request-local
+    /// snapshot blockers are validated before any lifecycle transition:
+    /// draining is irreversible, so a misrouted permit, revoked authority, or
+    /// stale inventory (`Blocked`) must leave admission open and the writer
     /// `Ready`.
     pub async fn run_maintenance_checkpoint(
         &self,
@@ -562,6 +563,11 @@ impl RepositoryRuntimePhysicalAttachment {
                     CheckpointControlError::AuthorityDenied {
                         stage: RuntimeWriteAuthorityStage::BeforeAdmission,
                     },
+                ));
+            }
+            if !request.blockers().is_clear() {
+                return Err(RepositoryDispatchError::Checkpoint(
+                    CheckpointControlError::Blocked(request.blockers().clone()),
                 ));
             }
             Self::begin_maintenance_drain_locked(&mut state)?;
@@ -1293,6 +1299,10 @@ mod tests {
                 if *actual == blockers
         ));
 
+        assert_admission_open_and_writer_ready(&attachment);
+        attachment
+            .exact_sql_handle()
+            .expect("a blocked inventory must not close exact-SQL admission");
         attachment.drain().unwrap();
         attachment.close_and_join().unwrap();
     }
