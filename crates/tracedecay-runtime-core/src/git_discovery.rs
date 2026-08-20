@@ -13,6 +13,12 @@ use crate::cancellation::{CancellationToken, MonotonicDeadline};
 
 const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const REPOSITORY_IDENTITY_ARGS: [&str; 4] = [
+    "rev-parse",
+    "--show-toplevel",
+    "--git-dir",
+    "--git-common-dir",
+];
 
 /// Paired identity needed to compare a worktree with its repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,15 +59,34 @@ pub async fn discover_repository_identity(
         return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
     }
 
-    let directory = directory.to_path_buf();
-    let cancellation = cancellation.clone();
-    tokio::task::spawn_blocking(move || {
-        discover_repository_identity_with_control(&directory, deadline, &cancellation)
-    })
-    .await
-    .unwrap_or(GitRepositoryIdentityOutcome::Unknown(
-        GitDiscoveryUnknown::ProbeFailed,
-    ))
+    if !repository_control_may_exist(directory) {
+        return GitRepositoryIdentityOutcome::NotRepository;
+    }
+
+    let child = match async_repository_identity_command(directory).spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::SpawnFailed);
+        }
+    };
+    let output = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled);
+        }
+        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline.instant())) => {
+            return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
+        }
+        output = child.wait_with_output() => output,
+    };
+    match output {
+        Ok(output) if output.status.success() => {
+            parse_repository_identity(directory, &output.stdout).unwrap_or(
+                GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::ProbeFailed),
+            )
+        }
+        Ok(_) | Err(_) => GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::ProbeFailed),
+    }
 }
 
 /// Synchronous bounded discovery for legacy parser seams that cannot await.
@@ -139,15 +164,26 @@ fn repository_identity_command(directory: &Path) -> Command {
         .env_remove("GIT_COMMON_DIR")
         .arg("-C")
         .arg(directory)
-        .args([
-            "rev-parse",
-            "--show-toplevel",
-            "--git-dir",
-            "--git-common-dir",
-        ])
+        .args(REPOSITORY_IDENTITY_ARGS)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    command
+}
+
+fn async_repository_identity_command(directory: &Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(crate::git::git_program());
+    command
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .arg("-C")
+        .arg(directory)
+        .args(REPOSITORY_IDENTITY_ARGS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
     command
 }
 
