@@ -40,6 +40,7 @@ pub enum AutomationSkipReasonV1 {
     SessionEvidenceResetRequired,
     SessionCursorManifestLimitExceeded,
     SessionEvidenceBudgetExhausted,
+    SessionEvidenceBudgetSuppressed,
     SessionEvidenceCancelled,
     NoSessionEvidence,
     ShippedFactProposalHistoryRetired,
@@ -84,6 +85,7 @@ impl AutomationSkipReasonV1 {
             "session_evidence_reset_required" => Reason::SessionEvidenceResetRequired,
             "session_cursor_manifest_limit_exceeded" => Reason::SessionCursorManifestLimitExceeded,
             "session_evidence_budget_exhausted" => Reason::SessionEvidenceBudgetExhausted,
+            "session_evidence_budget_suppressed" => Reason::SessionEvidenceBudgetSuppressed,
             "session_evidence_cancelled" => Reason::SessionEvidenceCancelled,
             "no_session_evidence" | "no_skill_writer_evidence" => Reason::NoSessionEvidence,
             "shipped_fact_proposal_history_retired" => Reason::ShippedFactProposalHistoryRetired,
@@ -117,6 +119,7 @@ impl AutomationSkipReasonV1 {
             | Reason::SessionEvidenceResetRequired
             | Reason::SessionCursorManifestLimitExceeded
             | Reason::SessionEvidenceBudgetExhausted
+            | Reason::SessionEvidenceBudgetSuppressed
             | Reason::SessionEvidenceCancelled
             | Reason::NoSessionEvidence => matches!(
                 task,
