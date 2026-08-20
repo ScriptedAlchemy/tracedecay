@@ -1371,8 +1371,14 @@ mod tests {
             // label (no attempt ran) and not the failure cooldown.
             for now_secs in [2_060, 2_120, 2_000 + 3_599] {
                 assert_eq!(
-                    schedule_decision(&config, task, &records, SessionActivity::at(2_500), now_secs)
-                        .skip_reason(),
+                    schedule_decision(
+                        &config,
+                        task,
+                        &records,
+                        SessionActivity::at(2_500),
+                        now_secs
+                    )
+                    .skip_reason(),
                     Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
                     "tick at {now_secs} for {task:?} must stay suppressed"
                 );
@@ -1492,11 +1498,7 @@ mod tests {
                 Some("provider unavailable"),
                 1_900,
             ),
-            budget_exhausted_skip(
-                "run-exhausted",
-                AgentTaskKind::SessionReflector,
-                2_000,
-            ),
+            budget_exhausted_skip("run-exhausted", AgentTaskKind::SessionReflector, 2_000),
         ];
 
         assert_eq!(
@@ -1536,11 +1538,8 @@ mod tests {
     #[test]
     fn earlier_effectful_run_in_the_same_second_does_not_clear_exhaustion() {
         let config = session_evidence_config();
-        let mut exhausted = budget_exhausted_skip(
-            "run-exhausted",
-            AgentTaskKind::SessionReflector,
-            2_000,
-        );
+        let mut exhausted =
+            budget_exhausted_skip("run-exhausted", AgentTaskKind::SessionReflector, 2_000);
         exhausted.completed_at_micros = Some(2_000_900_000);
         let mut earlier_success = scheduler_ledger_record(
             "run-success",

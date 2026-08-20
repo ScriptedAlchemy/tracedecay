@@ -609,7 +609,9 @@ mod tests {
     fn session_evidence_budget_backoff_is_patchable_clearable_and_nonzero() {
         let base = AutomationConfig::default();
         assert_eq!(
-            base.tasks.session_reflector.session_evidence_budget_backoff_secs,
+            base.tasks
+                .session_reflector
+                .session_evidence_budget_backoff_secs,
             None,
             "the window must default to unset so the typed contract's default applies"
         );
