@@ -1840,50 +1840,79 @@ mod tests {
     }
 
     /// The removed construction work is exactly one [`read_member_bytes`]
-    /// pass over every member, so that pass — still the per-session-open
-    /// verification — is the baseline the cheap construction must beat on
-    /// the same fixture.
+    /// pass over every member — still the per-session-open verification —
+    /// so construction must do strictly less: it may stat member pins but
+    /// never open one for reading. Proven by operations, not wall clocks:
+    /// the verification pass must return every member's exact pinned bytes
+    /// (impossible without reading all of them), while construction still
+    /// succeeds after member read permission is revoked (any
+    /// construction-time byte read would fail the constructor and this
+    /// test).
     #[test]
     fn lifecycle_authority_construction_is_cheaper_than_member_byte_verification() {
-        let model_bytes = vec![0xa5_u8; 16 * 1024 * 1024];
-        let fixture = lifecycle_install_fixture(&model_bytes);
-        let ceiling = 32 * 1024 * 1024;
-        // Also warms the page cache so the baseline measures the removed
-        // read+hash verification work rather than first-touch disk latency.
+        let fixture = lifecycle_install_fixture(b"model");
         let authority =
-            lifecycle_authority_from(&fixture, ceiling).expect("verified lifecycle authority");
-
-        let baseline_started = std::time::Instant::now();
-        for role in [
-            ArtifactMemberRoleV1::Model,
-            ArtifactMemberRoleV1::Tokenizer,
-            ArtifactMemberRoleV1::Config,
-            ArtifactMemberRoleV1::SpecialTokensMap,
-            ArtifactMemberRoleV1::TokenizerConfig,
+            lifecycle_authority_from(&fixture, 1024).expect("verified lifecycle authority");
+        for (role, pinned) in [
+            (ArtifactMemberRoleV1::Model, b"model".as_slice()),
+            (ArtifactMemberRoleV1::Tokenizer, b"tokenizer".as_slice()),
+            (ArtifactMemberRoleV1::Config, b"config".as_slice()),
+            (
+                ArtifactMemberRoleV1::SpecialTokensMap,
+                b"special".as_slice(),
+            ),
+            (
+                ArtifactMemberRoleV1::TokenizerConfig,
+                b"tokenizer-config".as_slice(),
+            ),
         ] {
-            authority
-                .runtime_artifact()
-                .required_member_bytes(role)
-                .expect("baseline member byte verification");
+            assert_eq!(
+                authority
+                    .runtime_artifact()
+                    .required_member_bytes(role)
+                    .expect("baseline member byte verification"),
+                pinned,
+                "one verification pass must consume every member's bytes"
+            );
         }
-        let baseline = baseline_started.elapsed();
 
-        let constructions = 10;
-        let construction_started = std::time::Instant::now();
-        for _ in 0..constructions {
-            lifecycle_authority_from(&fixture, ceiling).expect("cheap construction");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for member in [
+                "model.onnx",
+                "tokenizer.json",
+                "config.json",
+                "special_tokens_map.json",
+                "tokenizer_config.json",
+            ] {
+                std::fs::set_permissions(
+                    fixture.install.path().join(member),
+                    std::fs::Permissions::from_mode(0o000),
+                )
+                .expect("revoke member read permission");
+            }
+            assert!(
+                std::fs::read(fixture.install.path().join("model.onnx")).is_err(),
+                "the fixture requires a test runner whose member reads are deniable"
+            );
+            let unreadable = lifecycle_authority_from(&fixture, 1024).expect(
+                "construction checks structural pins without opening member bytes for reading",
+            );
+            assert!(
+                matches!(
+                    unreadable
+                        .runtime_artifact()
+                        .required_member_bytes(ArtifactMemberRoleV1::Model),
+                    Err(EmbedError::Runtime(RuntimeFailureV1 {
+                        kind: RuntimeFailureKindV1::CorruptArtifact,
+                        ..
+                    }))
+                ),
+                "the byte-verification pass cannot succeed without reading, so the revocation \
+                 that construction tolerates provably blocks the read path"
+            );
         }
-        let construction = construction_started.elapsed();
-
-        eprintln!(
-            "lifecycle authority construction: {constructions} constructions {construction:?} \
-             vs one member byte verification {baseline:?}"
-        );
-        assert!(
-            construction < baseline,
-            "{constructions} authority constructions ({construction:?}) must cost less than one \
-             full member byte verification over the same 16 MiB fixture ({baseline:?})"
-        );
     }
 
     #[test]
