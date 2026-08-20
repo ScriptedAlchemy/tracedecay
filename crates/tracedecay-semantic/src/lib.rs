@@ -33,7 +33,9 @@ use self::runtime_query::CurrentSemanticQueryRuntimeV1;
 use self::runtime_service::{
     SemanticRuntimeService, SharedEmbeddingRuntimeFactory, fastembed_runtime_factory,
 };
-use self::session_pool::{PooledSession, SessionPoolConfigV1, SystemMonotonicClock};
+use self::session_pool::{
+    PooledSession, SessionAcquireError, SessionPoolConfigV1, SystemMonotonicClock,
+};
 
 mod artifact_store;
 pub mod embedding_parallelism;
@@ -405,6 +407,28 @@ pub struct SemanticRuntimeStatusProjectionV1 {
     pub prior_generation: Option<VectorGenerationIdV1>,
 }
 
+/// Map a pre-install warm failure onto the scheduler's typed failure set.
+///
+/// Cancellation and deadline expiry keep their identities: a cancelled or
+/// timed-out warm is a cancelled or expired schedule — never a runtime
+/// fault, and per the plan lock never a served generation. Everything else
+/// (exhaustion, ceilings, open failures, a closed pool) is a runtime
+/// failure.
+fn warm_failure(error: SessionAcquireError) -> SemanticRuntimeScheduleFailureV1 {
+    match error {
+        SessionAcquireError::Cancelled => SemanticRuntimeScheduleFailureV1::Cancelled,
+        SessionAcquireError::DeadlineExceeded { .. }
+        | SessionAcquireError::LoadDeadlineExceeded { .. } => {
+            SemanticRuntimeScheduleFailureV1::DeadlineExceeded
+        }
+        SessionAcquireError::Exhausted { .. }
+        | SessionAcquireError::QueueFull { .. }
+        | SessionAcquireError::MemoryCeilingExceeded { .. }
+        | SessionAcquireError::Open(_)
+        | SessionAcquireError::Closed => SemanticRuntimeScheduleFailureV1::Runtime,
+    }
+}
+
 /// Prove a candidate runtime can serve before its pointer is installed.
 ///
 /// Opens (or reuses) one pooled session away from retrieval executor
@@ -418,7 +442,7 @@ async fn warm_candidate_for_install(
     tokio::task::spawn_blocking(move || warmed.warm_query_session())
         .await
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)
+        .map_err(warm_failure)
 }
 
 /// The daemon-callable semantic owner. It exposes no transport operation.
@@ -808,9 +832,7 @@ impl DaemonSemanticRuntimeHandleV1 {
         let candidate =
             SemanticRuntimeService::new_owned(authority, factory, self.pool_config.clone())
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
-        candidate
-            .warm_query_session()
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+        candidate.warm_query_session().map_err(warm_failure)?;
         Ok(PreparedSemanticRuntimeRestoreV1 {
             runtime: CurrentSemanticQueryRuntimeV1::new_with_admission(
                 pointer.clone(),
@@ -1191,10 +1213,11 @@ mod scheduling_tests {
     };
 
     use super::fastembed_adapter::lifecycle_test_support::digest_mismatched_lifecycle_authority;
+    use super::session_pool::SessionAcquireError;
     use super::{
         SemanticFallbackReasonV1, SemanticGenerationPointerV1, SemanticProjectionResumeOutcomeV1,
         SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
-        SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1,
+        SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1, warm_failure,
     };
 
     fn source_generation(value: char) -> CodeGenerationId {
@@ -1576,6 +1599,32 @@ mod scheduling_tests {
         assert!(
             !staged.load(Ordering::Acquire),
             "a failed pre-install warm must stop before publication staging"
+        );
+    }
+
+    #[test]
+    fn warm_failure_mapping_preserves_cancellation_and_deadline_identities() {
+        assert_eq!(
+            warm_failure(SessionAcquireError::Cancelled),
+            SemanticRuntimeScheduleFailureV1::Cancelled
+        );
+        assert_eq!(
+            warm_failure(SessionAcquireError::DeadlineExceeded {
+                waited: std::time::Duration::from_secs(1),
+                budget: std::time::Duration::from_secs(1),
+            }),
+            SemanticRuntimeScheduleFailureV1::DeadlineExceeded
+        );
+        assert_eq!(
+            warm_failure(SessionAcquireError::LoadDeadlineExceeded {
+                elapsed: std::time::Duration::from_secs(2),
+                deadline: std::time::Duration::from_secs(1),
+            }),
+            SemanticRuntimeScheduleFailureV1::DeadlineExceeded
+        );
+        assert_eq!(
+            warm_failure(SessionAcquireError::Closed),
+            SemanticRuntimeScheduleFailureV1::Runtime
         );
     }
 

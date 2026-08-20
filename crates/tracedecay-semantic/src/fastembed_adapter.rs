@@ -1332,6 +1332,20 @@ impl EmbeddingRuntime for FakeEmbeddingRuntime {
                 detail: "scripted fake open failure".to_string(),
             }));
         }
+        // Production parity: a session open consumes member bytes, so a
+        // lifecycle-backed authority is length- and digest-verified here
+        // exactly as the FastEmbed runtime is when it reads the bytes.
+        if let Some(lifecycle) = authority.runtime_artifact().lifecycle_install.as_ref() {
+            for role in [
+                ArtifactMemberRoleV1::Model,
+                ArtifactMemberRoleV1::Tokenizer,
+                ArtifactMemberRoleV1::Config,
+                ArtifactMemberRoleV1::SpecialTokensMap,
+                ArtifactMemberRoleV1::TokenizerConfig,
+            ] {
+                lifecycle.read_member_bytes(role)?;
+            }
+        }
         self.counters.sessions_opened.fetch_add(1, Ordering::SeqCst);
         Ok(FakeEmbeddingSession {
             authority: authority.clone(),
@@ -1753,6 +1767,16 @@ mod tests {
                 }))
             ),
             "every byte consumption still verifies the digest pin"
+        );
+        assert!(
+            matches!(
+                FakeEmbeddingRuntime::new().open_session(&authority),
+                Err(EmbedError::Runtime(RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::CorruptArtifact,
+                    ..
+                }))
+            ),
+            "the default-runtime session open also rejects digest-mismatched bytes"
         );
         #[cfg(feature = "semantic-fastembed")]
         assert!(
