@@ -4,6 +4,8 @@ use std::future::Future;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 #[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
@@ -316,34 +318,39 @@ pub enum BrokerListener {
 #[cfg(unix)]
 const DAEMON_SOCKET_MODE: u32 = 0o600;
 
-/// Refuse to publish a socket in a directory other users can traverse.
+/// Longest socket path `bind(2)`/`connect(2)` accept on this platform.
+///
+/// `sockaddr_un` reserves 104 bytes for the NUL-terminated path on macOS and
+/// the BSDs and 108 on Linux; a longer path fails the syscall itself, so it
+/// must be refused (or re-derived) before it reaches the kernel.
+#[cfg(unix)]
+pub(crate) const MAX_UNIX_SOCKET_PATH_BYTES: usize =
+    if cfg!(any(target_os = "linux", target_os = "android")) {
+        107
+    } else {
+        103
+    };
+
+#[cfg(unix)]
+pub(crate) fn unix_socket_path_within_limit(path: &Path) -> bool {
+    path.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES
+}
+
+/// Refuse to publish a socket through a symlink or a directory that is not
+/// owned privately by the current user.
 #[cfg(unix)]
 pub(super) fn ensure_private_socket_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let metadata = std::fs::metadata(parent).map_err(|error| {
+    tracedecay_private_fs::validate_private_directory(parent).map_err(|error| {
         config_error(format!(
-            "failed to inspect daemon socket directory '{}': {error}",
-            parent.display()
-        ))
-    })?;
-    if !metadata.is_dir() {
-        return Err(config_error(format!(
-            "daemon socket parent '{}' is not a directory",
-            parent.display()
-        )));
-    }
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(config_error(format!(
-            "refusing to publish daemon socket '{}' outside a private directory: '{}' has mode {mode:04o}; restrict it to 0700",
+            "refusing to publish daemon socket '{}' outside a private directory owned by the current user '{}': {error}",
             path.display(),
             parent.display(),
-        )));
-    }
-    Ok(())
+        ))
+    })
 }
 
 /// Binds the daemon's Unix socket and narrows it to its owner before the
@@ -379,6 +386,16 @@ impl BrokerListener {
         match endpoint {
             #[cfg(unix)]
             DaemonEndpoint::Unix(path) => {
+                // Refuse an over-long path with a typed remedy instead of the
+                // kernel's opaque "invalid argument": SUN_LEN overflow must
+                // never surface as an unexplained daemon startup failure.
+                if !unix_socket_path_within_limit(path) {
+                    return Err(config_error(format!(
+                        "daemon socket path '{}' exceeds this platform's Unix socket path limit ({MAX_UNIX_SOCKET_PATH_BYTES} bytes); set {} to a shorter path",
+                        path.display(),
+                        crate::daemon::SOCKET_ENV,
+                    )));
+                }
                 ensure_private_socket_parent(path)?;
                 let listener = bind_owner_only_unix_listener(path)?;
                 Ok((Self::Unix(listener), endpoint.clone()))
@@ -467,6 +484,55 @@ mod tests {
         assert!(matches!(&error, TraceDecayError::Config { .. }), "{error}");
         assert!(error.to_string().contains("private directory"), "{error}");
         assert!(!path.exists(), "socket must not be bound before rejection");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listener_rejects_symlinked_private_parent_before_binding() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let linked_parent = dir.path().join("linked-parent");
+        symlink(&target, &linked_parent).unwrap();
+        let path = linked_parent.join("daemon.sock");
+
+        let Err(error) = BrokerListener::bind(&DaemonEndpoint::Unix(path.clone())).await else {
+            panic!("symlinked socket parent must be rejected");
+        };
+
+        assert!(matches!(&error, TraceDecayError::Config { .. }), "{error}");
+        assert!(error.to_string().contains("private directory"), "{error}");
+        assert!(
+            !target.join("daemon.sock").exists(),
+            "rejection must not bind through the symlink"
+        );
+    }
+
+    /// A `SUN_LEN` overflow must be a typed refusal naming its remedy, not the
+    /// kernel's opaque bind failure that reads as an unexplained daemon crash.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listener_refuses_over_long_socket_path_with_a_typed_remedy() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir
+            .path()
+            .join("s".repeat(MAX_UNIX_SOCKET_PATH_BYTES))
+            .join("daemon.sock");
+
+        let Err(error) = BrokerListener::bind(&DaemonEndpoint::Unix(path.clone())).await else {
+            panic!("over-long socket path must be refused before bind");
+        };
+
+        assert!(matches!(&error, TraceDecayError::Config { .. }), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("Unix socket path limit"), "{message}");
+        assert!(
+            message.contains(crate::daemon::SOCKET_ENV),
+            "the refusal must name the override remedy: {message}"
+        );
     }
 
     #[tokio::test]

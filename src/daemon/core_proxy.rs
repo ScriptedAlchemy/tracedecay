@@ -11,8 +11,9 @@ use tokio::time::{Duration, Instant};
 
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
-    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, connect_to_current_daemon_within,
-    json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
+    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, PROJECT_WARMING_RETRY_HINT,
+    connect_to_current_daemon_within, json_rpc_error_is_project_open_retryable,
+    next_daemon_response_line, write_daemon_preamble,
 };
 #[cfg(unix)]
 use super::{
@@ -392,13 +393,23 @@ pub(super) async fn bounded_repository_identity(
     .await
 }
 
+/// A deadline-limited discovery is uncertainty, not failure: the route stays
+/// unresolved and the caller retries within its own budget, exactly like a
+/// warming project open. Spawn and probe failures are terminal because retrying
+/// them until the caller's budget expires only hides the actionable error.
 pub(super) fn repository_discovery_deferred(
     path: &Path,
     reason: tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown,
 ) -> TraceDecayError {
+    let retry_hint = matches!(
+        reason,
+        tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded
+    )
+    .then_some(PROJECT_WARMING_RETRY_HINT)
+    .unwrap_or("cannot be resolved");
     TraceDecayError::Config {
         message: format!(
-            "initialize route repository discovery deferred for {}: {reason:?}",
+            "repository discovery for '{}' is deferred ({reason:?}); the project route {retry_hint}",
             path.display()
         ),
     }

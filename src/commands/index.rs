@@ -207,11 +207,57 @@ async fn brokered_init(
         init_deadline,
     )
     .await?;
+    // Admission alone does not start indexing: the code-index scheduler mounts
+    // on first demand, and the background full-server upgrade that would
+    // eventually demand it does not survive a daemon restart. Request the
+    // reconciliation explicitly so the message below reports something that
+    // actually happened.
+    let reconcile = tracedecay::daemon::call_default_tool_awaiting_project_open(
+        handshake,
+        "tracedecay_admin_sync",
+        serde_json::json!({}),
+        init_deadline,
+    )
+    .await;
+    if let Err(error) = reconcile {
+        if !code_index_reconciliation_is_optional(project_path, &error).await {
+            return Err(error);
+        }
+        eprintln!(
+            "initialized {}; code indexing is unavailable for this non-Git project",
+            project_path.display()
+        );
+        return Ok(());
+    }
     eprintln!(
         "initialized {}; daemon code-index reconciliation requested",
         project_path.display()
     );
     Ok(())
+}
+
+async fn code_index_reconciliation_is_optional(
+    project_path: &Path,
+    error: &tracedecay::errors::TraceDecayError,
+) -> bool {
+    if !error
+        .to_string()
+        .contains("code_index_scheduler_unavailable")
+    {
+        return false;
+    }
+    let deadline = tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+    );
+    matches!(
+        tracedecay_runtime_core::git_discovery::discover_repository_identity(
+            project_path,
+            deadline,
+            &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        )
+        .await,
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -271,6 +317,111 @@ mod init_bootstrap_tests {
         );
     }
 
+    struct SocketEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl SocketEnvGuard {
+        fn set(value: &Path) -> Self {
+            let previous = std::env::var_os(tracedecay::daemon::SOCKET_ENV);
+            unsafe {
+                std::env::set_var(tracedecay::daemon::SOCKET_ENV, value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for SocketEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(previous) => {
+                        std::env::set_var(tracedecay::daemon::SOCKET_ENV, previous);
+                    }
+                    None => std::env::remove_var(tracedecay::daemon::SOCKET_ENV),
+                }
+            }
+        }
+    }
+
+    /// Init's "daemon code-index reconciliation requested" must describe a
+    /// request that actually crossed the wire: admission first, then the
+    /// explicit `tracedecay_admin_sync` reconcile. Without the second call the
+    /// first index only starts if the background full-server upgrade survives
+    /// long enough to demand it, which a daemon restart silently discards.
+    #[tokio::test]
+    async fn brokered_init_requests_a_real_code_index_reconciliation() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        static SOCKET_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serialize = SOCKET_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = temp.path().join("project");
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        let socket = temp.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _socket_env = SocketEnvGuard::set(&socket);
+
+        let recorded: std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let responder = {
+            let recorded = std::sync::Arc::clone(&recorded);
+            tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (stream, _addr) = listener.accept().await.unwrap();
+                    let (reader, mut writer) = stream.into_split();
+                    let mut lines = tokio::io::BufReader::new(reader).lines();
+                    let _handshake_line = lines.next_line().await.unwrap().unwrap();
+                    let request_line = lines.next_line().await.unwrap().unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&request_line).unwrap();
+                    recorded.lock().unwrap().push((
+                        request["params"]["name"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        request["params"]["arguments"].clone(),
+                    ));
+                    let response = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": { "content": [] },
+                    });
+                    writer
+                        .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                        .await
+                        .unwrap();
+                    writer.write_all(b"\n").await.unwrap();
+                    writer.shutdown().await.unwrap();
+                }
+            })
+        };
+
+        let handshake = test_handshake(&project, &profile);
+        brokered_init(&project, &[], &[], &handshake)
+            .await
+            .expect("brokered init against the fixture daemon");
+        tokio::time::timeout(std::time::Duration::from_secs(5), responder)
+            .await
+            .expect("fixture daemon must observe both requests")
+            .expect("fixture daemon task");
+
+        let recorded = recorded.lock().unwrap();
+        let names: Vec<&str> = recorded.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["tracedecay_status", "tracedecay_admin_sync"],
+            "init must request the reconcile it reports, after admission"
+        );
+        assert_eq!(
+            recorded[0].1["admission_only"],
+            serde_json::json!(true),
+            "the bootstrap status call stays admission-only"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn brokered_init_retains_folder_option_error_before_sending_request() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -299,6 +450,34 @@ mod init_bootstrap_tests {
             !profile.exists(),
             "brokered rejection must not open a local store"
         );
+    }
+
+    #[tokio::test]
+    async fn only_non_git_scheduler_unavailability_is_optional_during_init() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let non_git = temp.path().join("non-git");
+        let git = temp.path().join("git");
+        let nested_git = git.join("nested");
+        std::fs::create_dir_all(&non_git).unwrap();
+        std::fs::create_dir_all(&nested_git).unwrap();
+        let initialized = std::process::Command::new(tracedecay_runtime_core::git::git_program())
+            .args(["init", "-q"])
+            .current_dir(&git)
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+        let unavailable = tracedecay::errors::TraceDecayError::Config {
+            message: "daemon tool call failed: code_index_scheduler_unavailable: admin sync was not accepted"
+                .to_string(),
+        };
+        let unrelated = tracedecay::errors::TraceDecayError::Config {
+            message: "daemon tool call failed: storage unavailable".to_string(),
+        };
+
+        assert!(code_index_reconciliation_is_optional(&non_git, &unavailable).await);
+        assert!(!code_index_reconciliation_is_optional(&git, &unavailable).await);
+        assert!(!code_index_reconciliation_is_optional(&nested_git, &unavailable).await);
+        assert!(!code_index_reconciliation_is_optional(&non_git, &unrelated).await);
     }
 }
 
