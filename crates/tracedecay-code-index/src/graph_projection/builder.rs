@@ -260,10 +260,7 @@ pub(super) fn build_projection(
                 )
             })?;
         relations.push(file_import_relation(
-            projection,
-            import,
-            file_id,
-            &identity,
+            projection, import, file_id, &identity,
         )?);
         entities.push(import_entity(identity, import)?);
     }
@@ -298,8 +295,7 @@ pub(super) fn build_projection(
         for (occurrence, binding) in &bindings {
             let file_id = file_ids.get(&binding.file).cloned().ok_or_else(|| {
                 CodeGraphProjectionError::Contract(
-                    "code graph binding refers to a file outside its immutable snapshot"
-                        .to_owned(),
+                    "code graph binding refers to a file outside its immutable snapshot".to_owned(),
                 )
             })?;
             let symbol_id = require_symbol_id(&symbol_ids, occurrence)?;
@@ -347,8 +343,14 @@ fn edge_artifacts(
     projection: &GraphProjectionIdentity,
     edge: &CanonicalRelationEdgeV1,
     symbol_ids: &BTreeMap<SymbolOccurrenceId, GraphEntityId>,
-) -> Result<(GraphEntity, GraphGenerationRelation, GraphGenerationRelation), CodeGraphProjectionError>
-{
+) -> Result<
+    (
+        GraphEntity,
+        GraphGenerationRelation,
+        GraphGenerationRelation,
+    ),
+    CodeGraphProjectionError,
+> {
     let payload = serialize(edge)?;
     let identity = GraphEntityId::new(stable_identity("edge", &hex::encode(&payload)))?;
     let entity = GraphEntity::new(

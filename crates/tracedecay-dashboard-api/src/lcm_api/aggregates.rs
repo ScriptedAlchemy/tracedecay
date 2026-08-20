@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_runtime_core::timeutil::format_yyyy_mm_dd;
 
-use super::super::token_count::count_text_tokens;
+use super::super::token_count::{
+    TokenCountCache, content_fingerprint, count_text_tokens, counting_available,
+};
 use super::{
     DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1,
     DashboardLcmCanonicalSummaryV1, DashboardLcmReadRequestV1, DashboardLcmTimelineBucketV1,
@@ -13,13 +15,14 @@ pub(super) fn render_canonical_payload<T>(
     request: DashboardLcmReadRequestV1,
     page: DashboardLcmCanonicalPageV1,
     storage_scope: &str,
+    token_counts: &TokenCountCache,
 ) -> Result<T, ()>
 where
     T: serde::de::DeserializeOwned,
 {
     let value = match request {
         DashboardLcmReadRequestV1::Overview { query, limit } => {
-            overview_json(page, query, limit, storage_scope)?
+            overview_json(page, query, limit, storage_scope, token_counts)?
         }
         DashboardLcmReadRequestV1::Search {
             query,
@@ -34,7 +37,7 @@ where
             let messages = page
                 .messages
                 .into_iter()
-                .map(message_json)
+                .map(|message| message_json(message, token_counts))
                 .collect::<Vec<_>>();
             let summary_nodes = page
                 .summary_nodes
@@ -75,7 +78,7 @@ where
             let messages = page
                 .messages
                 .into_iter()
-                .map(message_json)
+                .map(|message| message_json(message, token_counts))
                 .collect::<Vec<_>>();
             let summary_nodes = page
                 .summary_nodes
@@ -107,7 +110,7 @@ where
             bucket,
             session_id,
             limit,
-        } => timeline_json(page, bucket, session_id, limit, storage_scope),
+        } => timeline_json(page, bucket, session_id, limit, storage_scope, token_counts),
     };
     serde_json::from_value(value).map_err(|_| ())
 }
@@ -117,6 +120,7 @@ fn overview_json(
     query: String,
     limit: i64,
     storage_scope: &str,
+    token_counts: &TokenCountCache,
 ) -> Result<serde_json::Value, ()> {
     let mut role_counts = BTreeMap::<String, i64>::new();
     let mut source_counts = BTreeMap::<String, i64>::new();
@@ -217,7 +221,7 @@ fn overview_json(
         ).collect::<Vec<_>>(),
         "latest_summary_nodes": latest_summary_nodes.into_iter().map(summary_json).collect::<Vec<_>>(),
         "matches": {
-            "messages": matches.messages.into_iter().take(i64_to_usize(limit)).map(message_json).collect::<Vec<_>>(),
+            "messages": matches.messages.into_iter().take(i64_to_usize(limit)).map(|message| message_json(message, token_counts)).collect::<Vec<_>>(),
             "summary_nodes": matches.summary_nodes.into_iter().take(i64_to_usize(limit)).map(summary_json).collect::<Vec<_>>()
         },
         "query": query,
@@ -231,10 +235,36 @@ struct DisplayedContentTokenCount {
     provenance: Option<LcmTokenCountProvenanceV1>,
 }
 
+/// Token count of the displayed message content, served from the shared
+/// [`TokenCountCache`] when the same content was already counted so repeat
+/// dashboard renders never re-run the BPE. Provenance stays
+/// `O200kApproximate` because every cached value originally came from the
+/// same `o200k_base` encode; when counting is compiled out (or failed) the
+/// count is truthfully absent rather than invented.
 fn displayed_content_token_count(
     message: &DashboardLcmCanonicalMessageV1,
+    token_counts: &TokenCountCache,
 ) -> DisplayedContentTokenCount {
-    match count_text_tokens(&message.content, "") {
+    if !counting_available() {
+        return DisplayedContentTokenCount {
+            token_count: None,
+            provenance: None,
+        };
+    }
+    let fingerprint = content_fingerprint(&message.content);
+    let token_count = token_counts
+        .displayed_tokens(&message.provider, &message.message_id, fingerprint)
+        .or_else(|| {
+            let counted = count_text_tokens(&message.content, "")?;
+            token_counts.store_displayed_tokens(
+                &message.provider,
+                &message.message_id,
+                fingerprint,
+                counted,
+            );
+            Some(counted)
+        });
+    match token_count {
         Some(token_count) => DisplayedContentTokenCount {
             token_count: Some(token_count),
             provenance: Some(LcmTokenCountProvenanceV1::O200kApproximate),
@@ -291,11 +321,12 @@ fn timeline_json(
     session_id: Option<String>,
     limit: i64,
     storage_scope: &str,
+    token_counts: &TokenCountCache,
 ) -> serde_json::Value {
     let mut dated = BTreeMap::<String, TokenCountAggregate>::new();
     let mut undated = TokenCountAggregate::default();
     for message in &page.messages {
-        let token_count = displayed_content_token_count(message);
+        let token_count = displayed_content_token_count(message, token_counts);
         if let Some(timestamp) = message.timestamp {
             let key = utc_bucket(timestamp, bucket);
             dated.entry(key).or_default().add(token_count);
@@ -446,8 +477,11 @@ fn i64_to_usize(value: i64) -> usize {
     }
 }
 
-fn message_json(message: DashboardLcmCanonicalMessageV1) -> serde_json::Value {
-    let token_count = displayed_content_token_count(&message);
+fn message_json(
+    message: DashboardLcmCanonicalMessageV1,
+    token_counts: &TokenCountCache,
+) -> serde_json::Value {
+    let token_count = displayed_content_token_count(&message, token_counts);
     serde_json::json!({
         "store_id": null,
         "session_id": message.session_id,
@@ -501,6 +535,9 @@ mod tests {
         trimmed_nonempty,
     };
     use super::{message_json, overview_json, timeline_json};
+    #[cfg(feature = "token-counting")]
+    use crate::token_count::count_text_tokens;
+    use crate::token_count::{TokenCountCache, content_fingerprint};
 
     fn aggregate_page() -> DashboardLcmCanonicalPageV1 {
         DashboardLcmCanonicalPageV1 {
@@ -548,17 +585,20 @@ mod tests {
 
     #[test]
     fn canonical_message_uses_unknown_model_o200k_only_when_available() {
-        let message = message_json(DashboardLcmCanonicalMessageV1 {
-            session_id: "session.message".to_owned(),
-            provider: "codex".to_owned(),
-            role: "assistant".to_owned(),
-            timestamp: Some(1),
-            ordinal: 1,
-            content: "content whose tokenizer is unknown".to_owned(),
-            message_id: "message.one".to_owned(),
-            metadata_json: None,
-            tool_names: None,
-        });
+        let message = message_json(
+            DashboardLcmCanonicalMessageV1 {
+                session_id: "session.message".to_owned(),
+                provider: "codex".to_owned(),
+                role: "assistant".to_owned(),
+                timestamp: Some(1),
+                ordinal: 1,
+                content: "content whose tokenizer is unknown".to_owned(),
+                message_id: "message.one".to_owned(),
+                metadata_json: None,
+                tool_names: None,
+            },
+            &TokenCountCache::new(),
+        );
 
         #[cfg(feature = "token-counting")]
         {
@@ -577,27 +617,30 @@ mod tests {
 
     #[test]
     fn native_usage_does_not_claim_visible_content_tokens() {
-        let message = message_json(DashboardLcmCanonicalMessageV1 {
-            session_id: "session.message".to_owned(),
-            provider: "codex".to_owned(),
-            role: "assistant".to_owned(),
-            timestamp: Some(1),
-            ordinal: 1,
-            content: "short visible answer".to_owned(),
-            message_id: "message.one".to_owned(),
-            metadata_json: Some(
-                serde_json::json!({
-                    "usage": {
-                        "input_tokens": 4_000,
-                        "output_tokens": 999_999,
-                        "completion_tokens": 888_888,
-                        "total_tokens": 1_003_999
-                    }
-                })
-                .to_string(),
-            ),
-            tool_names: None,
-        });
+        let message = message_json(
+            DashboardLcmCanonicalMessageV1 {
+                session_id: "session.message".to_owned(),
+                provider: "codex".to_owned(),
+                role: "assistant".to_owned(),
+                timestamp: Some(1),
+                ordinal: 1,
+                content: "short visible answer".to_owned(),
+                message_id: "message.one".to_owned(),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "usage": {
+                            "input_tokens": 4_000,
+                            "output_tokens": 999_999,
+                            "completion_tokens": 888_888,
+                            "total_tokens": 1_003_999
+                        }
+                    })
+                    .to_string(),
+                ),
+                tool_names: None,
+            },
+            &TokenCountCache::new(),
+        );
 
         #[cfg(feature = "token-counting")]
         {
@@ -626,8 +669,14 @@ mod tests {
 
     #[test]
     fn overview_reduction_preserves_exact_counts_and_deterministic_recency() {
-        let value = overview_json(aggregate_page(), String::new(), 1, "profile_sharded")
-            .expect("valid aggregate");
+        let value = overview_json(
+            aggregate_page(),
+            String::new(),
+            1,
+            "profile_sharded",
+            &TokenCountCache::new(),
+        )
+        .expect("valid aggregate");
 
         assert_eq!(value["overview"]["messages_total"], 2);
         assert_eq!(value["overview"]["sessions_total"], 2);
@@ -648,6 +697,7 @@ mod tests {
             None,
             1,
             "profile_sharded",
+            &TokenCountCache::new(),
         );
 
         assert_eq!(value["buckets"][0]["bucket"], "1970-01-02");
@@ -688,6 +738,7 @@ mod tests {
             None,
             25,
             "profile_sharded",
+            &TokenCountCache::new(),
         );
         let bucket = &value["buckets"][0];
         assert_eq!(bucket["count"], 2);
@@ -711,6 +762,7 @@ mod tests {
             None,
             25,
             "profile_sharded",
+            &TokenCountCache::new(),
         );
         let bucket = &value["buckets"][0];
         assert!(bucket["token_count"].as_i64().is_some());
@@ -724,9 +776,127 @@ mod tests {
         let mut page = aggregate_page();
         page.summary_nodes[0].source_token_count = None;
 
-        let value = overview_json(page, String::new(), 25, "profile_sharded")
-            .expect("other overview fields remain valid");
+        let value = overview_json(
+            page,
+            String::new(),
+            25,
+            "profile_sharded",
+            &TokenCountCache::new(),
+        )
+        .expect("other overview fields remain valid");
         assert!(value["overview"]["compression"]["source_token_count"].is_null());
         assert!(value["overview"]["compression"]["ratio"].is_null());
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[test]
+    fn repeat_message_render_reads_the_shared_cache_instead_of_reencoding() {
+        let cache = TokenCountCache::new();
+        let message = aggregate_page().messages.remove(0);
+
+        let first = message_json(message.clone(), &cache);
+        let direct = count_text_tokens(&message.content, "").expect("token counting compiled in");
+        assert_eq!(first["token_count"].as_i64(), Some(direct));
+        assert_eq!(first["token_count_provenance"], "o200k_approximate");
+
+        // Overwrite the cached count with a sentinel the BPE can never
+        // produce for this text. If the repeat render re-invoked
+        // `count_text_tokens` it would return (and re-store) `direct`, not
+        // the sentinel — so the sentinel surfacing pins zero re-encodes for
+        // unchanged content.
+        let fingerprint = content_fingerprint(&message.content);
+        cache.store_displayed_tokens(&message.provider, &message.message_id, fingerprint, 987_654);
+        let second = message_json(message.clone(), &cache);
+        assert_eq!(second["token_count"].as_i64(), Some(987_654));
+        assert_eq!(second["token_count_provenance"], "o200k_approximate");
+
+        // Changed content under the same message id must miss the cache and
+        // be recounted: the stale sentinel is never served for new text.
+        let mut changed = message;
+        changed.content = "entirely different displayed content".to_owned();
+        let recounted = message_json(changed.clone(), &cache);
+        assert_eq!(
+            recounted["token_count"].as_i64(),
+            count_text_tokens(&changed.content, "")
+        );
+        assert_eq!(recounted["token_count_provenance"], "o200k_approximate");
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[test]
+    fn timeline_and_message_renders_share_one_display_cache() {
+        let cache = TokenCountCache::new();
+        let page = aggregate_page();
+
+        // The message path (search/session/overview renders) stores its
+        // counts in the shared cache…
+        for message in &page.messages {
+            message_json(message.clone(), &cache);
+            let fingerprint = content_fingerprint(&message.content);
+            assert_eq!(
+                cache.displayed_tokens(&message.provider, &message.message_id, fingerprint),
+                count_text_tokens(&message.content, ""),
+                "message render must populate the shared cache"
+            );
+        }
+
+        // …and the timeline pass consumes the same entries: sentinels
+        // planted under the message keys surface in the bucket sums, so the
+        // timeline re-encoded nothing.
+        cache.store_displayed_tokens(
+            &page.messages[0].provider,
+            &page.messages[0].message_id,
+            content_fingerprint(&page.messages[0].content),
+            1_000,
+        );
+        cache.store_displayed_tokens(
+            &page.messages[1].provider,
+            &page.messages[1].message_id,
+            content_fingerprint(&page.messages[1].content),
+            2_000,
+        );
+        let value = timeline_json(
+            page,
+            DashboardLcmTimelineBucketV1::Day,
+            None,
+            25,
+            "profile_sharded",
+            &cache,
+        );
+        assert_eq!(value["buckets"][0]["bucket"], "1970-01-01");
+        assert_eq!(value["buckets"][0]["token_count"], 1_000);
+        assert_eq!(
+            value["buckets"][0]["token_count_provenance"],
+            "o200k_approximate"
+        );
+        assert_eq!(value["buckets"][1]["bucket"], "1970-01-02");
+        assert_eq!(value["buckets"][1]["token_count"], 2_000);
+        assert_eq!(
+            value["buckets"][1]["token_count_provenance"],
+            "o200k_approximate"
+        );
+    }
+
+    #[cfg(not(feature = "token-counting"))]
+    #[test]
+    fn compiled_out_counting_stays_unavailable_and_never_consults_the_cache() {
+        let cache = TokenCountCache::new();
+        let message = aggregate_page().messages.remove(0);
+
+        let rendered = message_json(message.clone(), &cache);
+        assert!(rendered["token_count"].is_null());
+        assert!(rendered["token_count_provenance"].is_null());
+        let fingerprint = content_fingerprint(&message.content);
+        assert_eq!(
+            cache.displayed_tokens(&message.provider, &message.message_id, fingerprint),
+            None,
+            "no count may be stored when counting is compiled out"
+        );
+
+        // Even a planted cache entry must not surface as an invented count.
+        cache.store_displayed_tokens(&message.provider, &message.message_id, fingerprint, 42);
+        let again = message_json(message, &cache);
+        assert!(again["token_count"].is_null());
+        assert!(again["token_count_provenance"].is_null());
     }
 }
