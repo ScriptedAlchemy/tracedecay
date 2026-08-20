@@ -406,6 +406,7 @@ impl CodeIndexPublishedGenerationV1 {
             validated: OnceLock::new(),
             admitted: OnceLock::new(),
             attribution: OnceLock::new(),
+            graph_manifest: OnceLock::new(),
         };
         generation.validate_fresh()?;
         Ok(generation)
