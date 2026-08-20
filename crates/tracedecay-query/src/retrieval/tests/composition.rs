@@ -3,7 +3,7 @@ use std::{cell::Cell, rc::Rc};
 
 use tracedecay_domain::{
     DiversityPolicy, EvidenceRole, ExactClass, HydrationReceipt, PublicRetrieverStatus,
-    RankingDecisionKind, RetrievalFailure, RetrieverKind, RetrieverOutcome,
+    RankingDecisionKind, RetrievalBudgetUsage, RetrievalFailure, RetrieverKind, RetrieverOutcome,
     ScoreDomainCalibrationV1,
 };
 
@@ -31,6 +31,68 @@ fn receipt(
         authorized: true,
         freshness: candidate.candidate.freshness[0].clone(),
     }
+}
+
+#[test]
+fn semantic_budget_exceeded_does_not_take_down_exact_lexical_or_graph() {
+    let exact = exact_candidate("exact", 1);
+    let lexical = candidate(RetrieverKind::Lexical, "lexical", 900_000, 0);
+    let graph = candidate(RetrieverKind::Graph, "graph", 800_000, 0);
+    let lanes = vec![
+        (
+            RetrieverKind::ExactLiteral,
+            RetrieverOutcome::Complete(batch(vec![exact], "exact evidence")),
+        ),
+        (
+            RetrieverKind::Lexical,
+            RetrieverOutcome::Complete(batch(vec![lexical], "lexical evidence")),
+        ),
+        (
+            RetrieverKind::Graph,
+            RetrieverOutcome::Complete(batch(vec![graph], "graph evidence")),
+        ),
+        (
+            RetrieverKind::Semantic,
+            RetrieverOutcome::BudgetExceeded(RetrievalBudgetUsage::default()),
+        ),
+    ];
+    let composition = CompositionKernel::new(id("ranking.fixture.v1"))
+        .compose(
+            &FusionStageInput {
+                profile: profile(),
+                lanes: composition_lanes(lanes),
+            },
+            &no_caps(),
+        )
+        .expect("semantic budget miss must not fail composition");
+
+    assert_eq!(
+        composition.public_lane_statuses[&RetrieverKind::Semantic],
+        PublicRetrieverStatus::Partial
+    );
+    assert_eq!(
+        composition.public_lane_statuses[&RetrieverKind::ExactLiteral],
+        PublicRetrieverStatus::Complete
+    );
+    assert_eq!(
+        composition.public_lane_statuses[&RetrieverKind::Lexical],
+        PublicRetrieverStatus::Complete
+    );
+    assert_eq!(
+        composition.public_lane_statuses[&RetrieverKind::Graph],
+        PublicRetrieverStatus::Complete
+    );
+    assert_eq!(
+        composition.ranked_candidates[0].candidate.exact_class,
+        ExactClass::ExactMessage
+    );
+    assert!(composition.ranked_candidates.iter().all(|ranked| {
+        ranked
+            .candidate
+            .contributions
+            .iter()
+            .all(|contribution| contribution.retriever != RetrieverKind::Semantic)
+    }));
 }
 
 #[test]

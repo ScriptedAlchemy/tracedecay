@@ -207,6 +207,13 @@ impl LatestCompleteCodeIndexV1 {
         self.install_query_owners(
             reader,
             CodeGraphServingAuthorityV1::Persistent { _lease: authority },
+            // Activation is the daemon's own background pass; on the
+            // ignored-dependency path it additionally runs past the durable
+            // commit boundary where requester deadlines stop binding. No
+            // request budget is in reach here, so the daemon retrieval
+            // ceiling applies: its unset `deadline_micros` truthfully keeps
+            // the crate build fallback instead of fabricating a deadline.
+            &super::queries::maximum_retrieval_budget(),
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         // First activation of a generation retains its store; a repeat
