@@ -2455,6 +2455,7 @@ impl SemanticVectorReadPort for ScopedSemanticEvaluationVectorReadPortV1<'_> {
     fn scan_exact_flat(
         &self,
         request: SemanticVectorReadRequestV1<'_>,
+        examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
         visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
     ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
         let mut eligible = 0_u64;
@@ -2465,7 +2466,9 @@ impl SemanticVectorReadPort for ScopedSemanticEvaluationVectorReadPortV1<'_> {
             }
             Ok(())
         };
-        let summary = self.inner.scan_exact_flat(request, &mut scoped_visit)?;
+        let summary = self
+            .inner
+            .scan_exact_flat(request, examine, &mut scoped_visit)?;
         Ok(SemanticVectorScanSummaryV1 {
             examined: summary.examined,
             eligible,
@@ -2649,6 +2652,7 @@ impl SemanticVectorReadPort for PublishedSemanticVectorReadPortV1 {
     fn scan_exact_flat(
         &self,
         request: SemanticVectorReadRequestV1<'_>,
+        examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
         visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
     ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
         if request.search_kind != SemanticSearchKindV1::ExactFlat
@@ -2661,6 +2665,7 @@ impl SemanticVectorReadPort for PublishedSemanticVectorReadPortV1 {
             return Err(RetrievalPortError::IncompatibleProjection);
         }
         for row in &self.rows {
+            examine()?;
             visit(row)?;
         }
         Ok(SemanticVectorScanSummaryV1 {
@@ -4118,6 +4123,7 @@ mod tests {
             fn scan_exact_flat(
                 &self,
                 _request: SemanticVectorReadRequestV1<'_>,
+                _examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
                 _visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
             ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
                 panic!("cancelled query runtime must not scan vectors")
@@ -4310,6 +4316,7 @@ mod tests {
             fn scan_exact_flat(
                 &self,
                 _request: tracedecay_query::retrieval::semantic::SemanticVectorReadRequestV1<'_>,
+                _examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
                 _visit: &mut dyn FnMut(
                     &tracedecay_query::retrieval::semantic::SemanticVectorRecordV1,
                 ) -> Result<(), RetrievalPortError>,

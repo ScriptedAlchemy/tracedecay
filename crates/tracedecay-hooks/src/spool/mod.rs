@@ -593,16 +593,42 @@ fn ensure_root(root: &Path) -> Result<(), HookSpoolError> {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
             return Err(HookSpoolError::UnsafePath);
         }
-        Ok(_) => return Ok(()),
+        Ok(_) => {
+            // An existing root must already be private to the current owner:
+            // a group/world-writable or foreign-owned directory lets another
+            // local account replace spool members despite their per-file
+            // modes. Transient metadata failures stay Io rather than
+            // condemning the path.
+            return tracedecay_private_fs::validate_private_directory(root).map_err(|error| {
+                match error.kind() {
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => {
+                        HookSpoolError::UnsafePath
+                    }
+                    _ => HookSpoolError::Io,
+                }
+            });
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(HookSpoolError::Io),
     }
-    fs::create_dir_all(root).map_err(|_| HookSpoolError::Io)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(root, fs::Permissions::from_mode(0o700))
-            .map_err(|_| HookSpoolError::Io)?;
+    if let Some(parent) = root.parent() {
+        fs::create_dir_all(parent).map_err(|_| HookSpoolError::Io)?;
+    }
+    match tracedecay_private_fs::create_private_directory(root) {
+        Ok(()) => {}
+        // A concurrent opener may win the creation race; the directory is
+        // acceptable only if it is private.
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            tracedecay_private_fs::validate_private_directory(root).map_err(|error| match error
+                .kind()
+            {
+                io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => {
+                    HookSpoolError::UnsafePath
+                }
+                _ => HookSpoolError::Io,
+            })?;
+        }
+        Err(_) => return Err(HookSpoolError::Io),
     }
     shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
 }

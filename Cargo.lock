@@ -5887,12 +5887,12 @@ dependencies = [
 name = "tracedecay-hooks"
 version = "0.1.0"
 dependencies = [
- "fs2",
  "serde",
  "serde_json",
  "thiserror",
  "tracedecay-application",
  "tracedecay-domain",
+ "tracedecay-private-fs",
 ]
 
 [[package]]

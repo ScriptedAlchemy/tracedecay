@@ -10,6 +10,7 @@
 //! a crash between the service's read and its write, so the rule is tested
 //! where it is enforced.
 
+mod common;
 mod work_registered_store;
 
 use std::collections::BTreeSet;
@@ -22,9 +23,11 @@ use tracedecay_domain::{
     WorkPlacementTargetV1, WorkPlacementV1, WorktreeId,
 };
 
+use common::fixture_abs_root;
 use work_registered_store::RegisteredWorkStore;
 
-const ROOT: &str = "/workspace/placement-storage";
+static ROOT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| fixture_abs_root("/workspace/placement-storage"));
 
 fn id<T>(value: &str) -> T
 where

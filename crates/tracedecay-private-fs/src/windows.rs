@@ -839,7 +839,6 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::process::Command;
-    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MoveFileExW};
 
     #[test]
     fn current_user_sid_string_is_canonical() {
@@ -978,24 +977,12 @@ mod tests {
         let mut replacement_file = create_private_file(&replacement).unwrap();
         replacement_file.write_all(b"new").unwrap();
         drop(replacement_file);
-        let encoded_replacement = encode_path(&replacement).unwrap();
-        let encoded_path = encode_path(&path).unwrap();
 
-        // SAFETY: both paths are NUL-terminated and remain live for the call.
-        let replaced = unsafe {
-            MoveFileExW(
-                encoded_replacement.as_ptr(),
-                encoded_path.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING,
-            )
-        };
-
-        assert_ne!(
-            replaced,
-            0,
-            "replacement failed: {}",
-            io::Error::last_os_error()
-        );
+        // Replace through the same primitive production uses. Rust's
+        // `std::fs::rename` requests POSIX rename semantics on Windows, which
+        // is what makes replacement succeed while a delete-sharing reader is
+        // still open; the legacy MoveFileExW replace is denied in that state.
+        std::fs::rename(&replacement, &path).unwrap();
         let mut old_contents = Vec::new();
         reader.read_to_end(&mut old_contents).unwrap();
         assert_eq!(old_contents, b"old");

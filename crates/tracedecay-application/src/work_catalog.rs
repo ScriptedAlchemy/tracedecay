@@ -471,20 +471,37 @@ where
     )?;
     let binding = ExecutableBindingV1::direct(
         &manifest,
-        OperationId::new(format!("operation.work.{operation}"))
-            .expect("static Work operation ID is valid"),
-        ServiceId::new(WORK_SERVICE_ID).expect("static Work service ID is valid"),
+        OperationId::new(format!("operation.work.{operation}")).map_err(|_| {
+            invalid_identity(
+                "operation_id",
+                "work operation name does not form a canonical operation ID",
+            )
+        })?,
+        ServiceId::new(WORK_SERVICE_ID)
+            .map_err(|_| invalid_identity("service_id", "work service ID is not canonical"))?,
         request_schema,
         result_schema,
-        CodecBindingKey::new(format!("codec.work.{operation}.json.v1"))
-            .expect("static Work codec ID is valid"),
+        CodecBindingKey::new(format!("codec.work.{operation}.json.v1")).map_err(|_| {
+            invalid_identity(
+                "codec_binding_key",
+                "work operation name does not form a canonical codec key",
+            )
+        })?,
         RouteExposureV1::Public {
-            binding_id: BindingId::new(format!("binding.http.work.{operation}"))
-                .expect("static Work binding ID is valid"),
+            binding_id: BindingId::new(format!("binding.http.work.{operation}")).map_err(|_| {
+                invalid_identity(
+                    "binding_id",
+                    "work operation name does not form a canonical binding ID",
+                )
+            })?,
             route_path: route_path.to_owned(),
         },
     )?;
     Ok(ExecutableBindingAvailabilityV1::available(binding))
+}
+
+fn invalid_identity(field: &'static str, reason: &'static str) -> CatalogValidationError {
+    CatalogValidationError::InvalidValue { field, reason }
 }
 
 fn work_manifest(
@@ -492,13 +509,25 @@ fn work_manifest(
     effect: EffectClass,
 ) -> Result<CapabilityManifestV1, CatalogValidationError> {
     let read_only = effect.is_read_only();
-    let binding_id = BindingId::new(format!("binding.http.work.{operation}"))
-        .expect("static Work binding ID is valid");
+    let binding_id = BindingId::new(format!("binding.http.work.{operation}")).map_err(|_| {
+        invalid_identity(
+            "binding_id",
+            "work operation name does not form a canonical binding ID",
+        )
+    })?;
     CapabilityManifestV1::new(CapabilityManifestInputV1 {
-        capability_id: CapabilityId::new(format!("capability.work.{operation}"))
-            .expect("static Work capability ID is valid"),
-        use_case_id: UseCaseId::new(format!("use-case.work.{operation}"))
-            .expect("static Work use-case ID is valid"),
+        capability_id: CapabilityId::new(format!("capability.work.{operation}")).map_err(|_| {
+            invalid_identity(
+                "capability_id",
+                "work operation name does not form a canonical capability ID",
+            )
+        })?,
+        use_case_id: UseCaseId::new(format!("use-case.work.{operation}")).map_err(|_| {
+            invalid_identity(
+                "use_case_id",
+                "work operation name does not form a canonical use-case ID",
+            )
+        })?,
         routing: RoutingContractV1::new(
             1,
             format!("Work {operation}"),

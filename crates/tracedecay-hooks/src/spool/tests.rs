@@ -16,7 +16,9 @@ impl TestDir {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&path).unwrap();
+        // The spool accepts an existing root only when it is private, so the
+        // fixture must create it through the same authority.
+        tracedecay_private_fs::create_private_directory(&path).unwrap();
         Self(path)
     }
 }
@@ -100,6 +102,22 @@ fn checksum_is_real_sha256() {
             0xf2, 0x00, 0x15, 0xad,
         ]
     );
+}
+
+/// A pre-existing spool root that another local account could write into
+/// must be refused outright: per-file modes cannot protect members inside a
+/// writable directory.
+#[cfg(unix)]
+#[test]
+fn open_refuses_a_group_writable_existing_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TestDir::new("permissive-root");
+    fs::set_permissions(&root.0, fs::Permissions::from_mode(0o770)).unwrap();
+
+    assert!(matches!(
+        HookSpoolV1::open(&root.0, config(), UtcMicros(10)),
+        Err(HookSpoolError::UnsafePath)
+    ));
 }
 
 #[test]
