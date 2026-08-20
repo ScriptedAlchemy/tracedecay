@@ -717,15 +717,20 @@ async fn duplicate_concurrent_ignored_dependency_requests_publish_one_generation
     let right = right.expect("second duplicate admission");
 
     assert_eq!(left.generation_id, right.generation_id);
-    let publication = tokio::time::timeout(Duration::from_secs(5), publications.recv())
-        .await
-        .expect("one generation publication")
-        .expect("publication channel");
+    // Serving publication happens-before every admission return: the owner
+    // broadcasts before returning, and coalesced followers settle only from
+    // the owner's finished flight. Both admissions above have returned, so
+    // the receiver subscribed before the join already holds every publication
+    // these requests could produce — read it without a wall-clock bound.
+    let publication = publications
+        .try_recv()
+        .expect("one generation publication is sealed before admission returns");
     assert_eq!(publication.generation_id, left.generation_id);
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), publications.recv())
-            .await
-            .is_err(),
+        matches!(
+            publications.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
         "duplicate in-flight requests coalesce instead of publishing twice"
     );
     registry.shutdown().await;
