@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.4](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.3...v0.1.0-beta.4) (2026-08-20)
+
+
+### Bug Fixes
+
+* **release:** use cross-platform Python runtime ([cc22f04](https://github.com/ScriptedAlchemy/tracedecay/commit/cc22f04a5b5a8dbc04239d0d4f1b6c213d5effea))
+* **release:** validate beta source before Rust setup ([adecaa0](https://github.com/ScriptedAlchemy/tracedecay/commit/adecaa0eaa37dad94deb2e8063c49530c5c08699))
+
 ## [0.1.0-beta.3](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.2...v0.1.0-beta.3) (2026-08-20)
 
 
