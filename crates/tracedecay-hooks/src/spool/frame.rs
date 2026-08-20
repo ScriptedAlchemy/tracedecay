@@ -2,8 +2,8 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use tracedecay_application::framed_log::{append_durable, truncate_file as shared_truncate_file};
 use tracedecay_domain::{UtcMicros, framed_log::checksum as frame_checksum};
+use tracedecay_private_fs::framed_log::{append_durable, truncate_file as shared_truncate_file};
 
 use crate::{HOOK_EVENT_SCHEMA_VERSION, HookEventEnvelopeV2, HookHostV1, MAX_HOOK_PAYLOAD_BYTES};
 use serde_json::Value;

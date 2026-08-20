@@ -1,7 +1,9 @@
-//! Owner-private filesystem creation and validation shared by store engines.
+//! Owner-private filesystem creation, validation, and durable publication.
 
 use std::fs::File;
 use std::io;
+
+pub mod framed_log;
 
 /// A private-file creation failure that distinguishes pre-creation errors from
 /// validation errors on an already-created exact file handle.

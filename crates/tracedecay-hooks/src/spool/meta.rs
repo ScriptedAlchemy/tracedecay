@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use tracedecay_application::framed_log::atomic_write as shared_atomic_write;
 use tracedecay_domain::framed_log::partial_tail_matches_prefix;
 use tracedecay_domain::{canonical_json_bytes, framed_log::checksum as frame_checksum};
+use tracedecay_private_fs::framed_log::atomic_write as shared_atomic_write;
 
 use crate::HookHostV1;
 use serde_json::Value;

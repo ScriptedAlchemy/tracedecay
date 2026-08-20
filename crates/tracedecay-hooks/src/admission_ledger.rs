@@ -29,12 +29,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_application::framed_log::{
+use tracedecay_domain::{UtcMicros, canonical_json_bytes, framed_log::checksum as frame_checksum};
+use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, append_durable, atomic_write as shared_atomic_write,
     read_bounded as shared_read_bounded, sync_directory as shared_sync_directory,
     truncate_file as shared_truncate_file, validate_regular_or_missing as shared_validate_regular,
 };
-use tracedecay_domain::{UtcMicros, canonical_json_bytes, framed_log::checksum as frame_checksum};
 
 use crate::{HookEventEnvelopeV2, HookHostV1, MAX_SPOOL_AGE_MICROS, MAX_SPOOL_RECORDS_PER_HOST};
 
