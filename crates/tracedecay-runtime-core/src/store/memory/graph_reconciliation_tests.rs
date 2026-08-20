@@ -690,8 +690,9 @@ async fn settled_finish_skips_reload_and_stale_stamp_still_conflicts() {
         loaded.lineage_stamp.is_some(),
         "a committed fact must produce a lineage stamp"
     );
-    let watermark = super::graph_manifest::source_watermark(&FactOwnerV1::Profile, &loaded.source, None)
-        .expect("hash canonical source watermark");
+    let watermark =
+        super::graph_manifest::source_watermark(&FactOwnerV1::Profile, &loaded.source, None)
+            .expect("hash canonical source watermark");
 
     let observer = database.project_memory_reconciliation_telemetry_observer();
     let before = observer.snapshot();

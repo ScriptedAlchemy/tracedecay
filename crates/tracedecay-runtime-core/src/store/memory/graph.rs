@@ -262,7 +262,9 @@ pub(super) async fn project_memory_graph(
     if !source_unchanged_since(db, source_stamp, Some(read_control)).await?
         && source_watermark(
             &owner,
-            &load_source(db, &owner, Some(read_control), None).await?.source,
+            &load_source(db, &owner, Some(read_control), None)
+                .await?
+                .source,
             Some(read_control),
         )? != expected_watermark
     {
