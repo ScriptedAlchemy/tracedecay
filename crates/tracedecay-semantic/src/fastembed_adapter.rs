@@ -45,6 +45,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[cfg(any(test, feature = "semantic-fastembed"))]
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1,
@@ -677,6 +678,9 @@ impl LifecycleInstallArtifactV1 {
         Ok((path, pin))
     }
 
+    // Byte reads exist only where a runtime consumes member bytes, matching
+    // the [`VerifiedEmbeddingArtifactV1::required_member_bytes`] gate.
+    #[cfg(any(test, feature = "semantic-fastembed"))]
     fn read_member_bytes(&self, role: ArtifactMemberRoleV1) -> Result<Vec<u8>, EmbedError> {
         let (path, pin) = self.member_pin_path(role)?;
         let bytes = std::fs::read(path).map_err(|_| {
@@ -1461,12 +1465,125 @@ fn pseudo_embedding(
     values
 }
 
+/// Lifecycle-install fixtures shared by this module's tests and the crate
+/// root's scheduling tests. Everything stays inside a tempdir; nothing here
+/// reads a live profile or downloads a model.
 #[cfg(test)]
-mod tests {
+pub(crate) mod lifecycle_test_support {
     use std::collections::BTreeMap;
+
+    use sha2::{Digest, Sha256};
+    use tracedecay_domain::{ChunkerRevision, PrivacyDomainId};
 
     use super::super::model_catalog::{
         CatalogMemberPinV1, CatalogSourceV1, CatalogedFastEmbedModelV1,
+    };
+    use super::AdmittedProjectionArtifactV1;
+    use super::EmbedError;
+    use crate::SemanticResourceCeilings;
+
+    pub(crate) struct LifecycleInstallFixtureV1 {
+        pub(crate) install: tempfile::TempDir,
+        pub(crate) model: CatalogedFastEmbedModelV1,
+    }
+
+    pub(crate) fn lifecycle_install_fixture(model_bytes: &[u8]) -> LifecycleInstallFixtureV1 {
+        let install = tempfile::tempdir().expect("lifecycle install");
+        let members = [
+            ("model", "model.onnx", model_bytes),
+            ("tokenizer", "tokenizer.json", b"tokenizer".as_slice()),
+            ("config", "config.json", b"config".as_slice()),
+            (
+                "special_tokens_map",
+                "special_tokens_map.json",
+                b"special".as_slice(),
+            ),
+            (
+                "tokenizer_config",
+                "tokenizer_config.json",
+                b"tokenizer-config".as_slice(),
+            ),
+        ];
+        let mut pins = BTreeMap::new();
+        for (role, path, bytes) in members {
+            std::fs::write(install.path().join(path), bytes).expect("fixture member");
+            pins.insert(
+                role.to_owned(),
+                CatalogMemberPinV1 {
+                    path: path.to_owned(),
+                    upstream_path: path.to_owned(),
+                    length: bytes.len() as u64,
+                    sha256: hex::encode(Sha256::digest(bytes)),
+                },
+            );
+        }
+        let model = CatalogedFastEmbedModelV1 {
+            model_id: "jina-embeddings-v2-base-code".to_owned(),
+            fastembed_enum: "JinaEmbeddingsV2BaseCode".to_owned(),
+            model_code: "jinaai/jina-embeddings-v2-base-code".to_owned(),
+            source: CatalogSourceV1 {
+                upstream: "https://example.invalid".to_owned(),
+                revision: "fixture-revision".to_owned(),
+                license: "Apache-2.0".to_owned(),
+                license_url: "https://www.apache.org/licenses/LICENSE-2.0".to_owned(),
+                provenance: "fixture".to_owned(),
+            },
+            expected_dimensions: 768,
+            max_length: 8192,
+            members: pins,
+        };
+        LifecycleInstallFixtureV1 { install, model }
+    }
+
+    /// A constructed lifecycle authority holding its tempdir install alive.
+    pub(crate) struct LifecycleAuthorityV1 {
+        pub(crate) authority: AdmittedProjectionArtifactV1,
+        pub(crate) _install: tempfile::TempDir,
+    }
+
+    /// An authority whose model member matches its length pin but not its
+    /// digest pin. Structural construction succeeds by design; any session
+    /// open (read + digest verification) over it must fail typed.
+    pub(crate) fn digest_mismatched_lifecycle_authority() -> LifecycleAuthorityV1 {
+        let fixture = lifecycle_install_fixture(b"model");
+        std::fs::write(fixture.install.path().join("model.onnx"), b"lodem")
+            .expect("same-length digest-mismatched model member");
+        let authority = lifecycle_authority_from(&fixture, 1024)
+            .expect("structural construction succeeds without reading member bytes");
+        LifecycleAuthorityV1 {
+            authority,
+            _install: fixture.install,
+        }
+    }
+
+    pub(crate) fn lifecycle_authority_from(
+        fixture: &LifecycleInstallFixtureV1,
+        max_model_bytes: u64,
+    ) -> Result<AdmittedProjectionArtifactV1, EmbedError> {
+        AdmittedProjectionArtifactV1::from_lifecycle_install(
+            &fixture.model,
+            fixture.install.path(),
+            ChunkerRevision::new("chunker.v1").expect("chunker fixture"),
+            PrivacyDomainId::new("privacy.project-a".to_owned()).expect("privacy fixture"),
+            7,
+            SemanticResourceCeilings {
+                max_model_bytes,
+                max_tokenizer_bytes: 1024,
+                max_resident_bytes: max_model_bytes.max(4096),
+                max_threads: 1,
+                max_concurrent_sessions: 1,
+                max_batch_size: 4,
+                max_sequence_length: 128,
+                load_deadline_ms: 1_000,
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lifecycle_test_support::{
+        digest_mismatched_lifecycle_authority, lifecycle_authority_from, lifecycle_install_fixture,
     };
     use super::*;
     use tracedecay_domain::{ChunkerRevision, EmbeddingProjectionKeyV1, PrivacyDomainId};
@@ -1579,82 +1696,6 @@ mod tests {
         );
     }
 
-    struct LifecycleInstallFixtureV1 {
-        install: tempfile::TempDir,
-        model: CatalogedFastEmbedModelV1,
-    }
-
-    fn lifecycle_install_fixture(model_bytes: &[u8]) -> LifecycleInstallFixtureV1 {
-        let install = tempfile::tempdir().expect("lifecycle install");
-        let members = [
-            ("model", "model.onnx", model_bytes),
-            ("tokenizer", "tokenizer.json", b"tokenizer".as_slice()),
-            ("config", "config.json", b"config".as_slice()),
-            (
-                "special_tokens_map",
-                "special_tokens_map.json",
-                b"special".as_slice(),
-            ),
-            (
-                "tokenizer_config",
-                "tokenizer_config.json",
-                b"tokenizer-config".as_slice(),
-            ),
-        ];
-        let mut pins = BTreeMap::new();
-        for (role, path, bytes) in members {
-            std::fs::write(install.path().join(path), bytes).expect("fixture member");
-            pins.insert(
-                role.to_owned(),
-                CatalogMemberPinV1 {
-                    path: path.to_owned(),
-                    upstream_path: path.to_owned(),
-                    length: bytes.len() as u64,
-                    sha256: hex::encode(sha2::Sha256::digest(bytes)),
-                },
-            );
-        }
-        let model = CatalogedFastEmbedModelV1 {
-            model_id: "jina-embeddings-v2-base-code".to_owned(),
-            fastembed_enum: "JinaEmbeddingsV2BaseCode".to_owned(),
-            model_code: "jinaai/jina-embeddings-v2-base-code".to_owned(),
-            source: CatalogSourceV1 {
-                upstream: "https://example.invalid".to_owned(),
-                revision: "fixture-revision".to_owned(),
-                license: "Apache-2.0".to_owned(),
-                license_url: "https://www.apache.org/licenses/LICENSE-2.0".to_owned(),
-                provenance: "fixture".to_owned(),
-            },
-            expected_dimensions: 768,
-            max_length: 8192,
-            members: pins,
-        };
-        LifecycleInstallFixtureV1 { install, model }
-    }
-
-    fn lifecycle_authority_from(
-        fixture: &LifecycleInstallFixtureV1,
-        max_model_bytes: u64,
-    ) -> Result<AdmittedProjectionArtifactV1, EmbedError> {
-        AdmittedProjectionArtifactV1::from_lifecycle_install(
-            &fixture.model,
-            fixture.install.path(),
-            id::<ChunkerRevision>("chunker.v1"),
-            id::<PrivacyDomainId>("privacy.project-a"),
-            7,
-            SemanticResourceCeilings {
-                max_model_bytes,
-                max_tokenizer_bytes: 1024,
-                max_resident_bytes: max_model_bytes.max(4096),
-                max_threads: 1,
-                max_concurrent_sessions: 1,
-                max_batch_size: 4,
-                max_sequence_length: 128,
-                load_deadline_ms: 1_000,
-            },
-        )
-    }
-
     #[test]
     fn lifecycle_install_authority_verifies_member_bytes_at_read() {
         let fixture = lifecycle_install_fixture(b"model");
@@ -1694,15 +1735,12 @@ mod tests {
 
     #[test]
     fn lifecycle_authority_construction_reads_no_member_bytes() {
-        let fixture = lifecycle_install_fixture(b"model");
-        // Same length as the pinned bytes, different content. Only reading
-        // and hashing the file could detect the mismatch, so a successful
-        // construction proves zero member byte reads at construction.
-        std::fs::write(fixture.install.path().join("model.onnx"), b"lodem")
-            .expect("digest-mismatched model member");
-
-        let authority = lifecycle_authority_from(&fixture, 1024)
-            .expect("construction checks structural pins without reading member bytes");
+        // The fixture's model member has the pinned length but not the
+        // pinned digest. Only reading and hashing the file could detect the
+        // mismatch, so the successful construction inside the fixture
+        // helper proves zero member byte reads at construction.
+        let mismatched = digest_mismatched_lifecycle_authority();
+        let authority = mismatched.authority;
 
         assert!(
             matches!(
