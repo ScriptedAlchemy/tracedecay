@@ -1247,3 +1247,48 @@ fn default_socket_path_is_profile_scoped_not_project_scoped() {
         override_socket
     );
 }
+
+/// A profile rooted deep enough to overflow `sockaddr_un` (macOS `SUN_LEN`)
+/// must not surface as a daemon that cannot bind its socket. The default
+/// endpoint re-derives to a short deterministic per-profile path that daemon
+/// and clients converge on independently.
+#[cfg(unix)]
+#[test]
+fn over_long_profile_socket_path_falls_back_to_a_short_deterministic_path() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let _socket_guard = EnvVarGuard::unset(crate::daemon::SOCKET_ENV);
+    let root = tempfile::TempDir::new().expect("profile temp dir");
+    let deep_profile = root.path().join("p".repeat(120)).join(".tracedecay");
+    let sibling_profile = root.path().join("q".repeat(120)).join(".tracedecay");
+
+    let first = {
+        let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &deep_profile);
+        let first = super::default_socket_path().expect("fallback socket path");
+        assert_eq!(
+            first,
+            super::default_socket_path().expect("repeat lookup"),
+            "clients and daemon must derive the same endpoint independently"
+        );
+        first
+    };
+    assert!(
+        crate::daemon::transport::unix_socket_path_within_limit(&first),
+        "fallback endpoint must satisfy the platform socket path limit: {}",
+        first.display()
+    );
+    assert!(
+        first.starts_with("/tmp"),
+        "fallback endpoint must live under the fixed short base: {}",
+        first.display()
+    );
+
+    let sibling = {
+        let _data_dir_guard =
+            EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &sibling_profile);
+        super::default_socket_path().expect("sibling fallback socket path")
+    };
+    assert_ne!(
+        first, sibling,
+        "distinct profiles must keep distinct daemon endpoints"
+    );
+}

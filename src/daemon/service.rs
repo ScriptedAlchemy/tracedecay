@@ -1,7 +1,12 @@
 use std::fmt::Write;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+
+#[cfg(unix)]
+use sha2::Digest;
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -565,7 +570,33 @@ pub fn default_socket_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os(SOCKET_ENV).filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
     }
-    Ok(tracedecay_data_dir()?.join("daemon.sock"))
+    let profile_root = tracedecay_data_dir()?;
+    let profile_scoped = profile_root.join("daemon.sock");
+    #[cfg(unix)]
+    if !super::transport::unix_socket_path_within_limit(&profile_scoped) {
+        return Ok(short_profile_socket_path(&profile_root));
+    }
+    Ok(profile_scoped)
+}
+
+/// Deterministic short bind path for a profile whose own directory would
+/// overflow `sockaddr_un` (`SUN_LEN` — 104 bytes on macOS/BSD).
+///
+/// Daemon and clients all derive the endpoint through this one function, so
+/// hashing the profile root keeps them convergent without any extra
+/// discovery state, while distinct profiles keep distinct sockets. The
+/// literal `/tmp` base is deliberate: `$TMPDIR` differs between launchd
+/// services and login shells on macOS, which would split the daemon and its
+/// clients onto different paths. Squatting on the parent fails closed: a
+/// group- or world-accessible parent is refused before binding, and an
+/// attacker-owned 0700 directory refuses the bind at the kernel.
+#[cfg(unix)]
+fn short_profile_socket_path(profile_root: &Path) -> PathBuf {
+    let digest = sha2::Sha256::digest(profile_root.as_os_str().as_bytes());
+    PathBuf::from(format!(
+        "/tmp/tracedecay-{}/daemon.sock",
+        hex::encode(&digest[..8])
+    ))
 }
 
 pub fn socket_path_or_default(socket: Option<String>) -> Result<PathBuf> {
