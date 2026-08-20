@@ -1822,6 +1822,7 @@
         "session_evidence_reset_required",
         "session_cursor_manifest_limit_exceeded",
         "session_evidence_budget_exhausted",
+        "session_evidence_budget_suppressed",
         "session_evidence_cancelled",
         "no_session_evidence",
         "shipped_fact_proposal_history_retired"
@@ -28921,7 +28922,7 @@
     },
     "workflow_definition": {
       "$ref": "#/$defs/WorkflowDefinition",
-      "description": "The workflow definition/run slice the Workflows workspace consumes off\nthe mounted `/api/application/workflow` routes. Handoff issue/redeem\nstay uncontracted for the dashboard because it never holds a bearer;\nrun start/pause/resume/cancel stay uncontracted because the browser\nmust not mint fences, command ids, or provider admissions."
+      "description": "The workflow definition/run slice the Workflows workspace consumes.\nHandoffs and run control stay uncontracted: the browser never holds a\nbearer or mints fences, command ids, or provider admissions."
     },
     "workflow_definition_activate_request": {
       "$ref": "#/$defs/WorkflowDefinitionActivateRequest"
