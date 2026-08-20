@@ -15,10 +15,9 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
-    GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
-    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
-    GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
-    SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
+    GraphGenerationManifest, GraphIdempotencyKey, GraphLabel, GraphNamespace, GraphProjectionId,
+    GraphProjectionIdentity, GraphProjectorRevision, GraphProperty, GraphPropertyName,
+    GraphTraversalDirection, SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
 };
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use tracedecay_graph_db::{GraphWatermark, NeverCancelled};
@@ -754,55 +753,21 @@ fn current_generation_entity(
     .map_err(Into::into)
 }
 
-fn symbol_entity(record: SymbolRecordV1) -> Result<GraphEntity, CodeGraphProjectionError> {
+/// `identity` must be the [`symbol_entity_id`] of `record.occurrence`; the
+/// builder derives each occurrence's identity once and reuses it here and in
+/// every relation that names the symbol.
+fn symbol_entity(
+    identity: GraphEntityId,
+    record: SymbolRecordV1,
+) -> Result<GraphEntity, CodeGraphProjectionError> {
     validate_symbol_record(&record)?;
     GraphEntity::new(
-        symbol_entity_id(&record.occurrence)?,
+        identity,
         BTreeSet::from([GraphLabel::new(SYMBOL_LABEL)?]),
         BTreeMap::from([(
             GraphPropertyName::new(SYMBOL_RECORD_PROPERTY)?,
             GraphProperty::Bytes(serialize(&record)?),
         )]),
-    )
-    .map_err(Into::into)
-}
-
-fn edge_entity(edge: &CanonicalRelationEdgeV1) -> Result<GraphEntity, CodeGraphProjectionError> {
-    GraphEntity::new(
-        edge_entity_id(edge)?,
-        BTreeSet::from([GraphLabel::new(EDGE_LABEL)?]),
-        BTreeMap::from([(
-            GraphPropertyName::new(EDGE_RECORD_PROPERTY)?,
-            GraphProperty::Bytes(serialize(edge)?),
-        )]),
-    )
-    .map_err(Into::into)
-}
-
-fn source_relation(
-    projection: &GraphProjectionIdentity,
-    edge: &CanonicalRelationEdgeV1,
-) -> Result<GraphGenerationRelation, CodeGraphProjectionError> {
-    GraphGenerationRelation::new(
-        relation_id("source", edge)?,
-        GraphEntityRef::new(projection.clone(), symbol_entity_id(&edge.from_occurrence)?),
-        GraphEntityRef::new(projection.clone(), edge_entity_id(edge)?),
-        GraphRelationKind::new(SOURCE_EDGE_KIND)?,
-        BTreeMap::new(),
-    )
-    .map_err(Into::into)
-}
-
-fn target_relation(
-    projection: &GraphProjectionIdentity,
-    edge: &CanonicalRelationEdgeV1,
-) -> Result<GraphGenerationRelation, CodeGraphProjectionError> {
-    GraphGenerationRelation::new(
-        relation_id("target", edge)?,
-        GraphEntityRef::new(projection.clone(), edge_entity_id(edge)?),
-        GraphEntityRef::new(projection.clone(), symbol_entity_id(&edge.to_occurrence)?),
-        GraphRelationKind::new(TARGET_EDGE_KIND)?,
-        BTreeMap::new(),
     )
     .map_err(Into::into)
 }
@@ -817,13 +782,6 @@ fn edge_entity_id(
     edge: &CanonicalRelationEdgeV1,
 ) -> Result<GraphEntityId, CodeGraphProjectionError> {
     GraphEntityId::new(stable_identity("edge", &hex::encode(serialize(edge)?))).map_err(Into::into)
-}
-
-fn relation_id(
-    role: &str,
-    edge: &CanonicalRelationEdgeV1,
-) -> Result<GraphRelationId, CodeGraphProjectionError> {
-    GraphRelationId::new(stable_identity(role, edge_entity_id(edge)?.as_str())).map_err(Into::into)
 }
 
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
