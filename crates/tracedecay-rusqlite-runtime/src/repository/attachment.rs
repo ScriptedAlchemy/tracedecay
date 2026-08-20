@@ -506,6 +506,10 @@ impl RepositoryRuntimePhysicalAttachment {
     /// Crate-private: public callers use [`Self::run_maintenance_checkpoint`],
     /// which validates permit and admission-stage authority first. Admission is
     /// not reopened; that exclusive window is intentional.
+    ///
+    /// Test modules in this crate call this wrapper; lib clippy does not see
+    /// those `#[cfg(test)]` uses.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn begin_maintenance_drain(&self) -> Result<(), RepositoryDispatchError> {
         let mut state = self.lock_state();
         Self::begin_maintenance_drain_locked(&mut state)
