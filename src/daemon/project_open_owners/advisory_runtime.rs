@@ -802,21 +802,26 @@ async fn run_production_hook_cycle(
         )
         .await;
     match outcome {
-        Ok(ContextScoutRuntimeOutcomeV1::Enqueued { .. }) => producer
-            .graph
-            .mount_current_context_scout_claim_authority(
-                Arc::clone(&producer.scout_registry),
-                &request.hook,
-                pin,
-                execution.context,
-                lifecycle,
-                canonical.address,
-                selection.input_watermark,
-                observed_at,
-            )
-            .await
-            .then_some(HookOrchestrationWorkOutcomeV1::Completed)
-            .unwrap_or(HookOrchestrationWorkOutcomeV1::RetryableFailure),
+        Ok(ContextScoutRuntimeOutcomeV1::Enqueued { .. }) => {
+            let mounted = producer
+                .graph
+                .mount_current_context_scout_claim_authority(
+                    Arc::clone(&producer.scout_registry),
+                    &request.hook,
+                    pin,
+                    execution.context,
+                    lifecycle,
+                    canonical.address,
+                    selection.input_watermark,
+                    observed_at,
+                )
+                .await;
+            if mounted {
+                HookOrchestrationWorkOutcomeV1::Completed
+            } else {
+                HookOrchestrationWorkOutcomeV1::RetryableFailure
+            }
+        }
         Ok(ContextScoutRuntimeOutcomeV1::Suppressed { .. }) => {
             HookOrchestrationWorkOutcomeV1::Completed
         }

@@ -28,7 +28,6 @@ use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionCon
 
 mod discovery_queue;
 mod disposition;
-mod durability;
 mod projection_drain;
 mod replay;
 mod runtime;
@@ -39,7 +38,6 @@ mod wire;
 pub use disposition::{
     HostAdmissionDispositionClass, HostAdmissionStatus, HostAdmissionTelemetryDisposition,
 };
-pub use durability::{DirectorySyncPolicy, sync_directory};
 pub use replay::{ReplayPassDecision, classify_replay_pass, replay_backoff};
 
 pub use runtime::{DurableHostAdmission, HostAdmissionRuntime};

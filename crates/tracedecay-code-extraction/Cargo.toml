@@ -5,7 +5,7 @@ publish = false
 edition.workspace = true
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
-description = "TraceDecay tree-sitter language extraction leaf"
+description = "Tree-sitter language extraction for TraceDecay"
 build = "build.rs"
 include = [
     "/src/**",

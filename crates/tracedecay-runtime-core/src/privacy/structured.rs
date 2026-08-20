@@ -80,6 +80,18 @@ pub(crate) enum StructuredSanitizationError {
     InvalidEncoding,
     #[error("structured JSON has an ambiguous duplicate key or exceeds parse limits")]
     UnsafeJsonStructure,
+    /// An object key carries credential material. A key cannot be redacted in
+    /// place without rewriting the document's structure, so the sanitizer
+    /// refuses the payload fail-closed. This is the sanitizer doing its job,
+    /// not a fault in the sanitizer or in receipt construction.
+    #[error("structured payload carries credential material in object keys")]
+    CredentialKeyQuarantine,
+    /// The sanitized payload could not be canonically re-encoded, so its
+    /// expansion cannot be measured or bound to a receipt.
+    #[error("structured payload could not be canonically encoded")]
+    CanonicalEncoding,
+    /// The detector kernel itself failed to initialize (credential patterns
+    /// did not compile), so no payload can be scanned at all.
     #[error("structured sanitizer is unavailable")]
     SanitizerUnavailable,
 }
@@ -136,7 +148,7 @@ fn sanitize_parsed(
     let detected = redact_sensitive_values(value, &BTreeSet::new())
         .map_err(|_| StructuredSanitizationError::SanitizerUnavailable)?;
     if !detected.quarantine_findings.is_empty() {
-        return Err(StructuredSanitizationError::SanitizerUnavailable);
+        return Err(StructuredSanitizationError::CredentialKeyQuarantine);
     }
     validate_expansion(&detected.payload, limits)?;
     Ok(StructuredSanitizedPayload {
@@ -153,7 +165,7 @@ fn sanitize_malformed(
     let detected = redact_sensitive_values(Value::String(text.to_owned()), &BTreeSet::new())
         .map_err(|_| StructuredSanitizationError::SanitizerUnavailable)?;
     if !detected.quarantine_findings.is_empty() {
-        return Err(StructuredSanitizationError::SanitizerUnavailable);
+        return Err(StructuredSanitizationError::CredentialKeyQuarantine);
     }
     validate_expansion(&detected.payload, limits)?;
     Ok(StructuredSanitizedPayload {
@@ -1042,7 +1054,7 @@ fn validate_expansion(
     limits: StructuredSanitizationLimits,
 ) -> Result<(), StructuredSanitizationError> {
     let expanded =
-        serde_json::to_vec(value).map_err(|_| StructuredSanitizationError::SanitizerUnavailable)?;
+        serde_json::to_vec(value).map_err(|_| StructuredSanitizationError::CanonicalEncoding)?;
     if expanded.len() > limits.expanded_bytes {
         return Err(StructuredSanitizationError::ExpandedBytesExceeded);
     }

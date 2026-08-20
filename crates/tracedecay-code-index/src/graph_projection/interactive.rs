@@ -701,6 +701,12 @@ impl CodeGraphInteractiveReader {
         Ok(built)
     }
 
+    /// Hydration is staged so excluded work is never paid: each adjacency row
+    /// loads its relation and edge payload first, edges outside the admitted
+    /// kinds stop there without touching their far endpoint, and each unique
+    /// far endpoint that survives the filter is hydrated once per batch —
+    /// impact frontiers and shared callees converge on the same neighbors, so
+    /// per-edge endpoint reads repeated the same snapshot lookups.
     fn semantic_neighbors(
         &self,
         seeds: &[SymbolOccurrenceId],
@@ -730,6 +736,7 @@ impl CodeGraphInteractiveReader {
                 "code graph adjacency batch shape does not match its seeds".to_owned(),
             ));
         }
+        let mut neighbors = BTreeMap::<SymbolOccurrenceId, CodeGraphSymbolSummaryV1>::new();
         let mut batches = Vec::with_capacity(seeds.len());
         for (seed, relations) in seeds.iter().zip(per_seed_relations) {
             let mut edges = Vec::new();
@@ -737,15 +744,39 @@ impl CodeGraphInteractiveReader {
                 if cancellation.is_cancelled() {
                     return Err(CodeGraphProjectionError::Cancelled);
                 }
-                let edge = self.hydrate_semantic_edge(
+                let edge = self.hydrate_edge_record(
                     seed,
                     &relation,
                     direction,
                     Arc::clone(&cancellation),
                 )?;
-                if admitted.is_empty() || admitted.contains(&edge.edge.kind) {
-                    edges.push(edge);
+                if !admitted.is_empty() && !admitted.contains(&edge.kind) {
+                    continue;
                 }
+                let far = match direction {
+                    AdjacencyDirection::Outgoing => &edge.to_occurrence,
+                    AdjacencyDirection::Incoming => &edge.from_occurrence,
+                };
+                let neighbor = match neighbors.get(far) {
+                    Some(summary) => summary.clone(),
+                    None => {
+                        let record = load_symbol_record(
+                            &self.snapshot,
+                            &self.projection,
+                            far,
+                            Arc::clone(&cancellation),
+                        )?
+                        .ok_or_else(|| {
+                            CodeGraphProjectionError::Corrupt(
+                                "code graph edge endpoint has no symbol entity".to_owned(),
+                            )
+                        })?;
+                        let summary = summary_from_record(record);
+                        neighbors.insert(far.clone(), summary.clone());
+                        summary
+                    }
+                };
+                edges.push(CodeGraphSemanticEdgeV1 { edge, neighbor });
             }
             edges.sort_by(|left, right| compare_edges(&left.edge, &right.edge));
             edges.dedup();
@@ -754,13 +785,15 @@ impl CodeGraphInteractiveReader {
         Ok(batches)
     }
 
-    fn hydrate_semantic_edge(
+    /// Loads one adjacency row up to its validated edge payload: the relation,
+    /// the edge entity, and the seed-endpoint check — no far-endpoint read.
+    fn hydrate_edge_record(
         &self,
         seed: &SymbolOccurrenceId,
         relation: &GraphRelationId,
         direction: AdjacencyDirection,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<CodeGraphSemanticEdgeV1, CodeGraphProjectionError> {
+    ) -> Result<CanonicalRelationEdgeV1, CodeGraphProjectionError> {
         let relation = self
             .snapshot
             .relation(
@@ -778,32 +811,23 @@ impl CodeGraphInteractiveReader {
         };
         let entity = self
             .snapshot
-            .entity(edge_reference, Arc::clone(&cancellation))?
+            .entity(edge_reference, cancellation)?
             .ok_or_else(|| {
                 CodeGraphProjectionError::Corrupt(
                     "code graph adjacency referenced a missing edge entity".to_owned(),
                 )
             })?;
         let edge = load_edge_record(&entity)?;
-        let (near, far) = match direction {
-            AdjacencyDirection::Outgoing => (&edge.from_occurrence, &edge.to_occurrence),
-            AdjacencyDirection::Incoming => (&edge.to_occurrence, &edge.from_occurrence),
+        let near = match direction {
+            AdjacencyDirection::Outgoing => &edge.from_occurrence,
+            AdjacencyDirection::Incoming => &edge.to_occurrence,
         };
         if near != seed {
             return Err(CodeGraphProjectionError::Corrupt(
                 "code graph edge endpoint does not match its adjacency seed".to_owned(),
             ));
         }
-        let neighbor = load_symbol_record(&self.snapshot, &self.projection, far, cancellation)?
-            .ok_or_else(|| {
-                CodeGraphProjectionError::Corrupt(
-                    "code graph edge endpoint has no symbol entity".to_owned(),
-                )
-            })?;
-        Ok(CodeGraphSemanticEdgeV1 {
-            edge,
-            neighbor: summary_from_record(neighbor),
-        })
+        Ok(edge)
     }
 }
 

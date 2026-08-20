@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
-use tracedecay_application::framed_log::{
+use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, append_durable, file_len as shared_file_len,
     sync_parent_directory as shared_sync_parent_directory,
     tighten_existing_file as shared_tighten_existing_file, truncate_file as shared_truncate_file,

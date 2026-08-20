@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use tracedecay_application::DirectorySyncPolicy;
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory as sync_directory_io};
 
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
@@ -90,7 +90,7 @@ fn sync_file(path: &Path) -> Result<(), LcmError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), LcmError> {
-    tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict)
+    sync_directory_io(path, DirectorySyncPolicy::Strict)
         .map_err(|error| LcmError::Io(error.to_string()))
 }
 

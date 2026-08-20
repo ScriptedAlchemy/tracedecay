@@ -45,6 +45,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[cfg(any(test, feature = "semantic-fastembed"))]
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, EmbeddingDeviceClassV1, EmbeddingMetricV1,
@@ -453,8 +454,16 @@ impl AdmittedProjectionArtifactV1 {
             root: install_path.to_path_buf(),
             members: model.members.clone(),
         };
-        // Revalidate all members before exposing this authority. Each future
-        // session open repeats the same check when it reads the bytes.
+        // Check every required member's structural pin (declared entry,
+        // normalized path, regular non-symlink file, exact length) without
+        // reading its bytes. Byte digests are verified by
+        // `read_member_bytes` at every session open — the only place member
+        // bytes are consumed — matching the artifact-store authority, whose
+        // admission also defers digest checks to reads. Reading and hashing
+        // the whole model file here charged every authority construction
+        // (each scheduled projection's artifact load and each serving
+        // restore attempt) a full model read that session open then
+        // repeated.
         for role in [
             ArtifactMemberRoleV1::Model,
             ArtifactMemberRoleV1::Tokenizer,
@@ -462,7 +471,7 @@ impl AdmittedProjectionArtifactV1 {
             ArtifactMemberRoleV1::SpecialTokensMap,
             ArtifactMemberRoleV1::TokenizerConfig,
         ] {
-            lifecycle_install.read_member_bytes(role)?;
+            lifecycle_install.member_pin_path(role)?;
         }
         Ok(Self {
             runtime_artifact: VerifiedEmbeddingArtifactV1 {
@@ -611,7 +620,15 @@ impl LifecycleInstallArtifactV1 {
         self.members.contains_key(key)
     }
 
-    fn read_member_bytes(&self, role: ArtifactMemberRoleV1) -> Result<Vec<u8>, EmbedError> {
+    /// Resolve one member pin to its on-disk path after the byte-free
+    /// structural checks: the pin exists, its path is a normalized relative
+    /// path, and the target is a regular non-symlink file matching the
+    /// length pin exactly. Digest verification deliberately stays in
+    /// [`Self::read_member_bytes`], where the bytes are consumed.
+    fn member_pin_path(
+        &self,
+        role: ArtifactMemberRoleV1,
+    ) -> Result<(PathBuf, &CatalogMemberPinV1), EmbedError> {
         let key = match role {
             ArtifactMemberRoleV1::Model => "model",
             ArtifactMemberRoleV1::Tokenizer => "tokenizer",
@@ -658,6 +675,14 @@ impl LifecycleInstallArtifactV1 {
                 "cataloged lifecycle member no longer matches its length pin",
             ));
         }
+        Ok((path, pin))
+    }
+
+    // Byte reads exist only where a runtime consumes member bytes, matching
+    // the [`VerifiedEmbeddingArtifactV1::required_member_bytes`] gate.
+    #[cfg(any(test, feature = "semantic-fastembed"))]
+    fn read_member_bytes(&self, role: ArtifactMemberRoleV1) -> Result<Vec<u8>, EmbedError> {
+        let (path, pin) = self.member_pin_path(role)?;
         let bytes = std::fs::read(path).map_err(|_| {
             fastembed_failure(
                 RuntimeFailureKindV1::CorruptArtifact,
@@ -1307,6 +1332,20 @@ impl EmbeddingRuntime for FakeEmbeddingRuntime {
                 detail: "scripted fake open failure".to_string(),
             }));
         }
+        // Production parity: a session open consumes member bytes, so a
+        // lifecycle-backed authority is length- and digest-verified here
+        // exactly as the FastEmbed runtime is when it reads the bytes.
+        if let Some(lifecycle) = authority.runtime_artifact().lifecycle_install.as_ref() {
+            for role in [
+                ArtifactMemberRoleV1::Model,
+                ArtifactMemberRoleV1::Tokenizer,
+                ArtifactMemberRoleV1::Config,
+                ArtifactMemberRoleV1::SpecialTokensMap,
+                ArtifactMemberRoleV1::TokenizerConfig,
+            ] {
+                lifecycle.read_member_bytes(role)?;
+            }
+        }
         self.counters.sessions_opened.fetch_add(1, Ordering::SeqCst);
         Ok(FakeEmbeddingSession {
             authority: authority.clone(),
@@ -1440,12 +1479,125 @@ fn pseudo_embedding(
     values
 }
 
+/// Lifecycle-install fixtures shared by this module's tests and the crate
+/// root's scheduling tests. Everything stays inside a tempdir; nothing here
+/// reads a live profile or downloads a model.
 #[cfg(test)]
-mod tests {
+pub(crate) mod lifecycle_test_support {
     use std::collections::BTreeMap;
+
+    use sha2::{Digest, Sha256};
+    use tracedecay_domain::{ChunkerRevision, PrivacyDomainId};
 
     use super::super::model_catalog::{
         CatalogMemberPinV1, CatalogSourceV1, CatalogedFastEmbedModelV1,
+    };
+    use super::AdmittedProjectionArtifactV1;
+    use super::EmbedError;
+    use crate::SemanticResourceCeilings;
+
+    pub(crate) struct LifecycleInstallFixtureV1 {
+        pub(crate) install: tempfile::TempDir,
+        pub(crate) model: CatalogedFastEmbedModelV1,
+    }
+
+    pub(crate) fn lifecycle_install_fixture(model_bytes: &[u8]) -> LifecycleInstallFixtureV1 {
+        let install = tempfile::tempdir().expect("lifecycle install");
+        let members = [
+            ("model", "model.onnx", model_bytes),
+            ("tokenizer", "tokenizer.json", b"tokenizer".as_slice()),
+            ("config", "config.json", b"config".as_slice()),
+            (
+                "special_tokens_map",
+                "special_tokens_map.json",
+                b"special".as_slice(),
+            ),
+            (
+                "tokenizer_config",
+                "tokenizer_config.json",
+                b"tokenizer-config".as_slice(),
+            ),
+        ];
+        let mut pins = BTreeMap::new();
+        for (role, path, bytes) in members {
+            std::fs::write(install.path().join(path), bytes).expect("fixture member");
+            pins.insert(
+                role.to_owned(),
+                CatalogMemberPinV1 {
+                    path: path.to_owned(),
+                    upstream_path: path.to_owned(),
+                    length: bytes.len() as u64,
+                    sha256: hex::encode(Sha256::digest(bytes)),
+                },
+            );
+        }
+        let model = CatalogedFastEmbedModelV1 {
+            model_id: "jina-embeddings-v2-base-code".to_owned(),
+            fastembed_enum: "JinaEmbeddingsV2BaseCode".to_owned(),
+            model_code: "jinaai/jina-embeddings-v2-base-code".to_owned(),
+            source: CatalogSourceV1 {
+                upstream: "https://example.invalid".to_owned(),
+                revision: "fixture-revision".to_owned(),
+                license: "Apache-2.0".to_owned(),
+                license_url: "https://www.apache.org/licenses/LICENSE-2.0".to_owned(),
+                provenance: "fixture".to_owned(),
+            },
+            expected_dimensions: 768,
+            max_length: 8192,
+            members: pins,
+        };
+        LifecycleInstallFixtureV1 { install, model }
+    }
+
+    /// A constructed lifecycle authority holding its tempdir install alive.
+    pub(crate) struct LifecycleAuthorityV1 {
+        pub(crate) authority: AdmittedProjectionArtifactV1,
+        pub(crate) _install: tempfile::TempDir,
+    }
+
+    /// An authority whose model member matches its length pin but not its
+    /// digest pin. Structural construction succeeds by design; any session
+    /// open (read + digest verification) over it must fail typed.
+    pub(crate) fn digest_mismatched_lifecycle_authority() -> LifecycleAuthorityV1 {
+        let fixture = lifecycle_install_fixture(b"model");
+        std::fs::write(fixture.install.path().join("model.onnx"), b"lodem")
+            .expect("same-length digest-mismatched model member");
+        let authority = lifecycle_authority_from(&fixture, 1024)
+            .expect("structural construction succeeds without reading member bytes");
+        LifecycleAuthorityV1 {
+            authority,
+            _install: fixture.install,
+        }
+    }
+
+    pub(crate) fn lifecycle_authority_from(
+        fixture: &LifecycleInstallFixtureV1,
+        max_model_bytes: u64,
+    ) -> Result<AdmittedProjectionArtifactV1, EmbedError> {
+        AdmittedProjectionArtifactV1::from_lifecycle_install(
+            &fixture.model,
+            fixture.install.path(),
+            ChunkerRevision::new("chunker.v1").expect("chunker fixture"),
+            PrivacyDomainId::new("privacy.project-a".to_owned()).expect("privacy fixture"),
+            7,
+            SemanticResourceCeilings {
+                max_model_bytes,
+                max_tokenizer_bytes: 1024,
+                max_resident_bytes: max_model_bytes.max(4096),
+                max_threads: 1,
+                max_concurrent_sessions: 1,
+                max_batch_size: 4,
+                max_sequence_length: 128,
+                load_deadline_ms: 1_000,
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lifecycle_test_support::{
+        digest_mismatched_lifecycle_authority, lifecycle_authority_from, lifecycle_install_fixture,
     };
     use super::*;
     use tracedecay_domain::{ChunkerRevision, EmbeddingProjectionKeyV1, PrivacyDomainId};
@@ -1559,69 +1711,10 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_install_authority_revalidates_every_jina_member() {
-        let install = tempfile::tempdir().expect("lifecycle install");
-        let members = [
-            ("model", "model.onnx", b"model".as_slice()),
-            ("tokenizer", "tokenizer.json", b"tokenizer".as_slice()),
-            ("config", "config.json", b"config".as_slice()),
-            (
-                "special_tokens_map",
-                "special_tokens_map.json",
-                b"special".as_slice(),
-            ),
-            (
-                "tokenizer_config",
-                "tokenizer_config.json",
-                b"tokenizer-config".as_slice(),
-            ),
-        ];
-        let mut pins = BTreeMap::new();
-        for (role, path, bytes) in members {
-            std::fs::write(install.path().join(path), bytes).expect("fixture member");
-            pins.insert(
-                role.to_owned(),
-                CatalogMemberPinV1 {
-                    path: path.to_owned(),
-                    upstream_path: path.to_owned(),
-                    length: bytes.len() as u64,
-                    sha256: hex::encode(sha2::Sha256::digest(bytes)),
-                },
-            );
-        }
-        let model = CatalogedFastEmbedModelV1 {
-            model_id: "jina-embeddings-v2-base-code".to_owned(),
-            fastembed_enum: "JinaEmbeddingsV2BaseCode".to_owned(),
-            model_code: "jinaai/jina-embeddings-v2-base-code".to_owned(),
-            source: CatalogSourceV1 {
-                upstream: "https://example.invalid".to_owned(),
-                revision: "fixture-revision".to_owned(),
-                license: "Apache-2.0".to_owned(),
-                license_url: "https://www.apache.org/licenses/LICENSE-2.0".to_owned(),
-                provenance: "fixture".to_owned(),
-            },
-            expected_dimensions: 768,
-            max_length: 8192,
-            members: pins,
-        };
-        let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
-            &model,
-            install.path(),
-            id::<ChunkerRevision>("chunker.v1"),
-            id::<PrivacyDomainId>("privacy.project-a"),
-            7,
-            SemanticResourceCeilings {
-                max_model_bytes: 1024,
-                max_tokenizer_bytes: 1024,
-                max_resident_bytes: 4096,
-                max_threads: 1,
-                max_concurrent_sessions: 1,
-                max_batch_size: 4,
-                max_sequence_length: 128,
-                load_deadline_ms: 1_000,
-            },
-        )
-        .expect("verified lifecycle authority");
+    fn lifecycle_install_authority_verifies_member_bytes_at_read() {
+        let fixture = lifecycle_install_fixture(b"model");
+        let authority =
+            lifecycle_authority_from(&fixture, 1024).expect("verified lifecycle authority");
 
         assert_eq!(
             authority
@@ -1644,7 +1737,7 @@ mod tests {
                 }))
             ));
         }
-        std::fs::write(install.path().join("tokenizer.json"), b"mutated")
+        std::fs::write(fixture.install.path().join("tokenizer.json"), b"mutated")
             .expect("corrupt tokenizer");
         assert!(matches!(
             authority
@@ -1652,6 +1745,174 @@ mod tests {
                 .required_member_bytes(ArtifactMemberRoleV1::Tokenizer),
             Err(EmbedError::Runtime(_))
         ));
+    }
+
+    #[test]
+    fn lifecycle_authority_construction_reads_no_member_bytes() {
+        // The fixture's model member has the pinned length but not the
+        // pinned digest. Only reading and hashing the file could detect the
+        // mismatch, so the successful construction inside the fixture
+        // helper proves zero member byte reads at construction.
+        let mismatched = digest_mismatched_lifecycle_authority();
+        let authority = mismatched.authority;
+
+        assert!(
+            matches!(
+                authority
+                    .runtime_artifact()
+                    .required_member_bytes(ArtifactMemberRoleV1::Model),
+                Err(EmbedError::Runtime(RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::CorruptArtifact,
+                    ..
+                }))
+            ),
+            "every byte consumption still verifies the digest pin"
+        );
+        assert!(
+            matches!(
+                FakeEmbeddingRuntime::new().open_session(&authority),
+                Err(EmbedError::Runtime(RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::CorruptArtifact,
+                    ..
+                }))
+            ),
+            "the default-runtime session open also rejects digest-mismatched bytes"
+        );
+        #[cfg(feature = "semantic-fastembed")]
+        assert!(
+            matches!(
+                FastEmbedEmbeddingRuntime.open_session(&authority),
+                Err(EmbedError::Runtime(RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::CorruptArtifact,
+                    ..
+                }))
+            ),
+            "no session can open over digest-mismatched member bytes"
+        );
+    }
+
+    #[test]
+    fn lifecycle_authority_construction_rejects_structural_pin_violations() {
+        let fixture = lifecycle_install_fixture(b"model");
+        let model_path = fixture.install.path().join("model.onnx");
+
+        std::fs::write(&model_path, b"model-longer-than-pin").expect("length-mismatched member");
+        assert!(
+            matches!(
+                lifecycle_authority_from(&fixture, 1024),
+                Err(EmbedError::Runtime(RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::CorruptArtifact,
+                    ..
+                }))
+            ),
+            "a length-pin mismatch fails construction eagerly"
+        );
+
+        std::fs::remove_file(&model_path).expect("remove model member");
+        assert!(
+            matches!(
+                lifecycle_authority_from(&fixture, 1024),
+                Err(EmbedError::Runtime(RuntimeFailureV1 {
+                    kind: RuntimeFailureKindV1::CorruptArtifact,
+                    ..
+                }))
+            ),
+            "a missing member fails construction eagerly"
+        );
+
+        #[cfg(unix)]
+        {
+            std::fs::write(fixture.install.path().join("model.real"), b"model")
+                .expect("symlink target");
+            std::os::unix::fs::symlink(fixture.install.path().join("model.real"), &model_path)
+                .expect("symlinked member");
+            assert!(
+                matches!(
+                    lifecycle_authority_from(&fixture, 1024),
+                    Err(EmbedError::Runtime(RuntimeFailureV1 {
+                        kind: RuntimeFailureKindV1::CorruptArtifact,
+                        ..
+                    }))
+                ),
+                "a symlinked member fails construction eagerly"
+            );
+        }
+    }
+
+    /// The removed construction work is exactly one [`read_member_bytes`]
+    /// pass over every member — still the per-session-open verification —
+    /// so construction must do strictly less: it may stat member pins but
+    /// never open one for reading. Proven by operations, not wall clocks:
+    /// the verification pass must return every member's exact pinned bytes
+    /// (impossible without reading all of them), while construction still
+    /// succeeds after member read permission is revoked (any
+    /// construction-time byte read would fail the constructor and this
+    /// test).
+    #[test]
+    fn lifecycle_authority_construction_is_cheaper_than_member_byte_verification() {
+        let fixture = lifecycle_install_fixture(b"model");
+        let authority =
+            lifecycle_authority_from(&fixture, 1024).expect("verified lifecycle authority");
+        for (role, pinned) in [
+            (ArtifactMemberRoleV1::Model, b"model".as_slice()),
+            (ArtifactMemberRoleV1::Tokenizer, b"tokenizer".as_slice()),
+            (ArtifactMemberRoleV1::Config, b"config".as_slice()),
+            (
+                ArtifactMemberRoleV1::SpecialTokensMap,
+                b"special".as_slice(),
+            ),
+            (
+                ArtifactMemberRoleV1::TokenizerConfig,
+                b"tokenizer-config".as_slice(),
+            ),
+        ] {
+            assert_eq!(
+                authority
+                    .runtime_artifact()
+                    .required_member_bytes(role)
+                    .expect("baseline member byte verification"),
+                pinned,
+                "one verification pass must consume every member's bytes"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for member in [
+                "model.onnx",
+                "tokenizer.json",
+                "config.json",
+                "special_tokens_map.json",
+                "tokenizer_config.json",
+            ] {
+                std::fs::set_permissions(
+                    fixture.install.path().join(member),
+                    std::fs::Permissions::from_mode(0o000),
+                )
+                .expect("revoke member read permission");
+            }
+            assert!(
+                std::fs::read(fixture.install.path().join("model.onnx")).is_err(),
+                "the fixture requires a test runner whose member reads are deniable"
+            );
+            let unreadable = lifecycle_authority_from(&fixture, 1024).expect(
+                "construction checks structural pins without opening member bytes for reading",
+            );
+            assert!(
+                matches!(
+                    unreadable
+                        .runtime_artifact()
+                        .required_member_bytes(ArtifactMemberRoleV1::Model),
+                    Err(EmbedError::Runtime(RuntimeFailureV1 {
+                        kind: RuntimeFailureKindV1::CorruptArtifact,
+                        ..
+                    }))
+                ),
+                "the byte-verification pass cannot succeed without reading, so the revocation \
+                 that construction tolerates provably blocks the read path"
+            );
+        }
     }
 
     #[test]

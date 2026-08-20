@@ -4,8 +4,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::{DirectorySyncPolicy, atomic_write};
 use tracedecay_domain::canonical_sha256;
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
 use super::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionGenerationV1,

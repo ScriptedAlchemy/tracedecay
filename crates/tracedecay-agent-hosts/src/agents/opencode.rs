@@ -539,9 +539,9 @@ fn remove_external_opencode_assets(
 ) -> Result<()> {
     for path in external_opencode_asset_paths(home, components) {
         match super::safe_remove_host_file(&path) {
-            Ok(()) => tracedecay_application::sync_parent_directory(
+            Ok(()) => tracedecay_private_fs::framed_log::sync_parent_directory(
                 &path,
-                tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+                tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
             )
             .map_err(|error| TraceDecayError::Config {
                 message: format!("failed to durably remove {}: {error}", path.display()),
