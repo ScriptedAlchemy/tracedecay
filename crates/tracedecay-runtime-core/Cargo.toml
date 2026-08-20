@@ -80,8 +80,6 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", feat
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false, features = ["lite"] }
 
 hex = "0.4"
-reflink-copy = "0.1"
-rusqlite = { version = "0.40.1", default-features = false }
 sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
