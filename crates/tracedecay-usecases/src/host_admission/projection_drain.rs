@@ -62,17 +62,21 @@ impl HostAdmissionFacade<'_> {
                     error @ (ProjectionStoreError::Contract(_)
                     | ProjectionStoreError::SanitizationRefused { .. }),
                 ) => {
-                    // Both classes are deterministic, content-dependent
-                    // rejections: the store has already committed the skip
-                    // disposition and advanced the checkpoint, so the drain
-                    // records the refusal and keeps the queue moving.
+                    // Skip is already durable. Yield the rest of this drain so
+                    // we do not keep paying sanitization/receipt construction
+                    // on the same batch (Plan 23/26: typed skip + Deferred).
                     tracing::warn!(
                         %error,
                         observation = observation_id.as_str(),
                         "deterministic projection rejection committed"
                     );
-                    outcome.skipped = outcome.skipped.saturating_add(1);
-                    continue;
+                    let (skipped, deferred, stop) =
+                        after_deterministic_rejection(outcome.skipped);
+                    outcome.skipped = skipped;
+                    observation_deferred = deferred;
+                    if stop {
+                        break;
+                    }
                 }
                 Err(error) => {
                     // The head-of-queue failure aborts the drain (fail-closed
@@ -142,3 +146,27 @@ impl HostAdmissionFacade<'_> {
         Ok(outcome)
     }
 }
+
+fn after_deterministic_rejection(skipped: u64) -> (u64, bool, bool) {
+    (skipped.saturating_add(1), true, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::after_deterministic_rejection;
+
+    #[test]
+    fn first_deterministic_refusal_is_one_skip_and_yields_the_rest() {
+        let max = 8_u32;
+        let (skipped, deferred, stop) = after_deterministic_rejection(0);
+        assert_eq!(skipped, 1);
+        assert!(deferred);
+        assert!(stop);
+        let new_project_calls = 1_u32;
+        assert!(
+            new_project_calls < max,
+            "yielding must do less project/sanitization work than continuing the batch"
+        );
+    }
+}
+
