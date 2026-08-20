@@ -519,9 +519,13 @@ async fn run_worker(
         first_error: None,
         rollup_frontier_initialized: false,
     };
-    // Frontier write is idle-only. Starting it here raced persist for the
-    // same 2s write deadline (live: exceeded persistence deadline).
-    let rollup_tick = sleep_until(Instant::now() + ROLLUP_IDLE_RETRY_INTERVAL);
+    // Frontier write is idle-only: it happens inside the rollup arm of the
+    // biased select below, never as a concurrent future racing persist for
+    // the same 2s write deadline (live: exceeded persistence deadline). The
+    // first tick is due immediately so an idle producer still initializes
+    // the frontier and closes proved-quiet days promptly; a busy startup
+    // drains control and observations first because the select is biased.
+    let rollup_tick = sleep_until(Instant::now());
     tokio::pin!(rollup_tick);
     let mut rollup_source_persisted = false;
     loop {
