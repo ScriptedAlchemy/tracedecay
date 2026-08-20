@@ -128,6 +128,31 @@ struct CachedCount {
     tokens: i64,
 }
 
+/// Content-identity fingerprint of displayed message text: byte length plus
+/// a full-content hash, so equal-length rewrites (e.g. redaction variants)
+/// never reuse a stale count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContentFingerprint {
+    len: u64,
+    hash: u64,
+}
+
+pub(crate) fn content_fingerprint(text: &str) -> ContentFingerprint {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    ContentFingerprint {
+        len: text.len() as u64,
+        hash: hasher.finish(),
+    }
+}
+
+/// Cached `o200k_base` count of one message's displayed content.
+#[derive(Debug, Clone, Copy)]
+struct DisplayedCount {
+    fingerprint: ContentFingerprint,
+    tokens: i64,
+}
+
 /// Cached non-usage overlay plus the `session_messages` fingerprint it was
 /// built from.
 struct OverlayCache {
@@ -147,6 +172,13 @@ pub struct TokenCountCache {
     /// all need it, so without this every Savings-tab interaction re-ran the
     /// full `session_messages` scan + fold three times.
     overlay: tokio::sync::Mutex<Option<OverlayCache>>,
+    /// Displayed-content counts for the LCM render path, keyed by
+    /// `(provider, message_id)` and guarded by a content fingerprint.
+    /// Kept apart from `map`: LCM counts canonically hydrated display
+    /// content with `o200k_base` specifically, while `map` counts stored
+    /// text with the model-mapped tokenizer, so entries are not
+    /// interchangeable.
+    lcm_display: Mutex<HashMap<(String, String), DisplayedCount>>,
 }
 
 impl TokenCountCache {
@@ -154,7 +186,42 @@ impl TokenCountCache {
         Self {
             map: Mutex::new(HashMap::new()),
             overlay: tokio::sync::Mutex::new(None),
+            lcm_display: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Cached displayed-content count, or `None` when the content changed
+    /// or was never counted.
+    pub(crate) fn displayed_tokens(
+        &self,
+        provider: &str,
+        message_id: &str,
+        fingerprint: ContentFingerprint,
+    ) -> Option<i64> {
+        let map = self
+            .lcm_display
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.get(&(provider.to_owned(), message_id.to_owned()))
+            .filter(|cached| cached.fingerprint == fingerprint)
+            .map(|cached| cached.tokens)
+    }
+
+    pub(crate) fn store_displayed_tokens(
+        &self,
+        provider: &str,
+        message_id: &str,
+        fingerprint: ContentFingerprint,
+        tokens: i64,
+    ) {
+        let mut map = self
+            .lcm_display
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.insert(
+            (provider.to_owned(), message_id.to_owned()),
+            DisplayedCount { fingerprint, tokens },
+        );
     }
 }
 
@@ -431,6 +498,24 @@ mod tests {
             &dir.path().join("sessions.db"),
         );
         (dir, conn)
+    }
+
+    #[test]
+    fn display_cache_is_guarded_by_content_fingerprint() {
+        let cache = TokenCountCache::new();
+        let fingerprint = content_fingerprint("hello");
+        assert_eq!(cache.displayed_tokens("codex", "m1", fingerprint), None);
+        cache.store_displayed_tokens("codex", "m1", fingerprint, 7);
+        assert_eq!(cache.displayed_tokens("codex", "m1", fingerprint), Some(7));
+        assert_eq!(cache.displayed_tokens("codex", "m2", fingerprint), None);
+        assert_eq!(cache.displayed_tokens("claude", "m1", fingerprint), None);
+        // Same-length rewrites must invalidate: length alone is not content
+        // identity.
+        assert_ne!(content_fingerprint("hell0"), fingerprint);
+        assert_eq!(
+            cache.displayed_tokens("codex", "m1", content_fingerprint("hell0")),
+            None
+        );
     }
 
     #[test]
