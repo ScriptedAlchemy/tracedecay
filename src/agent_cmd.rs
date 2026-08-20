@@ -4186,6 +4186,14 @@ esac
         use tracedecay::agents::host_bundle_v2::HostBundleError;
 
         let _profile = pinned_host_profile();
+        #[cfg(unix)]
+        let kiro_cli_dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
+        #[cfg(unix)]
+        write_fake_kiro_cli(&kiro_cli_path);
+        #[cfg(unix)]
+        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set =
@@ -4193,8 +4201,28 @@ esac
                 .unwrap()
                 .unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
+        let install_options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+            adopt: false,
+        };
+        // A receipt-backed install claims the artifact path first: only a
+        // receipt makes a later foreign edit a standing conflict rather than
+        // an adoptable pre-receipt deployment.
+        apply_canonical_component_set(
+            "kiro",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &install_options,
+            home.path(),
+            lifecycle.path(),
+            &ComponentSetApplyContext::with_tracedecay_bin(KIRO_FIXTURE_BIN),
+        )
+        .expect("the packaged Kiro set must install cleanly");
+
         let request =
-            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+            component_set_request(&component_set, HostBundleCliOperation::Update, true).unwrap();
         let mut writer =
             tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
                 home.path(),
@@ -4219,11 +4247,12 @@ esac
             )
             .unwrap();
 
-        // Somebody else takes the artifact path between preview and apply.
+        // Somebody else rewrites the receipt-owned bytes between preview and
+        // apply. The bytes now match neither the catalog nor the receipt, so
+        // no retry can ever clear this.
         let artifact_path = home
             .path()
             .join(&component_set.component_set.components[0].manifest.artifacts[0].relative_path);
-        std::fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
         std::fs::write(&artifact_path, b"{\"owner\":\"somebody else\"}").unwrap();
 
         let error = transaction
@@ -4234,7 +4263,7 @@ esac
                 &component_set,
                 &mut registration,
             )
-            .expect_err("an unowned file on the artifact path must refuse the apply");
+            .expect_err("a foreign edit to a receipt-owned file must refuse the apply");
         assert!(
             !matches!(error, HostBundleError::StalePreview(_)),
             "a standing refusal must not be laundered into a retryable staleness report"

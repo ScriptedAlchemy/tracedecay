@@ -1526,6 +1526,109 @@ mod tests {
         );
     }
 
+    /// A live pre-receipt Cursor bundle — deployed by a release that predates
+    /// host-bundle receipts, stamped with an older product version and binary
+    /// path, and recorded by no receipt — must be taken over by the production
+    /// component transaction. `Install` (the operator's
+    /// `install --agent cursor`) adopts it, and `Update` (`update-plugin`)
+    /// restamps it to the running binary, instead of refusing with a
+    /// "recorded by no receipt" ownership conflict that no command can clear.
+    #[test]
+    fn cursor_component_transaction_takes_over_a_pre_receipt_bundle() {
+        for operation in [
+            HostBundleLifecycleOpV1::Install,
+            HostBundleLifecycleOpV1::Update,
+        ] {
+            let home = TempDir::new().unwrap();
+            let lifecycle = TempDir::new().unwrap();
+            let project = TempDir::new().unwrap();
+            // The pre-receipt live bundle: rendered for an older binary, with
+            // a version-stale manifest, and no v2 receipt anywhere.
+            let install_dir = cursor_plugin_install_dir(home.path());
+            write_embedded_plugin(&install_dir, "/opt/tracedecay-previous")
+                .expect("the simulated pre-receipt bundle must deploy");
+            let manifest_path = cursor_plugin_manifest_path(home.path());
+            let stamped = std::fs::read_to_string(&manifest_path).unwrap();
+            assert!(
+                stamped.contains(crate::PRODUCT_VERSION),
+                "the rendered manifest must carry the product version to re-stamp: {stamped}"
+            );
+            std::fs::write(
+                &manifest_path,
+                stamped.replace(crate::PRODUCT_VERSION, "0.1.0-beta.4"),
+            )
+            .unwrap();
+
+            // Doctor re-renders the expected catalog with the resolved
+            // binary, so the takeover must deploy exactly that binary for the
+            // receipts to read as the current release afterwards.
+            let current_bin =
+                super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+            let current = cursor_component_set(&current_bin);
+            let request = cursor_component_request(operation, [64; 16], true);
+            let mut writer =
+                HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path())
+                    .unwrap();
+            let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+                "cursor",
+                home.path(),
+                lifecycle.path(),
+                operation,
+                current_bin.clone(),
+            )
+            .unwrap();
+            HostComponentSetTransactionV1::new(&mut writer)
+                .execute(
+                    &current.component_set,
+                    &request,
+                    &current,
+                    &mut registration,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{operation:?} must take over the pre-receipt Cursor bundle: {error}")
+                });
+
+            let manifest: Value =
+                serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+            assert_eq!(
+                manifest["version"],
+                crate::PRODUCT_VERSION,
+                "{operation:?} must restamp the plugin manifest to the running product version"
+            );
+            let mcp: Value =
+                serde_json::from_slice(&std::fs::read(install_dir.join("mcp.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                mcp["mcpServers"]["tracedecay"]["command"],
+                Value::String(current_bin.clone()),
+                "{operation:?} must re-point the MCP registration at the running binary"
+            );
+
+            // The takeover recorded durable receipts: Doctor now reports the
+            // whole Cursor Desktop set as receipt-backed and current.
+            let report = crate::agents::inspect_receipt_backed_host_components(
+                &HealthcheckContext {
+                    home: home.path().to_path_buf(),
+                    project_path: project.path().to_path_buf(),
+                },
+                lifecycle.path(),
+            )
+            .expect("Doctor must inspect the adopted bundle through its new receipts");
+            assert_eq!(
+                report.components.len(),
+                current.component_set.components.len(),
+                "{operation:?} must leave every Cursor Desktop component receipt-backed: {report:#?}"
+            );
+            for component in &report.components {
+                assert_eq!(
+                    component.state,
+                    HostBundleComponentDoctorStateV1::Current,
+                    "{operation:?} left a non-current component: {component:#?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn native_extension_registration_is_receipt_doctor_ready() {
         let tmp = TempDir::new().unwrap();
