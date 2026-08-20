@@ -25,6 +25,10 @@ impl SnapshotReadControl {
         }
     }
 
+    pub(super) const fn is_unlimited(&self) -> bool {
+        self.deadline.is_none()
+    }
+
     pub(super) fn checkpoint(&self) -> io::Result<()> {
         if (self.cancelled)() {
             return Err(io::Error::new(
