@@ -194,7 +194,13 @@ pub async fn run_foreground(
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
     loop {
         let stream = tokio::select! {
-            accepted = listener.accept() => accepted?,
+            accepted = listener.accept() => match accepted {
+                Ok(stream) => stream,
+                Err(error) => {
+                    log_accept_error_and_backoff(&error).await;
+                    continue;
+                }
+            },
             completed = clients.join_next(), if !clients.is_empty() => {
                 if let Some(Err(error)) = completed {
                     log_daemon_event("daemon_client", &[("outcome", error.to_string())]);
@@ -620,7 +626,13 @@ async fn run_foreground_unix(
 
     loop {
         let stream = tokio::select! {
-            accepted = listener.accept() => accepted?,
+            accepted = listener.accept() => match accepted {
+                Ok(stream) => stream,
+                Err(error) => {
+                    log_accept_error_and_backoff(&error).await;
+                    continue;
+                }
+            },
             completed = client_tasks.join_next(), if !client_tasks.is_empty() => {
                 if let Some(completed) = completed {
                     log_client_task_result(completed);
@@ -724,6 +736,38 @@ async fn run_foreground_unix(
 }
 
 #[cfg(unix)]
+/// How long the accept loop pauses after a non-connection accept failure so a
+/// persistently failing listener degrades loudly instead of spinning a core.
+const DAEMON_ACCEPT_ERROR_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_millis(250);
+
+/// One failed accept must never end the daemon. `accept(2)` legitimately
+/// fails for per-connection reasons — a client that resets before accept
+/// surfaces `ECONNABORTED` on macOS/BSD, and reachability probes connect and
+/// drop immediately — and for transient resource pressure (`EMFILE`).
+/// Returning the error exited the whole daemon, which a service supervisor
+/// then restarts: one aborted connection became a daemon flap.
+async fn log_accept_error_and_backoff(error: &TraceDecayError) {
+    log_daemon_event(
+        "daemon_accept",
+        &[
+            ("outcome", "error".to_string()),
+            ("error", error.to_string()),
+        ],
+    );
+    let connection_scoped = matches!(
+        error,
+        TraceDecayError::Io(io_error) if matches!(
+            io_error.kind(),
+            std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::Interrupted
+        )
+    );
+    if !connection_scoped {
+        tokio::time::sleep(DAEMON_ACCEPT_ERROR_BACKOFF).await;
+    }
+}
+
 fn log_client_task_result(completed: std::result::Result<Result<()>, tokio::task::JoinError>) {
     let error = match completed {
         Ok(Ok(())) => return,
