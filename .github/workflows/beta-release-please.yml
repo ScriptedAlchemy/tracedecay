@@ -63,10 +63,9 @@ jobs:
           ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
-      # release-beta.yml resolves the prerelease version with
-      # `cargo metadata --locked`, so the release PR must carry a lockfile
-      # that matches the bumped Cargo.toml — same invariant as the stable
-      # channel's lockfile step in release-please.yml.
+      # The release PR must carry a lockfile that matches the bumped
+      # Cargo.toml — the same invariant as the stable channel's lockfile step
+      # in release-please.yml and the later locked release build.
       - name: Update release PR lockfile
         if: steps.release.outputs.prs_created == 'true'
         env:

@@ -59,7 +59,7 @@ jobs:
           set -euo pipefail
           source_sha="$(git rev-parse HEAD)"
           source_epoch="$(git show -s --format=%ct "$source_sha")"
-          version="$(cargo metadata --no-deps --locked --format-version 1 | jq -r '.packages[] | select(.name == "tracedecay") | .version')"
+          version="$(tr -d '[:space:]' < version.txt)"
           test -n "$version"
           test "$version" != "null"
           [[ "$version" == *-* ]]
