@@ -92,10 +92,18 @@ impl VerifiedGraphRuntimePortV1 for ProfileMemoryGraphRuntime {
     }
 }
 
-pub(super) fn bind_profile_memory_graph_runtime(database: &Database) {
+/// Binds the profile memory graph fixture and returns the strong port.
+///
+/// `Database::bind_memory_graph_runtime` retains only a weak binding, so the
+/// caller must hold the returned `Arc` for as long as graph operations should
+/// stay mountable.
+pub(super) fn bind_profile_memory_graph_runtime(
+    database: &Database,
+) -> Arc<dyn VerifiedGraphRuntimePortV1> {
     let runtime: Arc<dyn VerifiedGraphRuntimePortV1> =
         Arc::new(ProfileMemoryGraphRuntime::new(database));
     database
-        .bind_memory_graph_runtime(runtime)
+        .bind_memory_graph_runtime(Arc::clone(&runtime))
         .expect("bind profile memory graph fixture");
+    runtime
 }
