@@ -10,7 +10,10 @@ use super::StoreTelemetrySamplingRegistry;
 /// vector retention failed: it resolves its own vector protection inventory
 /// and degrades to the offline protection set when the graph runtime is
 /// unavailable, so sealed files cannot grow without bound while the graph is
-/// dark.
+/// dark. A daemon without a seated semantic runtime (the default-off state)
+/// takes the same offline sweep quietly — as an ordinary success, not a
+/// degraded retry loop — and an in-progress census defers the sweep until
+/// its exact pin set completes.
 pub(in crate::daemon) async fn run_project_generation_maintenance(
     graph: &crate::tracedecay::TraceDecay,
     code_index_schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,

@@ -20,6 +20,9 @@ use super::log_daemon_event;
 
 #[path = "store_maintenance/graph_replay.rs"]
 mod graph_replay;
+#[cfg(test)]
+#[path = "store_maintenance/vector_retention_tests.rs"]
+mod vector_retention_tests;
 use graph_replay::log_code_generation_retention_degraded;
 
 const MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY: usize = 256;
@@ -156,9 +159,36 @@ pub(super) async fn run_semantic_vector_generation_retention(
         .configuration_runtime()
         .semantic_configuration_inventory_authority()
     else {
-        observations.record_semantic_vector_retention_failure(root);
-        log_semantic_vector_retention_degraded("configuration_inventory_unavailable");
-        return false;
+        // The activation coordinator is not seated. Whether that is the
+        // ordinary default-off state or a project-open overlap is decided by
+        // the durable semantic configuration, never by mount timing: a
+        // committed retrieval profile means a coordinator is expected
+        // imminently, so the pass stays retryable on the short cadence
+        // instead of pinning quiet and making the first census wait a full
+        // maintenance interval.
+        return match graph.configuration_runtime().client().current().await {
+            Ok(runtime_configuration)
+                if semantic_retrieval_profiles_disabled(&runtime_configuration.config.semantic) =>
+            {
+                // Plan 20 default off: no committed active or rollback
+                // retrieval profile, so no census will ever complete. Pin the
+                // typed unseated read for the code-generation pass and
+                // succeed quietly instead of resetting to Unknown and
+                // re-logging a degraded retry loop every tick.
+                observations.record_semantic_vector_retention_unseated(root);
+                true
+            }
+            Ok(_) => {
+                observations.record_semantic_vector_retention_failure(root);
+                log_semantic_vector_retention_degraded("configuration_inventory_unavailable");
+                false
+            }
+            Err(_) => {
+                observations.record_semantic_vector_retention_failure(root);
+                log_semantic_vector_retention_degraded("runtime_configuration_unavailable");
+                false
+            }
+        };
     };
     let after = observations.semantic_vector_retention_cursor(root);
     match crate::daemon::code_index_scheduler::semantic_vector_graph::retire_one_project_vector_generation(
@@ -230,6 +260,15 @@ pub(super) async fn run_semantic_vector_generation_retention(
     }
 }
 
+/// Plan 20 default-off: semantic retrieval is genuinely disabled only when
+/// the durable configuration commits neither an active nor a rollback
+/// retrieval profile. A committed profile with an unseated activation
+/// coordinator is a transient (or genuinely degraded) state that must stay
+/// retryable, not a quiet pin.
+fn semantic_retrieval_profiles_disabled(semantic: &crate::config::SemanticConfig) -> bool {
+    semantic.active_profile.is_none() && semantic.rollback_profile.is_none()
+}
+
 fn log_semantic_vector_retention_degraded(failure: &str) {
     log_daemon_event(
         "retention_degraded",
@@ -244,17 +283,24 @@ fn log_semantic_vector_retention_degraded(failure: &str) {
 ///
 /// `Online` carries the exact vector pin set read from the mounted code
 /// graph plus the authorities needed to re-verify it under the writer freeze.
+/// `SemanticUnseated` is the ordinary default-off state: no semantic runtime
+/// is seated, no census will ever exist, and the pass sweeps under the
+/// offline protection set without reporting a degradation. `CensusScanning`
+/// is in-progress: the bounded census is still paging toward its exact pin
+/// set, so the pass defers instead of planning against a mid-scan inventory.
 /// `Offline` is a typed degradation for an unavailable vector runtime; the
 /// pass then plans against the offline protection set. `Refused` is
 /// fail-closed: the vector authority reported reset/corrupt/denied and no
 /// sweep may run.
-enum VectorRetentionInventoryV1 {
+pub(super) enum VectorRetentionInventoryV1 {
     Online {
         sources: std::collections::BTreeSet<tracedecay_domain::CodeGenerationId>,
         configuration:
             tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
         expected_vector_revision: tracedecay_store::SemanticVectorStageCensusRevision,
     },
+    SemanticUnseated,
+    CensusScanning,
     Offline {
         reason: String,
     },
@@ -263,7 +309,22 @@ enum VectorRetentionInventoryV1 {
     },
 }
 
-async fn resolve_vector_retention_inventory(
+impl VectorRetentionInventoryV1 {
+    /// The `retention_degraded` failure the code-generation pass reports for
+    /// this inventory, or `None` for states that are ordinary journeys and
+    /// must stay quiet on every pass: an online inventory, a daemon whose
+    /// semantic runtime is not seated (the default-off state), and a census
+    /// still paging toward its exact pin set.
+    pub(super) fn degraded_reason(&self) -> Option<String> {
+        match self {
+            Self::Online { .. } | Self::SemanticUnseated | Self::CensusScanning => None,
+            Self::Offline { reason } => Some(format!("vector_inventory_offline:{reason}")),
+            Self::Refused { reason } => Some(reason.clone()),
+        }
+    }
+}
+
+pub(super) async fn resolve_vector_retention_inventory(
     graph: &TraceDecay,
     schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
@@ -273,8 +334,13 @@ async fn resolve_vector_retention_inventory(
             crate::daemon::maintenance::SemanticVectorRetentionReadV1::Observed { receipt } => {
                 receipt.revision
             }
-            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Unknown
-            | crate::daemon::maintenance::SemanticVectorRetentionReadV1::Scanning => {
+            crate::daemon::maintenance::SemanticVectorRetentionReadV1::SemanticUnseated => {
+                return VectorRetentionInventoryV1::SemanticUnseated;
+            }
+            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Scanning => {
+                return VectorRetentionInventoryV1::CensusScanning;
+            }
+            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Unknown => {
                 return VectorRetentionInventoryV1::Offline {
                     reason: "vector_census_incomplete".to_owned(),
                 };
@@ -289,14 +355,25 @@ async fn resolve_vector_retention_inventory(
         };
     };
     let project_root = graph.hook_store_layout().project_root.clone();
-    match crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
+    let sources = crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
         schedulers,
         &project_root,
         &configuration,
         expected_vector_revision,
     )
-    .await
-    {
+    .await;
+    classify_vector_readable_sources(sources, configuration, expected_vector_revision)
+}
+
+/// Map the mounted graph's readable-source read onto the retention inventory:
+/// unavailable degrades to the offline protection set, while reset, corrupt,
+/// and denied stay fail-closed and refuse the sweep.
+fn classify_vector_readable_sources(
+    sources: crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources,
+    configuration: tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    expected_vector_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+) -> VectorRetentionInventoryV1 {
+    match sources {
         crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Ready {
             sources,
             ..
@@ -337,7 +414,10 @@ async fn resolve_vector_retention_inventory(
 /// disabled never collected anything and grew without bound.
 ///
 /// Vector-readable source generations are pinned through the mounted code
-/// graph when it is resolvable. When the graph runtime is unavailable —
+/// graph when it is resolvable. A daemon without a seated semantic runtime
+/// (the default-off state) sweeps under the offline protection set as its
+/// ordinary quiet journey, and an in-progress census defers the sweep until
+/// its exact pin set is complete. When the graph runtime is unavailable —
 /// saturated capacity, failed activation, or nothing serving — the pass
 /// degrades to the offline protection set (active pointer head, durable
 /// pointer index, rollback floor, and the serving generation) so sealed files
@@ -349,10 +429,6 @@ pub(super) async fn run_code_generation_retention(
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_usecases::context::CancellationToken,
 ) -> bool {
-    use crate::retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        execute_code_generation_retention, prepare_next_code_generation_retention_cancellable,
-    };
     if cancellation.is_cancelled() {
         log_code_generation_retention_degraded("retention_cancelled");
         return false;
@@ -363,32 +439,67 @@ pub(super) async fn run_code_generation_retention(
     if !store_root.join("active-code-generation-v1.json").is_file() {
         return true;
     }
-    // Published vectors live in the mounted code graph. When the graph is
-    // resolvable, its inventory is the exact vector pin set. When the vector
-    // runtime is unavailable — nothing is serving, the graph capacity budget
-    // is saturated, or activation keeps failing — the pass degrades to the
-    // offline protection set (active pointer head, durable pointer index,
-    // rollback floor, plus the serving generation) instead of letting sealed
-    // files grow without bound while the graph is dark. Reset, corrupt, and
-    // denied vector authorities stay fail-closed.
     let vector_inventory =
         resolve_vector_retention_inventory(graph, schedulers, observations).await;
-    let vector_readable_sources = match &vector_inventory {
-        VectorRetentionInventoryV1::Online { sources, .. } => sources.clone(),
-        VectorRetentionInventoryV1::Offline { reason } => {
-            log_code_generation_retention_degraded(&format!("vector_inventory_offline:{reason}"));
-            let mut pins = std::collections::BTreeSet::new();
-            if let Some(scope) = schedulers.serving_code_scope(&layout.project_root).await
-                && let Some(serving) = scope.serving_generation
-            {
-                pins.insert(serving.manifest().generation_id.clone());
-            }
-            pins
-        }
-        VectorRetentionInventoryV1::Refused { reason } => {
-            log_code_generation_retention_degraded(reason);
-            return false;
-        }
+    apply_code_generation_retention(graph, schedulers, vector_inventory, cancellation).await
+}
+
+/// The offline protection pin: the generation the mounted scheduler is
+/// currently serving, when one is mounted at all.
+async fn serving_generation_pins(
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) -> std::collections::BTreeSet<tracedecay_domain::CodeGenerationId> {
+    let mut pins = std::collections::BTreeSet::new();
+    if let Some(scope) = schedulers.serving_code_scope(project_root).await
+        && let Some(serving) = scope.serving_generation
+    {
+        pins.insert(serving.manifest().generation_id.clone());
+    }
+    pins
+}
+
+/// Execute one code-generation retention pass against a resolved vector
+/// inventory. Emitting `retention_degraded` is decided exclusively by
+/// [`VectorRetentionInventoryV1::degraded_reason`], so quiet states cannot be
+/// reintroduced into the degraded log by a divergent match arm.
+async fn apply_code_generation_retention(
+    graph: &TraceDecay,
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    vector_inventory: VectorRetentionInventoryV1,
+    cancellation: &tracedecay_usecases::context::CancellationToken,
+) -> bool {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        execute_code_generation_retention, prepare_next_code_generation_retention_cancellable,
+    };
+    let layout = graph.hook_store_layout();
+    let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
+    if let Some(failure) = vector_inventory.degraded_reason() {
+        log_code_generation_retention_degraded(&failure);
+    }
+    // Published vectors live in the mounted code graph. When the graph is
+    // resolvable, its inventory is the exact vector pin set. Without a seated
+    // semantic runtime, and while the vector runtime is unavailable, the pass
+    // plans against the offline protection set (active pointer head, durable
+    // pointer index, rollback floor, plus the serving generation) instead of
+    // letting sealed files grow without bound while the graph is dark. A
+    // paging census defers: its exact pin set arrives when the scan
+    // completes, and the vector retention pass already keeps the retry
+    // cadence short while paging. Reset, corrupt, and denied vector
+    // authorities stay fail-closed.
+    let (vector_readable_sources, inventory_mode) = match &vector_inventory {
+        VectorRetentionInventoryV1::Online { sources, .. } => (sources.clone(), "online"),
+        VectorRetentionInventoryV1::SemanticUnseated => (
+            serving_generation_pins(schedulers, &layout.project_root).await,
+            "semantic_unseated",
+        ),
+        VectorRetentionInventoryV1::CensusScanning => return true,
+        VectorRetentionInventoryV1::Offline { .. } => (
+            serving_generation_pins(schedulers, &layout.project_root).await,
+            "offline",
+        ),
+        VectorRetentionInventoryV1::Refused { .. } => return false,
     };
     // Full digest verification routinely reads several GiB. Run it before
     // entering the graph transaction and preserve the daemon shutdown token
@@ -609,16 +720,11 @@ pub(super) async fn run_code_generation_retention(
                 |receipt| receipt.reclaimed_bytes,
             );
             if reclaimed > 0 {
-                let mode = match &vector_inventory {
-                    VectorRetentionInventoryV1::Online { .. } => "online",
-                    VectorRetentionInventoryV1::Offline { .. } => "offline",
-                    VectorRetentionInventoryV1::Refused { .. } => "refused",
-                };
                 log_daemon_event(
                     "retention_code_generations",
                     &[
                         ("store", "code-index-v1".to_string()),
-                        ("mode", mode.to_string()),
+                        ("mode", inventory_mode.to_string()),
                         ("bytes_reclaimed", reclaimed.to_string()),
                         (
                             "generations_collected",
@@ -921,6 +1027,14 @@ pub(super) async fn run_code_index_scope_reconciliation(
         crate::daemon::maintenance::SemanticVectorRetentionReadV1::Unknown
         | crate::daemon::maintenance::SemanticVectorRetentionReadV1::Scanning => {
             log_code_index_scope_reconciliation_degraded("vector_census_incomplete");
+            return false;
+        }
+        // Scope collection is gated on a complete post-convergence census, so
+        // an unseated semantic runtime can never reach this pass through the
+        // maintenance journey; refuse fail-closed with its own reason if a
+        // future caller ever does.
+        crate::daemon::maintenance::SemanticVectorRetentionReadV1::SemanticUnseated => {
+            log_code_index_scope_reconciliation_degraded("semantic_configuration_unseated");
             return false;
         }
     };
