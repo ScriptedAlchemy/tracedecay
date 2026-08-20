@@ -3235,7 +3235,7 @@ async fn daemon_scheduler_discovery_without_work_does_not_wait_for_writer_gate()
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_ensure_scheduler_starts_after_project_configures_work() {
     use crate::automation::config::{
         AutomationBackend, AutomationConfigPatch, AutomationTaskPatch, save_project_config,
