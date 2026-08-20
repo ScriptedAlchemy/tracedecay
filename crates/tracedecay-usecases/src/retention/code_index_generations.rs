@@ -18,7 +18,7 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_application::{DirectorySyncPolicy, atomic_write};
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 // The census gates on the exact revision the publisher writes. A second copy of
 // that number here let the writer be versioned to 3 while retention still
 // demanded 1: every real sealed file was refused as "incompatible" and the store
@@ -1273,7 +1273,8 @@ fn write_receipt(
 }
 
 fn sync_directory(path: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
-    tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict).map_err(storage)
+    tracedecay_private_fs::framed_log::sync_directory(path, DirectorySyncPolicy::Strict)
+        .map_err(storage)
 }
 
 fn total_bytes(generations: &[CodeGenerationRetentionGenerationV1]) -> u64 {

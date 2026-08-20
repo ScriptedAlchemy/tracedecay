@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, ComponentRevision, DirectorySyncPolicy,
-    EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1,
-    EmbeddingPrecisionV1, EmbeddingTruncationSideV1, ManifestDigest, SemanticSearchIndexKeyV1,
-    atomic_write,
+    AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1,
+    EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+    EmbeddingTruncationSideV1, ManifestDigest, SemanticSearchIndexKeyV1,
 };
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
 use crate::{
     DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,

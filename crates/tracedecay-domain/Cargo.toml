@@ -20,4 +20,3 @@ url = "2"
 # even for the private `RawValue` struct token, which needs the feature on to
 # exercise.
 serde_json = { version = "1", features = ["raw_value"] }
-tempfile = "3"

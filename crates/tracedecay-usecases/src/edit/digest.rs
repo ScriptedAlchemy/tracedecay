@@ -4,10 +4,11 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_application::{
-    DirectorySyncPolicy, EffectId, read_bounded, with_owned_temp_publish,
-};
+use tracedecay_application::EffectId;
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
+use tracedecay_private_fs::framed_log::{
+    DirectorySyncPolicy, read_bounded, with_owned_temp_publish,
+};
 
 use tracedecay_runtime_core::errors::Result;
 

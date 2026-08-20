@@ -3,6 +3,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+        mpsc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -62,6 +63,12 @@ impl Drop for TestDatabase {
 
 struct TestPersistence {
     applied: Arc<AtomicU64>,
+    sequence: u64,
+}
+
+struct BlockingPersistence {
+    entered: mpsc::Sender<u64>,
+    release: mpsc::Receiver<()>,
     sequence: u64,
 }
 
@@ -281,6 +288,53 @@ impl WriterPersistence for TestPersistence {
             .map_err(|_| settlement::infrastructure("insert test marker"))?;
         self.applied.fetch_add(1, Ordering::SeqCst);
         self.sequence += 1;
+        let metadata = &request.envelope().metadata;
+        Ok(StoreCommitReceiptV1 {
+            operation_id: metadata.operation_id.clone(),
+            idempotency: metadata.idempotency.clone(),
+            shard_id: metadata.shard_id.clone(),
+            incarnation: metadata.incarnation,
+            authority_epoch: metadata.authority_epoch,
+            commit_sequence: CommitSequenceV1(self.sequence),
+            committed_at: metadata.admitted_at,
+        })
+    }
+}
+
+impl WriterPersistence for BlockingPersistence {
+    fn lookup_idempotency(
+        &mut self,
+        _transaction: &Transaction<'_>,
+        _binding: &StoreRuntimeBindingV1,
+        _idempotency: &IdempotencyIdentityV1,
+    ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
+        Ok(None)
+    }
+
+    fn apply_and_record(
+        &mut self,
+        savepoint: &mut Savepoint<'_>,
+        _binding: &StoreRuntimeBindingV1,
+        request: &RuntimeSubmitRequestV1,
+    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
+        self.sequence += 1;
+        self.entered
+            .send(self.sequence)
+            .map_err(|_| settlement::infrastructure("report blocked test write"))?;
+        self.release
+            .recv()
+            .map_err(|_| settlement::infrastructure("release blocked test write"))?;
+        savepoint
+            .execute_batch("CREATE TABLE IF NOT EXISTS maintenance_order (value INTEGER NOT NULL)")
+            .map_err(|_| settlement::infrastructure("create maintenance order table"))?;
+        let sequence = i64::try_from(self.sequence)
+            .map_err(|_| settlement::infrastructure("convert maintenance order marker"))?;
+        savepoint
+            .execute(
+                "INSERT INTO maintenance_order(value) VALUES (?1)",
+                [sequence],
+            )
+            .map_err(|_| settlement::infrastructure("insert maintenance order marker"))?;
         let metadata = &request.envelope().metadata;
         Ok(StoreCommitReceiptV1 {
             operation_id: metadata.operation_id.clone(),
