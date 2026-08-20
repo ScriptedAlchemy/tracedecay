@@ -136,7 +136,8 @@ def main() -> None:
         resolved_output = output.resolve()
         runtime_library = resolved_output / "libonnxruntime.so.1"
         assert runtime_library.read_bytes() == PAYLOAD
-        assert runtime_library.stat().st_mode & 0o777 == 0o644
+        if os.name != "nt":
+            assert runtime_library.stat().st_mode & 0o777 == 0o644
         linker_name = resolved_output / "libonnxruntime.so"
         assert linker_name.is_symlink()
         assert linker_name.readlink() == Path("libonnxruntime.so.1")

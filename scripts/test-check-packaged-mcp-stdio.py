@@ -26,16 +26,27 @@ def write_executable(path: Path, source: str) -> None:
     path.chmod(path.stat().st_mode | 0o111)
 
 
+def write_python_launcher(path: Path, source: str) -> Path:
+    if os.name != "nt":
+        write_executable(path, f"#!/usr/bin/env python3\n{source}")
+        return path
+
+    python_source = path.with_suffix(".py")
+    python_source.write_text(source, encoding="utf-8")
+    launcher = path.with_suffix(".cmd")
+    command = subprocess.list2cmdline([sys.executable, str(python_source)])
+    launcher.write_text(f"@echo off\r\n{command} %*\r\n", encoding="utf-8")
+    return launcher
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
         bin_directory = root / "bin"
         bin_directory.mkdir()
-        binary = bin_directory / "tracedecay.exe"
-        write_executable(
-            binary,
-            """#!/usr/bin/env python3
-import sys
+        binary = write_python_launcher(
+            bin_directory / "tracedecay",
+            """import sys
 import time
 from pathlib import Path
 
@@ -56,11 +67,9 @@ raise SystemExit(1)
         tools = [
             {"name": name, "inputSchema": {"type": "object"}} for name in REQUIRED_TOOLS
         ]
-        fake_npx = bin_directory / "npx"
-        write_executable(
-            fake_npx,
-            f"""#!/usr/bin/env python3
-import json
+        write_python_launcher(
+            bin_directory / "npx",
+            f"""import json
 import sys
 
 arguments = sys.argv[1:]
