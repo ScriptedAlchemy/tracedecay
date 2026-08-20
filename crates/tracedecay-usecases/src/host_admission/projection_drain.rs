@@ -75,7 +75,7 @@ impl HostAdmissionFacade<'_> {
                         observation = observation_id.as_str(),
                         "deterministic projection rejection committed"
                     );
-                    outcome.skipped = after_deterministic_rejection(outcome.skipped);
+                    outcome.skipped = outcome.skipped.saturating_add(1);
                     continue;
                 }
                 Err(error) => {
@@ -147,13 +147,6 @@ impl HostAdmissionFacade<'_> {
     }
 }
 
-// Durable skip is already recorded by the store. Do not force Deferred
-// or stop the batch: later healthy items must still project. Yielding
-// them is a stall until the next 60s host tick.
-fn after_deterministic_rejection(skipped: u64) -> u64 {
-    skipped.saturating_add(1)
-}
-
 #[cfg(test)]
 #[derive(Clone, Copy)]
 enum SimulatedProjectOutcome {
@@ -163,13 +156,13 @@ enum SimulatedProjectOutcome {
 
 #[cfg(test)]
 fn simulate_drain_project_calls(batch: &[SimulatedProjectOutcome]) -> (u64, usize) {
-    let mut skipped = 0;
+    let mut skipped: u64 = 0;
     let mut project_calls = 0_usize;
     for outcome in batch {
         project_calls = project_calls.saturating_add(1);
         match outcome {
             SimulatedProjectOutcome::Refusal => {
-                skipped = after_deterministic_rejection(skipped);
+                skipped = skipped.saturating_add(1);
             }
             SimulatedProjectOutcome::Projected => {}
         }
