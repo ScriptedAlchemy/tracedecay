@@ -67,8 +67,20 @@ fn fold_wal_in_place(connection: &Connection, control: &SnapshotReadControl) -> 
             .spawn_scoped(scope, move || {
                 loop {
                     if let Err(error) = watcher_control.checkpoint() {
-                        interrupt.interrupt();
-                        return Some(error);
+                        // Re-interrupt until the fold thread signals
+                        // completion: an interrupt delivered before the
+                        // PRAGMA statement starts running is a no-op, and a
+                        // single lost interrupt must not let the fold run
+                        // unbounded past its deadline.
+                        loop {
+                            interrupt.interrupt();
+                            match completion.recv_timeout(FOLD_INTERRUPT_POLL_INTERVAL) {
+                                Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                                    return Some(error);
+                                }
+                                Err(RecvTimeoutError::Timeout) => {}
+                            }
+                        }
                     }
                     match completion.recv_timeout(FOLD_INTERRUPT_POLL_INTERVAL) {
                         Ok(()) | Err(RecvTimeoutError::Disconnected) => return None,
