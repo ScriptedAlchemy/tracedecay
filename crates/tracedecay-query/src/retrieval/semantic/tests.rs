@@ -850,13 +850,10 @@ fn request_deadline_overrides_crate_exact_flat_default() {
         .expect("typed budget outcome");
     assert!(
         matches!(outcome, RetrieverOutcome::BudgetExceeded(_)),
-        "request deadline must win over the crate fallback"
-    );
-    assert!(
-        !matches!(outcome, RetrieverOutcome::Complete(_)),
-        "BudgetExceeded must not collapse into a complete empty success"
+        "request deadline must win over the crate fallback instead of becoming an empty success"
     );
     assert_eq!(embedder.calls.get(), 0);
+    assert_eq!(vectors.scans.get(), 0);
 
     request.budget.deadline_micros = Some(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1 * 2);
     let embedder = FakeQueryEmbedder::default();
@@ -869,9 +866,11 @@ fn request_deadline_overrides_crate_exact_flat_default() {
         .retrieve_semantic(&request)
         .expect("typed lane outcome");
     assert!(
-        !matches!(outcome, RetrieverOutcome::BudgetExceeded(_)),
-        "a longer request deadline must not trip the crate fallback"
+        matches!(outcome, RetrieverOutcome::Complete(_)),
+        "a longer request deadline must permit the complete empty scan"
     );
+    assert_eq!(embedder.calls.get(), 1);
+    assert_eq!(vectors.scans.get(), 1);
 }
 
 #[test]
