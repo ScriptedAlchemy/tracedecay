@@ -410,8 +410,8 @@ impl CodeLexicalProjectionAdapterV1 {
         Self::new_inner(metadata, chunks, false, None)
     }
 
-    /// Daemon `code_index_scheduler` entry. Hard-wires `deadline_micros = None`
-    /// (crate 30s fallback) until builder mounts [`Self::new_admitted_with_budget`].
+    /// Hard-wires `deadline_micros = None` (crate 30s fallback). Live daemon
+    /// mount is [`Self::new_admitted_with_budget`].
     pub fn new_admitted<C>(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<C>,
