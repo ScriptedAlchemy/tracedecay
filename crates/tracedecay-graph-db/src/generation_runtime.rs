@@ -16,6 +16,7 @@ use crate::recovery::{
     quarantine_transition_failure, requarantine_after_failed_checkpoint_verification,
     set_projection_quarantine,
 };
+use crate::runtime::{GraphBatchPlan, PreparedGraphBatch};
 use crate::schema::{NAMESPACE_PROPERTY, relation_kind_from_type, required_string};
 use crate::state::{
     latest_projection, load_entity_by_node, load_relation, load_relation_by_edge,
@@ -35,9 +36,10 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
         check()?;
+        let expected = manifest.expected_recovered_digest(check)?;
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        verify_recovered_generation(database, manifest, None, check)
+        verify_recovered_generation(database, manifest, &expected, check)
     }
 
     pub(crate) fn verify_existing_generation(
@@ -61,23 +63,23 @@ impl GraphDb {
             )
         })?
         .commit;
-        let recovered = verify_recovered_generation(database, manifest, Some(expected), check)?;
+        let recovered = verify_recovered_generation(database, manifest, expected, check)?;
         Ok((commit, recovered))
     }
 
     /// Applies one generation's rows, or re-seats bookkeeping for rows that
     /// are already stored.
     ///
-    /// `sealed_digest` is an already-proven recovered digest bound to this
-    /// exact manifest (a journaled publication's `expected_recovered_digest`).
-    /// A re-seat of already-stored rows streams them through the
-    /// recovered-digest proof and never rebuilds or re-hashes the canonical
-    /// batch; the sealed digest also replaces a second full canonicalization
-    /// of the manifest itself.
+    /// A re-seat is bound to this exact generation: the stored commit must
+    /// carry this manifest's source generation, watermark, and (when the
+    /// commit records one) dependency-closure digest under this generation's
+    /// locator. Rows stored for any other generation of the same logical
+    /// projection fall through to a real apply. A re-seat itself streams no
+    /// rows; the mandatory close/reopen recovered-digest proof that follows
+    /// every publication apply is the single row-stream proof.
     pub(crate) fn apply_generation_unverified(
         &self,
         manifest: &GraphGenerationManifest,
-        sealed_digest: Option<&GraphRecoveredGenerationDigestV1>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         check()?;
@@ -86,140 +88,126 @@ impl GraphDb {
         let dependency_namespaces = self.require_exact_dependencies(manifest)?;
         let locator =
             GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
-        // An upgradable claim admits concurrent snapshot readers while
-        // excluding writers, so the stored rows stay stable for the
-        // idempotent re-seat verification and the batch derivation below
-        // without stalling reads. The exclusive claim is deferred to the
-        // actual apply.
-        let snapshot_gate = self.inner.snapshot_gate.upgradable_read();
-        {
-            let guard = self.read_guard()?;
-            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-            if let Some(existing) = latest_projection(
-                database,
-                &physical_namespace,
-                &manifest.projection.projection,
-            )? {
-                let was_collected = self
-                    .inner
-                    .verified_generations
-                    .read()
-                    .map_err(|_| {
-                        GraphDbError::unavailable(
-                            "verified graph generation state lock is poisoned",
-                        )
-                    })?
-                    .collected
-                    .contains(&locator);
-                if !was_collected {
-                    // A retry re-seat proves the stored rows through the
-                    // recovered-digest stream alone; cloning the manifest
-                    // into a canonical batch and hashing it would be pure
-                    // duplicate work for rows that already exist.
-                    verify_recovered_generation(database, manifest, sealed_digest, check)?;
-                    let mut verified = self.inner.verified_generations.write().map_err(|_| {
-                        GraphDbError::unavailable(
-                            "verified graph generation state lock is poisoned",
-                        )
-                    })?;
-                    verified
-                        .stored
-                        .insert(locator, generation_dependency_locators(manifest));
-                    return Ok(existing.commit);
+        let dependency_digest = manifest.dependency_closure_digest(check)?;
+        self.run_gated_batch(
+            check,
+            |database| {
+                if let Some(existing) = latest_projection(
+                    database,
+                    &physical_namespace,
+                    &manifest.projection.projection,
+                )? {
+                    // Bind the cheap re-seat to THIS generation, not merely
+                    // to "some projection exists": the stored commit must
+                    // carry this manifest's identity. The physical namespace
+                    // is generation-hashed today, but the bind must not rely
+                    // on that staying true.
+                    let bound = existing.commit.source_generation == manifest.source_generation
+                        && existing.commit.watermark == manifest.watermark
+                        && existing
+                            .commit
+                            .generation_dependency_digest
+                            .as_ref()
+                            .is_none_or(|stored| stored == &dependency_digest);
+                    let was_collected = self
+                        .inner
+                        .verified_generations
+                        .read()
+                        .map_err(|_| {
+                            GraphDbError::unavailable(
+                                "verified graph generation state lock is poisoned",
+                            )
+                        })?
+                        .collected
+                        .contains(&locator);
+                    if bound && !was_collected {
+                        return Ok(GraphBatchPlan::Settled(existing.commit, ()));
+                    }
+                    if was_collected {
+                        let mut verified =
+                            self.inner.verified_generations.write().map_err(|_| {
+                                GraphDbError::unavailable(
+                                    "verified graph generation state lock is poisoned",
+                                )
+                            })?;
+                        verified.collected.remove(&locator);
+                    }
                 }
+                let mut endpoint_namespaces = mutation::RelationEndpointNamespaces::new();
+                let mut mutations = Vec::with_capacity(
+                    manifest
+                        .entities
+                        .len()
+                        .checked_add(manifest.relations.len())
+                        .ok_or_else(|| {
+                            GraphDbError::invalid("graph generation mutation count overflow")
+                        })?,
+                );
+                for entity in &manifest.entities {
+                    check()?;
+                    mutations.push(GraphMutation::UpsertEntity(entity.clone()));
+                }
+                for relation in &manifest.relations {
+                    check()?;
+                    endpoint_namespaces.insert(
+                        relation.identity.clone(),
+                        (
+                            endpoint_namespace(
+                                manifest,
+                                &physical_namespace,
+                                &dependency_namespaces,
+                                &relation.from.projection,
+                            )?,
+                            endpoint_namespace(
+                                manifest,
+                                &physical_namespace,
+                                &dependency_namespaces,
+                                &relation.to.projection,
+                            )?,
+                        ),
+                    );
+                    mutations.push(GraphMutation::UpsertRelation(relation.storage_relation()?));
+                }
+                let batch = GraphWriteBatch::new_canonical_checked(
+                    physical_namespace.clone(),
+                    manifest.projection.projection.clone(),
+                    manifest.source_generation.clone(),
+                    manifest.watermark.clone(),
+                    mutations,
+                    check,
+                )?;
+                let digest = batch.canonical_digest_checked(check)?;
+                Ok(GraphBatchPlan::Apply(
+                    PreparedGraphBatch {
+                        batch,
+                        metadata: mutation::CommitMetadata {
+                            digest,
+                            generation_dependency_digest: Some(dependency_digest.clone()),
+                            publication_record: None,
+                        },
+                        endpoint_namespaces,
+                    },
+                    (),
+                ))
+            },
+            |_database, commit, ()| {
                 let mut verified = self.inner.verified_generations.write().map_err(|_| {
                     GraphDbError::unavailable("verified graph generation state lock is poisoned")
                 })?;
-                verified.collected.remove(&locator);
-            }
-        }
-        let mut endpoint_namespaces = mutation::RelationEndpointNamespaces::new();
-        let mut mutations = Vec::with_capacity(
-            manifest
-                .entities
-                .len()
-                .checked_add(manifest.relations.len())
-                .ok_or_else(|| GraphDbError::invalid("graph generation mutation count overflow"))?,
-        );
-        for entity in &manifest.entities {
-            check()?;
-            mutations.push(GraphMutation::UpsertEntity(entity.clone()));
-        }
-        for relation in &manifest.relations {
-            check()?;
-            endpoint_namespaces.insert(
-                relation.identity.clone(),
-                (
-                    endpoint_namespace(
-                        manifest,
-                        &physical_namespace,
-                        &dependency_namespaces,
-                        &relation.from.projection,
-                    )?,
-                    endpoint_namespace(
-                        manifest,
-                        &physical_namespace,
-                        &dependency_namespaces,
-                        &relation.to.projection,
-                    )?,
-                ),
-            );
-            mutations.push(GraphMutation::UpsertRelation(relation.storage_relation()?));
-        }
-        let batch = GraphWriteBatch::new_canonical_checked(
-            physical_namespace.clone(),
-            manifest.projection.projection.clone(),
-            manifest.source_generation.clone(),
-            manifest.watermark.clone(),
-            mutations,
-            check,
-        )?;
-        // Hashing runs behind the upgradable claim: snapshot readers are
-        // never blocked for the canonical batch digest or the
-        // dependency-closure digest.
-        let digest = batch.canonical_digest_checked(check)?;
-        let dependency_digest = manifest.dependency_closure_digest(check)?;
-        let _snapshot_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
-        let guard = self.write_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let mut state = self.state_write_guard()?;
-        let commit = self.apply_locked(
-            database,
-            &mut state,
-            batch,
-            mutation::CommitMetadata {
-                digest,
-                generation_dependency_digest: Some(dependency_digest),
-                publication_record: None,
+                verified
+                    .stored
+                    .insert(locator.clone(), generation_dependency_locators(manifest));
+                drop(verified);
+                check()?;
+                Ok(commit)
             },
-            &endpoint_namespaces,
-            check,
-        )?;
-        {
-            let mut verified = self.inner.verified_generations.write().map_err(|_| {
-                GraphDbError::unavailable("verified graph generation state lock is poisoned")
-            })?;
-            verified
-                .stored
-                .insert(locator, generation_dependency_locators(manifest));
-        }
-        check()?;
-        Ok(commit)
+        )
     }
 
     pub(crate) fn reopen_and_verify_existing_generation(
         &self,
         manifest: &GraphGenerationManifest,
         expected: &GraphRecoveredGenerationDigestV1,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<(GraphCommit, GraphRecoveredGenerationDigestV1), GraphDbError> {
-        self.reopen_and_verify_generation_digest(manifest, Some(expected), check)
-    }
-
-    pub(crate) fn reopen_and_verify_generation_digest(
-        &self,
-        manifest: &GraphGenerationManifest,
-        expected: Option<&GraphRecoveredGenerationDigestV1>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(GraphCommit, GraphRecoveredGenerationDigestV1), GraphDbError> {
         check()?;
@@ -325,57 +313,76 @@ impl GraphDb {
         if !was_quarantined {
             return Ok((commit, verified));
         }
-        // Rare recovery repair: clearing the durable quarantine marker
-        // rewrites and checkpoints the database file, so it re-takes the
-        // exclusive claim for the remainder of the transition.
-        let _snapshot_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
-        let mut database_guard = self
-            .inner
-            .database
-            .write()
-            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
-        let mut state_guard = self.state_write_guard()?;
-        let mut quarantined_guard = self
-            .inner
-            .quarantined_projections
-            .write()
-            .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))?;
+        // Quarantine repair: the exclusive claim covers only the durable
+        // marker clear and the checkpoint transition (both rewrite the
+        // database file). The re-verification afterwards is read-only again,
+        // so the gate downgrades back to upgradable and snapshot readers are
+        // admitted while the repaired rows stream through the proof.
+        let write_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
         {
-            let database = database_guard.as_ref().ok_or(GraphDbError::Closed)?;
-            if let Err(error) =
-                set_projection_quarantine(database, &physical_namespace, &projection, false)
-                    .and_then(|()| crate::runtime::sync_wal(database))
+            let mut database_guard =
+                self.inner.database.write().map_err(|_| {
+                    GraphDbError::unavailable("graph database write lock is poisoned")
+                })?;
+            let mut state_guard = self.state_write_guard()?;
+            let mut quarantined_guard = self
+                .inner
+                .quarantined_projections
+                .write()
+                .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))?;
             {
+                let database = database_guard.as_ref().ok_or(GraphDbError::Closed)?;
+                if let Err(error) =
+                    set_projection_quarantine(database, &physical_namespace, &projection, false)
+                        .and_then(|()| crate::runtime::sync_wal(database))
+                {
+                    self.inner.poisoned.store(true, Ordering::Release);
+                    return Err(quarantine_transition_failure(
+                        "clear recovered generation quarantine",
+                        error,
+                    ));
+                }
+            }
+            let database = database_guard.take().ok_or(GraphDbError::Closed)?;
+            let (recovered, recovered_state, quarantined) =
+                match checkpoint_recovered_database(database, &reopen) {
+                    Ok(recovered) => recovered,
+                    Err(error) => {
+                        self.inner.poisoned.store(true, Ordering::Release);
+                        return Err(error);
+                    }
+                };
+            let still_quarantined = quarantined.contains(&quarantine_key);
+            *state_guard = recovered_state;
+            *quarantined_guard = quarantined;
+            *database_guard = Some(recovered);
+            if still_quarantined {
                 self.inner.poisoned.store(true, Ordering::Release);
-                return Err(quarantine_transition_failure(
-                    "clear recovered generation quarantine",
-                    error,
-                ));
+                return Err(GraphDbError::DurabilityUncertain {
+                    message: "recovered generation quarantine remained after checkpoint".to_owned(),
+                });
             }
         }
-        let database = database_guard.take().ok_or(GraphDbError::Closed)?;
-        let (recovered, recovered_state, quarantined) =
-            match checkpoint_recovered_database(database, &reopen) {
-                Ok(recovered) => recovered,
-                Err(error) => {
-                    self.inner.poisoned.store(true, Ordering::Release);
-                    return Err(error);
-                }
-            };
-        let still_quarantined = quarantined.contains(&quarantine_key);
-        *state_guard = recovered_state;
-        *quarantined_guard = quarantined;
-        *database_guard = Some(recovered);
-        if still_quarantined {
-            self.inner.poisoned.store(true, Ordering::Release);
-            return Err(GraphDbError::DurabilityUncertain {
-                message: "recovered generation quarantine remained after checkpoint".to_owned(),
-            });
-        }
-        let database = database_guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let verified = match verify_recovered_generation(database, manifest, expected, check) {
-            Ok(verified) => verified,
+        let snapshot_gate = ParkingRwLockWriteGuard::downgrade_to_upgradable(write_gate);
+        let verify_result = {
+            let guard = self.read_guard()?;
+            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+            verify_recovered_generation(database, manifest, expected, check)
+        };
+        match verify_result {
+            Ok(verified) => Ok((commit, verified)),
             Err(error) => {
+                // Restoring the durable quarantine marker rewrites the file,
+                // so the failure path re-takes the exclusive claim.
+                let _write_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
+                let mut database_guard = self.inner.database.write().map_err(|_| {
+                    GraphDbError::unavailable("graph database write lock is poisoned")
+                })?;
+                let mut state_guard = self.state_write_guard()?;
+                let mut quarantined_guard =
+                    self.inner.quarantined_projections.write().map_err(|_| {
+                        GraphDbError::unavailable("graph quarantine lock is poisoned")
+                    })?;
                 let database = database_guard.take().ok_or(GraphDbError::Closed)?;
                 let (recovered, recovered_state, quarantined) =
                     match requarantine_after_failed_checkpoint_verification(
@@ -397,10 +404,9 @@ impl GraphDb {
                 *state_guard = recovered_state;
                 *quarantined_guard = quarantined;
                 *database_guard = Some(recovered);
-                return Err(error);
+                Err(error)
             }
-        };
-        Ok((commit, verified))
+        }
     }
 
     pub(crate) fn install_verified_generation(
@@ -474,60 +480,54 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         check()?;
-        // The deletion batch is derived from the stored rows, so enumerate
-        // and hash it behind an upgradable claim (readers proceed, writers
-        // queue) and take the exclusive claim only for the apply itself.
-        let snapshot_gate = self.inner.snapshot_gate.upgradable_read();
-        let (batch, digest) = {
-            let guard = self.read_guard()?;
-            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-            let relation_ids =
-                projection_relations_checked(database, &namespace, &projection, check)?
-                    .into_iter()
-                    .map(|relation| relation.relation.identity)
-                    .collect::<std::collections::BTreeSet<_>>();
-            let entity_ids = projection_entities_checked(database, &namespace, &projection, check)?
-                .into_iter()
-                .map(|entity| entity.entity.identity)
-                .collect::<std::collections::BTreeSet<_>>();
-            let mut mutations = Vec::with_capacity(
-                relation_ids
-                    .len()
-                    .checked_add(entity_ids.len())
-                    .ok_or_else(|| {
-                        GraphDbError::invalid("graph deletion mutation count overflow")
-                    })?,
-            );
-            for identity in relation_ids {
-                check()?;
-                mutations.push(GraphMutation::DeleteRelation(identity));
-            }
-            for identity in entity_ids {
-                check()?;
-                mutations.push(GraphMutation::DeleteEntity(identity));
-            }
-            let batch = GraphWriteBatch::new_canonical_checked(
-                namespace,
-                projection,
-                source_generation,
-                watermark,
-                mutations,
-                check,
-            )?;
-            let digest = batch.canonical_digest_checked(check)?;
-            (batch, digest)
-        };
-        let _snapshot_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
-        let guard = self.write_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let mut state = self.state_write_guard()?;
-        self.apply_locked(
-            database,
-            &mut state,
-            batch,
-            mutation::CommitMetadata::for_digest(digest),
-            &mutation::RelationEndpointNamespaces::new(),
+        self.run_gated_batch(
             check,
+            |database| {
+                let relation_ids =
+                    projection_relations_checked(database, &namespace, &projection, check)?
+                        .into_iter()
+                        .map(|relation| relation.relation.identity)
+                        .collect::<std::collections::BTreeSet<_>>();
+                let entity_ids =
+                    projection_entities_checked(database, &namespace, &projection, check)?
+                        .into_iter()
+                        .map(|entity| entity.entity.identity)
+                        .collect::<std::collections::BTreeSet<_>>();
+                let mut mutations = Vec::with_capacity(
+                    relation_ids
+                        .len()
+                        .checked_add(entity_ids.len())
+                        .ok_or_else(|| {
+                            GraphDbError::invalid("graph deletion mutation count overflow")
+                        })?,
+                );
+                for identity in relation_ids {
+                    check()?;
+                    mutations.push(GraphMutation::DeleteRelation(identity));
+                }
+                for identity in entity_ids {
+                    check()?;
+                    mutations.push(GraphMutation::DeleteEntity(identity));
+                }
+                let batch = GraphWriteBatch::new_canonical_checked(
+                    namespace,
+                    projection,
+                    source_generation,
+                    watermark,
+                    mutations,
+                    check,
+                )?;
+                let digest = batch.canonical_digest_checked(check)?;
+                Ok(GraphBatchPlan::Apply(
+                    PreparedGraphBatch {
+                        batch,
+                        metadata: mutation::CommitMetadata::for_digest(digest),
+                        endpoint_namespaces: mutation::RelationEndpointNamespaces::new(),
+                    },
+                    (),
+                ))
+            },
+            |_database, commit, ()| Ok(commit),
         )
     }
 
@@ -895,19 +895,26 @@ mod tests {
         (owner, database)
     }
 
+    fn sealed_digest(
+        manifest: &GraphGenerationManifest,
+    ) -> tracedecay_store::runtime::GraphRecoveredGenerationDigestV1 {
+        manifest.expected_recovered_digest(&|| Ok(())).unwrap()
+    }
+
     #[test]
     fn recovered_generation_rejects_stale_persisted_source_generation() {
         let temp = TempDir::new().unwrap();
         let (_owner, database) = persistent_database(&temp);
         database
-            .apply_generation_unverified(&manifest("source:old", "watermark:one"), None, &|| Ok(()))
+            .apply_generation_unverified(&manifest("source:old", "watermark:one"), &|| Ok(()))
             .unwrap();
 
+        let changed = manifest("source:new", "watermark:one");
         assert!(matches!(
-            database.reopen_and_verify_generation_digest(
-                &manifest("source:new", "watermark:one"),
-                None,
-                &|| Ok(())
+            database.reopen_and_verify_existing_generation(
+                &changed,
+                &sealed_digest(&changed),
+                &|| { Ok(()) }
             ),
             Err(GraphDbError::GenerationMismatch { .. })
         ));
@@ -918,14 +925,15 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let (_owner, database) = persistent_database(&temp);
         database
-            .apply_generation_unverified(&manifest("source:one", "watermark:old"), None, &|| Ok(()))
+            .apply_generation_unverified(&manifest("source:one", "watermark:old"), &|| Ok(()))
             .unwrap();
 
+        let changed = manifest("source:one", "watermark:new");
         assert!(matches!(
-            database.reopen_and_verify_generation_digest(
-                &manifest("source:one", "watermark:new"),
-                None,
-                &|| Ok(())
+            database.reopen_and_verify_existing_generation(
+                &changed,
+                &sealed_digest(&changed),
+                &|| { Ok(()) }
             ),
             Err(GraphDbError::GenerationMismatch { .. })
         ));
@@ -937,7 +945,7 @@ mod tests {
         let (_owner, database) = persistent_database(&temp);
         let original = manifest("source:one", "watermark:one");
         database
-            .apply_generation_unverified(&original, None, &|| Ok(()))
+            .apply_generation_unverified(&original, &|| Ok(()))
             .unwrap();
         let mut changed = original;
         changed.dependencies.push(GraphGenerationDependency::new(
@@ -950,7 +958,11 @@ mod tests {
         ));
 
         assert!(matches!(
-            database.reopen_and_verify_generation_digest(&changed, None, &|| Ok(())),
+            database.reopen_and_verify_existing_generation(
+                &changed,
+                &sealed_digest(&changed),
+                &|| { Ok(()) }
+            ),
             Err(GraphDbError::GenerationMismatch { .. })
         ));
     }
@@ -989,12 +1001,13 @@ mod tests {
         )
         .unwrap();
         database
-            .apply_generation_unverified(&manifest, None, &|| Ok(()))
+            .apply_generation_unverified(&manifest, &|| Ok(()))
             .unwrap();
 
+        let sealed = sealed_digest(&manifest);
         reset_recovered_generation_enumerations();
         database
-            .reopen_and_verify_generation_digest(&manifest, None, &|| Ok(()))
+            .reopen_and_verify_existing_generation(&manifest, &sealed, &|| Ok(()))
             .unwrap();
 
         assert_eq!(recovered_generation_enumerations(), 1);
@@ -1037,7 +1050,7 @@ mod tests {
         .unwrap();
         reset_batch_canonicalizations();
         database
-            .apply_generation_unverified(&manifest, None, &|| Ok(()))
+            .apply_generation_unverified(&manifest, &|| Ok(()))
             .unwrap();
         assert_eq!(
             batch_canonicalizations(),
@@ -1087,9 +1100,10 @@ mod tests {
             }
             Ok(())
         };
+        let sealed = sealed_digest(&manifest);
         reset_recovered_generation_enumerations();
         database
-            .reopen_and_verify_generation_digest(&manifest, None, &check)
+            .reopen_and_verify_existing_generation(&manifest, &sealed, &check)
             .unwrap();
         reader.join().unwrap();
 
@@ -1114,20 +1128,7 @@ mod tests {
     fn sealed_digest_reopen_skips_manifest_recanonicalization() {
         let temp = TempDir::new().unwrap();
         let (owner, database, manifest) = large_persistent_generation(&temp, "sealed-reuse");
-        let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
-
-        reset_recovered_generation_enumerations();
-        reset_manifest_canonicalizations();
-        let (_, recovered) = database
-            .reopen_and_verify_generation_digest(&manifest, None, &|| Ok(()))
-            .unwrap();
-        assert_eq!(recovered, sealed);
-        assert_eq!(
-            manifest_canonicalizations(),
-            1,
-            "a digest-less hydrate canonicalizes the full manifest once"
-        );
-        assert_eq!(recovered_generation_enumerations(), 1);
+        let sealed = sealed_digest(&manifest);
 
         reset_recovered_generation_enumerations();
         reset_manifest_canonicalizations();
@@ -1138,7 +1139,7 @@ mod tests {
         assert_eq!(
             manifest_canonicalizations(),
             0,
-            "a sealed digest replaces the full-manifest re-stream"
+            "the sealed digest replaces every full-manifest re-stream during hydrate"
         );
         assert_eq!(
             recovered_generation_enumerations(),
@@ -1152,7 +1153,7 @@ mod tests {
     fn foreign_sealed_digest_still_fails_recovered_proof_then_repairs() {
         let temp = TempDir::new().unwrap();
         let (owner, database, manifest) = large_persistent_generation(&temp, "sealed-mismatch");
-        let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let sealed = sealed_digest(&manifest);
 
         assert!(matches!(
             database.reopen_and_verify_existing_generation(
@@ -1163,83 +1164,208 @@ mod tests {
             Err(GraphDbError::GenerationMismatch { .. })
         ));
 
-        // The mismatch quarantined the generation; hydrating with the exact
+        // The mismatch quarantined the generation. Hydrating with the exact
         // sealed digest clears the durable marker through the checkpoint
-        // transition and seats the recovered digest again.
-        let (_, recovered) = database
-            .reopen_and_verify_existing_generation(&manifest, &sealed, &|| Ok(()))
-            .unwrap();
-        assert_eq!(recovered, sealed);
-        owner.close().unwrap();
-    }
-
-    #[test]
-    fn idempotent_reapply_with_sealed_digest_avoids_manifest_restream() {
-        let temp = TempDir::new().unwrap();
-        let (owner, database, manifest) = large_persistent_generation(&temp, "sealed-reapply");
-        let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
-        reset_batch_canonicalizations();
-        let first = database
-            .apply_generation_unverified(&manifest, Some(&sealed), &|| Ok(()))
-            .unwrap();
-        assert_eq!(
-            batch_canonicalizations(),
-            0,
-            "a re-seat of stored rows must not rebuild or hash the canonical batch"
-        );
-
+        // transition and re-verifies the repaired rows; that second (repair)
+        // enumeration must also admit snapshot readers instead of holding
+        // the gate exclusively.
+        let (start_tx, start_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let reader = {
+            let database = database.clone();
+            std::thread::spawn(move || {
+                start_rx.recv().unwrap();
+                drop(database.snapshot().unwrap());
+                done_tx.send(()).unwrap();
+            })
+        };
         let gate = Arc::clone(&database.inner.snapshot_gate);
         let admitted = Cell::new(0usize);
         let refused = Cell::new(0usize);
+        let signalled = Cell::new(false);
+        let reader_completed = Cell::new(None::<bool>);
         let check = || {
-            if recovered_generation_enumerations() > 0 {
-                if gate.try_read().is_some() {
-                    admitted.set(admitted.get() + 1);
-                } else {
-                    refused.set(refused.get() + 1);
-                }
+            // The repair path enumerates twice: the pre-repair proof, then
+            // the post-checkpoint re-verification. Sample the gate during
+            // the repair enumeration specifically.
+            if recovered_generation_enumerations() < 2 {
+                return Ok(());
+            }
+            if gate.try_read().is_some() {
+                admitted.set(admitted.get() + 1);
+            } else {
+                refused.set(refused.get() + 1);
+            }
+            if !signalled.get() {
+                signalled.set(true);
+                start_tx.send(()).unwrap();
+                reader_completed.set(Some(done_rx.recv_timeout(Duration::from_secs(30)).is_ok()));
             }
             Ok(())
         };
         reset_recovered_generation_enumerations();
+        let (_, recovered) = database
+            .reopen_and_verify_existing_generation(&manifest, &sealed, &check)
+            .unwrap();
+        reader.join().unwrap();
+        assert_eq!(recovered, sealed);
+        assert_eq!(
+            recovered_generation_enumerations(),
+            2,
+            "quarantine repair re-verifies the checkpointed rows"
+        );
+        assert!(
+            admitted.get() > 0,
+            "the repair re-verification must run outside the exclusive snapshot gate"
+        );
+        assert_eq!(
+            refused.get(),
+            0,
+            "no part of the repair re-verification may hold the snapshot gate exclusively"
+        );
+        assert_eq!(
+            reader_completed.get(),
+            Some(true),
+            "a concurrent snapshot reader must complete while the repair digest streams"
+        );
+        owner.close().unwrap();
+    }
+
+    #[test]
+    fn retry_admission_apply_then_reopen_streams_rows_once() {
+        let temp = TempDir::new().unwrap();
+        let (owner, database, manifest) = large_persistent_generation(&temp, "retry-admission");
+        let sealed = sealed_digest(&manifest);
+        let first = database
+            .apply_generation_unverified(&manifest, &|| Ok(()))
+            .unwrap();
+
+        // The live retry admission sequence is publish's apply-then-reopen.
+        // The re-seat apply is bookkeeping only; the mandatory close/reopen
+        // recovered-digest proof is the one and only row stream.
+        reset_recovered_generation_enumerations();
         reset_manifest_canonicalizations();
         reset_batch_canonicalizations();
         let reapplied = database
-            .apply_generation_unverified(&manifest, Some(&sealed), &check)
+            .apply_generation_unverified(&manifest, &|| Ok(()))
+            .unwrap();
+        let (_, recovered) = database
+            .reopen_and_verify_existing_generation(&manifest, &sealed, &|| Ok(()))
             .unwrap();
 
         assert_eq!(reapplied.sequence, first.sequence);
         assert_eq!(reapplied.digest, first.digest);
-        assert_eq!(
-            manifest_canonicalizations(),
-            0,
-            "an idempotent re-apply with a sealed digest must not re-stream the manifest"
-        );
+        assert_eq!(recovered, sealed);
         assert_eq!(
             batch_canonicalizations(),
             0,
-            "an idempotent re-apply must not re-hash the canonical batch"
+            "a retry admission must not rebuild or hash the canonical batch"
+        );
+        assert_eq!(
+            manifest_canonicalizations(),
+            0,
+            "a retry admission must not re-canonicalize the manifest"
         );
         assert_eq!(
             recovered_generation_enumerations(),
             1,
-            "the stored rows are still proven against the sealed digest"
+            "the whole retry admission streams the rows exactly once, at the reopen proof"
         );
-        assert!(admitted.get() > 0);
-        assert_eq!(
-            refused.get(),
-            0,
-            "the re-seat verification must not hold the snapshot gate exclusively"
-        );
-
-        assert!(matches!(
-            database.apply_generation_unverified(
-                &manifest,
-                Some(&foreign_recovered_digest()),
-                &|| { Ok(()) }
-            ),
-            Err(GraphDbError::GenerationMismatch { .. })
-        ));
         owner.close().unwrap();
+    }
+
+    #[test]
+    fn second_generation_apply_writes_instead_of_reseating_prior() {
+        let temp = TempDir::new().unwrap();
+        let (owner, database, manifest_a) = large_persistent_generation(&temp, "two-generations");
+        let mut entities_b = manifest_a.entities.clone();
+        entities_b.push(
+            GraphEntity::new(
+                GraphEntityId::new("entity:only-in-b").unwrap(),
+                BTreeSet::new(),
+                BTreeMap::new(),
+            )
+            .unwrap(),
+        );
+        let manifest_b = GraphGenerationManifest::new(
+            manifest_a.projection.clone(),
+            GraphGenerationId::new("generation-b").unwrap(),
+            SourceGeneration::new("source-b").unwrap(),
+            GraphWatermark::new("watermark-b").unwrap(),
+            vec![],
+            entities_b,
+            vec![],
+        )
+        .unwrap();
+
+        reset_batch_canonicalizations();
+        let commit_b = database
+            .apply_generation_unverified(&manifest_b, &|| Ok(()))
+            .unwrap();
+        assert_eq!(
+            batch_canonicalizations(),
+            1,
+            "a different generation of the same logical projection must apply, not re-seat"
+        );
+        assert_eq!(commit_b.source_generation.as_str(), "source-b");
+        assert_eq!(commit_b.watermark.as_str(), "watermark-b");
+
+        // B's rows are really stored: the close/reopen recovered-digest
+        // proof over B's generation (including the entity A never had)
+        // seats B's sealed digest.
+        let sealed_b = sealed_digest(&manifest_b);
+        let (reopened_b, recovered_b) = database
+            .reopen_and_verify_existing_generation(&manifest_b, &sealed_b, &|| Ok(()))
+            .unwrap();
+        assert_eq!(recovered_b, sealed_b);
+        assert_eq!(reopened_b.source_generation.as_str(), "source-b");
+
+        // A same-generation retry of A still takes the cheap re-seat.
+        reset_batch_canonicalizations();
+        let retried_a = database
+            .apply_generation_unverified(&manifest_a, &|| Ok(()))
+            .unwrap();
+        assert_eq!(batch_canonicalizations(), 0);
+        assert_eq!(retried_a.source_generation.as_str(), "source-large");
+        assert_ne!(commit_b.digest, retried_a.digest);
+        assert_ne!(
+            commit_b.source_generation, retried_a.source_generation,
+            "generation B's commit must never alias generation A's"
+        );
+        owner.close().unwrap();
+    }
+
+    #[test]
+    fn divergent_identity_apply_falls_through_to_write() {
+        let temp = TempDir::new().unwrap();
+        let (_owner, database) = persistent_database(&temp);
+        database
+            .apply_generation_unverified(&manifest("source:one", "watermark:one"), &|| Ok(()))
+            .unwrap();
+
+        // Same projection and generation id (same physical namespace), but a
+        // different stored identity: the re-seat bind must refuse the cheap
+        // return and fall through to a real apply instead of fail-closing
+        // the apply with a verification mismatch.
+        let divergent = manifest("source:two", "watermark:two");
+        reset_batch_canonicalizations();
+        let commit = database
+            .apply_generation_unverified(&divergent, &|| Ok(()))
+            .unwrap();
+        assert_eq!(
+            batch_canonicalizations(),
+            1,
+            "a divergent identity must write, not re-seat"
+        );
+        assert_eq!(commit.source_generation.as_str(), "source:two");
+        assert_eq!(commit.watermark.as_str(), "watermark:two");
+
+        // Retrying the now-stored identity takes the cheap re-seat.
+        reset_batch_canonicalizations();
+        let retried = database
+            .apply_generation_unverified(&divergent, &|| Ok(()))
+            .unwrap();
+        assert_eq!(batch_canonicalizations(), 0);
+        assert_eq!(retried.source_generation.as_str(), "source:two");
     }
 }
