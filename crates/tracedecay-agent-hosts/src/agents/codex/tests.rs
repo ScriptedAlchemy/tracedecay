@@ -309,6 +309,17 @@ trusted_hash = "sha256:foreign"
                 & 0o777,
             0o600
         );
+        // The backup carries the same secrets as the original, so it must
+        // inherit the restrictive mode instead of the umask default.
+        assert_eq!(
+            std::fs::metadata(crate::agents::config_backup_path(&config_path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "config.toml.bak must keep the original 0600 mode"
+        );
     }
 
     let config_text = std::fs::read_to_string(&config_path).unwrap();
@@ -1057,7 +1068,9 @@ fn codex_preflight_reports_inactive_cache_without_interactive_guidance() {
 #[test]
 fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
     let home = tempfile::tempdir().unwrap();
-    // Pre-existing user config the install-path trust write must preserve.
+    // Pre-existing user config: preparation runs before the component
+    // transaction stages `config.toml`, so it must not write there — hook
+    // trust is recorded by activation, inside the rollback boundary.
     let config_path = codex_config_path(home.path());
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     std::fs::write(&config_path, "model = \"gpt-5\"\n").unwrap();
@@ -1068,26 +1081,114 @@ fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
     assert!(matches!(outcome, NonInteractiveInstallOutcome::Ready));
     assert!(codex_plugin_manifest_path(home.path()).is_file());
     assert!(codex_personal_marketplace_path(home.path()).is_file());
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        "model = \"gpt-5\"\n",
+        "preparation must leave config.toml untouched"
+    );
+}
 
-    // Install auto-trusts the staged managed hooks in config.toml while
-    // leaving the user's unrelated keys intact.
-    let config = load_toml_file(&config_path).unwrap();
-    assert_eq!(config["model"].as_str().unwrap(), "gpt-5");
-    assert!(
-        config["hooks"]["state"]
-            .as_table()
-            .unwrap()
-            .keys()
-            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
-        "install should record tracedecay hook trust entries"
+/// Activation must record hook trust even when Codex already reports the
+/// plugin natively active (no `codex plugin add` run): an already-current
+/// install can still carry missing or stale trust, and the canonical
+/// install/update/repair transaction reaches this method for both cases.
+#[test]
+fn activation_records_hook_trust_for_already_active_install() {
+    let home = tempfile::tempdir().unwrap();
+    write_exact_native_activation(home.path(), TEST_BIN);
+    let config_path = codex_config_path(home.path());
+    std::fs::write(
+        &config_path,
+        "model = \"gpt-5\"\n\n[plugins.\"tracedecay@personal\"]\nenabled = true\n",
+    )
+    .unwrap();
+
+    CodexIntegration
+        .activate_deployed_host_registration(&install_ctx(home.path()))
+        .unwrap();
+
+    let updated = load_toml_file(&config_path).unwrap();
+    assert_eq!(updated["model"].as_str().unwrap(), "gpt-5");
+    assert_eq!(
+        updated["plugins"]["tracedecay@personal"]["enabled"].as_bool(),
+        Some(true)
+    );
+    let entries = managed_entries(TEST_BIN);
+    assert_eq!(
+        codex_plugin_hook_trust_state(&updated, &entries),
+        CodexHookTrustState::Trusted
+    );
+    assert_eq!(codex_hook_trust_followup(home.path()), None);
+}
+
+/// Uninstall must not leave the managed trust records behind: they count as
+/// registration residue and would hold the post-uninstall registration state
+/// at Repairable instead of Missing. Foreign plugins' records and unrelated
+/// user config stay untouched.
+#[test]
+fn deactivation_prunes_managed_hook_trust_and_preserves_foreign_records() {
+    let home = tempfile::tempdir().unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        r#"model = "gpt-5"
+
+[hooks.state."other@plugin:hooks/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:foreign"
+"#,
+    )
+    .unwrap();
+    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+    let seeded = load_toml_file(&config_path).unwrap();
+    assert_eq!(
+        seeded["hooks"]["state"].as_table().unwrap().len(),
+        CODEX_MANAGED_HOOKS.len() + 1
+    );
+
+    // No activation record and no current cache: deactivation takes the
+    // no-CLI branch and must still prune the managed trust records.
+    CodexIntegration
+        .deactivate_deployed_host_registration(&install_ctx(home.path()))
+        .unwrap();
+
+    let pruned = load_toml_file(&config_path).unwrap();
+    assert_eq!(pruned["model"].as_str().unwrap(), "gpt-5");
+    let state = pruned["hooks"]["state"].as_table().unwrap();
+    assert_eq!(
+        state.keys().collect::<Vec<_>>(),
+        vec!["other@plugin:hooks/hooks.json:session_start:0:0"],
+        "only the foreign record survives deactivation"
     );
     assert!(
         std::fs::read_to_string(&config_path)
             .unwrap()
             .lines()
             .any(|line| line == "[hooks.state]"),
-        "install should write the explicit [hooks.state] parent table"
+        "surviving foreign records keep the explicit [hooks.state] table"
     );
+
+    // With no foreign records the emptied hooks tables disappear entirely and
+    // the hook-trust residue is gone.
+    std::fs::write(&config_path, "model = \"gpt-5\"\n").unwrap();
+    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+    CodexIntegration
+        .deactivate_deployed_host_registration(&install_ctx(home.path()))
+        .unwrap();
+    let cleaned = load_toml_file(&config_path).unwrap();
+    assert_eq!(cleaned["model"].as_str().unwrap(), "gpt-5");
+    assert!(
+        cleaned.get("hooks").is_none(),
+        "an emptied [hooks] tree is dropped rather than left hollow"
+    );
+
+    // Idempotent: pruning with nothing to prune leaves the file byte-stable.
+    let before = std::fs::read(&config_path).unwrap();
+    CodexIntegration
+        .deactivate_deployed_host_registration(&install_ctx(home.path()))
+        .unwrap();
+    assert_eq!(std::fs::read(&config_path).unwrap(), before);
 }
 
 #[test]

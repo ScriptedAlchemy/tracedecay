@@ -12,10 +12,11 @@
 //! activation. Codex owns the `tracedecay@<marketplace>` activation keys in
 //! `~/.codex/config.toml`; TraceDecay never writes those. Hook trust is
 //! different: `codex plugin add` does not record `[hooks.state]` hashes and
-//! `/hooks` is interactive-only, so after a successful install or
-//! update-plugin TraceDecay records trust for its own managed hooks itself
-//! ([`sync_codex_hook_trust`]) — but only for hooks whose installed command is
-//! byte-for-byte a generated tracedecay command
+//! `/hooks` is interactive-only, so activation records trust for TraceDecay's
+//! own managed hooks ([`sync_codex_hook_trust`]) and deactivation prunes those
+//! records again ([`prune_codex_hook_trust_records`]) — both inside the
+//! component transaction's rollback boundary. Trust is recorded only for hooks
+//! whose installed command is byte-for-byte a generated tracedecay command
 //! ([`codex_hook_command_invokes_tracedecay`]); anything else keeps the manual
 //! `/hooks` review. See [`plugin_registry`] for the plugin adoption and
 //! [`mcp_registry`] for the MCP-only (non-plugin) registry.
@@ -90,11 +91,6 @@ impl AgentIntegration for CodexIntegration {
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
         install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        // Trust the staged hooks now: `codex plugin add` copies this exact
-        // payload into its cache without writing `[hooks.state]`, so recording
-        // the content hashes here is what lets the hooks run without a manual
-        // `/hooks` approval once activation completes.
-        announce_codex_hook_trust(&ctx.home, &ctx.tracedecay_bin);
         Ok(NonInteractiveInstallOutcome::Ready)
     }
 
@@ -172,16 +168,8 @@ impl AgentIntegration for CodexIntegration {
         if staged.is_empty() {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
+        // Activation also re-pins hook trust for the refreshed bundle.
         self.activate_deployed_host_registration(ctx)?;
-        // Auto-trust the personal bundle's hooks whenever one is present, so a
-        // refresh (which may have changed hook content) re-pins trust without a
-        // manual /hooks approval. Repo-local-only installs ship no hooks and
-        // have no personal trust surface, so this is a no-op for them.
-        if codex_plugin_manifest_path(&ctx.home).exists()
-            || !codex_plugin_cached_install_dirs(&ctx.home).is_empty()
-        {
-            announce_codex_hook_trust(&ctx.home, &ctx.tracedecay_bin);
-        }
         Ok(UpdatePluginOutcome::Refreshed(staged))
     }
 
@@ -355,23 +343,41 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
-            return Ok(());
+        if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
+            let marketplace_name = codex_cached_marketplace_name(&ctx.home);
+            let codex_cli = plugin_registry::require_codex_plugin_cli()?;
+            plugin_registry::codex_plugin_add_with(&codex_cli, &ctx.home, &marketplace_name)?;
         }
-        let marketplace_name = codex_cached_marketplace_name(&ctx.home);
-        let codex_cli = plugin_registry::require_codex_plugin_cli()?;
-        plugin_registry::codex_plugin_add_with(&codex_cli, &ctx.home, &marketplace_name)
+        // Auto-trust the personal bundle's hooks whenever one is present:
+        // `codex plugin add` never writes `[hooks.state]`, and an
+        // already-active install may still carry missing or stale trust.
+        // Activation runs inside the component transaction's write-intent
+        // scope, so a rejected install/update rolls this write back with the
+        // rest of `config.toml`. Repo-local-only installs ship no hooks and
+        // have no personal trust surface, so this is a no-op for them.
+        if codex_plugin_manifest_path(&ctx.home).exists()
+            || !codex_plugin_cached_install_dirs(&ctx.home).is_empty()
+        {
+            announce_codex_hook_trust(&ctx.home, &ctx.tracedecay_bin);
+        }
+        Ok(())
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))?
-            && !codex_plugin_enabled(&ctx.home).unwrap_or(false)
+        if codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))?
+            || codex_plugin_enabled(&ctx.home).unwrap_or(false)
         {
-            return Ok(());
+            let marketplace_name = codex_cached_marketplace_name(&ctx.home);
+            let codex_cli = plugin_registry::require_codex_plugin_cli()?;
+            plugin_registry::codex_plugin_remove_with(&codex_cli, &ctx.home, &marketplace_name)?;
         }
-        let marketplace_name = codex_cached_marketplace_name(&ctx.home);
-        let codex_cli = plugin_registry::require_codex_plugin_cli()?;
-        plugin_registry::codex_plugin_remove_with(&codex_cli, &ctx.home, &marketplace_name)
+        // `codex plugin remove` deliberately never touches `[hooks.state]`,
+        // so the managed trust records written at install/update time would
+        // otherwise survive as registration residue and hold uninstall
+        // verification at Repairable instead of Missing. Prune them here,
+        // inside the transaction's rollback boundary, preserving foreign
+        // plugins' records.
+        prune_codex_hook_trust_records(&ctx.home)
     }
 
     /// Split by component: the MCP-only set is driven through Codex's own
@@ -1254,6 +1260,72 @@ fn write_codex_hook_trust_config(config_path: &Path, config: &toml::Value) -> Re
     updated.push_str(&contents[child_offset..]);
     super::safe_write_text_file(config_path, &updated, backup.as_deref())?;
     eprintln!("\x1b[32m✔\x1b[0m Wrote {}", config_path.display());
+    Ok(())
+}
+
+/// Remove every TraceDecay-managed `[hooks.state]` trust record from
+/// `~/.codex/config.toml`, preserving foreign plugins' records and all
+/// unrelated config. `codex plugin remove` never touches `[hooks.state]`, so
+/// without this prune the records written by [`sync_codex_hook_trust`] would
+/// survive uninstall as registration residue ([`codex_registration_residue`])
+/// and hold the post-uninstall registration state at Repairable. Emptied
+/// `[hooks.state]`/`[hooks]` tables are dropped so a clean uninstall leaves no
+/// hollow managed sections behind.
+fn prune_codex_hook_trust_records(home: &Path) -> Result<()> {
+    let config_path = codex_config_path(home);
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let mut config = load_toml_file(&config_path)?;
+    let Some(table) = config.as_table_mut() else {
+        return Err(TraceDecayError::Config {
+            message: format!("{} is not a TOML table", config_path.display()),
+        });
+    };
+    let Some(state) = table
+        .get_mut("hooks")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|hooks| hooks.get_mut("state"))
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return Ok(());
+    };
+    let before = state.len();
+    state.retain(|key, _| !key.starts_with(CODEX_PLUGIN_ACTIVATION_KEY_PREFIX));
+    if state.len() == before {
+        return Ok(());
+    }
+    let state_empty = state.is_empty();
+    if state_empty
+        && let Some(hooks) = table.get_mut("hooks").and_then(toml::Value::as_table_mut)
+    {
+        hooks.remove("state");
+        if hooks.is_empty() {
+            table.remove("hooks");
+        }
+    }
+    let backup = super::backup_config_file(&config_path)?;
+    let contents = toml::to_string_pretty(&config).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to serialize {}: {error}", config_path.display()),
+    })?;
+    // Foreign trust records that remain still need the explicit parent table
+    // Codex's hook loader requires (see [`write_codex_hook_trust_config`]).
+    let updated = match contents.find("[hooks.state.\"") {
+        Some(child_offset) => {
+            let mut updated =
+                String::with_capacity(contents.len() + "[hooks.state]\n\n".len());
+            updated.push_str(&contents[..child_offset]);
+            updated.push_str("[hooks.state]\n\n");
+            updated.push_str(&contents[child_offset..]);
+            updated
+        }
+        None => contents,
+    };
+    super::safe_write_text_file(&config_path, &updated, backup.as_deref())?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Removed tracedecay hook trust records from {}",
+        config_path.display()
+    );
     Ok(())
 }
 
