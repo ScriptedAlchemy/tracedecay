@@ -8,6 +8,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId};
 use tracedecay_graph_db::{
@@ -19,6 +20,8 @@ use tracedecay_store::{
     FactReadControl, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
     StoreShardIdV1, VerifiedStoreLocatorV1,
 };
+
+const SNAPSHOT_READ_GATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Blocks gated `verified_snapshot` readers in place of fake slow IO, so
 /// tests order overlap and cancellation explicitly instead of racing
@@ -52,16 +55,28 @@ impl SnapshotReadGate {
         }
         state.entered += 1;
         self.changed.notify_all();
-        while !state.released {
-            state = self.changed.wait(state).unwrap();
-        }
+        let (state, wait) = self
+            .changed
+            .wait_timeout_while(state, SNAPSHOT_READ_GATE_TIMEOUT, |state| !state.released)
+            .unwrap();
+        assert!(
+            state.released && !wait.timed_out(),
+            "gated snapshot read was never released"
+        );
     }
 
     fn await_reader(&self) {
-        let mut state = self.state.lock().unwrap();
-        while state.entered == 0 {
-            state = self.changed.wait(state).unwrap();
-        }
+        let state = self.state.lock().unwrap();
+        let (state, wait) = self
+            .changed
+            .wait_timeout_while(state, SNAPSHOT_READ_GATE_TIMEOUT, |state| {
+                state.entered == 0
+            })
+            .unwrap();
+        assert!(
+            state.entered > 0 && !wait.timed_out(),
+            "no snapshot reader reached the enabled gate"
+        );
     }
 
     fn release(&self) {
