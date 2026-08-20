@@ -17,6 +17,10 @@ ROOT = Path(__file__).resolve().parent.parent
 PREPARER = ROOT / "scripts" / "prepare-release-runtime.py"
 ARCHIVE_ENTRY = "onnxruntime-linux-aarch64/lib/libonnxruntime.so.1.24.2"
 PAYLOAD = b"portable official ONNX Runtime\n"
+LICENSE_ENTRY = "onnxruntime-linux-aarch64/LICENSE"
+LICENSE_PAYLOAD = b"ONNX Runtime license\n"
+NOTICES_ENTRY = "onnxruntime-linux-aarch64/ThirdPartyNotices.txt"
+NOTICES_PAYLOAD = b"ONNX Runtime third-party notices\n"
 
 
 def build_archive(path: Path) -> str:
@@ -25,6 +29,14 @@ def build_archive(path: Path) -> str:
         entry.size = len(PAYLOAD)
         entry.mode = 0o755
         archive.addfile(entry, io.BytesIO(PAYLOAD))
+        for name, payload in [
+            (LICENSE_ENTRY, LICENSE_PAYLOAD),
+            (NOTICES_ENTRY, NOTICES_PAYLOAD),
+        ]:
+            notice = tarfile.TarInfo(name)
+            notice.size = len(payload)
+            notice.mode = 0o644
+            archive.addfile(notice, io.BytesIO(payload))
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -50,6 +62,18 @@ def write_manifest(path: Path, archive: Path, digest: str) -> None:
                             "archive_entry": ARCHIVE_ENTRY,
                             "entry_name": "libonnxruntime.so.1",
                             "link_name": "libonnxruntime.so",
+                            "notices": [
+                                {
+                                    "kind": "license",
+                                    "archive_entry": LICENSE_ENTRY,
+                                    "entry_name": "onnxruntime-LICENSE",
+                                },
+                                {
+                                    "kind": "notices",
+                                    "archive_entry": NOTICES_ENTRY,
+                                    "entry_name": "onnxruntime-ThirdPartyNotices.txt",
+                                },
+                            ],
                         },
                     },
                 ]
@@ -115,6 +139,10 @@ def main() -> None:
         linker_name = output / "libonnxruntime.so"
         assert linker_name.is_symlink()
         assert linker_name.readlink() == Path("libonnxruntime.so.1")
+        runtime_license = output / "onnxruntime-LICENSE"
+        runtime_notices = output / "onnxruntime-ThirdPartyNotices.txt"
+        assert runtime_license.read_bytes() == LICENSE_PAYLOAD
+        assert runtime_notices.read_bytes() == NOTICES_PAYLOAD
         env_lines = github_env.read_text(encoding="utf-8").splitlines()
         assert env_lines == [
             f"ORT_LIB_PATH={output}",
@@ -126,6 +154,8 @@ def main() -> None:
         assert github_output.read_text(encoding="utf-8").splitlines() == [
             f"runtime_library={runtime_library}",
             "runtime_entry_name=libonnxruntime.so.1",
+            f"runtime_license={runtime_license}",
+            f"runtime_notices={runtime_notices}",
         ]
 
         no_runtime_output = root / "no-runtime"
@@ -144,6 +174,8 @@ def main() -> None:
         assert no_runtime_github_output.read_text(encoding="utf-8").splitlines() == [
             "runtime_library=",
             "runtime_entry_name=",
+            "runtime_license=",
+            "runtime_notices=",
         ]
 
         bad_manifest = root / "bad-targets.json"

@@ -17,7 +17,19 @@
         "archive_entry": "onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so.1.24.2",
         "entry_name": "libonnxruntime.so.1",
         "link_name": "libonnxruntime.so",
-        "max_glibc": "2.27"
+        "max_glibc": "2.27",
+        "notices": [
+          {
+            "kind": "license",
+            "archive_entry": "onnxruntime-linux-x64-1.24.2/LICENSE",
+            "entry_name": "onnxruntime-LICENSE"
+          },
+          {
+            "kind": "notices",
+            "archive_entry": "onnxruntime-linux-x64-1.24.2/ThirdPartyNotices.txt",
+            "entry_name": "onnxruntime-ThirdPartyNotices.txt"
+          }
+        ]
       }
     },
     {
@@ -31,7 +43,19 @@
         "archive_entry": "onnxruntime-linux-aarch64-1.24.2/lib/libonnxruntime.so.1.24.2",
         "entry_name": "libonnxruntime.so.1",
         "link_name": "libonnxruntime.so",
-        "max_glibc": "2.27"
+        "max_glibc": "2.27",
+        "notices": [
+          {
+            "kind": "license",
+            "archive_entry": "onnxruntime-linux-aarch64-1.24.2/LICENSE",
+            "entry_name": "onnxruntime-LICENSE"
+          },
+          {
+            "kind": "notices",
+            "archive_entry": "onnxruntime-linux-aarch64-1.24.2/ThirdPartyNotices.txt",
+            "entry_name": "onnxruntime-ThirdPartyNotices.txt"
+          }
+        ]
       }
     },
     {

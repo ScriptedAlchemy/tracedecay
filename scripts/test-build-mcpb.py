@@ -87,6 +87,10 @@ def main() -> None:
 
         runtime_library = root / "libonnxruntime.so.1.24.2"
         runtime_library.write_bytes(b"portable-linux-runtime")
+        runtime_license = root / "onnxruntime-LICENSE"
+        runtime_license.write_bytes(b"onnxruntime-license")
+        runtime_notices = root / "onnxruntime-ThirdPartyNotices.txt"
+        runtime_notices.write_bytes(b"onnxruntime-third-party-notices")
         for platform in ["aarch64-linux", "x86_64-linux"]:
             binary = root / platform / "tracedecay"
             binary.parent.mkdir()
@@ -99,6 +103,8 @@ def main() -> None:
                 "0.0.67",
                 platform,
                 runtime_library,
+                runtime_license,
+                runtime_notices,
             )
             MODULE.verify_bundle(output, "0.0.67", platform)
 
@@ -107,10 +113,20 @@ def main() -> None:
                     "manifest.json",
                     "server/tracedecay",
                     "server/libonnxruntime.so.1",
+                    "licenses/onnxruntime-LICENSE",
+                    "licenses/onnxruntime-ThirdPartyNotices.txt",
                 }
                 assert (
                     archive.read("server/libonnxruntime.so.1")
                     == b"portable-linux-runtime"
+                )
+                assert (
+                    archive.read("licenses/onnxruntime-LICENSE")
+                    == b"onnxruntime-license"
+                )
+                assert (
+                    archive.read("licenses/onnxruntime-ThirdPartyNotices.txt")
+                    == b"onnxruntime-third-party-notices"
                 )
 
     print("MCPB build acceptance passed")

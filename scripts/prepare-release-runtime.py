@@ -49,20 +49,20 @@ def download(url: str) -> bytes:
     return payload
 
 
-def extract_runtime(payload: bytes, archive_entry: str) -> bytes:
+def extract_regular_file(payload: bytes, archive_entry: str, label: str) -> bytes:
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         member = archive.getmember(archive_entry)
         if not member.isfile():
-            raise ValueError(f"runtime archive entry is not a regular file: {archive_entry}")
+            raise ValueError(f"{label} archive entry is not a regular file: {archive_entry}")
         source = archive.extractfile(member)
         if source is None:
-            raise ValueError(f"runtime archive entry could not be read: {archive_entry}")
-        runtime = source.read(MAX_ARCHIVE_BYTES + 1)
-    if not runtime:
-        raise ValueError("release runtime library is empty")
-    if len(runtime) > MAX_ARCHIVE_BYTES:
-        raise ValueError("release runtime library exceeds the size limit")
-    return runtime
+            raise ValueError(f"{label} archive entry could not be read: {archive_entry}")
+        extracted = source.read(MAX_ARCHIVE_BYTES + 1)
+    if not extracted:
+        raise ValueError(f"release {label} is empty")
+    if len(extracted) > MAX_ARCHIVE_BYTES:
+        raise ValueError(f"release {label} exceeds the size limit")
+    return extracted
 
 
 def main() -> None:
@@ -72,7 +72,12 @@ def main() -> None:
     if runtime is None:
         append_lines(
             args.github_output,
-            ["runtime_library=", "runtime_entry_name="],
+            [
+                "runtime_library=",
+                "runtime_entry_name=",
+                "runtime_license=",
+                "runtime_notices=",
+            ],
         )
         return
     if not isinstance(runtime, dict):
@@ -83,12 +88,29 @@ def main() -> None:
     archive_entry = str(runtime["archive_entry"])
     entry_name = str(runtime["entry_name"])
     link_name = str(runtime["link_name"])
+    notice_entries = runtime["notices"]
     if Path(entry_name).name != entry_name or not entry_name:
         raise ValueError("runtime entry name must be a nonempty basename")
     if Path(link_name).name != link_name or not link_name:
         raise ValueError("runtime link name must be a nonempty basename")
     if link_name == entry_name:
         raise ValueError("runtime link and entry names must differ")
+    if not isinstance(notice_entries, list):
+        raise ValueError("runtime notices metadata must be a list")
+    notices: dict[str, tuple[str, str]] = {}
+    for notice in notice_entries:
+        if not isinstance(notice, dict):
+            raise ValueError("runtime notice metadata must be an object")
+        kind = str(notice["kind"])
+        notice_archive_entry = str(notice["archive_entry"])
+        notice_entry_name = str(notice["entry_name"])
+        if kind not in {"license", "notices"} or kind in notices:
+            raise ValueError("runtime notices must define license and notices once")
+        if Path(notice_entry_name).name != notice_entry_name or not notice_entry_name:
+            raise ValueError("runtime notice entry name must be a nonempty basename")
+        notices[kind] = (notice_archive_entry, notice_entry_name)
+    if set(notices) != {"license", "notices"}:
+        raise ValueError("runtime notices must define license and notices once")
     if len(expected_sha256) != 64 or any(
         character not in "0123456789abcdef" for character in expected_sha256
     ):
@@ -101,7 +123,16 @@ def main() -> None:
             f"release runtime SHA-256 mismatch: got {actual_sha256}, "
             f"expected {expected_sha256}"
         )
-    runtime_payload = extract_runtime(archive_payload, archive_entry)
+    runtime_payload = extract_regular_file(
+        archive_payload, archive_entry, "runtime library"
+    )
+    notice_payloads = {
+        kind: (
+            entry_name,
+            extract_regular_file(archive_payload, notice_archive_entry, kind),
+        )
+        for kind, (notice_archive_entry, entry_name) in notices.items()
+    }
 
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -109,6 +140,12 @@ def main() -> None:
     runtime_library.write_bytes(runtime_payload)
     runtime_library.chmod(0o644)
     (output / link_name).symlink_to(entry_name)
+    notice_paths: dict[str, Path] = {}
+    for kind, (notice_entry_name, notice_payload) in notice_payloads.items():
+        notice_path = output / notice_entry_name
+        notice_path.write_bytes(notice_payload)
+        notice_path.chmod(0o644)
+        notice_paths[kind] = notice_path
 
     ld_library_path = str(output)
     if current_ld_library_path := os.environ.get("LD_LIBRARY_PATH"):
@@ -130,6 +167,8 @@ def main() -> None:
         [
             f"runtime_library={runtime_library}",
             f"runtime_entry_name={entry_name}",
+            f"runtime_license={notice_paths['license']}",
+            f"runtime_notices={notice_paths['notices']}",
         ],
     )
 

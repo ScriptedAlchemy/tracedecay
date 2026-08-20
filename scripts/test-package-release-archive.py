@@ -24,7 +24,7 @@ def package(
     output: Path,
     archive_format: str,
     entry_name: str,
-    companion: tuple[Path, str] | None = None,
+    companions: list[tuple[Path, str]] | None = None,
 ) -> None:
     command = [
         "python3",
@@ -40,7 +40,7 @@ def package(
         "--epoch",
         str(EPOCH),
     ]
-    if companion is not None:
+    for companion in companions or []:
         command.extend(["--companion", f"{companion[0]}={companion[1]}"])
     subprocess.run(
         command,
@@ -94,6 +94,12 @@ def test_tar_gz_with_runtime_library(temp: Path, binary: Path) -> None:
     runtime = temp / "libonnxruntime.so.1.24.2"
     runtime_payload = b"portable ARM runtime\n"
     runtime.write_bytes(runtime_payload)
+    license_file = temp / "onnxruntime-LICENSE"
+    license_payload = b"ONNX Runtime license\n"
+    license_file.write_bytes(license_payload)
+    notices_file = temp / "onnxruntime-ThirdPartyNotices.txt"
+    notices_payload = b"ONNX Runtime third-party notices\n"
+    notices_file.write_bytes(notices_payload)
     first = temp / "runtime-first.tar.gz"
     second = temp / "runtime-second.tar.gz"
 
@@ -102,7 +108,11 @@ def test_tar_gz_with_runtime_library(temp: Path, binary: Path) -> None:
         first,
         "tar.gz",
         "tracedecay",
-        (runtime, "libonnxruntime.so.1"),
+        [
+            (runtime, "libonnxruntime.so.1"),
+            (license_file, "onnxruntime-LICENSE"),
+            (notices_file, "onnxruntime-ThirdPartyNotices.txt"),
+        ],
     )
     os.utime(runtime, (EPOCH + 300, EPOCH + 300))
     package(
@@ -110,7 +120,11 @@ def test_tar_gz_with_runtime_library(temp: Path, binary: Path) -> None:
         second,
         "tar.gz",
         "tracedecay",
-        (runtime, "libonnxruntime.so.1"),
+        [
+            (runtime, "libonnxruntime.so.1"),
+            (license_file, "onnxruntime-LICENSE"),
+            (notices_file, "onnxruntime-ThirdPartyNotices.txt"),
+        ],
     )
     assert first.read_bytes() == second.read_bytes()
 
@@ -119,11 +133,19 @@ def test_tar_gz_with_runtime_library(temp: Path, binary: Path) -> None:
         assert [entry.name for entry in entries] == [
             "tracedecay",
             "libonnxruntime.so.1",
+            "onnxruntime-LICENSE",
+            "onnxruntime-ThirdPartyNotices.txt",
         ]
         assert entries[0].mode == 0o755
         assert entries[1].mode == 0o644
         extracted = archive.extractfile(entries[1])
         assert extracted is not None and extracted.read() == runtime_payload
+        extracted_license = archive.extractfile(entries[2])
+        assert extracted_license is not None
+        assert extracted_license.read() == license_payload
+        extracted_notices = archive.extractfile(entries[3])
+        assert extracted_notices is not None
+        assert extracted_notices.read() == notices_payload
 
 
 def main() -> None:

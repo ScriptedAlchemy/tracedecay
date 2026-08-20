@@ -284,6 +284,8 @@ jobs:
           if [[ -n "${{ steps.target-runtime.outputs.runtime_library }}" ]]; then
             runtime_args+=(
               --runtime-library "${{ steps.target-runtime.outputs.runtime_library }}"
+              --runtime-license "${{ steps.target-runtime.outputs.runtime_license }}"
+              --runtime-notices "${{ steps.target-runtime.outputs.runtime_notices }}"
             )
           fi
           python3 .release-automation/scripts/build-mcpb.py build \
@@ -331,6 +333,10 @@ jobs:
             companion_args+=(
               --companion
               "${{ steps.target-runtime.outputs.runtime_library }}=${{ steps.target-runtime.outputs.runtime_entry_name }}"
+              --companion
+              "${{ steps.target-runtime.outputs.runtime_license }}=onnxruntime-LICENSE"
+              --companion
+              "${{ steps.target-runtime.outputs.runtime_notices }}=onnxruntime-ThirdPartyNotices.txt"
             )
           fi
           python3 .release-automation/scripts/package-release-archive.py \
