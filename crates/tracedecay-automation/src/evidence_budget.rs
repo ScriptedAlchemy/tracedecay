@@ -187,8 +187,7 @@ mod tests {
     #[test]
     fn exhausted_and_suppressed_labels_are_distinct_typed_states() {
         assert_ne!(
-            SESSION_EVIDENCE_BUDGET_EXHAUSTED,
-            SESSION_EVIDENCE_BUDGET_SUPPRESSED,
+            SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
             "a suppressed tick must never present as a fresh exhausted attempt"
         );
     }
