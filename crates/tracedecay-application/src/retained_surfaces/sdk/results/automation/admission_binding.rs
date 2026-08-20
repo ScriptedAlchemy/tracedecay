@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use tracedecay_domain::SESSION_EVIDENCE_BUDGET_SUPPRESSED;
 
 use super::{
     AutomationRunResultV1, AutomationSkipReasonV1, AutomationTaskV1, automation_request,
@@ -48,6 +49,25 @@ fn session_evidence_unavailability_skips_session_backed_writers() {
     let reason =
         AutomationSkipReasonV1::from_ledger_reason("session_evidence_retrieval_unavailable")
             .expect("known session-evidence skip");
+    assert!(reason.matches_task(AutomationTaskV1::SessionReflector));
+    assert!(reason.matches_task(AutomationTaskV1::SkillWriter));
+    assert!(reason.matches_task(AutomationTaskV1::CombinedReview));
+    assert!(!reason.matches_task(AutomationTaskV1::MemoryCurator));
+    assert!(!reason.matches_task(AutomationTaskV1::UserJob));
+}
+
+#[test]
+fn budget_backoff_suppression_is_a_typed_session_evidence_skip() {
+    assert_eq!(
+        SESSION_EVIDENCE_BUDGET_SUPPRESSED,
+        "session_evidence_budget_suppressed"
+    );
+    let reason = AutomationSkipReasonV1::from_ledger_reason(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
+        .expect("known session-evidence budget suppression skip");
+    assert_eq!(
+        reason,
+        AutomationSkipReasonV1::SessionEvidenceBudgetSuppressed
+    );
     assert!(reason.matches_task(AutomationTaskV1::SessionReflector));
     assert!(reason.matches_task(AutomationTaskV1::SkillWriter));
     assert!(reason.matches_task(AutomationTaskV1::CombinedReview));

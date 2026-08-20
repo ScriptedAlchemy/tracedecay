@@ -11,12 +11,12 @@ use super::ExtractionState;
 
 /// Preserve the statement-level graph row while collecting binding evidence
 /// from the same parser node. Binding rows never become graph nodes.
-pub(super) fn visit_import(state: &mut ExtractionState, node: TsNode<'_>) {
+pub(super) fn visit_import(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
     let text = state.node_text(node);
     let module_specifier = extract_module_specifier(state, node);
     let name = match &module_specifier {
         Some(module_specifier) => module_specifier.clone(),
-        None => text.clone(),
+        None => text.to_string(),
     };
     let start_line = node.start_position().row as u32;
     let end_line = node.end_position().row as u32;
@@ -106,7 +106,7 @@ pub(super) fn visit_import(state: &mut ExtractionState, node: TsNode<'_>) {
         let child = cursor.node();
         match child.kind() {
             "identifier" => {
-                let local_name = state.node_text(child);
+                let local_name = state.node_text(child).to_string();
                 push_evidence(
                     state,
                     &module_specifier,
@@ -139,7 +139,7 @@ pub(super) fn visit_import(state: &mut ExtractionState, node: TsNode<'_>) {
 }
 
 fn visit_named_imports(
-    state: &mut ExtractionState,
+    state: &mut ExtractionState<'_>,
     named_imports: TsNode<'_>,
     module_specifier: &str,
     statement_namespace: ImportNamespaceV1,
@@ -183,7 +183,7 @@ fn visit_named_imports(
 }
 
 fn visit_namespace_import(
-    state: &mut ExtractionState,
+    state: &mut ExtractionState<'_>,
     namespace_import: TsNode<'_>,
     module_specifier: &str,
     namespace: ImportNamespaceV1,
@@ -192,7 +192,7 @@ fn visit_namespace_import(
     let Some(local) = find_direct_child_by_kind(namespace_import, "identifier") else {
         return;
     };
-    let local_name = state.node_text(local);
+    let local_name = state.node_text(local).to_string();
     push_evidence(
         state,
         module_specifier,
@@ -204,7 +204,7 @@ fn visit_namespace_import(
 }
 
 fn push_evidence(
-    state: &mut ExtractionState,
+    state: &mut ExtractionState<'_>,
     module_specifier: &str,
     names: (Option<String>, Option<String>),
     namespace: ImportNamespaceV1,
@@ -228,7 +228,7 @@ fn push_evidence(
 }
 
 fn evidence_location(
-    state: &mut ExtractionState,
+    state: &mut ExtractionState<'_>,
     node: TsNode<'_>,
 ) -> Option<(SourceSpan, u32, u32)> {
     let start_byte = match u64::try_from(node.start_byte()) {
@@ -277,16 +277,16 @@ fn evidence_location(
     ))
 }
 
-fn extract_module_specifier(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
+fn extract_module_specifier(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
     node.child_by_field_name("source")
-        .and_then(|source| unquote(&state.node_text(source)))
+        .and_then(|source| unquote(state.node_text(source)))
 }
 
-fn binding_name(state: &ExtractionState, node: TsNode<'_>) -> String {
+fn binding_name(state: &ExtractionState<'_>, node: TsNode<'_>) -> String {
     let text = state.node_text(node);
-    match unquote(&text) {
+    match unquote(text) {
         Some(unquoted) => unquoted,
-        None => text,
+        None => text.to_string(),
     }
 }
 

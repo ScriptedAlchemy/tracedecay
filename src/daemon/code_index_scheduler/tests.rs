@@ -2184,6 +2184,77 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
     );
 }
 
+/// The lexical projection build inside `install_query_owners` honors the
+/// caller's `RetrievalBudget` verbatim: `Some(0)` is a set deadline that
+/// expires immediately as a typed `BudgetExceeded` refusal with nothing
+/// memoized, while `None` is unset and keeps the crate build fallback so the
+/// same generation still builds and memoizes its owners.
+#[test]
+fn query_owner_build_honors_set_budget_and_keeps_crate_fallback_when_unset() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let graph_reader = || {
+        crate::code_index::graph_projection::CodeGraphEvidenceReader::new(
+            latest.generation().manifest().generation_id.clone(),
+            Some(latest.generation().snapshot().repository.clone()),
+            latest.source_freshness().expect("source freshness"),
+            latest.generation().edges(),
+            latest.generation().chunks().chunks(),
+        )
+        .expect("memory graph reader")
+    };
+
+    let expired = RetrievalBudget {
+        max_candidates_per_lane: 1,
+        max_fused_candidates: 1,
+        max_hydrated_results: 1,
+        max_hydration_bytes: 1,
+        deadline_micros: Some(0),
+    };
+    let refusal = latest.install_query_owners(
+        graph_reader(),
+        super::CodeGraphServingAuthorityV1::Memory,
+        &expired,
+    );
+    match refusal {
+        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded) => {}
+        Err(error) => {
+            panic!("an already-expired build budget is a typed budget refusal: {error:?}")
+        }
+        Ok(_) => panic!("Some(0) is a set deadline and must expire immediately"),
+    }
+    assert!(
+        latest.query_owners.get().is_none(),
+        "a refused build must not be memoized as serving owners"
+    );
+
+    let unset = RetrievalBudget {
+        deadline_micros: None,
+        ..expired
+    };
+    let owners = latest
+        .install_query_owners(
+            graph_reader(),
+            super::CodeGraphServingAuthorityV1::Memory,
+            &unset,
+        )
+        .expect("an unset deadline keeps the crate build fallback");
+    let repeat = latest
+        .production_query_owners()
+        .expect("built owners are memoized for serving");
+    assert!(
+        Arc::ptr_eq(&owners, &repeat),
+        "every reader must share the one built owner set"
+    );
+}
+
 /// The generation record index must answer every point lookup exactly as the
 /// linear `.iter().find(..)` scans it replaced, including misses, and must be
 /// built once per generation rather than once per query.

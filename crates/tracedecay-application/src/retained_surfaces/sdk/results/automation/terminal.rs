@@ -1,5 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::{SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED};
 
 use crate::retained_surfaces::AutomationTaskV1;
 
@@ -40,6 +41,7 @@ pub enum AutomationSkipReasonV1 {
     SessionEvidenceResetRequired,
     SessionCursorManifestLimitExceeded,
     SessionEvidenceBudgetExhausted,
+    SessionEvidenceBudgetSuppressed,
     SessionEvidenceCancelled,
     NoSessionEvidence,
     ShippedFactProposalHistoryRetired,
@@ -83,7 +85,8 @@ impl AutomationSkipReasonV1 {
             "session_evidence_locked" => Reason::SessionEvidenceLocked,
             "session_evidence_reset_required" => Reason::SessionEvidenceResetRequired,
             "session_cursor_manifest_limit_exceeded" => Reason::SessionCursorManifestLimitExceeded,
-            "session_evidence_budget_exhausted" => Reason::SessionEvidenceBudgetExhausted,
+            SESSION_EVIDENCE_BUDGET_EXHAUSTED => Reason::SessionEvidenceBudgetExhausted,
+            SESSION_EVIDENCE_BUDGET_SUPPRESSED => Reason::SessionEvidenceBudgetSuppressed,
             "session_evidence_cancelled" => Reason::SessionEvidenceCancelled,
             "no_session_evidence" | "no_skill_writer_evidence" => Reason::NoSessionEvidence,
             "shipped_fact_proposal_history_retired" => Reason::ShippedFactProposalHistoryRetired,
@@ -117,6 +120,7 @@ impl AutomationSkipReasonV1 {
             | Reason::SessionEvidenceResetRequired
             | Reason::SessionCursorManifestLimitExceeded
             | Reason::SessionEvidenceBudgetExhausted
+            | Reason::SessionEvidenceBudgetSuppressed
             | Reason::SessionEvidenceCancelled
             | Reason::NoSessionEvidence => matches!(
                 task,

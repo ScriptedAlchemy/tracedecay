@@ -5,7 +5,10 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 use parking_lot::lock_api::ArcRwLockReadGuard;
-use parking_lot::{RawRwLock, RwLock as ParkingRwLock};
+use parking_lot::{
+    RawRwLock, RwLock as ParkingRwLock, RwLockUpgradableReadGuard,
+    RwLockWriteGuard as ParkingRwLockWriteGuard,
+};
 
 use crate::lease::VerifiedGenerationState;
 use crate::location::{PersistentGraphStoreState, ValidatedOpen};
@@ -30,6 +33,21 @@ use crate::{
 enum ReplacementPrecondition<'a> {
     Unchecked,
     Expected(Option<&'a GraphWatermark>),
+}
+
+/// A batch derived behind the upgradable snapshot-gate claim, ready to apply
+/// under the exclusive claim.
+pub(crate) struct PreparedGraphBatch {
+    pub(crate) batch: GraphWriteBatch,
+    pub(crate) metadata: mutation::CommitMetadata,
+    pub(crate) endpoint_namespaces: mutation::RelationEndpointNamespaces,
+}
+
+/// Outcome of deriving a gated batch: apply it, or adopt an already-stored
+/// commit without taking the exclusive claim.
+pub(crate) enum GraphBatchPlan<P> {
+    Apply(PreparedGraphBatch, P),
+    Settled(GraphCommit, P),
 }
 
 pub struct GraphDb {
@@ -208,64 +226,69 @@ impl GraphDb {
         for relation in &replacement.relations {
             relation.validate()?;
         }
-        let _snapshot_gate = self.inner.snapshot_gate.write();
-        let guard = self.write_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        if let ReplacementPrecondition::Expected(expected) = precondition {
-            let current =
-                latest_projection(database, &replacement.namespace, &replacement.projection)?
-                    .map(|state| state.commit.watermark);
-            if current.as_ref() != expected {
-                return Err(GraphDbError::Conflict);
-            }
-        }
-        let retained: BTreeSet<_> = replacement
-            .entities
-            .iter()
-            .map(|entity| entity.identity.clone())
-            .collect();
-        let mut mutations = Vec::new();
-        for relation in
-            projection_relations(database, &replacement.namespace, &replacement.projection)?
-        {
-            mutations.push(GraphMutation::DeleteRelation(relation.relation.identity));
-        }
-        for entity in
-            projection_entities(database, &replacement.namespace, &replacement.projection)?
-        {
-            if !retained.contains(&entity.entity.identity) {
-                mutations.push(GraphMutation::DeleteEntity(entity.entity.identity));
-            }
-        }
-        mutations.extend(
-            replacement
-                .entities
-                .into_iter()
-                .map(GraphMutation::UpsertEntity),
-        );
-        mutations.extend(
-            replacement
-                .relations
-                .into_iter()
-                .map(GraphMutation::UpsertRelation),
-        );
-        let mut batch = GraphWriteBatch::new(
-            replacement.namespace,
-            replacement.projection,
-            replacement.source_generation,
-            replacement.next_watermark,
-            mutations,
-            replacement.cancellation,
-        )?;
-        let digest = batch.validate_and_digest()?;
-        let mut state = self.state_write_guard()?;
-        self.apply_locked(
-            database,
-            &mut state,
-            batch,
-            mutation::CommitMetadata::for_digest(digest),
-            &mutation::RelationEndpointNamespaces::new(),
+        self.run_gated_batch(
             &|| Ok(()),
+            |database| {
+                if let ReplacementPrecondition::Expected(expected) = precondition {
+                    let current = latest_projection(
+                        database,
+                        &replacement.namespace,
+                        &replacement.projection,
+                    )?
+                    .map(|state| state.commit.watermark);
+                    if current.as_ref() != expected {
+                        return Err(GraphDbError::Conflict);
+                    }
+                }
+                let retained: BTreeSet<_> = replacement
+                    .entities
+                    .iter()
+                    .map(|entity| entity.identity.clone())
+                    .collect();
+                let mut mutations = Vec::new();
+                for relation in
+                    projection_relations(database, &replacement.namespace, &replacement.projection)?
+                {
+                    mutations.push(GraphMutation::DeleteRelation(relation.relation.identity));
+                }
+                for entity in
+                    projection_entities(database, &replacement.namespace, &replacement.projection)?
+                {
+                    if !retained.contains(&entity.entity.identity) {
+                        mutations.push(GraphMutation::DeleteEntity(entity.entity.identity));
+                    }
+                }
+                mutations.extend(
+                    replacement
+                        .entities
+                        .into_iter()
+                        .map(GraphMutation::UpsertEntity),
+                );
+                mutations.extend(
+                    replacement
+                        .relations
+                        .into_iter()
+                        .map(GraphMutation::UpsertRelation),
+                );
+                let mut batch = GraphWriteBatch::new(
+                    replacement.namespace,
+                    replacement.projection,
+                    replacement.source_generation,
+                    replacement.next_watermark,
+                    mutations,
+                    replacement.cancellation,
+                )?;
+                let digest = batch.validate_and_digest()?;
+                Ok(GraphBatchPlan::Apply(
+                    PreparedGraphBatch {
+                        batch,
+                        metadata: mutation::CommitMetadata::for_digest(digest),
+                        endpoint_namespaces: mutation::RelationEndpointNamespaces::new(),
+                    },
+                    (),
+                ))
+            },
+            |_database, commit, ()| Ok(commit),
         )
     }
 
@@ -565,6 +588,59 @@ impl GraphDb {
         } else {
             Ok(())
         }
+    }
+
+    /// One shared snapshot-gate choreography for every batch that is derived
+    /// from (or validated against) currently stored rows:
+    ///
+    /// 1. `derive` runs behind an upgradable claim — snapshot readers proceed
+    ///    while writers queue, so the rows it reads and the bytes it hashes
+    ///    stay exact without stalling reads.
+    /// 2. An `Apply` plan upgrades atomically to the exclusive claim for the
+    ///    write itself, then downgrades back; a `Settled` plan never takes
+    ///    the exclusive claim at all.
+    /// 3. `settle` runs behind the upgradable claim again, so post-apply
+    ///    reads (bookkeeping, digest streams over the applied rows) also
+    ///    admit readers.
+    pub(crate) fn run_gated_batch<P, T>(
+        &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+        derive: impl FnOnce(&GrafeoDB) -> Result<GraphBatchPlan<P>, GraphDbError>,
+        settle: impl FnOnce(&GrafeoDB, GraphCommit, P) -> Result<T, GraphDbError>,
+    ) -> Result<T, GraphDbError> {
+        let snapshot_gate = self.inner.snapshot_gate.upgradable_read();
+        let plan = {
+            let guard = self.read_guard()?;
+            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+            derive(database)?
+        };
+        let (commit, payload, _snapshot_gate) = match plan {
+            GraphBatchPlan::Settled(commit, payload) => (commit, payload, snapshot_gate),
+            GraphBatchPlan::Apply(prepared, payload) => {
+                let write_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
+                let commit = {
+                    let guard = self.write_guard()?;
+                    let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+                    let mut state = self.state_write_guard()?;
+                    self.apply_locked(
+                        database,
+                        &mut state,
+                        prepared.batch,
+                        prepared.metadata,
+                        &prepared.endpoint_namespaces,
+                        check,
+                    )?
+                };
+                (
+                    commit,
+                    payload,
+                    ParkingRwLockWriteGuard::downgrade_to_upgradable(write_gate),
+                )
+            }
+        };
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        settle(database, commit, payload)
     }
 
     pub(crate) fn apply_locked(
