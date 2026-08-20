@@ -791,20 +791,22 @@ fn detect_lcm_payload(raw: &str) -> Result<(String, Vec<SanitizationFindingV1>),
 
 /// Routes a non-empty quarantine-finding set to its typed refusal.
 ///
-/// A malformed-record finding means the document declared a structured format
-/// but could not be parsed without ambiguity — that is parse-ambiguity
-/// quarantine. Every other quarantine finding comes from a *parsed* document
-/// whose key-anchored material cannot be redacted in place (a credential
-/// carried in a key, or a key-proven sensitive field the sanitizer cannot
-/// locate byte-exactly), which is the key-quarantine refusal. The two never
-/// mix: malformed-record findings are only emitted instead of, never alongside,
-/// parsed-document findings.
+/// Malformed records, unlocatable sensitive values, and credential-bearing
+/// keys require different remediation, so preserve their distinct typed
+/// refusals. A parsed document can contain both an unlocatable sensitive value
+/// and a credential-bearing key; the unlocatable-field result takes precedence
+/// because reporting only the key would conceal the value-location failure.
 fn quarantine_detection_error(findings: &[SanitizationFindingV1]) -> DetectionError {
     if findings
         .iter()
         .any(|finding| finding.detector() == PrivacyDetectorV1::MalformedRecord)
     {
         DetectionError::StructuredQuarantine
+    } else if findings
+        .iter()
+        .any(|finding| finding.detector() == PrivacyDetectorV1::SensitiveField)
+    {
+        DetectionError::SensitiveFieldQuarantine
     } else {
         DetectionError::CredentialKeyQuarantine
     }

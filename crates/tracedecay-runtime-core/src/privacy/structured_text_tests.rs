@@ -428,6 +428,28 @@ fn code_source_parse_ambiguity_stays_a_structured_quarantine() {
 }
 
 #[test]
+fn lcm_unlocatable_sensitive_fields_are_not_reported_as_credential_keys() {
+    let raw = "# rotate the vault_passphrase monthly\nvault_passphrase: >\n  line-one-of-secret\n  line-two-of-secret\nregion: us-east\n";
+
+    let error = sanitize_lcm_payload_text(raw).expect_err("unlocatable sensitive field");
+    assert_eq!(error, DetectionError::SensitiveFieldQuarantine);
+    assert_eq!(
+        error.to_string(),
+        "privacy sanitizer quarantined an unlocatable sensitive field"
+    );
+}
+
+#[test]
+fn code_source_unlocatable_sensitive_fields_keep_their_typed_refusal() {
+    let raw = "# rotate the vault_passphrase monthly\nvault_passphrase: >\n  line-one-of-secret\n  line-two-of-secret\nregion: us-east\n";
+
+    let error = sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData)
+        .map(|_| ())
+        .expect_err("unlocatable sensitive field");
+    assert_eq!(error, DetectionError::SensitiveFieldQuarantine);
+}
+
+#[test]
 fn lcm_json_credential_values_under_ordinary_keys_still_redact_durably() {
     // The quarantine above is specific to key positions. The same credential in
     // a *value* position is redactable, so sanitization must stay a durable
