@@ -101,14 +101,15 @@ impl GraphDb {
                     // to "some projection exists": the stored commit must
                     // carry this manifest's identity. The physical namespace
                     // is generation-hashed today, but the bind must not rely
-                    // on that staying true.
+                    // on that staying true. The dependency digest must match
+                    // exactly: a commit without one (staged vector batches,
+                    // deletion markers) can never pass the reopen proof, so
+                    // re-seating it would quarantine durably where the write
+                    // fall-through below completes the publication instead.
                     let bound = existing.commit.source_generation == manifest.source_generation
                         && existing.commit.watermark == manifest.watermark
-                        && existing
-                            .commit
-                            .generation_dependency_digest
-                            .as_ref()
-                            .is_none_or(|stored| stored == &dependency_digest);
+                        && existing.commit.generation_dependency_digest.as_ref()
+                            == Some(&dependency_digest);
                     let was_collected = self
                         .inner
                         .verified_generations
