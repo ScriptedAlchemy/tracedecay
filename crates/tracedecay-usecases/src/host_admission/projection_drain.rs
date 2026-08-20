@@ -65,18 +65,18 @@ impl HostAdmissionFacade<'_> {
                     // Skip is already durable. Yield the rest of this drain so
                     // we do not keep paying sanitization/receipt construction
                     // on the same batch (Plan 23/26: typed skip + Deferred).
-                    tracing::warn!(
+                    // The durable skip is represented in the typed outcome.
+                    // Keep per-item detail below WARN so deferred host ticks
+                    // cannot turn standing invalid input into an alert loop.
+                    tracing::debug!(
                         %error,
                         observation = observation_id.as_str(),
                         "deterministic projection rejection committed"
                     );
-                    let (skipped, deferred, stop) =
-                        after_deterministic_rejection(outcome.skipped);
+                    let (skipped, deferred) = after_deterministic_rejection(outcome.skipped);
                     outcome.skipped = skipped;
                     observation_deferred = deferred;
-                    if stop {
-                        break;
-                    }
+                    break;
                 }
                 Err(error) => {
                     // The head-of-queue failure aborts the drain (fail-closed
@@ -147,26 +147,60 @@ impl HostAdmissionFacade<'_> {
     }
 }
 
-fn after_deterministic_rejection(skipped: u64) -> (u64, bool, bool) {
-    (skipped.saturating_add(1), true, true)
+fn after_deterministic_rejection(skipped: u64) -> (u64, bool) {
+    (skipped.saturating_add(1), true)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum SimulatedProjectOutcome {
+    Refusal,
+    Projected,
+}
+
+#[cfg(test)]
+fn simulate_drain_project_calls(batch: &[SimulatedProjectOutcome]) -> (u64, bool, usize) {
+    let mut skipped = 0;
+    let mut deferred = false;
+    let mut project_calls = 0_usize;
+    for outcome in batch {
+        project_calls = project_calls.saturating_add(1);
+        match outcome {
+            SimulatedProjectOutcome::Refusal => {
+                let (next_skipped, next_deferred) = after_deterministic_rejection(skipped);
+                skipped = next_skipped;
+                deferred = next_deferred;
+                break;
+            }
+            SimulatedProjectOutcome::Projected => {}
+        }
+    }
+    (skipped, deferred, project_calls)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::after_deterministic_rejection;
+    use super::{SimulatedProjectOutcome, simulate_drain_project_calls};
 
     #[test]
-    fn first_deterministic_refusal_is_one_skip_and_yields_the_rest() {
-        let max = 8_u32;
-        let (skipped, deferred, stop) = after_deterministic_rejection(0);
+    fn multi_item_batch_yields_after_first_refusal() {
+        let batch = [
+            SimulatedProjectOutcome::Refusal,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Projected,
+        ];
+        let (skipped, deferred, project_calls) = simulate_drain_project_calls(&batch);
         assert_eq!(skipped, 1);
         assert!(deferred);
-        assert!(stop);
-        let new_project_calls = 1_u32;
-        assert!(
-            new_project_calls < max,
-            "yielding must do less project/sanitization work than continuing the batch"
+        assert_eq!(
+            project_calls, 1,
+            "first durable refusal must yield; remaining max-1 items are unpaid"
         );
+        assert!(project_calls < batch.len());
     }
 }
-
