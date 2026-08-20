@@ -456,16 +456,99 @@ incremental = false
 [profile.dev]
 debug = 1
 incremental = true
+opt-level = 1
 
 [profile.test]
 debug = 1
 incremental = true
+opt-level = 1
 
 [profile.dev.package."*"]
 debug = 0
 
 [profile.test.package."*"]
 debug = 0
+
+# Code-index lifecycle tests exercise six-figure production generations under
+# the same bounded readiness contracts as the daemon. Keep the owning kernels
+# optimized without hiding assertions or optimizing unrelated workspace code.
+[profile.dev.package.tracedecay-code-extraction]
+opt-level = 2
+
+[profile.dev.package.tracedecay-code-index]
+opt-level = 2
+
+[profile.dev.package.tracedecay-domain]
+opt-level = 2
+
+[profile.dev.package.tracedecay-graph-db]
+opt-level = 2
+
+[profile.dev.package.tracedecay-runtime-core]
+opt-level = 2
+
+[profile.dev.package.tracedecay-rusqlite-runtime]
+opt-level = 2
+
+[profile.dev.package.tracedecay-store]
+opt-level = 2
+
+[profile.dev.package.grafeo-adapters]
+opt-level = 2
+
+[profile.dev.package.grafeo-common]
+opt-level = 2
+
+[profile.dev.package.grafeo-core]
+opt-level = 2
+
+[profile.dev.package.grafeo-engine]
+opt-level = 2
+
+[profile.dev.package.grafeo-storage]
+opt-level = 2
+
+[profile.dev.package.serde_json]
+opt-level = 2
+
+[profile.test.package.tracedecay-code-extraction]
+opt-level = 2
+
+[profile.test.package.tracedecay-code-index]
+opt-level = 2
+
+[profile.test.package.tracedecay-domain]
+opt-level = 2
+
+[profile.test.package.tracedecay-graph-db]
+opt-level = 2
+
+[profile.test.package.tracedecay-runtime-core]
+opt-level = 2
+
+[profile.test.package.tracedecay-rusqlite-runtime]
+opt-level = 2
+
+[profile.test.package.tracedecay-store]
+opt-level = 2
+
+[profile.test.package.grafeo-adapters]
+opt-level = 2
+
+[profile.test.package.grafeo-common]
+opt-level = 2
+
+[profile.test.package.grafeo-core]
+opt-level = 2
+
+[profile.test.package.grafeo-engine]
+opt-level = 2
+
+[profile.test.package.grafeo-storage]
+opt-level = 2
+
+[profile.test.package.serde_json]
+opt-level = 2
 
 # The first token count pays a one-time BPE model load (embedded-vocabulary
 # base64 decode + BPE regex compile) that costs seconds in unoptimized
