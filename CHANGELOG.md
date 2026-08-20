@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.11](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.10...v0.1.0-beta.11) (2026-08-20)
+
+
+### Bug Fixes
+
+* **daemon:** keep committed-profile unseated retention retryable ([f45e856](https://github.com/ScriptedAlchemy/tracedecay/commit/f45e85641d3096d9d96793e080d9234b60d6c70e))
+* **daemon:** quiet vector retention when semantic runtime is unseated ([78509af](https://github.com/ScriptedAlchemy/tracedecay/commit/78509afaccbb21aa99459788a344854ba0c40e0f))
+* **runtime:** isolate repository discovery from blocking pool ([ca8f06c](https://github.com/ScriptedAlchemy/tracedecay/commit/ca8f06cbc2fdb67d989b52b3bd4db68824360e84))
+
 ## [0.1.0-beta.10](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.9...v0.1.0-beta.10) (2026-08-20)
 
 
