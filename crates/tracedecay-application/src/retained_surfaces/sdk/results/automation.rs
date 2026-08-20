@@ -29,7 +29,10 @@ pub use curation::{
     MemoryAutomationCurationRelationProvenanceV1, MemoryAutomationCurationRelationV1,
     MemoryAutomationCurationRemoveDispositionV1, MemoryAutomationCurationResultV1,
 };
-pub use terminal::{AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1};
+pub use terminal::{
+    AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
+    SESSION_EVIDENCE_BUDGET_SUPPRESSED,
+};
 
 #[derive(Serialize)]
 struct AutomaticFactDigestProjection<'a> {
