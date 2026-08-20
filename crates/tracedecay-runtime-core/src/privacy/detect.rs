@@ -396,7 +396,7 @@ fn is_safe_structural_location(location: &str) -> bool {
     true
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum DetectionError {
     #[error("privacy detector initialization failed")]
     Initialization,
@@ -405,10 +405,15 @@ pub enum DetectionError {
     #[error("privacy sanitizer receipt construction failed")]
     Receipt,
     /// The document declared a structured data format but could not be parsed
-    /// without ambiguity, so field semantics cannot be proven scanned. This is
-    /// the sanitizer's own fail-closed refusal, not a construction fault.
+    /// without ambiguity, so field semantics cannot be proven scanned.
     #[error("privacy sanitizer quarantined an ambiguous structured document")]
     StructuredQuarantine,
+    /// The document parsed, but key-anchored material cannot be redacted in
+    /// place: an object key carries credential material, or a key-proven
+    /// sensitive field cannot be located byte-exactly. Fail-closed quarantine,
+    /// not a receipt fault.
+    #[error("privacy sanitizer quarantined credential-bearing keys")]
+    CredentialKeyQuarantine,
 }
 
 pub enum MemoryFactSanitizationV1 {
