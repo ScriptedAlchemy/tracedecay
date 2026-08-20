@@ -33,11 +33,6 @@ pub mod doctor;
 pub mod execution_topology_metrics;
 pub mod external_source;
 pub mod feedback;
-/// Compatibility re-export: the framed-log primitives moved down into
-/// `tracedecay-domain` so the dependency-free kernel can use them without an
-/// edge back up into this contract crate. Every historical
-/// `tracedecay_application::framed_log::…` path still resolves here.
-pub use tracedecay_domain::framed_log;
 pub mod git;
 pub mod handlers;
 pub mod handoff;
@@ -321,11 +316,6 @@ pub use storage::{
     StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
     incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
     semantic_vector_retention_finding,
-};
-pub use tracedecay_domain::framed_log::{
-    DirectorySyncPolicy, append_durable, atomic_write, atomic_write_prepared, file_len,
-    read_bounded, replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
-    truncate_file, validate_regular_or_missing, with_owned_temp_publish,
 };
 pub use work::*;
 pub use work_artifact_hydration::*;
