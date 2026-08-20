@@ -414,6 +414,11 @@ pub enum DetectionError {
     /// not a receipt fault.
     #[error("privacy sanitizer quarantined credential-bearing keys")]
     CredentialKeyQuarantine,
+    /// A parsed sensitive field could not be mapped back to one exact byte
+    /// span. Redacting a guessed span could leave the real value intact, so
+    /// the payload is quarantined instead.
+    #[error("privacy sanitizer quarantined an unlocatable sensitive field")]
+    SensitiveFieldQuarantine,
 }
 
 pub enum MemoryFactSanitizationV1 {
