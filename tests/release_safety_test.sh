@@ -147,6 +147,16 @@ for marker in external_publication_markers:
         )
 
 for path, text in ((stable_path, stable), (beta_path, beta)):
+    release_test = re.search(
+        r"- name: Test release distribution\n"
+        r"\s+if: matrix\.name == 'x86_64-linux'\n"
+        r"\s+run: cargo test --workspace --release --target",
+        text,
+    )
+    if release_test is None:
+        raise SystemExit(
+            f"{path} must run the full release test suite once on x86_64-linux"
+        )
     if "scripts/package-release-archive.py" not in text:
         raise SystemExit(f"{path} must use deterministic release archive packaging")
     for mutable_packager in ("tar czf", "tar -czf", "Compress-Archive", "7z a "):
