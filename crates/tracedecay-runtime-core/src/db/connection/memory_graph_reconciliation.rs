@@ -1068,7 +1068,7 @@ mod tests {
         assert_eq!(coordinator.retained_task_count(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn transient_failure_retries_without_a_later_write_trigger() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, _) = task_owner(&coordinator);
@@ -1082,7 +1082,7 @@ mod tests {
                 let call = task_calls.fetch_add(1, Ordering::SeqCst);
                 let task_succeeded = Arc::clone(&task_succeeded);
                 async move {
-                    if call == 0 {
+                    if call < 2 {
                         false
                     } else {
                         task_succeeded.notify_one();
@@ -1092,11 +1092,38 @@ mod tests {
             }),
             MemoryGraphReconciliationTaskScheduleV1::Scheduled
         );
+        // The first failed pass retries immediately through the wake permit
+        // its own schedule stored; the second failure has no permit left, so
+        // the worker re-arms itself and parks on its backoff timer. The
+        // worker publishes that re-armed state and registers its timer
+        // within one poll, so on this single-threaded paused runtime the
+        // explicit advances below race with nothing.
+        wait_until(|| {
+            let state = coordinator
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            calls.load(Ordering::SeqCst) == 2 && state.pending && !state.running
+        })
+        .await;
+
+        tokio::time::advance(AUTOMATIC_RETRY_BASE - Duration::from_millis(1)).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "automatic retry must wait out its full base backoff"
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
         tokio::time::timeout(Duration::from_secs(1), succeeded.notified())
             .await
             .expect("lifecycle retry must settle without another write");
         wait_until(|| reconciliation_retirement_is_admissible(&owner)).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert!(!owner.pending());
         owner.shutdown().await.expect("join reconciler worker");
     }
