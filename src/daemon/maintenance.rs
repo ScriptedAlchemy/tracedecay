@@ -333,6 +333,11 @@ impl SemanticVectorRetentionBacklogV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum SemanticVectorRetentionReadV1 {
     Unknown,
+    /// The semantic runtime is not seated for this daemon, so no vector
+    /// census will ever start, let alone complete. This is the ordinary
+    /// default-off state, distinct from [`Self::Unknown`] (a census that has
+    /// not run yet or was reset by a failure or mutation).
+    SemanticUnseated,
     Scanning,
     Observed {
         receipt: tracedecay_store::SemanticVectorProjectCensusReceipt,
@@ -344,6 +349,7 @@ struct SemanticVectorRetentionProgressV1 {
     cursor: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
     observed: Option<tracedecay_store::SemanticVectorProjectCensusReceipt>,
     scanning: bool,
+    semantic_unseated: bool,
 }
 
 impl StoreTelemetrySamplingRegistry {
@@ -430,6 +436,24 @@ impl StoreTelemetrySamplingRegistry {
             );
     }
 
+    /// Pin the project's census read to [`SemanticVectorRetentionReadV1::SemanticUnseated`].
+    ///
+    /// The vector retention pass records this when the daemon has no seated
+    /// semantic runtime, so downstream passes can distinguish "no census will
+    /// ever exist" from a census that merely has not completed yet.
+    pub(super) fn record_semantic_vector_retention_unseated(&self, project_root: &Path) {
+        self.semantic_vector_retention
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root.to_path_buf(),
+                SemanticVectorRetentionProgressV1 {
+                    semantic_unseated: true,
+                    ..SemanticVectorRetentionProgressV1::default()
+                },
+            );
+    }
+
     pub(super) fn record_semantic_vector_retention_census(
         &self,
         project_root: &Path,
@@ -442,6 +466,8 @@ impl StoreTelemetrySamplingRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let progress = retention.entry(project_root.to_path_buf()).or_default();
+        // A census page can only come from a seated semantic runtime.
+        progress.semantic_unseated = false;
         if matches!(
             census.action,
             SemanticVectorRetentionAction::Retired(_)
@@ -491,6 +517,9 @@ impl StoreTelemetrySamplingRegistry {
         let Some(progress) = retention.get(project_root) else {
             return SemanticVectorRetentionReadV1::Unknown;
         };
+        if progress.semantic_unseated {
+            return SemanticVectorRetentionReadV1::SemanticUnseated;
+        }
         if progress.scanning {
             return SemanticVectorRetentionReadV1::Scanning;
         }
@@ -1623,6 +1652,71 @@ mod tests {
             registry.semantic_vector_retention_read(project),
             SemanticVectorRetentionReadV1::Unknown
         );
+    }
+
+    #[test]
+    fn semantic_unseated_read_is_distinct_and_cleared_by_census_and_failure() {
+        let registry = StoreTelemetrySamplingRegistry::default();
+        let project = std::path::Path::new("/project");
+
+        registry.record_semantic_vector_retention_unseated(project);
+        assert_eq!(
+            registry.semantic_vector_retention_read(project),
+            SemanticVectorRetentionReadV1::SemanticUnseated
+        );
+        assert_eq!(registry.semantic_vector_retention_cursor(project), None);
+
+        // A failure reset is Unknown, not unseated: the census could not be
+        // read even though a semantic runtime is seated.
+        registry.record_semantic_vector_retention_failure(project);
+        assert_eq!(
+            registry.semantic_vector_retention_read(project),
+            SemanticVectorRetentionReadV1::Unknown
+        );
+
+        // A census page proves a seated runtime and clears the unseated pin.
+        registry.record_semantic_vector_retention_unseated(project);
+        let shard_id = tracedecay_store::StoreShardIdV1::project(
+            tracedecay_domain::BrainId::new("brain.maintenance").unwrap(),
+            tracedecay_domain::UserProfileId::new("profile.maintenance").unwrap(),
+            tracedecay_domain::ProjectId::new("project.maintenance").unwrap(),
+        );
+        let revision = tracedecay_store::SemanticVectorStageCensusRevision::new(3).unwrap();
+        let complete = tracedecay_graph_db::SemanticVectorRetentionCensus {
+            shard_id: shard_id.clone(),
+            revision,
+            pending: 0,
+            ready: 0,
+            published: 1,
+            cancelled: 0,
+            complete_receipt: Some(tracedecay_store::SemanticVectorProjectCensusReceipt {
+                shard_id,
+                revision,
+                counts: tracedecay_store::SemanticVectorStageCensusCounts {
+                    pending: 0,
+                    ready: 0,
+                    published: 1,
+                    cancelled: 0,
+                },
+                record_digest: tracedecay_domain::canonical_sha256(&"unseated-clear").unwrap(),
+            }),
+            continuation: None,
+            action: tracedecay_graph_db::SemanticVectorRetentionAction::None,
+        };
+        assert!(registry.record_semantic_vector_retention_census(project, &complete));
+        assert!(matches!(
+            registry.semantic_vector_retention_read(project),
+            SemanticVectorRetentionReadV1::Observed { .. }
+        ));
+
+        // Re-pinning unseated discards a stale observed receipt: an unseated
+        // runtime cannot vouch for a census taken while it was seated.
+        registry.record_semantic_vector_retention_unseated(project);
+        assert_eq!(
+            registry.semantic_vector_retention_read(project),
+            SemanticVectorRetentionReadV1::SemanticUnseated
+        );
+        assert!(!registry.semantic_vector_scope_collection_ready(project));
     }
 
     #[test]
