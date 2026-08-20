@@ -30,6 +30,37 @@ impl ExactSqlWriteAuthority for AtomicWriteAuthority {
     }
 }
 
+/// Drives the writer thread's fake lease clock from inside the lease it
+/// probes: authority verification is the only test code that runs on the
+/// writer thread. `run_transaction` verifies with `Execute` intent exactly
+/// twice per bounded step — before and after execution — so every even check
+/// is the pre-step hook.
+struct LeaseClockAdvancingAuthority {
+    step: Duration,
+    execute_checks: AtomicUsize,
+}
+
+impl LeaseClockAdvancingAuthority {
+    fn fake_elapsed(&self) -> Duration {
+        let steps = self.execute_checks.load(Ordering::Acquire).div_ceil(2);
+        self.step * u32::try_from(steps).unwrap()
+    }
+}
+
+impl ExactSqlWriteAuthority for LeaseClockAdvancingAuthority {
+    fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
+        if intent == ExactSqlWriteIntent::Execute
+            && self
+                .execute_checks
+                .fetch_add(1, Ordering::AcqRel)
+                .is_multiple_of(2)
+        {
+            command::lease_clock::advance(self.step);
+        }
+        Ok(())
+    }
+}
+
 struct SlowSchemaAuthority {
     execute_batch_checks: AtomicUsize,
 }

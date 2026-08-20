@@ -116,6 +116,46 @@ fn sqlite_busy_or_locked(error: &rusqlite::Error) -> bool {
     )
 }
 
+/// Clock behind every transaction lease deadline: idle, absolute, renewal.
+///
+/// Production reads the monotonic wall clock. Tests may freeze and advance a
+/// writer-thread-local fake instead, so lease renewal is provable without
+/// sleeping through real lease periods.
+#[cfg(not(test))]
+fn lease_now() -> Instant {
+    Instant::now()
+}
+
+#[cfg(test)]
+use lease_clock::lease_now;
+
+#[cfg(test)]
+pub(crate) mod lease_clock {
+    use std::{
+        cell::Cell,
+        time::{Duration, Instant},
+    };
+
+    thread_local! {
+        static FAKE_LEASE_NOW: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+
+    /// Real monotonic time until [`advance`] freezes this thread's clock.
+    pub(crate) fn lease_now() -> Instant {
+        FAKE_LEASE_NOW.with(Cell::get).unwrap_or_else(Instant::now)
+    }
+
+    /// Freezes this thread's lease clock `by` past its current reading.
+    ///
+    /// Only code already running on the writer thread — in practice an
+    /// [`super::ExactSqlWriteAuthority`] verification — can move the clock
+    /// the transaction loop reads.
+    pub(crate) fn advance(by: Duration) {
+        let advanced = lease_now() + by;
+        FAKE_LEASE_NOW.with(|fake| fake.set(Some(advanced)));
+    }
+}
+
 pub(crate) enum TransactionCommand {
     Attach {
         attachment: ExactSqlAttachment,
@@ -332,14 +372,14 @@ fn run_transaction(
 ) -> TransactionCompletion {
     let mut attachments = Vec::new();
     let mut previous_attachment_limit = None;
-    let mut idle_deadline = Instant::now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
-    let mut transaction_deadline = Instant::now() + EXACT_SQL_TRANSACTION_LIMIT;
+    let mut idle_deadline = lease_now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
+    let mut transaction_deadline = lease_now() + EXACT_SQL_TRANSACTION_LIMIT;
     loop {
         if shutdown_requested.load(Ordering::Acquire) {
             let _ = transaction.rollback();
             return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
         }
-        let now = Instant::now();
+        let now = lease_now();
         if now >= idle_deadline || now >= transaction_deadline {
             expired.store(true, Ordering::Release);
             let _ = transaction.rollback();
@@ -358,7 +398,7 @@ fn run_transaction(
         };
         match command {
             TransactionCommand::Attach { attachment, reply } => {
-                if Instant::now() >= transaction_deadline {
+                if lease_now() >= transaction_deadline {
                     expired.store(true, Ordering::Release);
                     let _ = transaction.rollback();
                     let _ = reply.send(Err(ExactSqlError::TransactionExpired));
@@ -420,7 +460,7 @@ fn run_transaction(
                             );
                         }
                         let _ = reply.send(Ok(()));
-                        idle_deadline = Instant::now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
+                        idle_deadline = lease_now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
                     }
                     Err(error) => {
                         let _ = transaction.rollback();
@@ -437,7 +477,7 @@ fn run_transaction(
                 execution_policy,
                 reply,
             } => {
-                if Instant::now() >= transaction_deadline {
+                if lease_now() >= transaction_deadline {
                     expired.store(true, Ordering::Release);
                     let _ = transaction.rollback();
                     let _ = reply.send(Err(ExactSqlError::TransactionExpired));
@@ -517,7 +557,7 @@ fn run_transaction(
                     );
                 }
                 if execution_policy == ExecutionPolicy::Bounded
-                    && Instant::now() >= transaction_deadline
+                    && lease_now() >= transaction_deadline
                 {
                     expired.store(true, Ordering::Release);
                     let _ = transaction.rollback();
@@ -536,7 +576,7 @@ fn run_transaction(
                 let succeeded = result.is_ok();
                 let _ = reply.send(result);
                 if succeeded {
-                    let renewed_at = Instant::now();
+                    let renewed_at = lease_now();
                     idle_deadline = renewed_at + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
                     // A long-lease transaction earns its next lease by
                     // committing progress: full-index replacement writes far
@@ -549,7 +589,7 @@ fn run_transaction(
                 }
             }
             TransactionCommand::Commit { reply } => {
-                if Instant::now() >= transaction_deadline {
+                if lease_now() >= transaction_deadline {
                     expired.store(true, Ordering::Release);
                     let _ = transaction.rollback();
                     let _ = reply.send(Err(ExactSqlError::TransactionExpired));

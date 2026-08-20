@@ -172,19 +172,20 @@ fn long_lease_transaction_renews_its_lease_after_successful_bounded_steps() {
     let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     base.execute_batch("CREATE TABLE lease_probe (value INTEGER)".to_owned())
         .unwrap();
+    let authority = Arc::new(LeaseClockAdvancingAuthority {
+        step: EXACT_SQL_TRANSACTION_LIMIT / 4,
+        execute_checks: AtomicUsize::new(0),
+    });
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
         .unwrap()
-        .with_write_authority(Arc::new(AtomicWriteAuthority(Arc::new(AtomicBool::new(
-            true,
-        )))))
+        .with_write_authority(authority.clone())
         .unwrap();
     let transaction = channel.begin_authorized_long_lease_immediate().unwrap();
-    let started = Instant::now();
 
-    // Five bounded steps, each well inside a single lease, must together
-    // outlive the absolute transaction limit so success proves renewal.
+    // Five bounded steps, each preceded by a quarter-limit advance of the
+    // writer's fake lease clock, must together outlive the absolute
+    // transaction limit so success proves renewal.
     for value in 0..5 {
-        std::thread::sleep(EXACT_SQL_TRANSACTION_LIMIT / 4);
         transaction
             .execute(statement(
                 "INSERT INTO lease_probe VALUES (?)",
@@ -192,7 +193,7 @@ fn long_lease_transaction_renews_its_lease_after_successful_bounded_steps() {
             ))
             .unwrap();
     }
-    assert!(started.elapsed() > EXACT_SQL_TRANSACTION_LIMIT);
+    assert!(authority.fake_elapsed() > EXACT_SQL_TRANSACTION_LIMIT);
     transaction.commit().unwrap();
 
     let rows = base
