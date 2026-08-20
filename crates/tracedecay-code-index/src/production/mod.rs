@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_code_extraction::incremental::ParseError;
+use tracedecay_graph_db::{GraphGenerationManifest, GraphProjectionIdentity, GraphProjectorRevision};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeIndexCapabilityManifestV1, CodeSearchEligibilityV1, ComponentVersion, CoverageSummaryV1,
@@ -433,6 +434,25 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// evidence digest are a pure function of the immutable generation. Only
     /// success is cached.
     attribution: OnceLock<PublishedGenerationTestAttributionAuthorityV1>,
+    /// Amortized code-graph publication manifest. Seat retries and the
+    /// seat/reconcile duplicate publication of one sealed generation each
+    /// rebuilt every graph entity and relation — a serialize-and-hash sweep
+    /// over the whole store charged against the activation deadline. The
+    /// manifest is a pure function of the immutable generation plus the
+    /// projection identity and projector revision recorded beside it. Only a
+    /// complete successful build is cached; an interrupted or
+    /// deadline-exceeded build records nothing.
+    graph_manifest: OnceLock<CodeGraphManifestMemoV1>,
+}
+
+/// One successfully built code-graph publication manifest, pinned to the
+/// exact projection identity and projector revision it was derived under. A
+/// lookup under any other identity is a memo miss, never an aliased manifest.
+#[derive(Clone, Debug)]
+struct CodeGraphManifestMemoV1 {
+    projection: GraphProjectionIdentity,
+    projector_revision: GraphProjectorRevision,
+    manifest: Arc<GraphGenerationManifest>,
 }
 
 impl CodeIndexPublishedGenerationV1 {
@@ -718,6 +738,36 @@ impl CodeIndexPublishedGenerationV1 {
             generation_id: self.manifest.generation_id.clone(),
             read,
         })
+    }
+
+    /// The memoized code-graph publication manifest for exactly this
+    /// projection identity and projector revision, if a prior complete build
+    /// recorded one. A key mismatch is a miss, never a substituted manifest.
+    pub(crate) fn memoized_graph_manifest(
+        &self,
+        projection: &GraphProjectionIdentity,
+        projector_revision: &GraphProjectorRevision,
+    ) -> Option<Arc<GraphGenerationManifest>> {
+        self.graph_manifest.get().and_then(|memo| {
+            (memo.projection == *projection && memo.projector_revision == *projector_revision)
+                .then(|| Arc::clone(&memo.manifest))
+        })
+    }
+
+    /// Record one complete, successfully built code-graph publication
+    /// manifest. First success wins; the generation is immutable, so any
+    /// competing build under the same key produced an identical manifest.
+    pub(crate) fn memoize_graph_manifest(
+        &self,
+        projection: GraphProjectionIdentity,
+        projector_revision: GraphProjectorRevision,
+        manifest: Arc<GraphGenerationManifest>,
+    ) {
+        let _ = self.graph_manifest.set(CodeGraphManifestMemoV1 {
+            projection,
+            projector_revision,
+            manifest,
+        });
     }
 
     /// Return chunks re-admitted through their parser-backed exact authority.
@@ -1226,6 +1276,7 @@ where
             validated: OnceLock::new(),
             admitted: OnceLock::new(),
             attribution: OnceLock::new(),
+            graph_manifest: OnceLock::new(),
         };
         candidate.validate()?;
 
