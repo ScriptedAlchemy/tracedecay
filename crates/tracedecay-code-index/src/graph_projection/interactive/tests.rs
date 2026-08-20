@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracedecay_application::CancellationSignal;
 use tracedecay_domain::{
@@ -30,6 +31,26 @@ struct CancelledNow;
 impl GraphCancellation for CancelledNow {
     fn is_cancelled(&self) -> bool {
         true
+    }
+}
+
+/// Counts cancellation observations without ever cancelling. Every snapshot
+/// read observes the request cancellation, so for two structurally identical
+/// queries against one snapshot the observation counts order exactly like the
+/// snapshot reads performed.
+#[derive(Default)]
+struct CountingCancellation(AtomicU64);
+
+impl CountingCancellation {
+    fn observations(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+impl GraphCancellation for CountingCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        false
     }
 }
 
@@ -409,6 +430,97 @@ fn adjacency_reads_are_kind_filtered_and_endpoint_checked() {
         .expect("callees");
     assert_eq!(callees[0].len(), 1);
     assert_eq!(callees[0][0].edge.to_occurrence.as_str(), "sym.beta.run");
+}
+
+/// Edge kinds outside the admitted set must stop hydration at the edge
+/// payload: their far endpoints are never read. Both queries examine the same
+/// two adjacency rows of `sym.beta.run`; the filtered one hydrates one
+/// neighbor where the unfiltered one hydrates two, so it must perform strictly
+/// fewer snapshot reads.
+#[test]
+fn kind_filtered_adjacency_skips_far_endpoint_hydration_for_excluded_edges() {
+    let reader = reader(&store_for(production_manifest()));
+    let beta = vec![id::<SymbolOccurrenceId>("sym.beta.run")];
+
+    let filtered_reads = Arc::new(CountingCancellation::default());
+    let filtered = reader
+        .callers(
+            &beta,
+            &[RelationEdgeKindV1::Calls],
+            16,
+            Arc::clone(&filtered_reads) as Arc<dyn GraphCancellation>,
+        )
+        .expect("filtered callers");
+    assert_eq!(filtered[0].len(), 1, "one Calls edge survives the filter");
+
+    let unfiltered_reads = Arc::new(CountingCancellation::default());
+    let unfiltered = reader
+        .callers(
+            &beta,
+            &[],
+            16,
+            Arc::clone(&unfiltered_reads) as Arc<dyn GraphCancellation>,
+        )
+        .expect("unfiltered callers");
+    assert_eq!(unfiltered[0].len(), 2, "both incoming edges hydrate");
+
+    assert!(
+        filtered_reads.observations() < unfiltered_reads.observations(),
+        "excluded kinds must not hydrate far endpoints: filtered={} unfiltered={}",
+        filtered_reads.observations(),
+        unfiltered_reads.observations()
+    );
+}
+
+/// Far endpoints shared inside one batch hydrate once, not once per edge.
+/// Both batches carry two seeds with one outgoing edge each; the batch whose
+/// edges converge on one shared endpoint must perform strictly fewer snapshot
+/// reads than the batch whose endpoints are distinct.
+#[test]
+fn shared_far_endpoints_hydrate_once_per_adjacency_batch() {
+    let reader = reader(&store_for(production_manifest()));
+
+    let shared_reads = Arc::new(CountingCancellation::default());
+    let shared = reader
+        .callees(
+            &[
+                id::<SymbolOccurrenceId>("sym.alpha.run"),
+                id::<SymbolOccurrenceId>("sym.beta.runner"),
+            ],
+            &[],
+            16,
+            Arc::clone(&shared_reads) as Arc<dyn GraphCancellation>,
+        )
+        .expect("shared-endpoint batch");
+    assert!(
+        shared
+            .iter()
+            .flatten()
+            .all(|edge| edge.neighbor.occurrence.as_str() == "sym.beta.run"),
+        "both edges converge on sym.beta.run"
+    );
+    assert_eq!(shared.iter().flatten().count(), 2);
+
+    let distinct_reads = Arc::new(CountingCancellation::default());
+    let distinct = reader
+        .callees(
+            &[
+                id::<SymbolOccurrenceId>("sym.gamma.main"),
+                id::<SymbolOccurrenceId>("sym.alpha.run"),
+            ],
+            &[],
+            16,
+            Arc::clone(&distinct_reads) as Arc<dyn GraphCancellation>,
+        )
+        .expect("distinct-endpoint batch");
+    assert_eq!(distinct.iter().flatten().count(), 2);
+
+    assert!(
+        shared_reads.observations() < distinct_reads.observations(),
+        "a shared far endpoint must hydrate once per batch: shared={} distinct={}",
+        shared_reads.observations(),
+        distinct_reads.observations()
+    );
 }
 
 #[test]

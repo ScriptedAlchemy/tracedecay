@@ -511,28 +511,36 @@ impl GraphDbRegistry {
                     &manifest,
                     &mut visiting,
                 )?;
+                // The journaled replay's expected recovered digest is
+                // already proven to bind this exact manifest, so the
+                // close/reopen recovered-digest proof verifies against it
+                // directly instead of re-canonicalizing the full manifest.
+                let sealed_digest = &replay.publication.expected_recovered_digest;
                 let (historical_commit, recovered_digest) =
                     match (apply_native, has_supplied_manifest) {
                         (true, _) => {
                             let commit = database.apply_generation_unverified(&manifest, &check)?;
-                            let (_, recovered) =
-                                database.reopen_and_verify_generation(&manifest, &check)?;
+                            let (_, recovered) = database.reopen_and_verify_existing_generation(
+                                &manifest,
+                                sealed_digest,
+                                &check,
+                            )?;
                             (commit, recovered)
                         }
-                        (false, true) => {
-                            database.reopen_and_verify_generation(&manifest, &check)?
-                        }
+                        (false, true) => database.reopen_and_verify_existing_generation(
+                            &manifest,
+                            sealed_digest,
+                            &check,
+                        )?,
                         (false, false) if reopen_metadata => database
                             .reopen_and_verify_existing_generation(
                                 &manifest,
-                                &replay.publication.expected_recovered_digest,
+                                sealed_digest,
                                 &check,
                             )?,
-                        (false, false) => database.verify_existing_generation(
-                            &manifest,
-                            &replay.publication.expected_recovered_digest,
-                            &check,
-                        )?,
+                        (false, false) => {
+                            database.verify_existing_generation(&manifest, sealed_digest, &check)?
+                        }
                     };
                 visiting.clear();
                 self.load_verified_head(
@@ -575,6 +583,12 @@ impl GraphDbRegistry {
             &mut visiting,
         )?;
 
+        // The journaled replay's expected recovered digest is already proven
+        // to bind this exact manifest (inline decode, sealed identity pin, or
+        // supplied-manifest binding above), so the close/reopen
+        // recovered-digest proof verifies against it directly instead of
+        // re-canonicalizing the full manifest a second time.
+        let sealed_digest = &replay.publication.expected_recovered_digest;
         let verified = match (apply_native, has_supplied_manifest) {
             // A supplied manifest for a metadata-only replay carries the
             // native rows (vectors) the canonical source omits; a first
@@ -582,19 +596,13 @@ impl GraphDbRegistry {
             (true, _) | (false, true) => {
                 let commit = database.apply_generation_unverified(&manifest, &check)?;
                 database
-                    .reopen_and_verify_generation(&manifest, &check)
+                    .reopen_and_verify_existing_generation(&manifest, sealed_digest, &check)
                     .map(|(_, recovered)| (commit, recovered))
             }
-            (false, false) if reopen_metadata => database.reopen_and_verify_existing_generation(
-                &manifest,
-                &replay.publication.expected_recovered_digest,
-                &check,
-            ),
-            (false, false) => database.verify_existing_generation(
-                &manifest,
-                &replay.publication.expected_recovered_digest,
-                &check,
-            ),
+            (false, false) if reopen_metadata => {
+                database.reopen_and_verify_existing_generation(&manifest, sealed_digest, &check)
+            }
+            (false, false) => database.verify_existing_generation(&manifest, sealed_digest, &check),
         };
         let (commit, recovered_digest) = match verified {
             Ok(verified) => verified,
@@ -860,7 +868,6 @@ impl GraphDbRegistry {
         require_head_replay(&head, &replay)?;
         let check = || operation.check(self, context);
         let metadata_manifest = metadata_manifest_from_replay(&replay.publication, &check)?;
-        let metadata_only = metadata_manifest.is_some();
         let manifest = match metadata_manifest {
             Some(manifest) => manifest,
             None => GraphGenerationManifest::from_replay(
@@ -899,25 +906,20 @@ impl GraphDbRegistry {
         }
         let guard = database.read_guard()?;
         let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let expected = metadata_only.then_some(&head.recovered_digest);
-        let recovered = match verify_recovered_generation(native, &manifest, expected, &check) {
-            Ok(recovered) => recovered,
+        // `require_head_replay` pinned this head to its journaled replay, and
+        // the manifest was proven to bind that replay's digests when it was
+        // decoded above, so the stored rows verify directly against the head
+        // digest without canonicalizing the full manifest a second time.
+        match verify_recovered_generation(native, &manifest, &head.recovered_digest, &check) {
+            Ok(_) => {}
             Err(error @ GraphDbError::GenerationMismatch { .. }) => {
                 drop(guard);
                 database.quarantine_generation(&manifest)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
-        };
-        drop(guard);
-        if recovered != head.recovered_digest {
-            return Err(GraphDbError::GenerationMismatch {
-                namespace: manifest.projection.namespace.to_string(),
-                projection: manifest.projection.projection.to_string(),
-                generation: manifest.generation.to_string(),
-                message: "relational head digest differs from recovered generation".to_owned(),
-            });
         }
+        drop(guard);
         let lease = generation_lease(&manifest, head, dependencies);
         database.remember_verified_generation(&lease)?;
         visiting.remove(&locator);

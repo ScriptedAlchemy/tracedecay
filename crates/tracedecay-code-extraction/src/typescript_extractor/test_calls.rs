@@ -25,7 +25,7 @@ const TEST_CALLEES: &[&str] = &[
 /// member accesses (`describe.only`, `it.each`) and curried calls
 /// (`test.each([...])('t', fn)`). Returns the base identifier text, e.g.
 /// `describe`, `it`, `test`.
-fn test_call_root_callee(state: &ExtractionState, call: TsNode<'_>) -> Option<String> {
+fn test_call_root_callee<'s>(state: &ExtractionState<'s>, call: TsNode<'_>) -> Option<&'s str> {
     // The callee is the first named child of the call_expression (the
     // "function" field); arguments follow.
     let mut callee = call.named_child(0)?;
@@ -46,13 +46,13 @@ fn test_call_root_callee(state: &ExtractionState, call: TsNode<'_>) -> Option<St
 
 /// Returns true if the given `call_expression` is a recognized test-framework
 /// call (`describe`, `it`, `test`, …) based on its root callee.
-pub(super) fn is_test_framework_call(state: &ExtractionState, call: TsNode<'_>) -> bool {
-    test_call_root_callee(state, call).is_some_and(|root| TEST_CALLEES.contains(&root.as_str()))
+pub(super) fn is_test_framework_call(state: &ExtractionState<'_>, call: TsNode<'_>) -> bool {
+    test_call_root_callee(state, call).is_some_and(|root| TEST_CALLEES.contains(&root))
 }
 
 /// Find the title argument (first string / template) of a test call's
 /// argument list, stripped of quotes and truncated.
-fn test_call_title(state: &ExtractionState, args: TsNode<'_>) -> Option<String> {
+fn test_call_title(state: &ExtractionState<'_>, args: TsNode<'_>) -> Option<String> {
     let mut cursor = args.walk();
     if !cursor.goto_first_child() {
         return None;
@@ -124,15 +124,14 @@ fn truncate_title(title: &str) -> String {
 /// The node is deliberately `NodeKind::Function` so it passes `is_callable`
 /// filters and the Function|Method coverage universes. The framework callee
 /// itself (e.g. `describe`) does NOT get a Calls ref.
-pub(super) fn visit_test_call(state: &mut ExtractionState, call: TsNode<'_>) {
+pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>) {
     // The arguments node holds the title and callback.
     let Some(args) = find_direct_child_by_kind(call, "arguments") else {
         return;
     };
 
-    let root = test_call_root_callee(state, call);
     let title = test_call_title(state, args)
-        .or(root)
+        .or_else(|| test_call_root_callee(state, call).map(str::to_string))
         .unwrap_or_else(TypeScriptExtractor::anonymous_name);
 
     let start_line = call.start_position().row as u32;
@@ -145,7 +144,7 @@ pub(super) fn visit_test_call(state: &mut ExtractionState, call: TsNode<'_>) {
     let callback = test_call_callback(args);
     let is_async = callback.is_some_and(|cb| TypeScriptExtractor::has_child_kind(cb, "async"));
     let metrics = callback
-        .map(|cb| count_complexity(cb, &TYPESCRIPT_COMPLEXITY, &state.source))
+        .map(|cb| count_complexity(cb, &TYPESCRIPT_COMPLEXITY, state.source))
         .unwrap_or_default();
 
     let call_text = state.node_text(call);
@@ -221,7 +220,7 @@ fn defines_own_callable(stmt: TsNode<'_>) -> bool {
 /// Walk the statement block of a test callback: recurse into nested
 /// test-framework calls, and for every other statement both register nested
 /// declarations (helpers/consts) AND attribute call sites to `test_id`.
-fn visit_test_body(state: &mut ExtractionState, body: TsNode<'_>, test_id: &str) {
+fn visit_test_body(state: &mut ExtractionState<'_>, body: TsNode<'_>, test_id: &str) {
     let mut cursor = body.walk();
     if !cursor.goto_first_child() {
         return;
