@@ -212,18 +212,52 @@ async fn brokered_init(
     // eventually demand it does not survive a daemon restart. Request the
     // reconciliation explicitly so the message below reports something that
     // actually happened.
-    tracedecay::daemon::call_default_tool_awaiting_project_open(
+    let reconcile = tracedecay::daemon::call_default_tool_awaiting_project_open(
         handshake,
         "tracedecay_admin_sync",
         serde_json::json!({}),
         init_deadline,
     )
-    .await?;
+    .await;
+    if let Err(error) = reconcile {
+        if !code_index_reconciliation_is_optional(project_path, &error).await {
+            return Err(error);
+        }
+        eprintln!(
+            "initialized {}; code indexing is unavailable for this non-Git project",
+            project_path.display()
+        );
+        return Ok(());
+    }
     eprintln!(
         "initialized {}; daemon code-index reconciliation requested",
         project_path.display()
     );
     Ok(())
+}
+
+async fn code_index_reconciliation_is_optional(
+    project_path: &Path,
+    error: &tracedecay::errors::TraceDecayError,
+) -> bool {
+    if !error
+        .to_string()
+        .contains("code_index_scheduler_unavailable")
+    {
+        return false;
+    }
+    let deadline = tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+    );
+    matches!(
+        tracedecay_runtime_core::git_discovery::discover_repository_identity(
+            project_path,
+            deadline,
+            &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        )
+        .await,
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -416,6 +450,34 @@ mod init_bootstrap_tests {
             !profile.exists(),
             "brokered rejection must not open a local store"
         );
+    }
+
+    #[tokio::test]
+    async fn only_non_git_scheduler_unavailability_is_optional_during_init() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let non_git = temp.path().join("non-git");
+        let git = temp.path().join("git");
+        let nested_git = git.join("nested");
+        std::fs::create_dir_all(&non_git).unwrap();
+        std::fs::create_dir_all(&nested_git).unwrap();
+        let initialized = std::process::Command::new(tracedecay_runtime_core::git::git_program())
+            .args(["init", "-q"])
+            .current_dir(&git)
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+        let unavailable = tracedecay::errors::TraceDecayError::Config {
+            message: "daemon tool call failed: code_index_scheduler_unavailable: admin sync was not accepted"
+                .to_string(),
+        };
+        let unrelated = tracedecay::errors::TraceDecayError::Config {
+            message: "daemon tool call failed: storage unavailable".to_string(),
+        };
+
+        assert!(code_index_reconciliation_is_optional(&non_git, &unavailable).await);
+        assert!(!code_index_reconciliation_is_optional(&git, &unavailable).await);
+        assert!(!code_index_reconciliation_is_optional(&nested_git, &unavailable).await);
+        assert!(!code_index_reconciliation_is_optional(&non_git, &unrelated).await);
     }
 }
 

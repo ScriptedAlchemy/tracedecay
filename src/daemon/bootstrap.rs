@@ -521,15 +521,26 @@ async fn run_foreground_unix(
         }
     };
     if let Some(parent) = socket_path.parent() {
-        let parent_existed = parent.exists();
-        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "failed to create socket directory '{}': {e}",
-                parent.display()
-            ),
-        })?;
-        if !parent_existed {
-            set_owner_only_permissions(parent, 0o700)?;
+        match tracedecay_private_fs::create_private_directory(parent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                tracedecay_private_fs::validate_private_directory(parent).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!(
+                            "refusing daemon socket directory '{}': {error}",
+                            parent.display()
+                        ),
+                    }
+                })?;
+            }
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "failed to create private socket directory '{}': {error}",
+                        parent.display()
+                    ),
+                });
+            }
         }
     }
     prepare_socket_path(&authority).await?;
@@ -735,7 +746,6 @@ async fn run_foreground_unix(
     endpoint_cleanup
 }
 
-#[cfg(unix)]
 /// How long the accept loop pauses after a non-connection accept failure so a
 /// persistently failing listener degrades loudly instead of spinning a core.
 const DAEMON_ACCEPT_ERROR_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_millis(250);

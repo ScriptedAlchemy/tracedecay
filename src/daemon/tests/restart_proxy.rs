@@ -116,6 +116,25 @@ fn deferred_repository_discovery_is_project_open_retryable() {
 
 #[cfg(unix)]
 #[test]
+fn terminal_repository_discovery_failures_are_not_project_open_retryable() {
+    for reason in [
+        tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::SpawnFailed,
+        tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::ProbeFailed,
+    ] {
+        let error = super::super::core_proxy::repository_discovery_deferred(
+            std::path::Path::new("/broken-git/project"),
+            reason,
+        );
+
+        assert!(
+            !super::super::error_message_is_project_open_retryable(&error.to_string()),
+            "a terminal discovery failure must not classify as retryable: {error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn transient_daemon_connect_errors_cover_restart_window_only() {
     assert!(super::super::is_transient_daemon_connect_error(
         std::io::ErrorKind::NotFound

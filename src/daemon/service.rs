@@ -571,12 +571,16 @@ pub fn default_socket_path() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
     let profile_root = tracedecay_data_dir()?;
+    Ok(default_socket_path_for_profile(&profile_root))
+}
+
+fn default_socket_path_for_profile(profile_root: &Path) -> PathBuf {
     let profile_scoped = profile_root.join("daemon.sock");
     #[cfg(unix)]
     if !super::transport::unix_socket_path_within_limit(&profile_scoped) {
-        return Ok(short_profile_socket_path(&profile_root));
+        return short_profile_socket_path(profile_root);
     }
-    Ok(profile_scoped)
+    profile_scoped
 }
 
 /// Deterministic short bind path for a profile whose own directory would
@@ -730,15 +734,8 @@ fn refresh_installed_service_with_state(
     }
     let unit = read_service_unit(&service_path)?;
     let mut refreshed_spec = spec.clone();
-    if let Some(socket_path) = socket_path_from_unit_text(&unit) {
-        refreshed_spec.socket_path = socket_path;
-    }
     refreshed_spec.remote_tls = unit_file::remote_tls_from_unit_text(&unit)?;
     let runner = ServiceRunner::current()?;
-    let previous_state = match previous_state {
-        Some(state) => state,
-        None => runner.service_state(&refreshed_spec.socket_path)?,
-    };
     if matches!(runner, ServiceRunner::Launchd) {
         // The installed plist is the source of truth for the daemon's data
         // directory; the refreshing shell may not have the override set.
@@ -747,6 +744,31 @@ fn refresh_installed_service_with_state(
     } else if matches!(runner, ServiceRunner::WindowsTask) {
         refreshed_spec.data_dir_override = windows_task::profile_root_from_task_xml(&unit);
     }
+    if let Some(socket_path) = socket_path_from_unit_text(&unit) {
+        #[cfg(unix)]
+        {
+            let profile_root = refreshed_spec
+                .data_dir_override
+                .clone()
+                .map_or_else(tracedecay_data_dir, Ok)?;
+            let legacy_generated_socket = profile_root.join("daemon.sock");
+            if socket_path != legacy_generated_socket
+                || super::transport::unix_socket_path_within_limit(&socket_path)
+            {
+                refreshed_spec.socket_path = socket_path;
+            } else {
+                refreshed_spec.socket_path = default_socket_path_for_profile(&profile_root);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            refreshed_spec.socket_path = socket_path;
+        }
+    }
+    let previous_state = match previous_state {
+        Some(state) => state,
+        None => runner.service_state(&refreshed_spec.socket_path)?,
+    };
     refresh_service_with_runner(&runner, &refreshed_spec, previous_state).map(Some)
 }
 

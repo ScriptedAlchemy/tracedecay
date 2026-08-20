@@ -336,34 +336,21 @@ pub(crate) fn unix_socket_path_within_limit(path: &Path) -> bool {
     path.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES
 }
 
-/// Refuse to publish a socket in a directory other users can traverse.
+/// Refuse to publish a socket through a symlink or a directory that is not
+/// owned privately by the current user.
 #[cfg(unix)]
 pub(super) fn ensure_private_socket_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let metadata = std::fs::metadata(parent).map_err(|error| {
+    tracedecay_private_fs::validate_private_directory(parent).map_err(|error| {
         config_error(format!(
-            "failed to inspect daemon socket directory '{}': {error}",
-            parent.display()
-        ))
-    })?;
-    if !metadata.is_dir() {
-        return Err(config_error(format!(
-            "daemon socket parent '{}' is not a directory",
-            parent.display()
-        )));
-    }
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(config_error(format!(
-            "refusing to publish daemon socket '{}' outside a private directory: '{}' has mode {mode:04o}; restrict it to 0700",
+            "refusing to publish daemon socket '{}' outside a private directory owned by the current user '{}': {error}",
             path.display(),
             parent.display(),
-        )));
-    }
-    Ok(())
+        ))
+    })
 }
 
 /// Binds the daemon's Unix socket and narrows it to its owner before the
@@ -497,6 +484,31 @@ mod tests {
         assert!(matches!(&error, TraceDecayError::Config { .. }), "{error}");
         assert!(error.to_string().contains("private directory"), "{error}");
         assert!(!path.exists(), "socket must not be bound before rejection");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listener_rejects_symlinked_private_parent_before_binding() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let linked_parent = dir.path().join("linked-parent");
+        symlink(&target, &linked_parent).unwrap();
+        let path = linked_parent.join("daemon.sock");
+
+        let Err(error) = BrokerListener::bind(&DaemonEndpoint::Unix(path.clone())).await else {
+            panic!("symlinked socket parent must be rejected");
+        };
+
+        assert!(matches!(&error, TraceDecayError::Config { .. }), "{error}");
+        assert!(error.to_string().contains("private directory"), "{error}");
+        assert!(
+            !target.join("daemon.sock").exists(),
+            "rejection must not bind through the symlink"
+        );
     }
 
     /// A `SUN_LEN` overflow must be a typed refusal naming its remedy, not the

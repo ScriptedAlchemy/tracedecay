@@ -393,18 +393,23 @@ pub(super) async fn bounded_repository_identity(
     .await
 }
 
-/// A deferred discovery is uncertainty, not failure: the route stays
+/// A deadline-limited discovery is uncertainty, not failure: the route stays
 /// unresolved and the caller retries within its own budget, exactly like a
-/// warming project open. Carrying [`PROJECT_WARMING_RETRY_HINT`] is what makes
-/// every existing client/proxy retry classifier treat it that way instead of
-/// surfacing a terminal error on the first slow or contended Git probe.
+/// warming project open. Spawn and probe failures are terminal because retrying
+/// them until the caller's budget expires only hides the actionable error.
 pub(super) fn repository_discovery_deferred(
     path: &Path,
     reason: tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown,
 ) -> TraceDecayError {
+    let retry_hint = matches!(
+        reason,
+        tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded
+    )
+    .then_some(PROJECT_WARMING_RETRY_HINT)
+    .unwrap_or("cannot be resolved");
     TraceDecayError::Config {
         message: format!(
-            "repository discovery for '{}' is deferred ({reason:?}); the project route {PROJECT_WARMING_RETRY_HINT}",
+            "repository discovery for '{}' is deferred ({reason:?}); the project route {retry_hint}",
             path.display()
         ),
     }

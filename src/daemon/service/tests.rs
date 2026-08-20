@@ -1054,6 +1054,67 @@ fn refresh_installed_service_preserves_existing_socket_path() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn refresh_installed_service_migrates_overlong_generated_socket_path() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let config_home = dir.path().join("config");
+    let fake_bin = dir.path().join("bin");
+    let home = dir.path().join("home");
+    let profile = dir.path().join("p".repeat(120)).join(".tracedecay");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let systemctl = fake_bin.join("systemctl");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+
+    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _data_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &profile);
+    let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+
+    let legacy_socket = profile.join("daemon.sock");
+    let expected_socket = super::default_socket_path().expect("short default socket");
+    assert_ne!(legacy_socket, expected_socket);
+
+    let service_path = config_home
+        .join("systemd/user")
+        .join(crate::daemon::SERVICE_NAME);
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    std::fs::write(
+        &service_path,
+        format!(
+            "[Unit]\nDescription=TraceDecay daemon\n\n[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+            legacy_socket.display()
+        ),
+    )
+    .expect("existing service unit");
+
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+        socket_path: expected_socket.clone(),
+        data_dir_override: Some(profile),
+        remote_tls: None,
+    };
+    let outcome = super::refresh_installed_service_under_lease_with_state(
+        &spec,
+        DaemonServiceState::StoppedEnabled,
+    )
+    .expect("refresh service");
+
+    assert_eq!(outcome, Some(service_path.clone()));
+    let unit = std::fs::read_to_string(service_path).expect("service unit");
+    assert!(unit.contains(&format!("--socket {}", expected_socket.display())));
+    assert!(!unit.contains(&legacy_socket.display().to_string()));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
@@ -1283,12 +1344,32 @@ fn over_long_profile_socket_path_falls_back_to_a_short_deterministic_path() {
     );
 
     let sibling = {
-        let _data_dir_guard =
-            EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &sibling_profile);
+        let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &sibling_profile);
         super::default_socket_path().expect("sibling fallback socket path")
     };
     assert_ne!(
         first, sibling,
         "distinct profiles must keep distinct daemon endpoints"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn short_socket_derivation_uses_the_installed_profile_not_the_shell_profile() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let _socket_guard = EnvVarGuard::unset(crate::daemon::SOCKET_ENV);
+    let root = tempfile::TempDir::new().expect("profile temp dir");
+    let installed_profile = root.path().join("i".repeat(120)).join(".tracedecay");
+    let shell_profile = root.path().join("shell-profile");
+    let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &shell_profile);
+
+    let installed_socket = super::default_socket_path_for_profile(&installed_profile);
+    let shell_socket = super::default_socket_path().expect("shell socket path");
+
+    assert!(
+        crate::daemon::transport::unix_socket_path_within_limit(&installed_socket),
+        "installed profile endpoint must satisfy the platform limit"
+    );
+    assert_ne!(installed_socket, shell_socket);
+    assert_ne!(installed_socket, installed_profile.join("daemon.sock"));
 }
