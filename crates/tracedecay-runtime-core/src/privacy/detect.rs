@@ -408,8 +408,10 @@ pub enum DetectionError {
     /// without ambiguity, so field semantics cannot be proven scanned.
     #[error("privacy sanitizer quarantined an ambiguous structured document")]
     StructuredQuarantine,
-    /// The document parsed, but an object key carries credential material that
-    /// cannot be redacted in place. Fail-closed quarantine, not a receipt fault.
+    /// The document parsed, but key-anchored material cannot be redacted in
+    /// place: an object key carries credential material, or a key-proven
+    /// sensitive field cannot be located byte-exactly. Fail-closed quarantine,
+    /// not a receipt fault.
     #[error("privacy sanitizer quarantined credential-bearing keys")]
     CredentialKeyQuarantine,
 }
