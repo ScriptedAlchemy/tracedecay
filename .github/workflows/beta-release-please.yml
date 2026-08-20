@@ -69,11 +69,17 @@ jobs:
       - name: Update release PR lockfile
         if: steps.release.outputs.prs_created == 'true'
         env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           RELEASE_PR_JSON: ${{ steps.release.outputs.pr }}
         run: |
           RELEASE_PR_BRANCH=$(
             jq --exit-status --raw-output \
               '.headBranchName | select(type == "string" and length > 0)' \
+              <<<"$RELEASE_PR_JSON"
+          )
+          RELEASE_PR_NUMBER=$(
+            jq --exit-status --raw-output \
+              '.number | select(type == "number")' \
               <<<"$RELEASE_PR_JSON"
           )
           release_version=$(tr -d '[:space:]' < version.txt)
@@ -83,19 +89,19 @@ jobs:
           fi
           cargo update -p tracedecay --precise "$release_version"
 
-          if git diff --quiet -- Cargo.lock; then
-            exit 0
+          if ! git diff --quiet -- Cargo.lock; then
+            unexpected_paths=$(git diff --name-only -- . ':(exclude)Cargo.lock')
+            if [[ -n "$unexpected_paths" ]]; then
+              echo "Cargo metadata changed unexpected paths:" >&2
+              echo "$unexpected_paths" >&2
+              exit 1
+            fi
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "chore(release): update root lockfile"
+            git push origin "HEAD:$RELEASE_PR_BRANCH"
           fi
 
-          unexpected_paths=$(git diff --name-only -- . ':(exclude)Cargo.lock')
-          if [[ -n "$unexpected_paths" ]]; then
-            echo "Cargo metadata changed unexpected paths:" >&2
-            echo "$unexpected_paths" >&2
-            exit 1
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.lock
-          git commit -m "chore(release): update root lockfile"
-          git push origin "HEAD:$RELEASE_PR_BRANCH"
+          gh pr ready "$RELEASE_PR_NUMBER" --repo "$GITHUB_REPOSITORY"
