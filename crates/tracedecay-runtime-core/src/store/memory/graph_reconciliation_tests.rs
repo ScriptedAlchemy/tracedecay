@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
@@ -50,6 +50,14 @@ struct RecordingGraphRuntime {
     reconciliation_finished: AtomicBool,
     reconciliation_observed: AtomicBool,
     reconciliation_notify: Notify,
+    /// Last successfully reconciled snapshot, served back on the read path so
+    /// `project_memory_graph` journeys run against settled generations.
+    served_snapshot: Mutex<Option<VerifiedGraphSnapshot>>,
+    hold_snapshot_read_armed: AtomicBool,
+    hold_snapshot_read_entered: AtomicBool,
+    hold_snapshot_read_release: Mutex<bool>,
+    hold_snapshot_read_release_notify: Condvar,
+    snapshot_read_notify: Notify,
     publish_calls: AtomicUsize,
     reconcile_calls: AtomicUsize,
     snapshot_calls: AtomicUsize,
@@ -67,10 +75,46 @@ impl RecordingGraphRuntime {
             reconciliation_finished: AtomicBool::new(false),
             reconciliation_observed: AtomicBool::new(false),
             reconciliation_notify: Notify::new(),
+            served_snapshot: Mutex::new(None),
+            hold_snapshot_read_armed: AtomicBool::new(false),
+            hold_snapshot_read_entered: AtomicBool::new(false),
+            hold_snapshot_read_release: Mutex::new(false),
+            hold_snapshot_read_release_notify: Condvar::new(),
+            snapshot_read_notify: Notify::new(),
             publish_calls: AtomicUsize::new(0),
             reconcile_calls: AtomicUsize::new(0),
             snapshot_calls: AtomicUsize::new(0),
         }
+    }
+
+    /// Parks the next verified-snapshot read until
+    /// [`Self::release_held_snapshot_read`], after the read captured its
+    /// snapshot, so a test can land a canonical source mutation between a
+    /// read's source load and its post-hydration staleness re-check.
+    fn arm_snapshot_read_hold(&self) {
+        *self
+            .hold_snapshot_read_release
+            .lock()
+            .expect("arm snapshot read hold") = false;
+        self.hold_snapshot_read_armed.store(true, Ordering::Release);
+    }
+
+    fn release_held_snapshot_read(&self) {
+        *self
+            .hold_snapshot_read_release
+            .lock()
+            .expect("release snapshot read hold") = true;
+        self.hold_snapshot_read_release_notify.notify_all();
+    }
+
+    async fn wait_for_held_snapshot_read(&self) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !self.hold_snapshot_read_entered.load(Ordering::Acquire) {
+                self.snapshot_read_notify.notified().await;
+            }
+        })
+        .await
+        .expect("armed graph read never reached the verified snapshot");
     }
 
     fn blocking(database: &Database) -> Self {
@@ -132,6 +176,10 @@ impl VerifiedGraphRuntimePortV1 for RecordingGraphRuntime {
             return Err(GraphDbError::Cancelled);
         }
         let snapshot = VerifiedGraphSnapshot::memory(manifest.clone(), Arc::new(NeverCancelled))?;
+        *self
+            .served_snapshot
+            .lock()
+            .expect("serve reconciled snapshot") = Some(snapshot.clone());
         self.reconciliation_observed.store(true, Ordering::Release);
         self.reconciliation_notify.notify_one();
         Ok(snapshot)
@@ -149,7 +197,32 @@ impl VerifiedGraphRuntimePortV1 for RecordingGraphRuntime {
         if let Some(error) = &self.snapshot_error {
             return Err(error.clone());
         }
-        Ok(None)
+        // Capture before parking: a mutation that settles while the read is
+        // held must not leak its fresher generation into the held read.
+        let snapshot = self
+            .served_snapshot
+            .lock()
+            .expect("read served snapshot")
+            .clone();
+        if self.hold_snapshot_read_armed.swap(false, Ordering::AcqRel) {
+            self.hold_snapshot_read_entered
+                .store(true, Ordering::Release);
+            self.snapshot_read_notify.notify_one();
+            let released = self
+                .hold_snapshot_read_release
+                .lock()
+                .expect("wait for snapshot read release");
+            let (released, wait) = self
+                .hold_snapshot_read_release_notify
+                .wait_timeout_while(released, Duration::from_secs(30), |released| !*released)
+                .expect("wait for snapshot read release");
+            assert!(
+                *released && !wait.timed_out(),
+                "held snapshot read was never released within 30s; \
+                 a test assertion likely failed while the hold was parked"
+            );
+        }
+        Ok(snapshot)
     }
 }
 
@@ -593,6 +666,57 @@ async fn committed_low_level_fact_batch_schedules_lifecycle_reconciliation() {
 
     assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
     assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mid_read_source_mutation_never_serves_a_stale_page() {
+    let (_directory, database) = database("mid-read-source-mutation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    seed_high_level_fact(
+        &store,
+        &runtime,
+        "mid-read-stale-page-seed",
+        "The verified read path serves settled generations from the recording runtime.",
+    )
+    .await;
+
+    // Park the read after its source load captured the source watermark and
+    // before its post-hydration staleness re-check, while it holds the
+    // settled pre-mutation snapshot.
+    runtime.arm_snapshot_read_hold();
+    let read_database = database.clone();
+    let held_read = tokio::spawn(async move {
+        super::graph::project_memory_graph(
+            &read_database,
+            ProjectMemoryGraphQueryV1::new(FactOwnerV1::Profile, Vec::new(), 64)
+                .expect("stale-page graph query"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+    });
+    runtime.wait_for_held_snapshot_read().await;
+
+    // Mutate the canonical source while the read is parked.
+    let mutation = add_high_level_source_fact(
+        &store,
+        "mid-read-stale-page-mutation",
+        "A canonical source mutation landed while a verified graph read was parked.",
+    )
+    .await;
+    wait_for_reconciliation(&runtime).await;
+
+    runtime.release_held_snapshot_read();
+    match held_read.await.expect("held graph read task completes") {
+        Err(FactStoreError::GraphConflict) => {}
+        Ok(page) => assert!(
+            page.facts()
+                .iter()
+                .any(|fact| fact.fact_id() == mutation.target.fact_id()),
+            "held read must surface the mutation instead of the stale page"
+        ),
+        Err(other) => panic!("held read must conflict or serve a fresh page: {other:?}"),
+    }
 }
 
 #[tokio::test]

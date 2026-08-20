@@ -1,5 +1,3 @@
-use std::time::{Duration, Instant};
-
 use tracedecay_rusqlite_runtime::{WriterActorError, WriterState};
 use tracedecay_store::{
     AdmissionConfigV1, CorruptionClassV1, OperationPriorityV1, RuntimeSubmitOutcomeV1,
@@ -129,26 +127,16 @@ fn executor_panic_faults_the_actor_and_releases_the_pending_request() {
         Err(WriterActorError::ReplyDropped)
     ));
 
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while Instant::now() < deadline {
-        let telemetry = writer.telemetry_snapshot();
-        if writer.state() == WriterState::Faulted
-            && telemetry.queue.queued_operations == 0
-            && telemetry.error_events >= 1
-            && telemetry.operations.admitted_operations == telemetry.operations.completed_operations
-        {
-            break;
-        }
-        std::thread::yield_now();
-    }
-    assert_eq!(writer.state(), WriterState::Faulted);
-    let telemetry = writer.telemetry_snapshot();
+    // Joining the worker is the fault-settlement event: once the actor
+    // thread has exited, the queue has been released and the final state and
+    // telemetry are visible, so nothing here needs to poll.
+    let (state, telemetry) = writer.shutdown_and_join_snapshot().unwrap();
+    assert_eq!(state, WriterState::Faulted);
     assert_eq!(telemetry.queue.queued_operations, 0);
     assert_eq!(
         telemetry.operations.admitted_operations,
         telemetry.operations.completed_operations
     );
     assert_eq!(telemetry.error_events, 1);
-    writer.shutdown_and_join().unwrap();
     assert_eq!(marker_count(&database), 0);
 }

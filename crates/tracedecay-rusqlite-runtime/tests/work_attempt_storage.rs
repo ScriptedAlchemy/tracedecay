@@ -752,7 +752,7 @@ fn attempt_with_effect(
         id::<ProjectId>("project.attempt.storage"),
         id::<RepositoryId>("repository.attempt.storage"),
         id::<WorktreeId>("worktree.attempt.storage"),
-        "/tmp/attempt-storage".to_owned(),
+        fixture_abs_root("/tmp/attempt-storage"),
         Some(id::<RefId>("refs/heads/attempt-storage")),
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         "Execute the admitted provider step.".to_owned(),

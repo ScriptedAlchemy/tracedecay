@@ -940,6 +940,24 @@ impl PersistentWriter {
         self.join_worker()
     }
 
+    /// Drain, shut down, and join the worker, then report the settled
+    /// `(state, telemetry)` pair.
+    ///
+    /// Joining the worker is the event that settles a fault: after the join,
+    /// every admitted operation has been completed or released and the final
+    /// telemetry is visible, so callers observing a fault need no polling
+    /// loop. Hidden because it is a test observation seam, not part of the
+    /// writer contract — integration tests cannot reach `pub(crate)`.
+    #[doc(hidden)]
+    pub fn shutdown_and_join_snapshot(
+        mut self,
+    ) -> Result<(WriterState, WriterTelemetrySnapshot), WriterActorError> {
+        self.begin_drain();
+        self.request_shutdown();
+        self.join_worker()?;
+        Ok((self.state(), self.telemetry_snapshot()))
+    }
+
     fn request_shutdown(&mut self) {
         self.shutdown_requested.store(true, Ordering::Release);
         if let Some(sender) = self.shutdown_sender.take() {

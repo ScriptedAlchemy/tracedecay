@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicU8, Ordering},
     },
     time::{Duration, Instant},
@@ -57,9 +57,35 @@ impl ReaderQueryExecutor for CountExecutor {
     }
 }
 
+/// A one-way latch threads synchronize on without polling: `set` flips it
+/// under the lock and notifies, `wait` parks on the condvar until the gate is
+/// set or the bound lapses.
+#[derive(Clone, Default)]
+struct Gate {
+    state: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Gate {
+    fn set(&self) {
+        let (set, changed) = &*self.state;
+        *set.lock().unwrap() = true;
+        changed.notify_all();
+    }
+
+    /// Returns whether the gate was set within the bound.
+    fn wait(&self, bound: Duration) -> bool {
+        let (set, changed) = &*self.state;
+        let (set, _) = changed
+            .wait_timeout_while(set.lock().unwrap(), bound, |set| !*set)
+            .unwrap();
+        *set
+    }
+}
+
 #[derive(Clone)]
 struct SlowExecutor {
     delay: Duration,
+    entered: Gate,
 }
 
 impl ReaderQueryExecutor for SlowExecutor {
@@ -68,6 +94,7 @@ impl ReaderQueryExecutor for SlowExecutor {
         snapshot: &Transaction<'_>,
         request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
+        self.entered.set();
         std::thread::sleep(self.delay);
         CountExecutor.execute_read(snapshot, request)
     }
@@ -78,8 +105,8 @@ impl ReaderQueryExecutor for SlowExecutor {
 /// instead of racing a wall-clock bound.
 #[derive(Clone, Default)]
 struct GateExecutor {
-    entered: Arc<AtomicU8>,
-    release: Arc<AtomicU8>,
+    entered: Gate,
+    release: Gate,
     finished: Arc<AtomicU8>,
 }
 
@@ -89,10 +116,10 @@ impl ReaderQueryExecutor for GateExecutor {
         snapshot: &Transaction<'_>,
         request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
-        self.entered.store(1, Ordering::SeqCst);
-        while self.release.load(Ordering::SeqCst) == 0 {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        self.entered.set();
+        // The bound is a harness guard, not a timing assumption: every test
+        // opens the gate, directly or through its watchdog.
+        self.release.wait(Duration::from_secs(60));
         let outcome = CountExecutor.execute_read(snapshot, request);
         self.finished.store(1, Ordering::SeqCst);
         outcome
@@ -849,30 +876,24 @@ fn cancellation_bounds_query_return_even_when_the_executor_is_still_running() {
     let read = request(&store.binding, OperationPriorityV1::Foreground);
     let probe = Probe::for_request(&read);
     let cancellation = Arc::clone(&probe.interruption);
-    let entered = Arc::clone(&executor.entered);
+    let entered = executor.entered.clone();
     let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
     let mut snapshot = lease.begin_snapshot().unwrap();
     // Cancel only once the worker is provably inside the executor, so the
     // return below can only be explained by the cancellation observation and
     // never by the executor completing first.
     std::thread::spawn(move || {
-        while entered.load(Ordering::SeqCst) == 0 {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        entered.wait(Duration::from_secs(30));
         cancellation.store(1, Ordering::SeqCst);
     });
     // Watchdog: if cancellation regresses, `execute` blocks on the parked
     // executor until the harness kills the test. Releasing the gate after a
     // generous bound turns that hang into the clean assertion failures below.
-    let watchdog_release = Arc::clone(&executor.release);
+    let watchdog_release = executor.release.clone();
     let watchdog = std::thread::spawn(move || {
-        for _ in 0..300 {
-            if watchdog_release.load(Ordering::SeqCst) != 0 {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
+        if !watchdog_release.wait(Duration::from_secs(30)) {
+            watchdog_release.set();
         }
-        watchdog_release.store(1, Ordering::SeqCst);
     });
 
     let outcome = snapshot.execute(read, &probe).unwrap();
@@ -896,7 +917,7 @@ fn cancellation_bounds_query_return_even_when_the_executor_is_still_running() {
         0,
         "snapshot and lease teardown must not wait for the abandoned executor"
     );
-    executor.release.store(1, Ordering::SeqCst);
+    executor.release.set();
     watchdog.join().unwrap();
 }
 
@@ -1145,15 +1166,11 @@ fn a_blocked_acquisition_is_reported_as_a_waiter_and_released() {
         })
     };
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && pool.snapshot().waiting_general == 0 {
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert_eq!(
-        pool.snapshot().waiting_general,
-        1,
+    assert!(
+        pool.wait_until_waiting_general(Duration::from_secs(2)),
         "an acquisition blocked on a full lane must be visible as a waiter"
     );
+    assert_eq!(pool.snapshot().waiting_general, 1);
     assert_eq!(pool.snapshot().waiting_health, 0);
 
     // The waiter gives up on its own bound; the count must not leak.
@@ -1176,14 +1193,12 @@ fn a_blocked_acquisition_is_reported_as_a_waiter_and_released() {
 #[test]
 fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
     let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        two_reader_budget(),
-        SlowExecutor {
-            delay: Duration::from_millis(400),
-        },
-    )
-    .unwrap();
+    let executor = SlowExecutor {
+        delay: Duration::from_millis(400),
+        entered: Gate::default(),
+    };
+    let entered = executor.entered.clone();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), executor).unwrap();
 
     let read = request(&store.binding, OperationPriorityV1::Foreground);
     let probe = Probe::for_request(&read);
@@ -1191,8 +1206,11 @@ fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
     let mut lease = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
     {
         let mut snapshot = lease.begin_snapshot().unwrap();
+        // Cancel only once the worker is provably inside the executor's
+        // delay, so the cancellation always lands with most of the delay
+        // still ahead of the snapshot end.
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(30));
+            entered.wait(Duration::from_secs(30));
             cancel.store(1, Ordering::SeqCst);
         });
         // The probe releases the caller while the worker is still inside the
@@ -1231,17 +1249,13 @@ fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
     drop(second);
 
     // The deferred return is bounded, so the limbo always resolves.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline && !pool.is_quiescent() {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let settled = pool.snapshot();
-    assert_eq!(
-        settled.limbo_general, 0,
-        "the limbo worker was never reclaimed or replaced"
-    );
     assert!(
-        pool.is_quiescent(),
+        pool.wait_until_quiescent(Duration::from_secs(3)),
         "the pool must reach quiescence once the deferred end resolves"
+    );
+    assert_eq!(
+        pool.snapshot().limbo_general,
+        0,
+        "the limbo worker was never reclaimed or replaced"
     );
 }
