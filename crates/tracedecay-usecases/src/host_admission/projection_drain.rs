@@ -1,119 +1,8 @@
 use std::collections::BTreeSet;
-use std::sync::{Mutex, OnceLock};
 
 use tracedecay_store::ProjectionPersistOutcome;
 
 use super::*;
-
-/// One WARN per hour for a standing durable refusal, matching #538.
-/// The host re-ticks this queue on a 60s scheduler. The store already
-/// consumed the refused id (durable skip); the drain must keep going
-/// so later healthy items are not delayed until the next tick. The
-/// storm is re-entry, which this gate still holds.
-const DEFAULT_DETERMINISTIC_REFUSAL_WARN_SUPPRESSION_SECS: u64 = 3_600;
-
-static DETERMINISTIC_REFUSAL_WARN_STATE: OnceLock<Mutex<Option<DeterministicRefusalWarnAnchor>>> =
-    OnceLock::new();
-
-/// Whether to emit `deterministic projection rejection committed`.
-///
-/// Durable skip still happens on every first refusal (store consumed
-/// the id). This gate only holds back the repeat WARN.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeterministicRefusalWarnGate {
-    Emit,
-    Suppressed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DeterministicRefusalWarnAnchor {
-    observation_id: String,
-    observed_at_secs: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DeterministicRefusalWarnBackoff {
-    suppression_secs: u64,
-}
-
-impl Default for DeterministicRefusalWarnBackoff {
-    fn default() -> Self {
-        Self::new(DEFAULT_DETERMINISTIC_REFUSAL_WARN_SUPPRESSION_SECS)
-    }
-}
-
-impl DeterministicRefusalWarnBackoff {
-    #[must_use]
-    const fn new(suppression_secs: u64) -> Self {
-        // 0 makes `now < now+0` false, so every tick would Emit.
-        // Treat 0 as the default window; do not silently re-WARN.
-        Self {
-            suppression_secs: if suppression_secs == 0 {
-                DEFAULT_DETERMINISTIC_REFUSAL_WARN_SUPPRESSION_SECS
-            } else {
-                suppression_secs
-            },
-        }
-    }
-
-    #[cfg(test)]
-    #[must_use]
-    const fn suppression_secs(&self) -> u64 {
-        self.suppression_secs
-    }
-
-    #[must_use]
-    fn gate(
-        &self,
-        standing: Option<&DeterministicRefusalWarnAnchor>,
-        observation_id: &str,
-        now_secs: i64,
-    ) -> DeterministicRefusalWarnGate {
-        let Some(standing) = standing else {
-            return DeterministicRefusalWarnGate::Emit;
-        };
-        if standing.observation_id != observation_id {
-            return DeterministicRefusalWarnGate::Emit;
-        }
-        let until_secs = standing
-            .observed_at_secs
-            .saturating_add(i64::try_from(self.suppression_secs).unwrap_or(i64::MAX));
-        if now_secs < until_secs {
-            DeterministicRefusalWarnGate::Suppressed
-        } else {
-            DeterministicRefusalWarnGate::Emit
-        }
-    }
-}
-
-fn record_deterministic_refusal_warn(
-    observation_id: &str,
-    now_secs: i64,
-) -> DeterministicRefusalWarnGate {
-    let backoff = DeterministicRefusalWarnBackoff::default();
-    let state = DETERMINISTIC_REFUSAL_WARN_STATE.get_or_init(|| Mutex::new(None));
-    let mut standing = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let decision = backoff.gate(standing.as_ref(), observation_id, now_secs);
-    if decision == DeterministicRefusalWarnGate::Emit {
-        *standing = Some(DeterministicRefusalWarnAnchor {
-            observation_id: observation_id.to_owned(),
-            observed_at_secs: now_secs,
-        });
-    }
-    decision
-}
-
-fn unix_now_secs() -> i64 {
-    i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0),
-    )
-    .unwrap_or(i64::MAX)
-}
 
 impl HostAdmissionFacade<'_> {
     pub async fn drain_projection_queue(
@@ -178,21 +67,15 @@ impl HostAdmissionFacade<'_> {
                     // `apply_skip_disposition` + `consume_projection_queue_item`).
                     // Breaking here would stall later healthy items until the
                     // next 60s host tick — a stall, not a cheaper path. Keep
-                    // draining. The warn gate still holds the Plan 26 log storm
-                    // (one WARN per observation_id per hour).
-                    if record_deterministic_refusal_warn(observation_id.as_str(), unix_now_secs())
-                        == DeterministicRefusalWarnGate::Emit
-                    {
-                        tracing::warn!(
-                            %error,
-                            observation = observation_id.as_str(),
-                            "deterministic projection rejection committed"
-                        );
-                    }
-                    let (skipped, deferred, stop) = after_deterministic_rejection(outcome.skipped);
-                    outcome.skipped = skipped;
-                    debug_assert!(!deferred);
-                    debug_assert!(!stop);
+                    // draining. The typed skip count is the durable signal;
+                    // keep per-item detail below WARN so invalid input cannot
+                    // become a repeated alert loop.
+                    tracing::debug!(
+                        %error,
+                        observation = observation_id.as_str(),
+                        "deterministic projection rejection committed"
+                    );
+                    outcome.skipped = after_deterministic_rejection(outcome.skipped);
                     continue;
                 }
                 Err(error) => {
@@ -267,8 +150,8 @@ impl HostAdmissionFacade<'_> {
 // Durable skip is already recorded by the store. Do not force Deferred
 // or stop the batch: later healthy items must still project. Yielding
 // them is a stall until the next 60s host tick.
-fn after_deterministic_rejection(skipped: u64) -> (u64, bool, bool) {
-    (skipped.saturating_add(1), false, false)
+fn after_deterministic_rejection(skipped: u64) -> u64 {
+    skipped.saturating_add(1)
 }
 
 #[cfg(test)]
@@ -279,168 +162,40 @@ enum SimulatedProjectOutcome {
 }
 
 #[cfg(test)]
-fn simulate_drain_project_calls(batch: &[SimulatedProjectOutcome]) -> (u64, bool, usize) {
+fn simulate_drain_project_calls(batch: &[SimulatedProjectOutcome]) -> (u64, usize) {
     let mut skipped = 0;
-    let mut deferred = false;
-    let mut project_calls: usize = 0;
+    let mut project_calls = 0_usize;
     for outcome in batch {
         project_calls = project_calls.saturating_add(1);
         match outcome {
             SimulatedProjectOutcome::Refusal => {
-                let (next_skipped, next_deferred, stop) = after_deterministic_rejection(skipped);
-                skipped = next_skipped;
-                deferred = next_deferred;
-                if stop {
-                    break;
-                }
+                skipped = after_deterministic_rejection(skipped);
             }
             SimulatedProjectOutcome::Projected => {}
         }
     }
-    (skipped, deferred, project_calls)
-}
-
-#[cfg(test)]
-fn warn_gates_for_refusals(
-    backoff: DeterministicRefusalWarnBackoff,
-    events: &[(&str, i64)],
-) -> Vec<DeterministicRefusalWarnGate> {
-    let mut standing = None;
-    let mut gates = Vec::with_capacity(events.len());
-    for &(observation_id, now_secs) in events {
-        let gate = backoff.gate(standing.as_ref(), observation_id, now_secs);
-        if gate == DeterministicRefusalWarnGate::Emit {
-            standing = Some(DeterministicRefusalWarnAnchor {
-                observation_id: observation_id.to_owned(),
-                observed_at_secs: now_secs,
-            });
-        }
-        gates.push(gate);
-    }
-    gates
+    (skipped, project_calls)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DEFAULT_DETERMINISTIC_REFUSAL_WARN_SUPPRESSION_SECS, DeterministicRefusalWarnBackoff,
-        DeterministicRefusalWarnGate, SimulatedProjectOutcome, after_deterministic_rejection,
-        simulate_drain_project_calls, warn_gates_for_refusals,
-    };
+    use super::{SimulatedProjectOutcome, simulate_drain_project_calls};
 
     #[test]
-    fn first_deterministic_refusal_is_one_skip_and_yields_the_rest() {
-        let (skipped, deferred, stop) = after_deterministic_rejection(0);
-        assert_eq!(skipped, 1);
-        assert!(!deferred);
-        assert!(!stop);
+    fn multi_item_batch_continues_after_durable_refusals() {
         let batch = [
+            SimulatedProjectOutcome::Projected,
             SimulatedProjectOutcome::Refusal,
             SimulatedProjectOutcome::Projected,
-            SimulatedProjectOutcome::Projected,
-            SimulatedProjectOutcome::Projected,
-            SimulatedProjectOutcome::Projected,
-            SimulatedProjectOutcome::Projected,
-            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Refusal,
             SimulatedProjectOutcome::Projected,
         ];
-        let (skipped, deferred, project_calls) = simulate_drain_project_calls(&batch);
-        assert_eq!(skipped, 1);
-        assert!(!deferred);
+        let (skipped, project_calls) = simulate_drain_project_calls(&batch);
+        assert_eq!(skipped, 2);
         assert_eq!(
             project_calls,
             batch.len(),
-            "first durable refusal is one skip; remaining healthy items still project"
-        );
-    }
-
-    #[test]
-    fn multi_item_batch_yields_after_first_refusal() {
-        let batch = [
-            SimulatedProjectOutcome::Refusal,
-            SimulatedProjectOutcome::Projected,
-            SimulatedProjectOutcome::Projected,
-            SimulatedProjectOutcome::Projected,
-            SimulatedProjectOutcome::Projected,
-            SimulatedProjectOutcome::Projected,
-            SimulatedProjectOutcome::Projected,
-            SimulatedProjectOutcome::Projected,
-        ];
-        let (skipped, deferred, project_calls) = simulate_drain_project_calls(&batch);
-        assert_eq!(skipped, 1);
-        assert!(!deferred);
-        assert_eq!(
-            project_calls,
-            batch.len(),
-            "first durable refusal is one skip; remaining healthy items still project"
-        );
-    }
-
-    #[test]
-    fn repeat_deterministic_refusal_warn_is_gated_by_observation_and_window() {
-        let backoff = DeterministicRefusalWarnBackoff::new(3_600);
-        let standing_id = "obs-standing";
-        let later_id = "obs-later";
-        let observed_at = 1_000_i64;
-        let gates = warn_gates_for_refusals(
-            backoff,
-            &[
-                (standing_id, observed_at),
-                (standing_id, observed_at + 1),
-                (standing_id, observed_at + 3_599),
-                (later_id, observed_at + 60),
-                (later_id, observed_at + 120),
-                (later_id, observed_at + 60 + 3_600),
-            ],
-        );
-        assert_eq!(
-            gates,
-            [
-                DeterministicRefusalWarnGate::Emit,
-                DeterministicRefusalWarnGate::Suppressed,
-                DeterministicRefusalWarnGate::Suppressed,
-                DeterministicRefusalWarnGate::Emit,
-                DeterministicRefusalWarnGate::Suppressed,
-                DeterministicRefusalWarnGate::Emit,
-            ]
-        );
-        let emit_count = gates
-            .iter()
-            .filter(|gate| **gate == DeterministicRefusalWarnGate::Emit)
-            .count();
-        assert_eq!(
-            emit_count, 3,
-            "same standing id must not re-warn inside the window"
-        );
-        assert_eq!(
-            DeterministicRefusalWarnBackoff::default().suppression_secs(),
-            3_600
-        );
-    }
-
-    #[test]
-    fn zero_refusal_warn_suppression_secs_is_treated_as_default_not_always_emit() {
-        let backoff = DeterministicRefusalWarnBackoff::new(0);
-        assert_eq!(
-            backoff.suppression_secs(),
-            DEFAULT_DETERMINISTIC_REFUSAL_WARN_SUPPRESSION_SECS
-        );
-        let observed_at = 1_000_i64;
-        let gates = warn_gates_for_refusals(
-            backoff,
-            &[
-                ("obs-zero", observed_at),
-                ("obs-zero", observed_at + 1),
-                ("obs-zero", observed_at + 3_599),
-            ],
-        );
-        assert_eq!(
-            gates,
-            [
-                DeterministicRefusalWarnGate::Emit,
-                DeterministicRefusalWarnGate::Suppressed,
-                DeterministicRefusalWarnGate::Suppressed,
-            ]
+            "durably refused items must not stall healthy items later in the batch"
         );
     }
 }
