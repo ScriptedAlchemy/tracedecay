@@ -22,6 +22,7 @@ pub use automation::{
     MemoryAutomationFactNearestMatchV1, MemoryAutomationFactReceiptV1,
     MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1, MemoryAutomationFactTargetV1,
     MemoryAutomationFactValidationStatusV1, MemoryAutomationFactValidationV1,
+    SESSION_EVIDENCE_BUDGET_SUPPRESSED,
 };
 pub use lcm::{
     CompactLineageEdgeV1, LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmContentRangeV1,

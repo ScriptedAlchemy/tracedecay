@@ -1,8 +1,8 @@
 use serde_json::{Value, json};
 
 use super::{
-    AutomationRunResultV1, AutomationSkipReasonV1, AutomationTaskV1, automation_request,
-    with_request_digest, zero_terminal,
+    AutomationRunResultV1, AutomationSkipReasonV1, AutomationTaskV1,
+    SESSION_EVIDENCE_BUDGET_SUPPRESSED, automation_request, with_request_digest, zero_terminal,
 };
 
 #[test]
@@ -57,8 +57,16 @@ fn session_evidence_unavailability_skips_session_backed_writers() {
 
 #[test]
 fn budget_backoff_suppression_is_a_typed_session_evidence_skip() {
-    let reason = AutomationSkipReasonV1::from_ledger_reason("session_evidence_budget_suppressed")
+    assert_eq!(
+        SESSION_EVIDENCE_BUDGET_SUPPRESSED,
+        "session_evidence_budget_suppressed"
+    );
+    let reason = AutomationSkipReasonV1::from_ledger_reason(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
         .expect("known session-evidence budget suppression skip");
+    assert_eq!(
+        reason,
+        AutomationSkipReasonV1::SessionEvidenceBudgetSuppressed
+    );
     assert!(reason.matches_task(AutomationTaskV1::SessionReflector));
     assert!(reason.matches_task(AutomationTaskV1::SkillWriter));
     assert!(reason.matches_task(AutomationTaskV1::CombinedReview));

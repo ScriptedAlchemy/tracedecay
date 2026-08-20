@@ -1,6 +1,7 @@
 use super::{
     AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunResultV1,
     AutomationSkipReasonV1, AutomationTaskV1, MemoryAutomationCurationRelationV1,
+    SESSION_EVIDENCE_BUDGET_SUPPRESSED,
 };
 use serde_json::{Value, json};
 use tracedecay_domain::{
