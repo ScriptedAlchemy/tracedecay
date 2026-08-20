@@ -267,7 +267,7 @@ enum SimulatedProjectOutcome {
 fn simulate_drain_project_calls(batch: &[SimulatedProjectOutcome]) -> (u64, bool, usize) {
     let mut skipped = 0;
     let mut deferred = false;
-    let mut project_calls = 0;
+    let mut project_calls: usize = 0;
     for outcome in batch {
         project_calls = project_calls.saturating_add(1);
         match outcome {
