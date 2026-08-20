@@ -6,8 +6,8 @@
 //! typed `Ok(None)` empty start as the production registry so recovery paths
 //! exercise their real fallback.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId};
@@ -21,6 +21,74 @@ use tracedecay_store::{
     StoreShardIdV1, VerifiedStoreLocatorV1,
 };
 
+const SNAPSHOT_READ_GATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Blocks gated `verified_snapshot` readers in place of fake slow IO, so
+/// tests order overlap and cancellation explicitly instead of racing
+/// wall-clock sleeps. Release is the only wake-up: a test that cancels a
+/// gated reader must store its cancellation signal first and then release,
+/// so the reader's post-gate check observes it deterministically.
+#[derive(Default)]
+struct SnapshotReadGate {
+    state: Mutex<SnapshotReadGateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct SnapshotReadGateState {
+    enabled: bool,
+    entered: usize,
+    released: bool,
+}
+
+impl SnapshotReadGate {
+    fn enable(&self) {
+        self.state.lock().unwrap().enabled = true;
+    }
+
+    /// Reader side: record entry and hold until the gate is released.
+    /// A gate that was never enabled passes straight through.
+    fn pass(&self) {
+        let mut state = self.state.lock().unwrap();
+        if !state.enabled {
+            return;
+        }
+        state.entered += 1;
+        self.changed.notify_all();
+        let (state, wait) = self
+            .changed
+            .wait_timeout_while(state, SNAPSHOT_READ_GATE_TIMEOUT, |state| !state.released)
+            .unwrap();
+        assert!(
+            state.released && !wait.timed_out(),
+            "gated snapshot read was never released"
+        );
+    }
+
+    fn await_reader(&self) {
+        let state = self.state.lock().unwrap();
+        let (state, wait) = self
+            .changed
+            .wait_timeout_while(state, SNAPSHOT_READ_GATE_TIMEOUT, |state| {
+                state.entered == 0
+            })
+            .unwrap();
+        assert!(
+            state.entered > 0 && !wait.timed_out(),
+            "no snapshot reader reached the enabled gate"
+        );
+    }
+
+    fn release(&self) {
+        self.state.lock().unwrap().released = true;
+        self.changed.notify_all();
+    }
+
+    fn readers_entered(&self) -> usize {
+        self.state.lock().unwrap().entered
+    }
+}
+
 pub(crate) struct MemoryEvidenceGraphRuntime {
     binding: StoreRuntimeBindingV1,
     locator: VerifiedStoreLocatorV1,
@@ -28,7 +96,7 @@ pub(crate) struct MemoryEvidenceGraphRuntime {
     publication_lock: Mutex<()>,
     cancelled: AtomicBool,
     cancel_after_publish: AtomicBool,
-    snapshot_delay_millis: AtomicU64,
+    read_gate: SnapshotReadGate,
 }
 
 impl Default for MemoryEvidenceGraphRuntime {
@@ -54,7 +122,7 @@ impl Default for MemoryEvidenceGraphRuntime {
             publication_lock: Mutex::new(()),
             cancelled: AtomicBool::new(false),
             cancel_after_publish: AtomicBool::new(false),
-            snapshot_delay_millis: AtomicU64::new(0),
+            read_gate: SnapshotReadGate::default(),
         }
     }
 }
@@ -68,9 +136,24 @@ impl MemoryEvidenceGraphRuntime {
         self.cancel_after_publish.store(true, Ordering::Release);
     }
 
-    pub(crate) fn set_snapshot_read_delay(&self, delay: Duration) {
-        self.snapshot_delay_millis
-            .store(u64::try_from(delay.as_millis()).unwrap(), Ordering::Release);
+    /// Holds every subsequent `verified_snapshot` read at a gate until
+    /// [`Self::release_gated_snapshot_reads`] runs.
+    pub(crate) fn gate_snapshot_reads(&self) {
+        self.read_gate.enable();
+    }
+
+    /// Blocks until at least one reader is held inside `verified_snapshot`.
+    pub(crate) fn await_gated_snapshot_reader(&self) {
+        self.read_gate.await_reader();
+    }
+
+    /// Opens the gate permanently; held and future readers pass through.
+    pub(crate) fn release_gated_snapshot_reads(&self) {
+        self.read_gate.release();
+    }
+
+    pub(crate) fn gated_snapshot_readers_entered(&self) -> usize {
+        self.read_gate.readers_entered()
     }
 }
 
@@ -125,9 +208,7 @@ impl VerifiedGraphRuntimePortV1 for MemoryEvidenceGraphRuntime {
         if read_control.interrupted() || self.cancelled.load(Ordering::Acquire) {
             return Err(GraphDbError::Cancelled);
         }
-        std::thread::sleep(Duration::from_millis(
-            self.snapshot_delay_millis.load(Ordering::Acquire),
-        ));
+        self.read_gate.pass();
         if read_control.interrupted() || self.cancelled.load(Ordering::Acquire) {
             return Err(GraphDbError::Cancelled);
         }

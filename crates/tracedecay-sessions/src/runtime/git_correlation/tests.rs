@@ -385,7 +385,7 @@ fn recovery_observes_request_cancellation_before_reading_a_snapshot() {
 #[test]
 fn recovery_observes_request_cancellation_while_reading_a_snapshot() {
     let runtime = Arc::new(MemoryEvidenceGraphRuntime::default());
-    runtime.set_snapshot_read_delay(std::time::Duration::from_millis(50));
+    runtime.gate_snapshot_reads();
     let cancelled = Arc::new(AtomicBool::new(false));
     let reader_runtime = Arc::clone(&runtime);
     let reader_cancelled = Arc::clone(&cancelled);
@@ -394,8 +394,14 @@ fn recovery_observes_request_cancellation_while_reading_a_snapshot() {
             git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
         recover_git_evidence_projection(reader_runtime.as_ref(), &identity, reader_cancelled)
     });
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    runtime.await_gated_snapshot_reader();
+    assert_eq!(
+        runtime.gated_snapshot_readers_entered(),
+        1,
+        "the reader must be inside the snapshot read before cancellation"
+    );
     cancelled.store(true, std::sync::atomic::Ordering::Release);
+    runtime.release_gated_snapshot_reads();
 
     assert_eq!(
         reader.join().unwrap().unwrap_err(),
