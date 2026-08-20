@@ -821,6 +821,26 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
             ),
         }
     })?;
+    // The backup holds the same secrets as the original (host configs can
+    // carry credential env values), so it must not be published with the
+    // umask-default mode: copy the original's permission identity onto the
+    // staging file before it becomes `.bak`.
+    let original_metadata =
+        capture_host_file_metadata(path).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to capture metadata for {} before backup: {error}",
+                path.display()
+            ),
+        })?;
+    restore_host_file_metadata(&staging_path, &original_metadata).map_err(|error| {
+        std::fs::remove_file(&staging_path).ok();
+        TraceDecayError::Config {
+            message: format!(
+                "failed to apply original permissions to backup staging file {}: {error}",
+                staging_path.display()
+            ),
+        }
+    })?;
     let backup_metadata =
         capture_host_file_metadata(&staging_path).map_err(|error| TraceDecayError::Config {
             message: format!(

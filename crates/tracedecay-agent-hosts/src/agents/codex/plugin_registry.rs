@@ -17,10 +17,11 @@
 //! --json` exits 0 without a TTY, writes `[plugins."tracedecay@personal"]
 //! enabled = true` into `~/.codex/config.toml`, and copies the staged source
 //! into `~/.codex/plugins/cache/personal/tracedecay/<version>`. It does **not**
-//! write `[hooks.state]` — hook trust stays Codex-owned via `/hooks`.
+//! write `[hooks.state]` — TraceDecay records trust for its own managed hooks
+//! separately (see [`super::sync_codex_hook_trust`] and its safety valve).
 //!
 //! That is the same host-capability shape already adopted for `codex mcp add`
-//! in [`super::mcp_registry`]: TraceDecay never authors `config.toml`; it
+//! in [`super::mcp_registry`]: this module never authors `config.toml`; it
 //! drives Codex's own command and records the exact post-command bytes for
 //! rollback. The MCP-only / Core split is unchanged: a `Core`-bearing set
 //! takes this plugin path, and an MCP-only set still uses the MCP registry
@@ -52,8 +53,9 @@ const CODEX_PLUGINS_KEY: &str = "plugins";
 /// accept a plugin command that also rewrites MCP servers.
 const CODEX_MCP_SERVERS_KEY: &str = "mcp_servers";
 
-/// TOML key holding Codex's hook-trust records. Read only: `/hooks` stays
-/// Codex-owned even after plugin add succeeds.
+/// TOML key holding Codex's hook-trust records. Read only *here*: the plugin
+/// CLI must never disturb trust records; TraceDecay writes its own managed
+/// entries through [`super::sync_codex_hook_trust`], outside any CLI run.
 const CODEX_HOOKS_KEY: &str = "hooks";
 
 /// Resolve Codex's own CLI, or fail with the typed requirement.

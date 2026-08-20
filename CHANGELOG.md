@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.10](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.9...v0.1.0-beta.10) (2026-08-20)
+
+
+### Features
+
+* **agent-hosts:** auto-trust Codex managed hooks on install and update ([dbed6d3](https://github.com/ScriptedAlchemy/tracedecay/commit/dbed6d3f18d7a9651d6f790db000088de79d3680))
+* **agent-hosts:** auto-trust Codex managed hooks on install and update ([83be52d](https://github.com/ScriptedAlchemy/tracedecay/commit/83be52d382d6f14219063b6a681460de964a8926))
+
+
+### Bug Fixes
+
+* **agent-hosts:** preserve original mode on host config backups ([f4fbdcb](https://github.com/ScriptedAlchemy/tracedecay/commit/f4fbdcb078b7aea7126490ca813a1da31c14f6dd))
+* **agent-hosts:** sync Codex hook trust in activation, prune on removal ([21fdaa0](https://github.com/ScriptedAlchemy/tracedecay/commit/21fdaa073d8a32067a33ad976f9576eacd38c06c))
+
+## [0.1.0-beta.9](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.8...v0.1.0-beta.9) (2026-08-20)
+
+
+### Bug Fixes
+
+* **release:** prevent beta lockfile races ([28177d3](https://github.com/ScriptedAlchemy/tracedecay/commit/28177d3303277dfe03631afe5c8223f4b2e6efa5))
+
 ## [0.1.0-beta.8](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.7...v0.1.0-beta.8) (2026-08-20)
 
 
