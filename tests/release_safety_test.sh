@@ -60,6 +60,19 @@ for member in root["workspace"]["members"]:
         raise SystemExit(f"workspace package is publishable: {manifest_path}")
 PY
 
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+config = json.loads(
+    Path("release-please-config-beta.json").read_text(encoding="utf-8")
+)
+if config.get("draft-pull-request") is not True:
+    raise SystemExit(
+        "beta release PRs must remain draft while the generated lockfile is updated"
+    )
+PY
+
 # GitHub suppresses `on: release` workflows for releases created by
 # GITHUB_TOKEN, so Release Please must use the dedicated release token.
 if grep -q 'token: ${{ secrets.GITHUB_TOKEN }}' "$release_please"; then

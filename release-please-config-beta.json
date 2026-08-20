@@ -6,6 +6,7 @@
   "versioning": "prerelease",
   "prerelease": true,
   "prerelease-type": "beta",
+  "draft-pull-request": true,
   "pull-request-title-pattern": "chore(release): release ${version}",
   "packages": {
     ".": {
