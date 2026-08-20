@@ -1404,7 +1404,14 @@ impl TypeScriptExtractor {
         let text = state.node_text(node);
         if let Some(brace_pos) = text.find('{') {
             text[..brace_pos].trim().to_string()
+        } else if let Some(body) = node.child_by_field_name("body") {
+            // Body shapes that do not open with `{`: own only the header
+            // before the body child instead of copying the whole item.
+            let body_offset = body.start_byte() - node.start_byte();
+            text[..body_offset].trim().to_string()
         } else {
+            // Signature-only declaration: the whole (small) text is the
+            // signature.
             text.trim().to_string()
         }
     }
@@ -1416,6 +1423,14 @@ impl TypeScriptExtractor {
         // We want everything up to the arrow body.
         if let Some(arrow_pos) = text.find("=>") {
             text[..arrow_pos + 2].trim().to_string()
+        } else if let Some(body) = find_direct_child_by_kind(declarator, "arrow_function")
+            .and_then(|arrow| arrow.child_by_field_name("body"))
+        {
+            // Arrow shapes where the `=>` token is not found in the text:
+            // own only the header before the body child instead of copying
+            // the whole item.
+            let body_offset = body.start_byte() - declarator.start_byte();
+            text[..body_offset].trim().to_string()
         } else {
             text.trim().to_string()
         }
