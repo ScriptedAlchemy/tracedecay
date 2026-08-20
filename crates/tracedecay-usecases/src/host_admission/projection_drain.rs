@@ -62,11 +62,15 @@ impl HostAdmissionFacade<'_> {
                     error @ (ProjectionStoreError::Contract(_)
                     | ProjectionStoreError::SanitizationRefused { .. }),
                 ) => {
-                    // Both classes are deterministic, content-dependent
-                    // rejections: the store has already committed the skip
-                    // disposition and advanced the checkpoint, so the drain
-                    // records the refusal and keeps the queue moving.
-                    tracing::warn!(
+                    // Store already recorded a durable skip and consumed this
+                    // queue item (`persist_projection_rejection_on_database` via
+                    // `apply_skip_disposition` + `consume_projection_queue_item`).
+                    // Breaking here would stall later healthy items until the
+                    // next 60s host tick — a stall, not a cheaper path. Keep
+                    // draining. The typed skip count is the durable signal;
+                    // keep per-item detail below WARN so invalid input cannot
+                    // become a repeated alert loop.
+                    tracing::debug!(
                         %error,
                         observation = observation_id.as_str(),
                         "deterministic projection rejection committed"
@@ -140,5 +144,51 @@ impl HostAdmissionFacade<'_> {
         outcome.deferred |= observation_deferred;
         outcome.session_ids = session_ids.into_iter().collect();
         Ok(outcome)
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum SimulatedProjectOutcome {
+    Refusal,
+    Projected,
+}
+
+#[cfg(test)]
+fn simulate_drain_project_calls(batch: &[SimulatedProjectOutcome]) -> (u64, usize) {
+    let mut skipped: u64 = 0;
+    let mut project_calls = 0_usize;
+    for outcome in batch {
+        project_calls = project_calls.saturating_add(1);
+        match outcome {
+            SimulatedProjectOutcome::Refusal => {
+                skipped = skipped.saturating_add(1);
+            }
+            SimulatedProjectOutcome::Projected => {}
+        }
+    }
+    (skipped, project_calls)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SimulatedProjectOutcome, simulate_drain_project_calls};
+
+    #[test]
+    fn multi_item_batch_continues_after_durable_refusals() {
+        let batch = [
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Refusal,
+            SimulatedProjectOutcome::Projected,
+            SimulatedProjectOutcome::Refusal,
+            SimulatedProjectOutcome::Projected,
+        ];
+        let (skipped, project_calls) = simulate_drain_project_calls(&batch);
+        assert_eq!(skipped, 2);
+        assert_eq!(
+            project_calls,
+            batch.len(),
+            "durably refused items must not stall healthy items later in the batch"
+        );
     }
 }

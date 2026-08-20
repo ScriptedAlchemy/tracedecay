@@ -834,6 +834,96 @@ fn omitted_request_deadline_uses_crate_exact_flat_default() {
 }
 
 #[test]
+fn request_deadline_overrides_crate_exact_flat_default() {
+    let query_view = query_view();
+    let projection = projection();
+    let mut request = request(&query_view, &projection, 4);
+    request.budget.deadline_micros = Some(1);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(&request, Vec::new());
+    let control = FixedExecutionControl {
+        elapsed_micros: Rc::new(Cell::new(1)),
+        ..FixedExecutionControl::default()
+    };
+    let outcome = SemanticCodeRetriever::new(&embedder, &vectors, &control)
+        .retrieve_semantic(&request)
+        .expect("typed budget outcome");
+    assert!(
+        matches!(outcome, RetrieverOutcome::BudgetExceeded(_)),
+        "a set lane deadline must beat the crate fallback instead of becoming an empty success"
+    );
+    assert_eq!(embedder.calls.get(), 0);
+    assert_eq!(vectors.scans.get(), 0);
+
+    request.budget.deadline_micros = Some(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1 * 2);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(&request, Vec::new());
+    let control = FixedExecutionControl {
+        elapsed_micros: Rc::new(Cell::new(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1)),
+        ..FixedExecutionControl::default()
+    };
+    let outcome = SemanticCodeRetriever::new(&embedder, &vectors, &control)
+        .retrieve_semantic(&request)
+        .expect("typed lane outcome");
+    assert!(
+        matches!(outcome, RetrieverOutcome::Complete(_)),
+        "a longer lane deadline must run the lane to Complete, not just avoid BudgetExceeded"
+    );
+    assert_eq!(embedder.calls.get(), 1);
+    assert_eq!(vectors.scans.get(), 1);
+}
+
+#[test]
+fn set_deadline_zero_is_immediate_expire_not_crate_fallback() {
+    let query_view = query_view();
+    let projection = projection();
+    let mut request = request(&query_view, &projection, 4);
+    request.budget.deadline_micros = Some(0);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(&request, Vec::new());
+    let control = FixedExecutionControl {
+        elapsed_micros: Rc::new(Cell::new(0)),
+        ..FixedExecutionControl::default()
+    };
+    assert!(
+        matches!(
+            SemanticCodeRetriever::new(&embedder, &vectors, &control)
+                .retrieve_semantic(&request)
+                .expect("typed budget outcome"),
+            RetrieverOutcome::BudgetExceeded(_)
+        ),
+        "Some(0) is a set deadline, not omitted"
+    );
+    assert_eq!(embedder.calls.get(), 0);
+    assert_eq!(vectors.scans.get(), 0);
+}
+
+#[test]
+fn tighter_of_lane_and_base_deadline_is_used() {
+    let query_view = query_view();
+    let projection = projection();
+    let mut request = request(&query_view, &projection, 4);
+    request.budget.deadline_micros = Some(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1 * 2);
+    request.base.budget.deadline_micros = Some(1);
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(&request, Vec::new());
+    let control = FixedExecutionControl {
+        elapsed_micros: Rc::new(Cell::new(1)),
+        ..FixedExecutionControl::default()
+    };
+    assert!(
+        matches!(
+            SemanticCodeRetriever::new(&embedder, &vectors, &control)
+                .retrieve_semantic(&request)
+                .expect("typed budget outcome"),
+            RetrieverOutcome::BudgetExceeded(_)
+        ),
+        "a longer lane deadline must not lift a tighter base deadline"
+    );
+    assert_eq!(embedder.calls.get(), 0);
+}
+
+#[test]
 fn cancellation_and_deadline_are_checked_during_scan() {
     let query_view = query_view();
     let projection = projection();
