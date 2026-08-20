@@ -361,10 +361,12 @@ fn lcm_json_credential_bearing_keys_quarantine_instead_of_faulting_the_receipt()
     let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
     let raw = format!(r#"{{"{credential_key}":"ordinary-value"}}"#);
 
-    assert!(matches!(
-        sanitize_lcm_payload_text(&raw),
-        Err(DetectionError::StructuredQuarantine)
-    ));
+    let error = sanitize_lcm_payload_text(&raw).expect_err("key quarantine");
+    assert_eq!(error, DetectionError::CredentialKeyQuarantine);
+    assert_eq!(
+        error.to_string(),
+        "privacy sanitizer quarantined credential-bearing keys"
+    );
 }
 
 #[test]
