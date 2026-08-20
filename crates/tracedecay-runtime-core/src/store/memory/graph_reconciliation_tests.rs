@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
@@ -55,7 +55,8 @@ struct RecordingGraphRuntime {
     served_snapshot: Mutex<Option<VerifiedGraphSnapshot>>,
     hold_snapshot_read_armed: AtomicBool,
     hold_snapshot_read_entered: AtomicBool,
-    hold_snapshot_read_release: AtomicBool,
+    hold_snapshot_read_release: Mutex<bool>,
+    hold_snapshot_read_release_notify: Condvar,
     snapshot_read_notify: Notify,
     publish_calls: AtomicUsize,
     reconcile_calls: AtomicUsize,
@@ -77,7 +78,8 @@ impl RecordingGraphRuntime {
             served_snapshot: Mutex::new(None),
             hold_snapshot_read_armed: AtomicBool::new(false),
             hold_snapshot_read_entered: AtomicBool::new(false),
-            hold_snapshot_read_release: AtomicBool::new(false),
+            hold_snapshot_read_release: Mutex::new(false),
+            hold_snapshot_read_release_notify: Condvar::new(),
             snapshot_read_notify: Notify::new(),
             publish_calls: AtomicUsize::new(0),
             reconcile_calls: AtomicUsize::new(0),
@@ -90,12 +92,19 @@ impl RecordingGraphRuntime {
     /// snapshot, so a test can land a canonical source mutation between a
     /// read's source load and its post-hydration staleness re-check.
     fn arm_snapshot_read_hold(&self) {
+        *self
+            .hold_snapshot_read_release
+            .lock()
+            .expect("arm snapshot read hold") = false;
         self.hold_snapshot_read_armed.store(true, Ordering::Release);
     }
 
     fn release_held_snapshot_read(&self) {
-        self.hold_snapshot_read_release
-            .store(true, Ordering::Release);
+        *self
+            .hold_snapshot_read_release
+            .lock()
+            .expect("release snapshot read hold") = true;
+        self.hold_snapshot_read_release_notify.notify_all();
     }
 
     async fn wait_for_held_snapshot_read(&self) {
@@ -199,18 +208,19 @@ impl VerifiedGraphRuntimePortV1 for RecordingGraphRuntime {
             self.hold_snapshot_read_entered
                 .store(true, Ordering::Release);
             self.snapshot_read_notify.notify_one();
-            // Bounded: if the test panics before releasing the hold, this
-            // parked blocking-pool thread must fail loudly instead of
-            // spinning forever and hanging the runtime drop.
-            let hold_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            while !self.hold_snapshot_read_release.load(Ordering::Acquire) {
-                assert!(
-                    std::time::Instant::now() < hold_deadline,
-                    "held snapshot read was never released within 30s; \
-                     a test assertion likely failed while the hold was parked"
-                );
-                std::thread::yield_now();
-            }
+            let released = self
+                .hold_snapshot_read_release
+                .lock()
+                .expect("wait for snapshot read release");
+            let (released, wait) = self
+                .hold_snapshot_read_release_notify
+                .wait_timeout_while(released, Duration::from_secs(30), |released| !*released)
+                .expect("wait for snapshot read release");
+            assert!(
+                *released && !wait.timed_out(),
+                "held snapshot read was never released within 30s; \
+                 a test assertion likely failed while the hold was parked"
+            );
         }
         Ok(snapshot)
     }
