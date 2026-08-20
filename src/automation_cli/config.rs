@@ -213,6 +213,10 @@ fn automation_task_patch(
                 stale_lock_secs,
                 &format!("{task} stale_lock_secs"),
             )?,
+            // The budget-backoff window is patched through the configuration
+            // surfaces (dashboard/application PATCH); the CLI does not expose
+            // a flag for it.
+            session_evidence_budget_backoff_secs: None,
         },
     )
 }

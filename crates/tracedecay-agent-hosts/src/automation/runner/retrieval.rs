@@ -15,6 +15,7 @@ use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
 };
+use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED;
 use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
     TemporalModeV1, UtcMicros, WorktreeId,
@@ -509,7 +510,7 @@ pub(super) fn accept_automation_temporal_outcome(
             AutomationTemporalRetrieval::Rejected("session_cursor_manifest_limit_exceeded")
         }
         SessionRetrievalOutcome::BudgetExhausted => {
-            AutomationTemporalRetrieval::Rejected("session_evidence_budget_exhausted")
+            AutomationTemporalRetrieval::Rejected(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
         }
         SessionRetrievalOutcome::Cancelled => {
             AutomationTemporalRetrieval::Rejected("session_evidence_cancelled")

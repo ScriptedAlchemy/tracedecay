@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED;
+
 use super::backend::{
     AgentTaskFailureClass, AgentTaskKind, AgentTaskRetryAttempt, task_key as canonical_task_key,
 };
@@ -684,9 +686,11 @@ fn parse_nonnegative_unix_integer(value: &str, label: &str) -> Result<i64> {
 /// affect the selected result. Returning parsed seconds with the record keeps
 /// schedule arithmetic on the same validated timestamp that established the
 /// winner.
-pub(super) fn latest_record_by_canonical_completion<'a>(
+pub(super) type CanonicalCompletionKey<'a> = (i64, i64, &'a str);
+
+pub(super) fn latest_record_by_canonical_completion_key<'a>(
     records: impl IntoIterator<Item = &'a AutomationRunLedgerRecord>,
-) -> Result<Option<(&'a AutomationRunLedgerRecord, i64)>> {
+) -> Result<Option<(&'a AutomationRunLedgerRecord, CanonicalCompletionKey<'a>)>> {
     let mut latest = None;
     for record in records {
         validate_run_id_component(&record.run_id)?;
@@ -717,9 +721,19 @@ pub(super) fn latest_record_by_canonical_completion<'a>(
             "automation history repeats run '{}' with conflicting canonical state",
             record.run_id
         ))),
-        Some((record, completed_at, _, false)) => Ok(Some((record, completed_at))),
+        Some((record, completed_at, completed_at_micros, false)) => Ok(Some((
+            record,
+            (completed_at, completed_at_micros, record.run_id.as_str()),
+        ))),
         None => Ok(None),
     }
+}
+
+pub(super) fn latest_record_by_canonical_completion<'a>(
+    records: impl IntoIterator<Item = &'a AutomationRunLedgerRecord>,
+) -> Result<Option<(&'a AutomationRunLedgerRecord, i64)>> {
+    latest_record_by_canonical_completion_key(records)
+        .map(|latest| latest.map(|(record, (completed_at, _, _))| (record, completed_at)))
 }
 
 fn run_ledger_scan_io_error(error: TraceDecayError) -> std::io::Error {
@@ -808,6 +822,7 @@ pub struct AutomationRunLedgerTaskSummary {
     latest_effectful_any_trigger: Option<usize>,
     latest_scheduler_effectful: Option<usize>,
     latest_scheduler_activity: Option<usize>,
+    latest_session_evidence_budget_exhausted: Option<usize>,
 }
 
 impl AutomationRunLedgerTaskSummary {
@@ -836,6 +851,16 @@ impl AutomationRunLedgerTaskSummary {
 
     pub fn latest_scheduler_activity(&self) -> Option<&AutomationRunLedgerRecord> {
         self.latest_scheduler_activity
+            .map(|index| &self.records[index])
+    }
+
+    /// The most recent skip that observed session-evidence budget exhaustion.
+    ///
+    /// Standing exhaustion is anchored here even after a newer suppression
+    /// skip becomes the latest logical activity, so the scheduler backoff can
+    /// keep measuring its window from the last real exhausted attempt.
+    pub fn latest_session_evidence_budget_exhausted(&self) -> Option<&AutomationRunLedgerRecord> {
+        self.latest_session_evidence_budget_exhausted
             .map(|index| &self.records[index])
     }
 
@@ -1202,6 +1227,14 @@ struct TaskSummarySpans {
     latest_effectful_any_trigger: Option<exact_lookup::RunLedgerRowProjection>,
     latest_scheduler_effectful: Option<exact_lookup::RunLedgerRowProjection>,
     latest_scheduler_activity: Option<exact_lookup::RunLedgerRowProjection>,
+    latest_session_evidence_budget_exhausted: Option<exact_lookup::RunLedgerRowProjection>,
+}
+
+fn is_session_evidence_budget_exhausted_skip(
+    status: AutomationRunStatus,
+    session_evidence_budget_exhausted_error: bool,
+) -> bool {
+    status == AutomationRunStatus::Skipped && session_evidence_budget_exhausted_error
 }
 
 fn read_run_ledger_task_summary(
@@ -1251,6 +1284,15 @@ fn read_run_ledger_task_summary(
                 select_summary_projection(&mut selected.latest_scheduler_effectful, &projection)?;
             }
         }
+        if is_session_evidence_budget_exhausted_skip(
+            projection.status,
+            projection.session_evidence_budget_exhausted_error,
+        ) {
+            select_summary_projection(
+                &mut selected.latest_session_evidence_budget_exhausted,
+                &projection,
+            )?;
+        }
     }
     let selected_run_ids = [
         selected.latest_logical_activity.as_ref(),
@@ -1258,6 +1300,7 @@ fn read_run_ledger_task_summary(
         selected.latest_effectful_any_trigger.as_ref(),
         selected.latest_scheduler_effectful.as_ref(),
         selected.latest_scheduler_activity.as_ref(),
+        selected.latest_session_evidence_budget_exhausted.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -1309,6 +1352,7 @@ fn decode_task_summary(
         latest_effectful_any_trigger,
         latest_scheduler_effectful,
         latest_scheduler_activity,
+        latest_session_evidence_budget_exhausted,
     } = selected;
     for (projection, category) in [
         (latest_logical_activity, 0_u8),
@@ -1316,6 +1360,7 @@ fn decode_task_summary(
         (latest_effectful_any_trigger, 2),
         (latest_scheduler_effectful, 3),
         (latest_scheduler_activity, 4),
+        (latest_session_evidence_budget_exhausted, 5),
     ] {
         let Some(selected_projection) = projection else {
             continue;
@@ -1355,6 +1400,10 @@ fn decode_task_summary(
                     )
             }
             4 => projection.trigger == AutomationTrigger::Scheduler,
+            5 => is_session_evidence_budget_exhausted_skip(
+                projection.status,
+                projection.session_evidence_budget_exhausted_error,
+            ),
             _ => false,
         };
         if !category_matches {
@@ -1395,6 +1444,7 @@ fn decode_task_summary(
             2 => summary.latest_effectful_any_trigger = Some(index),
             3 => summary.latest_scheduler_effectful = Some(index),
             4 => summary.latest_scheduler_activity = Some(index),
+            5 => summary.latest_session_evidence_budget_exhausted = Some(index),
             _ => {
                 return Err(config_error(
                     "automation task summary selected an unknown category",
@@ -1579,6 +1629,8 @@ fn require_projection_identity(
         && record.trigger == projection.trigger
         && record.task == projection.task
         && record.task_key == projection.task_key
+        && (record.error.as_deref() == Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED))
+            == projection.session_evidence_budget_exhausted_error
         && record.started_at == projection.started_at
         && record.completed_at == projection.completed_at
         && record.completed_at_micros == projection.completed_at_micros
@@ -1688,6 +1740,76 @@ mod tests {
         body.push('\n');
         std::fs::write(&path, body).unwrap();
         (temp, path)
+    }
+
+    /// A skipped session-reflector scheduler run whose reason sits in the
+    /// ledger's `error` field, matching how skip records are minted.
+    fn skipped_session_reflector_line(run_id: &str, reason: &str, completed_at: i64) -> String {
+        format!(
+            "{{\"schema_version\":2,\"run_id\":\"{run_id}\",\"trigger\":\"scheduler\",\
+             \"task\":\"session_reflector\",\"backend\":\"codex_app_server\",\
+             \"status\":\"skipped\",\"accepted_count\":0,\"rejected_count\":0,\
+             \"error\":\"{reason}\",\"started_at\":\"{completed_at}\",\
+             \"completed_at\":\"{completed_at}\",\"completed_at_micros\":{}}}",
+            completed_at.saturating_mul(1_000_000),
+        )
+    }
+
+    #[test]
+    fn task_summary_keeps_the_budget_exhausted_anchor_visible_past_newer_skips() {
+        let lines = vec![
+            skipped_session_reflector_line("run-budget", SESSION_EVIDENCE_BUDGET_EXHAUSTED, 100),
+            skipped_session_reflector_line(
+                "run-suppressed",
+                "session_evidence_budget_suppressed",
+                200,
+            ),
+        ];
+        let (_temp, path) = write_ledger(&lines);
+
+        let summary = read_run_ledger_task_summary(
+            &path,
+            AgentTaskKind::SessionReflector,
+            "session_reflector",
+        )
+        .unwrap();
+
+        assert_eq!(
+            summary.latest_logical_activity().unwrap().run_id,
+            "run-suppressed"
+        );
+        let anchor = summary.latest_session_evidence_budget_exhausted().unwrap();
+        assert_eq!(anchor.run_id, "run-budget");
+        assert_eq!(
+            anchor.error.as_deref(),
+            Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
+        );
+        assert!(
+            summary
+                .records()
+                .iter()
+                .any(|record| record.run_id == "run-budget"),
+            "the anchor record must reach schedule decisions through records()"
+        );
+    }
+
+    #[test]
+    fn task_summary_has_no_budget_anchor_without_an_exhausted_skip() {
+        let lines = vec![skipped_session_reflector_line(
+            "run-stale",
+            "session_evidence_stale",
+            100,
+        )];
+        let (_temp, path) = write_ledger(&lines);
+
+        let summary = read_run_ledger_task_summary(
+            &path,
+            AgentTaskKind::SessionReflector,
+            "session_reflector",
+        )
+        .unwrap();
+
+        assert!(summary.latest_session_evidence_budget_exhausted().is_none());
     }
 
     #[test]

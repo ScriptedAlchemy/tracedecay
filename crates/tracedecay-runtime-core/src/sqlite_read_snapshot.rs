@@ -1213,6 +1213,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreign_wal_snapshot_reads_wal_frames_and_leaves_live_source_untouched() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("foreign.db");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE durable(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('checkpointed');
+                 PRAGMA wal_checkpoint(TRUNCATE);
+                 INSERT INTO durable(value) VALUES ('wal-resident');",
+            )
+            .unwrap();
+        assert!(with_suffix(&path, "-wal").metadata().unwrap().len() > 0);
+        let before = family_state(&path).unwrap();
+
+        let snapshot = open_foreign_in(
+            &path,
+            &temp.path().join("scratch"),
+            SnapshotReadControl::unlimited(),
+        )
+        .await
+        .unwrap();
+        let identity_path = snapshot
+            .attach_token()
+            .unwrap()
+            .verified_identity_path()
+            .unwrap()
+            .to_path_buf();
+        let mut rows = snapshot
+            .connection()
+            .query("SELECT value FROM durable ORDER BY rowid", ())
+            .await
+            .unwrap();
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            values.push(row.get::<String>(0).unwrap());
+        }
+
+        assert_eq!(values, ["checkpointed", "wal-resident"]);
+        assert_ne!(identity_path, path);
+        assert!(
+            ["-wal", "-shm"]
+                .into_iter()
+                .all(|suffix| !with_suffix(&identity_path, suffix).exists()),
+            "the materialized snapshot must be one standalone file"
+        );
+        assert_eq!(family_state(&path).unwrap(), before);
+        drop(writer);
+    }
+
+    #[tokio::test]
     async fn copied_snapshot_survives_empty_writer_sidecar_cleanup() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("source.db");

@@ -586,6 +586,12 @@ pub struct AutomationTaskSettingsV1 {
     pub cooldown_secs: Option<u64>,
     pub min_idle_secs: Option<u64>,
     pub stale_lock_secs: Option<u64>,
+    /// Suppression window between session-evidence retrieval attempts while
+    /// the evidence budget stays exhausted. Unset uses the automation crate's
+    /// one-hour default. Distinct from `cooldown_secs`, which paces retries
+    /// after failed runs; budget exhaustion is a skip, not a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_evidence_budget_backoff_secs: Option<u64>,
 }
 
 impl AutomationTaskSettingsV1 {
@@ -595,6 +601,7 @@ impl AutomationTaskSettingsV1 {
             self.cooldown_secs,
             self.min_idle_secs,
             self.stale_lock_secs,
+            self.session_evidence_budget_backoff_secs,
         ] {
             if matches!(value, Some(0)) {
                 return Err(DomainError::NonCanonical {
@@ -673,6 +680,7 @@ impl Default for AutomationSettingsV1 {
             cooldown_secs: Some(300),
             min_idle_secs,
             stale_lock_secs: Some(3_600),
+            session_evidence_budget_backoff_secs: None,
         };
         Self {
             schema_version: Self::SCHEMA_VERSION,

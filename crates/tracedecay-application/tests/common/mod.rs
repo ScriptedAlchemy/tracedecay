@@ -69,6 +69,16 @@ pub fn digest(value: &str) -> ManifestDigest {
     ManifestDigest::new(value).expect("fixture digest is canonical")
 }
 
+/// Platform-absolute fixture root: the work and registered-root contracts
+/// require `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+pub fn fixture_abs_root(posix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{}", posix.replace('/', "\\"))
+    } else {
+        posix.to_owned()
+    }
+}
+
 /// Canonical digest fixture for the Work-attempt product journey.
 pub fn work_digest(value: char) -> ManifestDigest {
     digest_char(value)
