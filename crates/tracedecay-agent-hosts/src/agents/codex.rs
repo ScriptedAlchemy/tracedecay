@@ -1296,9 +1296,7 @@ fn prune_codex_hook_trust_records(home: &Path) -> Result<()> {
         return Ok(());
     }
     let state_empty = state.is_empty();
-    if state_empty
-        && let Some(hooks) = table.get_mut("hooks").and_then(toml::Value::as_table_mut)
-    {
+    if state_empty && let Some(hooks) = table.get_mut("hooks").and_then(toml::Value::as_table_mut) {
         hooks.remove("state");
         if hooks.is_empty() {
             table.remove("hooks");
@@ -1312,8 +1310,7 @@ fn prune_codex_hook_trust_records(home: &Path) -> Result<()> {
     // Codex's hook loader requires (see [`write_codex_hook_trust_config`]).
     let updated = match contents.find("[hooks.state.\"") {
         Some(child_offset) => {
-            let mut updated =
-                String::with_capacity(contents.len() + "[hooks.state]\n\n".len());
+            let mut updated = String::with_capacity(contents.len() + "[hooks.state]\n\n".len());
             updated.push_str(&contents[..child_offset]);
             updated.push_str("[hooks.state]\n\n");
             updated.push_str(&contents[child_offset..]);
