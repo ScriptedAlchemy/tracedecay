@@ -36,6 +36,11 @@ compiles.
   `cargo nextest run --workspace --all-features --no-fail-fast`.
 - Dashboard: `npm run build` (rsbuild), `npm run typecheck` (`tsc --noEmit`),
   `npm test` (vitest) from `dashboard/`.
+- Default `cargo build` / `cargo test` compile every package at the base
+  dev/test opt-level. The critical-path kernel `opt-level` overrides
+  (code index, graph, sha2, …) live in the opt-in `perf` profile in the root
+  `Cargo.toml`; run generation-scale suites with `cargo test --profile perf`
+  (or `cargo build --profile perf`) when they need production-like speed.
 - libtest `--exact` requires the full module path and exits 0 when a filter
   matches nothing — a vacuous "0 passed" green. For name-filtered runs prefer
   the ad-hoc anti-vacuity helper `scripts/require-exact-test.sh`; it is not a

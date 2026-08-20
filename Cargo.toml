@@ -479,101 +479,75 @@ debug = 0
 [profile.test.package."*"]
 debug = 0
 
+# Opt-in profile for hot-kernel runs: `cargo test --profile perf ...` or
+# `cargo build --profile perf ...`. It mirrors dev/test (line tables for
+# workspace crates, no dependency debuginfo) but keeps the critical-path
+# kernels below optimized. Default `cargo build` / `cargo test` no longer
+# optimize any specific package, so ordinary edit-compile loops stay cheap;
+# reach for this profile when running the generation-scale code-index or
+# graph-publication suites at production-like speed.
+[profile.perf]
+inherits = "dev"
+
+[profile.perf.package."*"]
+debug = 0
+
 # Code-index lifecycle tests exercise six-figure production generations under
 # the same bounded readiness contracts as the daemon. Keep the owning kernels
 # optimized without hiding assertions or optimizing unrelated workspace code.
-[profile.dev.package.tracedecay-code-extraction]
+[profile.perf.package.tracedecay-code-extraction]
 opt-level = 2
 
-[profile.dev.package.tracedecay-code-index]
+[profile.perf.package.tracedecay-code-index]
 opt-level = 2
 
-[profile.dev.package.tracedecay-domain]
+[profile.perf.package.tracedecay-domain]
 opt-level = 2
 
-[profile.dev.package.tracedecay-graph-db]
+[profile.perf.package.tracedecay-graph-db]
 opt-level = 2
 
-[profile.dev.package.tracedecay-runtime-core]
+[profile.perf.package.tracedecay-runtime-core]
 opt-level = 2
 
-[profile.dev.package.tracedecay-rusqlite-runtime]
+[profile.perf.package.tracedecay-rusqlite-runtime]
 opt-level = 2
 
-[profile.dev.package.tracedecay-store]
+[profile.perf.package.tracedecay-store]
 opt-level = 2
 
-[profile.dev.package.grafeo-adapters]
+[profile.perf.package.grafeo-adapters]
 opt-level = 2
 
-[profile.dev.package.grafeo-common]
+[profile.perf.package.grafeo-common]
 opt-level = 2
 
-[profile.dev.package.grafeo-core]
+[profile.perf.package.grafeo-core]
 opt-level = 2
 
-[profile.dev.package.grafeo-engine]
+[profile.perf.package.grafeo-engine]
 opt-level = 2
 
-[profile.dev.package.grafeo-storage]
+[profile.perf.package.grafeo-storage]
 opt-level = 2
 
-[profile.dev.package.serde_json]
-opt-level = 2
-
-[profile.test.package.tracedecay-code-extraction]
-opt-level = 2
-
-[profile.test.package.tracedecay-code-index]
-opt-level = 2
-
-[profile.test.package.tracedecay-domain]
-opt-level = 2
-
-[profile.test.package.tracedecay-graph-db]
-opt-level = 2
-
-[profile.test.package.tracedecay-runtime-core]
-opt-level = 2
-
-[profile.test.package.tracedecay-rusqlite-runtime]
-opt-level = 2
-
-[profile.test.package.tracedecay-store]
-opt-level = 2
-
-[profile.test.package.grafeo-adapters]
-opt-level = 2
-
-[profile.test.package.grafeo-common]
-opt-level = 2
-
-[profile.test.package.grafeo-core]
-opt-level = 2
-
-[profile.test.package.grafeo-engine]
-opt-level = 2
-
-[profile.test.package.grafeo-storage]
-opt-level = 2
-
-[profile.test.package.serde_json]
+[profile.perf.package.serde_json]
 opt-level = 2
 
 # The first token count pays a one-time BPE model load (embedded-vocabulary
 # base64 decode + BPE regex compile) that costs seconds in unoptimized
 # builds; the dashboard token-count warm task and its tests hit it on every
 # test-process start.
-[profile.dev.package.tiktoken-rs]
+[profile.perf.package.tiktoken-rs]
 opt-level = 2
 
-[profile.dev.package.regex]
+[profile.perf.package.regex]
 opt-level = 2
 
 # Graph publication digest checks hash multi-megabyte canonical replay
 # sources on every durable read/write; unoptimized sha2 alone exceeds the
 # exact-SQL test transaction budget.
-[profile.dev.package.sha2]
+[profile.perf.package.sha2]
 opt-level = 3
 
 # Workspace dependencies keep the upstream package API while the canonical

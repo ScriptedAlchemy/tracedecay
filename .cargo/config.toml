@@ -30,6 +30,32 @@ TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 # Enforced by tests/core_cli_suite/test_profile_isolation_test.rs.
 TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = false, relative = true }
 
+# Cheaper Linux links, scoped to the gnu triples so Windows (MSVC supports
+# only packed split-debuginfo) and macOS (already defaults to unpacked) keep
+# their platform defaults. `split-debuginfo=unpacked` leaves debuginfo in the
+# object files instead of linking it into every binary; it is a no-op for
+# profiles that build without debuginfo. The `-B` flags prepend the mold
+# linker's driver directories (Debian/Ubuntu/Fedora package and source-install
+# locations): GCC and clang silently skip nonexistent `-B` dirs, so hosts
+# without mold fall back to the default `ld`, and any GCC accepts `-B`
+# (unlike `-fuse-ld=mold`, which needs GCC >= 12 — see
+# .github/actions/setup-linux-mold). CI symlinks ld -> mold, so its linker
+# choice is unchanged. A user-set RUSTFLAGS env var replaces these flags
+# entirely; these sections add no linker override.
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+  "-C", "split-debuginfo=unpacked",
+  "-C", "link-arg=-B/usr/libexec/mold",
+  "-C", "link-arg=-B/usr/local/libexec/mold",
+]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+  "-C", "split-debuginfo=unpacked",
+  "-C", "link-arg=-B/usr/libexec/mold",
+  "-C", "link-arg=-B/usr/local/libexec/mold",
+]
+
 [alias]
 # Local default for the full Rust test suite. Requires cargo-nextest:
 # https://nexte.st/docs/installation/pre-built-binaries/
