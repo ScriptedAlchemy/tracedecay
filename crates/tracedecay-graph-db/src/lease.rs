@@ -195,7 +195,7 @@ impl VerifiedGraphSnapshot {
                 Ok(())
             }
         };
-        database.apply_generation_unverified(&manifest, None, &check)?;
+        database.apply_generation_unverified(&manifest, &check)?;
         let recovered_digest = database.verify_generation_in_place(&manifest, &check)?;
         let projection = GraphProjectionIdentityV1 {
             shard_id: StoreShardIdV1::project(

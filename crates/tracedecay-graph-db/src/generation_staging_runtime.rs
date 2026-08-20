@@ -1,4 +1,3 @@
-use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard as ParkingRwLockWriteGuard};
 use tracedecay_store::{
     GraphPublicationInputDigestV1, GraphPublicationReplayV1, GraphRecoveredGenerationDigestV1,
     SemanticVectorBatchOutputDigest, SemanticVectorCheckpointDigest,
@@ -16,6 +15,7 @@ use crate::limits::{
     MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS,
     require_generation_capacity,
 };
+use crate::runtime::{GraphBatchPlan, PreparedGraphBatch};
 use crate::state::{
     latest_projection, load_entity, load_relation, projection_node_counts, publication,
 };
@@ -206,104 +206,102 @@ impl GraphDb {
         let dependency = stage_dependency(plan)?;
         let input_digest = finalization_input_digest(plan, checkpoint)?;
         let idempotency_key = finalization_idempotency_key(plan, checkpoint)?;
+        let existing_input_digest = input_digest.clone();
 
-        // An upgradable claim keeps the staged rows stable (writers queue)
-        // while snapshot readers proceed; the exclusive claim covers only
-        // the finalization apply, never the recovered-digest stream.
-        let snapshot_gate = self.inner.snapshot_gate.upgradable_read();
-        self.require_staged_generation_writable(&locator)?;
-        let (current, existing) = {
-            let guard = self.read_guard()?;
-            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-            let current = latest_projection(database, &physical_namespace, &projection)?
-                .ok_or_else(|| GraphDbError::ResetRequired {
-                    message: "semantic vector staged native generation is missing".to_owned(),
-                })?
-                .commit;
-            let existing = publication(database, &physical_namespace, &idempotency_key)?;
-            (current, existing)
-        };
-        if current.source_generation.as_str() != plan.source_generation.as_str() {
-            return Err(GraphDbError::Conflict);
-        }
-        let manifest = GraphGenerationManifest::new_checked(
-            locator.projection.clone(),
-            locator.generation.clone(),
-            SourceGeneration::new(plan.source_generation.as_str())?,
-            current.watermark.clone(),
-            vec![dependency],
-            Vec::new(),
-            Vec::new(),
+        // The shared gated-batch choreography keeps the staged rows stable
+        // (writers queue) while snapshot readers proceed: only the empty
+        // finalization apply takes the exclusive claim, never the
+        // recovered-digest stream.
+        let replay = self.run_gated_batch(
             check,
-        )?;
-        let dependency_digest = manifest.dependency_closure_digest(check)?;
-        let batch = GraphWriteBatch::new_canonical_checked(
-            physical_namespace.clone(),
-            projection.clone(),
-            manifest.source_generation.clone(),
-            manifest.watermark.clone(),
-            Vec::new(),
-            check,
-        )?;
-        let digest = batch.canonical_digest_checked(check)?;
-        let snapshot_gate = if let Some(existing) = existing {
-            if existing.input_digest != input_digest.as_str() || existing.digest != digest {
-                return Err(GraphDbError::Conflict);
-            }
-            snapshot_gate
-        } else {
-            let write_gate = RwLockUpgradableReadGuard::upgrade(snapshot_gate);
-            {
-                let guard = self.write_guard()?;
-                let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-                let mut state = self.state_write_guard()?;
-                self.apply_locked(
-                    database,
-                    &mut state,
-                    batch,
-                    mutation::CommitMetadata {
-                        digest: digest.clone(),
-                        generation_dependency_digest: Some(dependency_digest.clone()),
-                        publication_record: Some((
-                            idempotency_key.clone(),
-                            digest,
-                            input_digest.as_str().to_owned(),
-                        )),
-                    },
-                    &mutation::RelationEndpointNamespaces::new(),
+            |database| {
+                self.require_staged_generation_writable(&locator)?;
+                let current = latest_projection(database, &physical_namespace, &projection)?
+                    .ok_or_else(|| GraphDbError::ResetRequired {
+                        message: "semantic vector staged native generation is missing".to_owned(),
+                    })?
+                    .commit;
+                if current.source_generation.as_str() != plan.source_generation.as_str() {
+                    return Err(GraphDbError::Conflict);
+                }
+                let manifest = GraphGenerationManifest::new_checked(
+                    locator.projection.clone(),
+                    locator.generation.clone(),
+                    SourceGeneration::new(plan.source_generation.as_str())?,
+                    current.watermark.clone(),
+                    vec![dependency],
+                    Vec::new(),
+                    Vec::new(),
                     check,
                 )?;
-            }
-            ParkingRwLockWriteGuard::downgrade_to_upgradable(write_gate)
-        };
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let finalized = latest_projection(database, &physical_namespace, &projection)?
-            .ok_or_else(|| GraphDbError::ResetRequired {
-                message: "semantic vector finalized native generation is missing".to_owned(),
-            })?
-            .commit;
-        if finalized.source_generation != manifest.source_generation
-            || finalized.watermark != manifest.watermark
-            || finalized.generation_dependency_digest.as_ref() != Some(&dependency_digest)
-        {
-            return Err(GraphDbError::Conflict);
-        }
-        let recovered = GraphRecoveredGenerationDigestV1::new(format!(
-            "sha256:{}",
-            recovered_generation_digest_from_database(database, &manifest, check)?
-        ))
-        .map_err(|error| GraphDbError::Corrupt {
-            message: error.to_string(),
-        })?;
-        drop(guard);
-        drop(snapshot_gate);
-        let replay = manifest.relational_semantic_vector_replay_with_recovered_digest(
-            plan,
-            GraphIdempotencyKey::new(plan.publication_key.idempotency_key.as_str())?,
-            input_digest,
-            recovered,
-            check,
+                let dependency_digest = manifest.dependency_closure_digest(check)?;
+                let batch = GraphWriteBatch::new_canonical_checked(
+                    physical_namespace.clone(),
+                    projection.clone(),
+                    manifest.source_generation.clone(),
+                    manifest.watermark.clone(),
+                    Vec::new(),
+                    check,
+                )?;
+                let digest = batch.canonical_digest_checked(check)?;
+                if let Some(existing) =
+                    publication(database, &physical_namespace, &idempotency_key)?
+                {
+                    if existing.input_digest != existing_input_digest.as_str()
+                        || existing.digest != digest
+                    {
+                        return Err(GraphDbError::Conflict);
+                    }
+                    return Ok(GraphBatchPlan::Settled(
+                        existing.commit,
+                        (manifest, dependency_digest),
+                    ));
+                }
+                Ok(GraphBatchPlan::Apply(
+                    PreparedGraphBatch {
+                        batch,
+                        metadata: mutation::CommitMetadata {
+                            digest: digest.clone(),
+                            generation_dependency_digest: Some(dependency_digest.clone()),
+                            publication_record: Some((
+                                idempotency_key.clone(),
+                                digest,
+                                existing_input_digest.as_str().to_owned(),
+                            )),
+                        },
+                        endpoint_namespaces: mutation::RelationEndpointNamespaces::new(),
+                    },
+                    (manifest, dependency_digest),
+                ))
+            },
+            |database, _commit, (manifest, dependency_digest)| {
+                let finalized = latest_projection(database, &physical_namespace, &projection)?
+                    .ok_or_else(|| GraphDbError::ResetRequired {
+                        message: "semantic vector finalized native generation is missing"
+                            .to_owned(),
+                    })?
+                    .commit;
+                if finalized.source_generation != manifest.source_generation
+                    || finalized.watermark != manifest.watermark
+                    || finalized.generation_dependency_digest.as_ref() != Some(&dependency_digest)
+                {
+                    return Err(GraphDbError::Conflict);
+                }
+                let recovered = GraphRecoveredGenerationDigestV1::new(format!(
+                    "sha256:{}",
+                    recovered_generation_digest_from_database(database, &manifest, check)?
+                ))
+                .map_err(|error| GraphDbError::Corrupt {
+                    message: error.to_string(),
+                })?;
+                manifest.relational_semantic_vector_replay_with_recovered_digest(
+                    plan,
+                    GraphIdempotencyKey::new(plan.publication_key.idempotency_key.as_str())?,
+                    input_digest,
+                    recovered,
+                    check,
+                )
+            },
         )?;
         validate_stage_publication_replay(plan, checkpoint, &replay, check)?;
         Ok(replay)

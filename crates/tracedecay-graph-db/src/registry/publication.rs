@@ -519,11 +519,7 @@ impl GraphDbRegistry {
                 let (historical_commit, recovered_digest) =
                     match (apply_native, has_supplied_manifest) {
                         (true, _) => {
-                            let commit = database.apply_generation_unverified(
-                                &manifest,
-                                Some(sealed_digest),
-                                &check,
-                            )?;
+                            let commit = database.apply_generation_unverified(&manifest, &check)?;
                             let (_, recovered) = database.reopen_and_verify_existing_generation(
                                 &manifest,
                                 sealed_digest,
@@ -598,8 +594,7 @@ impl GraphDbRegistry {
             // native rows (vectors) the canonical source omits; a first
             // commit must install them natively before verification.
             (true, _) | (false, true) => {
-                let commit =
-                    database.apply_generation_unverified(&manifest, Some(sealed_digest), &check)?;
+                let commit = database.apply_generation_unverified(&manifest, &check)?;
                 database
                     .reopen_and_verify_existing_generation(&manifest, sealed_digest, &check)
                     .map(|(_, recovered)| (commit, recovered))
@@ -915,7 +910,7 @@ impl GraphDbRegistry {
         // the manifest was proven to bind that replay's digests when it was
         // decoded above, so the stored rows verify directly against the head
         // digest without canonicalizing the full manifest a second time.
-        match verify_recovered_generation(native, &manifest, Some(&head.recovered_digest), &check) {
+        match verify_recovered_generation(native, &manifest, &head.recovered_digest, &check) {
             Ok(_) => {}
             Err(error @ GraphDbError::GenerationMismatch { .. }) => {
                 drop(guard);

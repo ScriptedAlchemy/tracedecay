@@ -585,10 +585,16 @@ pub(crate) fn is_physical_generation_namespace(namespace: &GraphNamespace) -> bo
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Streams the stored rows of `manifest`'s generation through the
+/// recovered-digest proof and compares against `expected`, the digest bound
+/// to this exact manifest (a journaled publication's
+/// `expected_recovered_digest`, a verified head's digest, or a digest the
+/// caller computed from the manifest once). Verification never
+/// re-canonicalizes the manifest itself.
 pub(crate) fn verify_recovered_generation(
     database: &GrafeoDB,
     manifest: &GraphGenerationManifest,
-    expected: Option<&GraphRecoveredGenerationDigestV1>,
+    expected: &GraphRecoveredGenerationDigestV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
     #[cfg(test)]
@@ -629,11 +635,7 @@ pub(crate) fn verify_recovered_generation(
                 message: error.to_string(),
             }
         })?;
-    let expected = match expected {
-        Some(expected) => expected.clone(),
-        None => manifest.expected_recovered_digest(check)?,
-    };
-    if actual != expected {
+    if &actual != expected {
         return Err(GraphDbError::GenerationMismatch {
             namespace: manifest.projection.namespace.to_string(),
             projection: manifest.projection.projection.to_string(),
