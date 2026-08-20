@@ -505,7 +505,10 @@ impl RepositoryRuntimePhysicalAttachment {
     ///
     /// Crate-private: public callers use [`Self::run_maintenance_checkpoint`],
     /// which validates permit and admission-stage authority first. Admission is
-    /// not reopened; that exclusive window is intentional.
+    /// not reopened; that exclusive window is intentional. Test-only since the
+    /// unauthenticated drain seam was removed; production drains go through
+    /// [`Self::run_maintenance_checkpoint`], which calls the locked variant.
+    #[cfg(test)]
     pub(crate) fn begin_maintenance_drain(&self) -> Result<(), RepositoryDispatchError> {
         let mut state = self.lock_state();
         Self::begin_maintenance_drain_locked(&mut state)
