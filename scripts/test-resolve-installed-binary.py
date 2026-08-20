@@ -33,7 +33,7 @@ def main() -> int:
         windows = resolve(root, "Windows")
         if windows.returncode != 0:
             raise SystemExit(windows.stderr)
-        if Path(windows.stdout.strip()) != windows_binary:
+        if Path(windows.stdout.strip()) != windows_binary.resolve():
             raise SystemExit("Windows resolver did not return tracedecay.exe")
 
         extensionless = resolve(root, "Linux")
@@ -47,7 +47,7 @@ def main() -> int:
         unix = resolve(root, "Linux")
         if unix.returncode != 0:
             raise SystemExit(unix.stderr)
-        if Path(unix.stdout.strip()) != unix_binary:
+        if Path(unix.stdout.strip()) != unix_binary.resolve():
             raise SystemExit("Unix resolver did not return tracedecay")
         if not os.access(unix_binary, os.X_OK):
             raise SystemExit("Unix fixture unexpectedly lost executable mode")

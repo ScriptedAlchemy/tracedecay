@@ -4,45 +4,40 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 import subprocess
 import tomllib
 
 
-def metadata(repo: Path, *arguments: str) -> dict[str, object]:
+def resolved_features(repo: Path, *arguments: str) -> dict[str, set[str]]:
     completed = subprocess.run(
         [
             "cargo",
-            "metadata",
-            "--format-version",
-            "1",
+            "tree",
             "--locked",
+            "--package",
+            "tracedecay",
+            "--edges",
+            "normal,build",
+            "--prefix",
+            "none",
+            "--format",
+            "{p}|{f}",
             *arguments,
         ],
         cwd=repo,
         check=True,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
     )
-    return json.loads(completed.stdout)
-
-
-def resolved_features(value: dict[str, object]) -> dict[str, set[str]]:
-    resolve = value.get("resolve")
-    if not isinstance(resolve, dict):
-        raise SystemExit("cargo metadata omitted resolve graph")
-    nodes = resolve.get("nodes")
-    if not isinstance(nodes, list):
-        raise SystemExit("cargo metadata omitted resolve nodes")
     result: dict[str, set[str]] = {}
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        package_id = node.get("id")
-        features = node.get("features")
-        if isinstance(package_id, str) and isinstance(features, list):
-            result[package_id] = {item for item in features if isinstance(item, str)}
+    for line in completed.stdout.splitlines():
+        package_id, separator, feature_list = line.partition("|")
+        if not separator:
+            raise SystemExit(f"cargo tree emitted an invalid package row: {line}")
+        package_id = package_id.removesuffix(" (*)")
+        features = {feature for feature in feature_list.split(",") if feature}
+        result.setdefault(package_id, set()).update(features)
     return result
 
 
@@ -67,16 +62,23 @@ def main() -> int:
     if "test-transport" in features["production"]:
         raise SystemExit("production feature directly enables test-transport")
 
-    default = metadata(repo)
-    production = metadata(
+    # `cargo metadata` unifies dev-dependency features across the workspace and
+    # therefore makes test-only transports look production-reachable. Inspect
+    # the root package's normal/build tree so this check matches the artifact
+    # that `cargo build` actually produces.
+    default_graph = resolved_features(repo)
+    production_graph = resolved_features(
         repo, "--no-default-features", "--features", "production"
     )
-    default_graph = resolved_features(default)
-    production_graph = resolved_features(production)
     if default_graph.keys() != production_graph.keys():
         raise SystemExit("default and production resolve different package graphs")
 
-    root_id = default["resolve"]["root"]
+    root_id = next(
+        (package_id for package_id in default_graph if package_id.startswith("tracedecay ")),
+        None,
+    )
+    if root_id is None:
+        raise SystemExit("cargo tree omitted the tracedecay root package")
     default_graph[root_id].discard("default")
     mismatches = [
         package_id
