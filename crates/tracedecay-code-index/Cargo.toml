@@ -5,6 +5,7 @@ publish = false
 edition = "2024"
 license = "MIT"
 description = "In-process structural code search for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [features]
 default = ["full"]

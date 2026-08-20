@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "TraceDecay dashboard UI: standalone shell + ported Hermes plugin dashboards (holographic memory, LCM).",
+  "description": "TraceDecay dashboard for code intelligence, project memory, session context, and usage insights.",
   "scripts": {
     "build": "node build.mjs",
     "dev": "node dev/run.mjs",

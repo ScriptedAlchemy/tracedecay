@@ -5,6 +5,7 @@ publish = false
 edition.workspace = true
 license = "MIT"
 description = "TraceDecay temporal retrieval and context assembly kernel"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
 [dependencies]

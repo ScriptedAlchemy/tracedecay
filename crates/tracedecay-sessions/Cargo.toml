@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 license = "MIT"
 description = "TraceDecay session parsing and retrieval primitives"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 dirs = "6"

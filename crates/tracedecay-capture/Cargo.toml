@@ -3,6 +3,9 @@ name = "tracedecay-capture"
 version = "0.1.0"
 publish = false
 edition = "2024"
+license = "MIT"
+description = "Bounded event capture primitives for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [lib]
 path = "src/lib.rs"

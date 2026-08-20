@@ -5,6 +5,7 @@ publish = false
 edition = "2024"
 license = "MIT"
 description = "Tree-sitter language extraction for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 autotests = false
 
 [[test]]
