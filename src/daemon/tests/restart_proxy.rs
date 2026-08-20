@@ -88,6 +88,32 @@ async fn answer_one_authenticated_proxy_request(
     writer.shutdown().await.expect("shutdown fake daemon");
 }
 
+/// A slow or contended first Git probe defers the route; it must never be a
+/// terminal failure. Both retry classifiers — the CLI's message check and the
+/// proxy's JSON-RPC response check — have to accept the deferral, or a cold
+/// first open on a slow volume fails `init`/`status` outright.
+#[cfg(unix)]
+#[test]
+fn deferred_repository_discovery_is_project_open_retryable() {
+    let error = super::super::core_proxy::repository_discovery_deferred(
+        std::path::Path::new("/slow-volume/project"),
+        tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
+    );
+
+    assert!(
+        super::super::error_message_is_project_open_retryable(&error.to_string()),
+        "a deferred discovery must classify as retryable, got: {error}"
+    );
+
+    let response = super::super::project_open_error_response(json!(7), &error);
+    let refusal = serde_json::to_value(response.error.expect("deferred discovery refusal"))
+        .expect("serialize deferred refusal");
+    assert!(
+        super::super::json_rpc_error_is_project_open_retryable(&refusal),
+        "proxy retry classification must accept the deferred refusal: {refusal}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn transient_daemon_connect_errors_cover_restart_window_only() {

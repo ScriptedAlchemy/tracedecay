@@ -11,8 +11,9 @@ use tokio::time::{Duration, Instant};
 
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
-    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, connect_to_current_daemon_within,
-    json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
+    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, PROJECT_WARMING_RETRY_HINT,
+    connect_to_current_daemon_within, json_rpc_error_is_project_open_retryable,
+    next_daemon_response_line, write_daemon_preamble,
 };
 #[cfg(unix)]
 use super::{
@@ -392,13 +393,18 @@ pub(super) async fn bounded_repository_identity(
     .await
 }
 
+/// A deferred discovery is uncertainty, not failure: the route stays
+/// unresolved and the caller retries within its own budget, exactly like a
+/// warming project open. Carrying [`PROJECT_WARMING_RETRY_HINT`] is what makes
+/// every existing client/proxy retry classifier treat it that way instead of
+/// surfacing a terminal error on the first slow or contended Git probe.
 pub(super) fn repository_discovery_deferred(
     path: &Path,
     reason: tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown,
 ) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
-            "initialize route repository discovery deferred for {}: {reason:?}",
+            "repository discovery for '{}' is deferred ({reason:?}); the project route {PROJECT_WARMING_RETRY_HINT}",
             path.display()
         ),
     }

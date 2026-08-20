@@ -664,12 +664,30 @@ async fn serve_broker_socket_client(
     );
     // Resolve initialize roots only after authentication and inside daemon
     // authority. The proxy process never opens the registry database.
-    let initialize_route = apply_daemon_initialize_route(
+    // Resolution failures (deferred repository discovery, registry refusals)
+    // are answered as typed responses: dropping the connection here would
+    // surface as a hard host failure and leave the client without the
+    // retryable state the deferral carries.
+    let initialize_route = match apply_daemon_initialize_route(
         &mut handshake,
         &first_request_line,
         &engine.store_administration,
     )
-    .await?;
+    .await
+    {
+        Ok(route) => route,
+        Err(error) => {
+            drop(setup_activity);
+            write_project_open_error(
+                &mut transport,
+                &first_request_line,
+                &handshake.client_instance_id,
+                &error,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
     if let Some(request) = parse_branch_admin_request(&first_request_line) {
         let result = match request.action.clone() {
             Ok(action) => engine.execute_branch_admin(&handshake, action).await,
@@ -1249,9 +1267,28 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         )
         .await,
     );
-    let initialize_route =
-        apply_daemon_initialize_route(&mut handshake, &first_request_line, &store_administration)
+    // Same contract as the Unix broker path: a route-resolution failure is a
+    // typed response, never a dropped connection.
+    let initialize_route = match apply_daemon_initialize_route(
+        &mut handshake,
+        &first_request_line,
+        &store_administration,
+    )
+    .await
+    {
+        Ok(route) => route,
+        Err(error) => {
+            drop(setup_activity);
+            write_project_open_error(
+                &mut transport,
+                &first_request_line,
+                &handshake.client_instance_id,
+                &error,
+            )
             .await?;
+            return Ok(());
+        }
+    };
     if let Some(request) = parse_branch_admin_request(&first_request_line) {
         let result = match request.action.clone() {
             Ok(action) => {
