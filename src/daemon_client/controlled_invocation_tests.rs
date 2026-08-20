@@ -435,7 +435,7 @@ async fn remote_effect_deadline_requests_daemon_cancel_and_awaits_settlement() {
     server.await.expect("server task");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn remote_effect_without_authoritative_settlement_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-no-settlement";
     let (client, admitted, server) =
@@ -450,7 +450,9 @@ async fn remote_effect_without_authoritative_settlement_returns_reset_required()
     let deadline = deadline_after(Duration::from_secs(10));
 
     // The unsettled server never answers, so the join bound must outlive the
-    // full authoritative response grace.
+    // full authoritative response grace. The paused clock auto-advances that
+    // grace only while every task is idle on loopback I/O that will never
+    // arrive, so the join is virtual instead of a real 30s wait.
     let response = tokio::time::timeout(
         crate::daemon::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
         client.invoke_controlled(
@@ -469,7 +471,7 @@ async fn remote_effect_without_authoritative_settlement_returns_reset_required()
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-cancel-delivery-failure";
     let (client, admitted, server) =
@@ -483,6 +485,8 @@ async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     });
     let deadline = deadline_after(Duration::from_secs(10));
 
+    // The paused clock virtualizes the full response grace; see the
+    // no-settlement test above.
     let response = tokio::time::timeout(
         crate::daemon::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1),
         client.invoke_controlled(
@@ -501,10 +505,13 @@ async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn indeterminate_effect_discards_connection_before_next_invocation() {
     const FIRST_ID: &str = "request.remote-effect-reset-state";
     const SECOND_ID: &str = "request.remote-after-effect-reset";
+    // The paused clock virtualizes the response grace the first invocation
+    // must exhaust before it settles as an indeterminate effect; the
+    // choreography itself still runs over real loopback connections.
     let (client, admitted, server) = reset_then_reconnect_client(FIRST_ID, SECOND_ID).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-reset-state").expect("cancellation");
