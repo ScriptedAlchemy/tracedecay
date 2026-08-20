@@ -34,14 +34,18 @@ TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = false
 # only packed split-debuginfo) and macOS (already defaults to unpacked) keep
 # their platform defaults. `split-debuginfo=unpacked` leaves debuginfo in the
 # object files instead of linking it into every binary; it is a no-op for
-# profiles that build without debuginfo. The `-B` flags prepend the mold
+# profiles that build without debuginfo. The `-B` flags append the mold
 # linker's driver directories (Debian/Ubuntu/Fedora package and source-install
 # locations): GCC and clang silently skip nonexistent `-B` dirs, so hosts
-# without mold fall back to the default `ld`, and any GCC accepts `-B`
+# without mold fall back to the toolchain default, and any GCC accepts `-B`
 # (unlike `-fuse-ld=mold`, which needs GCC >= 12 — see
-# .github/actions/setup-linux-mold). CI symlinks ld -> mold, so its linker
-# choice is unchanged. A user-set RUSTFLAGS env var replaces these flags
-# entirely; these sections add no linker override.
+# .github/actions/setup-linux-mold). Search order keeps faster defaults
+# intact: on x86_64-unknown-linux-gnu, recent rustc already links with its
+# bundled rust-lld through an earlier `-B`, so mold engages only where that
+# self-contained lld default is absent (e.g. aarch64 gnu hosts or lld-less
+# toolchains) — never a regression, mold-or-better everywhere. CI separately
+# symlinks ld -> mold, which these flags do not disturb. A user-set RUSTFLAGS
+# env var replaces these flags entirely; these sections set no `linker` key.
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
   "-C", "split-debuginfo=unpacked",
