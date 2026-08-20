@@ -502,7 +502,11 @@ impl RepositoryRuntimePhysicalAttachment {
     /// exclusive maintenance checkpoint can run. Unlike [`Self::drain`], the
     /// writer is neither taken nor joined: its checkpoint handle stays live
     /// for [`Self::run_maintenance_checkpoint`]. Idempotent while draining.
-    pub fn begin_maintenance_drain(&self) -> Result<(), RepositoryDispatchError> {
+    ///
+    /// Crate-private: public callers use [`Self::run_maintenance_checkpoint`],
+    /// which validates permit and admission-stage authority first. Admission is
+    /// not reopened; that exclusive window is intentional.
+    pub(crate) fn begin_maintenance_drain(&self) -> Result<(), RepositoryDispatchError> {
         let mut state = self.lock_state();
         Self::begin_maintenance_drain_locked(&mut state)
     }
@@ -528,6 +532,8 @@ impl RepositoryRuntimePhysicalAttachment {
     /// writer. Maintenance runs after admission has closed, so this does not
     /// require `admission_open`; a still-`Ready` writer is moved to
     /// `Draining` first. PASSIVE checkpoints stay on [`Self::run_checkpoint`].
+    /// Admission is not reopened after Truncate — the exclusive window lasts
+    /// until `drain` + `close_and_join`.
     ///
     /// The permit binding and admission-stage authority are validated before
     /// any lifecycle transition: draining is irreversible, so a misrouted
