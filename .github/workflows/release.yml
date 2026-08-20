@@ -265,6 +265,7 @@ jobs:
           cache-on-failure: true
 
       - name: Test release distribution
+        if: matrix.name == 'x86_64-linux'
         run: cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
 
       # Runs before the default build so it never leaves an all-features

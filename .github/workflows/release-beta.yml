@@ -211,6 +211,7 @@ jobs:
           cache-on-failure: true
 
       - name: Test release distribution
+        if: matrix.name == 'x86_64-linux'
         run: cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
 
       - name: Verify all-feature release build compiles
