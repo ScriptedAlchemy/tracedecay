@@ -23,7 +23,8 @@ pub use self::fastembed_adapter::AdmittedProjectionArtifactV1;
 #[cfg(not(any(test, feature = "test-helpers")))]
 use self::fastembed_adapter::AdmittedProjectionArtifactV1;
 use self::fastembed_adapter::{
-    BoundedSanitizedTextBatchV1, EmbeddingRuntime, EmbeddingSession, FastEmbedEmbeddingRuntime,
+    BoundedSanitizedTextBatchV1, EmbedError, EmbeddingRuntime, EmbeddingSession,
+    FastEmbedEmbeddingRuntime,
 };
 use self::projector::{
     CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation_async,
@@ -416,9 +417,12 @@ pub struct SemanticRuntimeStatusProjectionV1 {
 /// failure.
 fn warm_failure(error: SessionAcquireError) -> SemanticRuntimeScheduleFailureV1 {
     match error {
-        SessionAcquireError::Cancelled => SemanticRuntimeScheduleFailureV1::Cancelled,
+        SessionAcquireError::Cancelled | SessionAcquireError::Open(EmbedError::Cancelled) => {
+            SemanticRuntimeScheduleFailureV1::Cancelled
+        }
         SessionAcquireError::DeadlineExceeded { .. }
-        | SessionAcquireError::LoadDeadlineExceeded { .. } => {
+        | SessionAcquireError::LoadDeadlineExceeded { .. }
+        | SessionAcquireError::Open(EmbedError::DeadlineExceeded) => {
             SemanticRuntimeScheduleFailureV1::DeadlineExceeded
         }
         SessionAcquireError::Exhausted { .. }
@@ -441,7 +445,13 @@ async fn warm_candidate_for_install(
     let warmed = Arc::clone(candidate);
     tokio::task::spawn_blocking(move || warmed.warm_query_session())
         .await
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?
+        .map_err(|error| {
+            if error.is_cancelled() {
+                SemanticRuntimeScheduleFailureV1::Cancelled
+            } else {
+                SemanticRuntimeScheduleFailureV1::Runtime
+            }
+        })?
         .map_err(warm_failure)
 }
 
@@ -1212,6 +1222,7 @@ mod scheduling_tests {
         ProjectionKeyV1, ProjectionReplayReasonV1, VectorGenerationIdV1,
     };
 
+    use super::fastembed_adapter::EmbedError;
     use super::fastembed_adapter::lifecycle_test_support::digest_mismatched_lifecycle_authority;
     use super::session_pool::SessionAcquireError;
     use super::{
@@ -1271,7 +1282,6 @@ mod scheduling_tests {
             replay_reason: ProjectionReplayReasonV1::SourceEdit,
         }
     }
-
 
     async fn wait_for_current(
         handle: &SemanticRuntimeSchedulingHandleV1,
@@ -1542,9 +1552,8 @@ mod scheduling_tests {
 
     /// Falsifiable in `semantic-fastembed` builds: without the pre-install
     /// warm, the structural-only authority would stage and publish Current
-    /// over digest-mismatched bytes. Without the feature the stand-in
-    /// runtime fails earlier, at candidate construction, with the same
-    /// terminal state.
+    /// over digest-mismatched bytes.
+    #[cfg(feature = "semantic-fastembed")]
     #[tokio::test]
     async fn already_published_resume_with_digest_mismatched_model_never_becomes_current() {
         let mismatched = digest_mismatched_lifecycle_authority();
@@ -1620,6 +1629,14 @@ mod scheduling_tests {
                 elapsed: std::time::Duration::from_secs(2),
                 deadline: std::time::Duration::from_secs(1),
             }),
+            SemanticRuntimeScheduleFailureV1::DeadlineExceeded
+        );
+        assert_eq!(
+            warm_failure(SessionAcquireError::Open(EmbedError::Cancelled)),
+            SemanticRuntimeScheduleFailureV1::Cancelled
+        );
+        assert_eq!(
+            warm_failure(SessionAcquireError::Open(EmbedError::DeadlineExceeded)),
             SemanticRuntimeScheduleFailureV1::DeadlineExceeded
         );
         assert_eq!(
