@@ -133,22 +133,23 @@ def main() -> None:
             github_output,
         )
         assert result.returncode == 0, result.stderr
-        runtime_library = output / "libonnxruntime.so.1"
+        resolved_output = output.resolve()
+        runtime_library = resolved_output / "libonnxruntime.so.1"
         assert runtime_library.read_bytes() == PAYLOAD
         assert runtime_library.stat().st_mode & 0o777 == 0o644
-        linker_name = output / "libonnxruntime.so"
+        linker_name = resolved_output / "libonnxruntime.so"
         assert linker_name.is_symlink()
         assert linker_name.readlink() == Path("libonnxruntime.so.1")
-        runtime_license = output / "onnxruntime-LICENSE"
-        runtime_notices = output / "onnxruntime-ThirdPartyNotices.txt"
+        runtime_license = resolved_output / "onnxruntime-LICENSE"
+        runtime_notices = resolved_output / "onnxruntime-ThirdPartyNotices.txt"
         assert runtime_license.read_bytes() == LICENSE_PAYLOAD
         assert runtime_notices.read_bytes() == NOTICES_PAYLOAD
         env_lines = github_env.read_text(encoding="utf-8").splitlines()
         assert env_lines == [
-            f"ORT_LIB_PATH={output}",
-            f"ORT_LIB_LOCATION={output}",
+            f"ORT_LIB_PATH={resolved_output}",
+            f"ORT_LIB_LOCATION={resolved_output}",
             "ORT_PREFER_DYNAMIC_LINK=1",
-            f"LD_LIBRARY_PATH={output}",
+            f"LD_LIBRARY_PATH={resolved_output}",
             "RUSTFLAGS=-C link-arg=-Wl,-rpath,$ORIGIN",
         ]
         assert github_output.read_text(encoding="utf-8").splitlines() == [
