@@ -1,14 +1,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::{SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED};
 
 use crate::retained_surfaces::AutomationTaskV1;
 
 const MAX_AUTOMATION_TERMINAL_COUNT: u64 = 1_000_000;
-
-/// Exact agent-host ledger label for a budget-backoff suppression skip. The
-/// projection below must consume this binding so the wire string cannot drift
-/// from the typed terminal.
-pub const SESSION_EVIDENCE_BUDGET_SUPPRESSED: &str = "session_evidence_budget_suppressed";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -89,7 +85,7 @@ impl AutomationSkipReasonV1 {
             "session_evidence_locked" => Reason::SessionEvidenceLocked,
             "session_evidence_reset_required" => Reason::SessionEvidenceResetRequired,
             "session_cursor_manifest_limit_exceeded" => Reason::SessionCursorManifestLimitExceeded,
-            "session_evidence_budget_exhausted" => Reason::SessionEvidenceBudgetExhausted,
+            SESSION_EVIDENCE_BUDGET_EXHAUSTED => Reason::SessionEvidenceBudgetExhausted,
             SESSION_EVIDENCE_BUDGET_SUPPRESSED => Reason::SessionEvidenceBudgetSuppressed,
             "session_evidence_cancelled" => Reason::SessionEvidenceCancelled,
             "no_session_evidence" | "no_skill_writer_evidence" => Reason::NoSessionEvidence,

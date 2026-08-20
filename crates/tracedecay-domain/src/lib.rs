@@ -3,6 +3,7 @@
 //! This crate contains values and validation only. It performs no I/O,
 //! persistence, query execution, policy evaluation, host integration, or async work.
 
+pub mod automation;
 pub mod canonical_text;
 pub mod code_intelligence;
 pub mod configuration;
@@ -39,6 +40,7 @@ pub mod workflow_fan_out_census;
 pub mod workflow_receipt;
 pub mod workflow_run;
 
+pub use automation::*;
 pub use code_intelligence::*;
 pub use configuration::*;
 pub use diagnostics::*;
