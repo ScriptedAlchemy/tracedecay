@@ -31,8 +31,8 @@ use tracedecay_store::{
 };
 
 use crate::db::{
-    Database, DatabaseAuthority, ProjectMemoryReconciliationTelemetryObserverV1,
-    TestDatabaseRuntimeMode,
+    Database, DatabaseAuthority, MemoryGraphReconciliationCancelErrorV1,
+    ProjectMemoryReconciliationTelemetryObserverV1, TestDatabaseRuntimeMode,
 };
 use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use crate::store::memory::automatic_facts::project_memory_record_automatic_fact_receipt_tx;
@@ -59,8 +59,8 @@ struct RecordingGraphRuntime {
 impl RecordingGraphRuntime {
     fn new(database: &Database) -> Self {
         Self {
-            binding: database.retained_runtime().binding().clone(),
-            locator: database.retained_runtime().locator().verified().clone(),
+            binding: database.registered_binding().clone(),
+            locator: database.registered_verified_locator().clone(),
             block_reconciliation: false,
             snapshot_error: None,
             reconciliation_cancelled: AtomicBool::new(false),
@@ -1275,6 +1275,31 @@ async fn retired_lifecycle_refuses_new_reconciliation_work() {
 }
 
 #[tokio::test]
+async fn reconciliation_owner_uses_a_weak_bound_runtime_after_database_drop() {
+    let (_directory, database) = database("weak-owner-runtime").await;
+    let runtime = bind_runtime(&database);
+    let runtime_weak = Arc::downgrade(&runtime);
+    let owner = database
+        .memory_graph_reconciliation_task_owner()
+        .expect("bound runtime has reconciliation owner");
+
+    drop(runtime);
+    assert!(
+        runtime_weak.upgrade().is_some(),
+        "the bound database owns its live graph runtime"
+    );
+    drop(database);
+    assert!(
+        runtime_weak.upgrade().is_none(),
+        "the reconciliation owner must not retain the bound graph runtime"
+    );
+    assert_eq!(
+        owner.cancel(),
+        Err(MemoryGraphReconciliationCancelErrorV1::RuntimeUnavailable)
+    );
+}
+
+#[tokio::test]
 async fn retirement_reservation_reports_a_distinct_schedule_outcome_and_drops_cleanly() {
     let (_directory, database) = database("reserved-reconciliation").await;
     let runtime = bind_runtime(&database);
@@ -1328,8 +1353,8 @@ async fn shutdown_waits_for_blocking_graph_publication_to_observe_cancellation()
         "shutdown returned before blocking publication exited"
     );
     assert!(
-        runtime.reconciliation_closed.load(Ordering::Acquire),
-        "shutdown returned before closing the exact graph attachment"
+        !runtime.reconciliation_closed.load(Ordering::Acquire),
+        "reconciliation shutdown must not close the graph attachment outside GraphDb retirement"
     );
     assert!(!owner.running());
 }
