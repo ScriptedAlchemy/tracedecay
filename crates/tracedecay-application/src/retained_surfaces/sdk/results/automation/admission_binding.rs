@@ -56,6 +56,17 @@ fn session_evidence_unavailability_skips_session_backed_writers() {
 }
 
 #[test]
+fn budget_backoff_suppression_is_a_typed_session_evidence_skip() {
+    let reason = AutomationSkipReasonV1::from_ledger_reason("session_evidence_budget_suppressed")
+        .expect("known session-evidence budget suppression skip");
+    assert!(reason.matches_task(AutomationTaskV1::SessionReflector));
+    assert!(reason.matches_task(AutomationTaskV1::SkillWriter));
+    assert!(reason.matches_task(AutomationTaskV1::CombinedReview));
+    assert!(!reason.matches_task(AutomationTaskV1::MemoryCurator));
+    assert!(!reason.matches_task(AutomationTaskV1::UserJob));
+}
+
+#[test]
 fn skill_writer_empty_evidence_is_a_typed_session_evidence_skip() {
     let reason = AutomationSkipReasonV1::from_ledger_reason("no_skill_writer_evidence")
         .expect("skill-writer empty evidence is a registered skip");

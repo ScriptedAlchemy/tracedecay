@@ -23,7 +23,8 @@ pub use self::fastembed_adapter::AdmittedProjectionArtifactV1;
 #[cfg(not(any(test, feature = "test-helpers")))]
 use self::fastembed_adapter::AdmittedProjectionArtifactV1;
 use self::fastembed_adapter::{
-    BoundedSanitizedTextBatchV1, EmbeddingRuntime, EmbeddingSession, FastEmbedEmbeddingRuntime,
+    BoundedSanitizedTextBatchV1, EmbedError, EmbeddingRuntime, EmbeddingSession,
+    FastEmbedEmbeddingRuntime,
 };
 use self::projector::{
     CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation_async,
@@ -33,7 +34,9 @@ use self::runtime_query::CurrentSemanticQueryRuntimeV1;
 use self::runtime_service::{
     SemanticRuntimeService, SharedEmbeddingRuntimeFactory, fastembed_runtime_factory,
 };
-use self::session_pool::{PooledSession, SessionPoolConfigV1, SystemMonotonicClock};
+use self::session_pool::{
+    PooledSession, SessionAcquireError, SessionPoolConfigV1, SystemMonotonicClock,
+};
 
 mod artifact_store;
 pub mod embedding_parallelism;
@@ -405,6 +408,53 @@ pub struct SemanticRuntimeStatusProjectionV1 {
     pub prior_generation: Option<VectorGenerationIdV1>,
 }
 
+/// Map a pre-install warm failure onto the scheduler's typed failure set.
+///
+/// Cancellation and deadline expiry keep their identities: a cancelled or
+/// timed-out warm is a cancelled or expired schedule — never a runtime
+/// fault, and per the plan lock never a served generation. Everything else
+/// (exhaustion, ceilings, open failures, a closed pool) is a runtime
+/// failure.
+fn warm_failure(error: SessionAcquireError) -> SemanticRuntimeScheduleFailureV1 {
+    match error {
+        SessionAcquireError::Cancelled | SessionAcquireError::Open(EmbedError::Cancelled) => {
+            SemanticRuntimeScheduleFailureV1::Cancelled
+        }
+        SessionAcquireError::DeadlineExceeded { .. }
+        | SessionAcquireError::LoadDeadlineExceeded { .. }
+        | SessionAcquireError::Open(EmbedError::DeadlineExceeded) => {
+            SemanticRuntimeScheduleFailureV1::DeadlineExceeded
+        }
+        SessionAcquireError::Exhausted { .. }
+        | SessionAcquireError::QueueFull { .. }
+        | SessionAcquireError::MemoryCeilingExceeded { .. }
+        | SessionAcquireError::Open(_)
+        | SessionAcquireError::Closed => SemanticRuntimeScheduleFailureV1::Runtime,
+    }
+}
+
+/// Prove a candidate runtime can serve before its pointer is installed.
+///
+/// Opens (or reuses) one pooled session away from retrieval executor
+/// threads. A cold open reads and digest-verifies every artifact member, so
+/// a same-length digest-mismatched model fails here with a typed runtime
+/// failure instead of ever becoming the current serving generation.
+async fn warm_candidate_for_install(
+    candidate: &Arc<SemanticRuntimeService<FastEmbedEmbeddingRuntime>>,
+) -> Result<(), SemanticRuntimeScheduleFailureV1> {
+    let warmed = Arc::clone(candidate);
+    tokio::task::spawn_blocking(move || warmed.warm_query_session())
+        .await
+        .map_err(|error| {
+            if error.is_cancelled() {
+                SemanticRuntimeScheduleFailureV1::Cancelled
+            } else {
+                SemanticRuntimeScheduleFailureV1::Runtime
+            }
+        })?
+        .map_err(warm_failure)
+}
+
 /// The daemon-callable semantic owner. It exposes no transport operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SemanticRuntimeSchedulingBoundsV1 {
@@ -541,6 +591,17 @@ impl DaemonSemanticRuntimeHandleV1 {
                     SemanticRuntimeService::new_owned(Arc::clone(&authority), factory, pool_config)
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
                 if resume == SemanticProjectionResumeOutcomeV1::AlreadyPublished {
+                    // Publication ≠ activation: a published projection still
+                    // must prove one session opens over the loaded artifact
+                    // bytes (read + digest verification) before its pointer
+                    // can be installed as serving, exactly as
+                    // `prepare_restore` warms before commit. A same-length
+                    // digest-mismatched member therefore stays Failed and
+                    // never becomes Current.
+                    warm_candidate_for_install(&candidate).await?;
+                    if let Some(failure) = progress.failure() {
+                        return Err(failure);
+                    }
                     progress.set_completed_units(total_units);
                     let commit = (request.stage_projection)().await?;
                     return Ok(install_candidate_on_success(
@@ -596,6 +657,14 @@ impl DaemonSemanticRuntimeHandleV1 {
                     embedded_units = embedded_units.saturating_add(batch_units);
                     progress.set_completed_units(embedded_units.min(total_units));
                 }
+                if let Some(failure) = progress.failure() {
+                    return Err(failure);
+                }
+                // A resume that reports every batch already committed embeds
+                // nothing above, so no session has opened over these bytes.
+                // After real embedding this reuses the idle pooled session
+                // without re-reading the artifact.
+                warm_candidate_for_install(&candidate).await?;
                 if let Some(failure) = progress.failure() {
                     return Err(failure);
                 }
@@ -773,9 +842,7 @@ impl DaemonSemanticRuntimeHandleV1 {
         let candidate =
             SemanticRuntimeService::new_owned(authority, factory, self.pool_config.clone())
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
-        candidate
-            .warm_query_session()
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+        candidate.warm_query_session().map_err(warm_failure)?;
         Ok(PreparedSemanticRuntimeRestoreV1 {
             runtime: CurrentSemanticQueryRuntimeV1::new_with_admission(
                 pointer.clone(),
@@ -1152,13 +1219,16 @@ mod scheduling_tests {
     use tokio::sync::oneshot;
     use tracedecay_domain::{
         ChangedCodeChunkSetV1, CodeGenerationId, ManifestDigest, ProjectionBatchRequestV1,
-        ProjectionReplayReasonV1, VectorGenerationIdV1,
+        ProjectionKeyV1, ProjectionReplayReasonV1, VectorGenerationIdV1,
     };
 
+    use super::fastembed_adapter::EmbedError;
+    use super::fastembed_adapter::lifecycle_test_support::digest_mismatched_lifecycle_authority;
+    use super::session_pool::SessionAcquireError;
     use super::{
         SemanticFallbackReasonV1, SemanticGenerationPointerV1, SemanticProjectionResumeOutcomeV1,
         SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
-        SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1,
+        SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1, warm_failure,
     };
 
     fn source_generation(value: char) -> CodeGenerationId {
@@ -1182,6 +1252,19 @@ mod scheduling_tests {
     }
 
     fn projection_request(source: char) -> ProjectionBatchRequestV1 {
+        projection_request_with_key(
+            source,
+            super::session_pool::test_support::authority()
+                .projection()
+                .projection_key()
+                .clone(),
+        )
+    }
+
+    fn projection_request_with_key(
+        source: char,
+        target_projection_key: ProjectionKeyV1,
+    ) -> ProjectionBatchRequestV1 {
         ProjectionBatchRequestV1 {
             request_digest: ManifestDigest::new(format!("sha256:{}", "c".repeat(64)))
                 .expect("request digest"),
@@ -1195,10 +1278,7 @@ mod scheduling_tests {
                 reused: Vec::new(),
             },
             previous_projection_key: None,
-            target_projection_key: super::session_pool::test_support::authority()
-                .projection()
-                .projection_key()
-                .clone(),
+            target_projection_key,
             replay_reason: ProjectionReplayReasonV1::SourceEdit,
         }
     }
@@ -1468,6 +1548,126 @@ mod scheduling_tests {
         let status = serde_json::to_value(projection).expect("serialize runtime status");
         assert_eq!(status["degraded_reason"], "artifact_unavailable");
         assert!(status["prior_generation"].is_string());
+    }
+
+    /// Falsifiable in `semantic-fastembed` builds: without the pre-install
+    /// warm, the structural-only authority would stage and publish Current
+    /// over digest-mismatched bytes.
+    #[cfg(feature = "semantic-fastembed")]
+    #[tokio::test]
+    async fn already_published_resume_with_digest_mismatched_model_never_becomes_current() {
+        let mismatched = digest_mismatched_lifecycle_authority();
+        let projection_key = mismatched.authority.projection().projection_key().clone();
+        let handle =
+            super::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
+        let staged = Arc::new(AtomicBool::new(false));
+        let staged_by_request = Arc::clone(&staged);
+        let pointer = SemanticGenerationPointerV1 {
+            generation: vector_generation('a'),
+            source_generation: source_generation('a'),
+            projection_key: projection_key.clone(),
+        };
+        let authority = Arc::new(mismatched.authority);
+        let request = super::FastEmbedSemanticGenerationRequestV1::new(
+            source_generation('a'),
+            projection_request_with_key('a', projection_key),
+            Vec::new(),
+            8,
+            move || Ok(super::LoadedSemanticArtifactV1(authority)),
+            || async { Ok(SemanticProjectionResumeOutcomeV1::AlreadyPublished) },
+            |_prepared| async { Ok(()) },
+            move || async move {
+                staged_by_request.store(true, Ordering::Release);
+                Ok(super::PreparedSemanticRuntimeCommitV1::new(
+                    move || async move { Ok(pointer) },
+                ))
+            },
+        )
+        .expect("already-published request");
+        assert!(handle.schedule_generation(request));
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !matches!(
+                handle.status(),
+                SemanticRuntimeScheduleStatusV1::Failed { .. }
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("digest-mismatched publication resume fails");
+
+        assert!(matches!(
+            handle.status(),
+            SemanticRuntimeScheduleStatusV1::Failed {
+                reason: SemanticRuntimeScheduleFailureV1::Runtime,
+                prior_generation: None,
+            }
+        ));
+        assert_eq!(handle.current(), None, "publication is not activation");
+        assert!(
+            !staged.load(Ordering::Acquire),
+            "a failed pre-install warm must stop before publication staging"
+        );
+    }
+
+    #[test]
+    fn warm_failure_mapping_preserves_cancellation_and_deadline_identities() {
+        assert_eq!(
+            warm_failure(SessionAcquireError::Cancelled),
+            SemanticRuntimeScheduleFailureV1::Cancelled
+        );
+        assert_eq!(
+            warm_failure(SessionAcquireError::DeadlineExceeded {
+                waited: std::time::Duration::from_secs(1),
+                budget: std::time::Duration::from_secs(1),
+            }),
+            SemanticRuntimeScheduleFailureV1::DeadlineExceeded
+        );
+        assert_eq!(
+            warm_failure(SessionAcquireError::LoadDeadlineExceeded {
+                elapsed: std::time::Duration::from_secs(2),
+                deadline: std::time::Duration::from_secs(1),
+            }),
+            SemanticRuntimeScheduleFailureV1::DeadlineExceeded
+        );
+        assert_eq!(
+            warm_failure(SessionAcquireError::Open(EmbedError::Cancelled)),
+            SemanticRuntimeScheduleFailureV1::Cancelled
+        );
+        assert_eq!(
+            warm_failure(SessionAcquireError::Open(EmbedError::DeadlineExceeded)),
+            SemanticRuntimeScheduleFailureV1::DeadlineExceeded
+        );
+        assert_eq!(
+            warm_failure(SessionAcquireError::Closed),
+            SemanticRuntimeScheduleFailureV1::Runtime
+        );
+    }
+
+    #[test]
+    fn restore_with_digest_mismatched_model_never_becomes_current() {
+        let mismatched = digest_mismatched_lifecycle_authority();
+        let handle =
+            super::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
+        let pointer = SemanticGenerationPointerV1 {
+            generation: vector_generation('a'),
+            source_generation: source_generation('a'),
+            projection_key: mismatched.authority.projection().projection_key().clone(),
+        };
+
+        assert!(matches!(
+            handle.prepare_restore(
+                pointer,
+                super::LoadedSemanticArtifactV1(Arc::new(mismatched.authority)),
+            ),
+            Err(SemanticRuntimeScheduleFailureV1::Runtime)
+        ));
+        assert_eq!(handle.current(), None);
+        assert_eq!(
+            handle.status(),
+            SemanticRuntimeScheduleStatusV1::Unavailable
+        );
     }
 
     #[test]

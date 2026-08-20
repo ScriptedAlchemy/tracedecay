@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use fs2::FileExt;
-use tracedecay_domain::framed_log::DirectorySyncPolicy;
+use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 
 use crate::config;
 use crate::errors::{Result, TraceDecayError};
@@ -383,7 +383,7 @@ fn sync_parent_directory(path: &Path) -> io::Result<()> {
         .parent()
         .ok_or_else(|| invalid_input("private store durable file has no parent directory"))?;
     inject_durable_namespace_sync_fault()?;
-    tracedecay_domain::framed_log::sync_directory(parent, DirectorySyncPolicy::Strict)
+    tracedecay_private_fs::framed_log::sync_directory(parent, DirectorySyncPolicy::Strict)
 }
 
 fn missing_directories(path: &Path) -> io::Result<Vec<PathBuf>> {

@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_application::framed_log::{DirectorySyncPolicy, atomic_write, read_bounded};
 use tracedecay_domain::UtcMicros;
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write, read_bounded};
 
 use crate::{HookHostV1, HookScopeBindingV1};
 
