@@ -353,6 +353,24 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         first_source_file.is_file(),
         "exact vector-source liveness must veto the source-code deletion plan"
     );
+    let observed_inventory = crate::daemon::store_maintenance::resolve_vector_retention_inventory(
+        graph.as_ref(),
+        schedulers,
+        &observations,
+    )
+    .await;
+    assert!(
+        matches!(
+            observed_inventory,
+            crate::daemon::store_maintenance::VectorRetentionInventoryV1::Online { .. }
+        ),
+        "a complete post-convergence census pins through the online vector inventory"
+    );
+    assert_eq!(
+        observed_inventory.degraded_reason(),
+        None,
+        "the online inventory reports no degradation"
+    );
     assert!(matches!(
         crate::daemon::doctor_kernel::collect_code_generation_retention_findings(
             schedulers,
