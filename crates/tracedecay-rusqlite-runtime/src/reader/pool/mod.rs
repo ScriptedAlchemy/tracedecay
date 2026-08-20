@@ -228,10 +228,14 @@ impl<'pool, E: ReaderQueryExecutor> WaitingGuard<'pool, E> {
         }
     }
 
-    const fn arm(&mut self, state: &mut PoolState) {
+    fn arm(&mut self, state: &mut PoolState) {
         if !self.counted {
             self.counted = true;
             *state.waiting_mut(self.lane) += 1;
+            // Arming is an observable state change: waiters on
+            // `capacity_changed` (tests watching for a blocked acquisition)
+            // must see it as an event rather than having to poll `snapshot`.
+            self.inner.capacity_changed.notify_all();
         }
     }
 }
@@ -590,6 +594,69 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             && state.limbo_general == 0
             && state.limbo_health == 0
             && Arc::strong_count(&self.inner) == 1
+    }
+
+    /// Test-only: block until a general-lane acquisition is counted as a
+    /// waiter, or the bound lapses.
+    ///
+    /// Arming a waiter notifies `capacity_changed`, so this observes the
+    /// event directly instead of polling `snapshot`.
+    #[cfg(test)]
+    pub(crate) fn wait_until_waiting_general(&self, max_wait: Duration) -> bool {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (state, _) = self
+            .inner
+            .capacity_changed
+            .wait_timeout_while(state, max_wait, |state| state.waiting_general == 0)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.waiting_general > 0
+    }
+
+    /// Test-only: block until the pool is quiescent, or the bound lapses.
+    ///
+    /// Every lane-state transition that feeds quiescence (lease returns,
+    /// opens, limbo resolution) notifies `capacity_changed`, so the wait is
+    /// event-driven. The one exception is the final strong-count handoff:
+    /// the deferred-return thread drops its pool reference immediately after
+    /// its notification, and that drop has no event, so the tail of this wait
+    /// yields across a window of a few instructions.
+    #[cfg(test)]
+    pub(crate) fn wait_until_quiescent(&self, max_wait: Duration) -> bool {
+        fn lanes_busy(state: &PoolState) -> bool {
+            state.opening_general != 0
+                || state.opening_health != 0
+                || state.leased_general != 0
+                || state.leased_health != 0
+                || state.limbo_general != 0
+                || state.limbo_health != 0
+        }
+        let deadline = Instant::now() + max_wait;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (state, _) = self
+                .inner
+                .capacity_changed
+                .wait_timeout_while(state, remaining, |state| lanes_busy(state))
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let lanes_settled = !lanes_busy(&state);
+            drop(state);
+            if lanes_settled && Arc::strong_count(&self.inner) == 1 {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::yield_now();
+        }
     }
 
     /// Acquire within a caller-selected bound. The caller-owned probe remains
