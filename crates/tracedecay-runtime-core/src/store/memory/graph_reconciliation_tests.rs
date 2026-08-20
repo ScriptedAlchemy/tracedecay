@@ -595,6 +595,138 @@ async fn committed_low_level_fact_batch_schedules_lifecycle_reconciliation() {
     assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
 }
 
+async fn seed_large_payload_fact(store: &DatabaseFactStore<'_>, label: &str, index: i64) {
+    let sanitized = sanitize_payload(
+        &format!("canonical {label} large payload source fact {index}"),
+        FactCategoryV1::General,
+        &[],
+        &[],
+        &json!({"filler": "x".repeat(16 * 1024), "index": index}),
+        None,
+    )
+    .expect("sanitize large payload source fixture")
+    .expect("large payload source fixture remains durable");
+    let batch = initial_batch(
+        &FactOwnerV1::Profile,
+        &ProvenanceId::new(format!("graph.reconciliation.{label}.{index}"))
+            .expect("large payload fixture operation id"),
+        sanitized.payload,
+        sanitized.access,
+        Confidence::new(0.8).expect("large payload fixture confidence"),
+        None,
+        UtcMicros(1_000_000 + index),
+    )
+    .expect("large payload fixture batch");
+    let outcome = store
+        .commit_fact(batch, &write_control())
+        .await
+        .expect("commit large payload fixture fact");
+    assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+}
+
+#[tokio::test]
+async fn reconciliation_pass_loads_large_payload_source_once() {
+    let (_directory, database) = database("single-pass-source-load").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    for index in 0..8 {
+        seed_large_payload_fact(&store, "single-pass-source-load", index).await;
+        wait_for_reconciliation(&runtime).await;
+        reset_reconciliation(&runtime);
+    }
+
+    // One full source load, measured through the exact telemetry the
+    // reconciliation pass records for its own source loads.
+    let observer = database.project_memory_reconciliation_telemetry_observer();
+    let before_single = observer.snapshot();
+    super::graph::load_source_for_test(&database, &FactOwnerV1::Profile, Some(&database))
+        .await
+        .expect("measure one canonical source load");
+    let single = observer.snapshot();
+    let single_rows = single.source_rows_loaded - before_single.source_rows_loaded;
+    let single_bytes = single.source_bytes_loaded - before_single.source_bytes_loaded;
+    assert!(
+        single_bytes > 8 * 16 * 1024,
+        "seeded payload_json must dominate one source load ({single_bytes} bytes)"
+    );
+
+    let before_pass = observer.snapshot();
+    super::graph::publish_project_memory_graph_after_write(database.clone()).await;
+    let after_pass = observer.snapshot();
+
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        after_pass.reconciliation_passes,
+        before_pass.reconciliation_passes + 1
+    );
+    assert_eq!(
+        after_pass.active_reconciliation_pass_count, 0,
+        "publication pass must settle before its work is measured"
+    );
+    assert_eq!(
+        after_pass.source_rows_loaded - before_pass.source_rows_loaded,
+        single_rows,
+        "a settled reconciliation pass must load the canonical source exactly once"
+    );
+    assert_eq!(
+        after_pass.source_bytes_loaded - before_pass.source_bytes_loaded,
+        single_bytes,
+        "a settled reconciliation pass must parse each payload_json exactly once"
+    );
+}
+
+#[tokio::test]
+async fn settled_finish_skips_reload_and_stale_stamp_still_conflicts() {
+    let (_directory, database) = database("finish-watermark-stamp").await;
+    let store = DatabaseFactStore::new(&database);
+    // No graph runtime is bound: the write-side publication pass fails as
+    // unavailable and its follow-up schedule is NotMounted, so reconciliation
+    // is quiet and never pending while the finish decision is exercised.
+    seed_large_payload_fact(&store, "finish-watermark-stamp", 0).await;
+    let loaded = super::graph::load_source_for_test(&database, &FactOwnerV1::Profile, None)
+        .await
+        .expect("load canonical source with lineage stamp");
+    assert!(
+        loaded.lineage_stamp.is_some(),
+        "a committed fact must produce a lineage stamp"
+    );
+    let watermark = super::graph_manifest::source_watermark(&FactOwnerV1::Profile, &loaded.source, None)
+        .expect("hash canonical source watermark");
+
+    let observer = database.project_memory_reconciliation_telemetry_observer();
+    let before = observer.snapshot();
+    super::graph::finish_reconciliation_watermark_for_test(
+        &database,
+        &FactOwnerV1::Profile,
+        watermark.clone(),
+        loaded.lineage_stamp,
+    )
+    .await
+    .expect("matching lineage stamp settles without a second source load");
+    let skipped = observer.snapshot();
+    assert_eq!(skipped.source_rows_loaded, before.source_rows_loaded);
+    assert_eq!(skipped.source_bytes_loaded, before.source_bytes_loaded);
+
+    seed_large_payload_fact(&store, "finish-watermark-stamp", 1).await;
+    assert!(!database.memory_graph_reconciliation_pending());
+    let stale = observer.snapshot();
+    let error = super::graph::finish_reconciliation_watermark_for_test(
+        &database,
+        &FactOwnerV1::Profile,
+        watermark,
+        loaded.lineage_stamp,
+    )
+    .await
+    .expect_err("a stale watermark without a pending pass must conflict");
+    assert!(matches!(error, FactStoreError::GraphConflict));
+    let fallback = observer.snapshot();
+    assert!(
+        fallback.source_rows_loaded > stale.source_rows_loaded,
+        "conflict detection must fall back to a full canonical source reload"
+    );
+    assert!(fallback.source_bytes_loaded > stale.source_bytes_loaded);
+}
+
 #[tokio::test]
 async fn retrieval_telemetry_does_not_reconcile_unchanged_memory_graph() {
     let (_directory, database) = database("retrieval-telemetry-reconciliation").await;
