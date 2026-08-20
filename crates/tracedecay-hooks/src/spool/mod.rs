@@ -11,14 +11,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tracedecay_application::framed_log::{
-    DirectorySyncPolicy, atomic_write as shared_atomic_write, read_bounded as shared_read_bounded,
-    sync_directory as shared_sync_directory,
-    validate_regular_or_missing as shared_validate_regular,
-};
 use tracedecay_domain::{
     UtcMicros, canonical_json_bytes,
     framed_log::{self, checksum as frame_checksum},
+};
+use tracedecay_private_fs::framed_log::{
+    DirectorySyncPolicy, atomic_write as shared_atomic_write, read_bounded as shared_read_bounded,
+    sync_directory as shared_sync_directory,
+    validate_regular_or_missing as shared_validate_regular,
 };
 
 use crate::{

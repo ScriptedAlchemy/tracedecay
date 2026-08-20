@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/ScriptedAlchemy/tracedecay/releases/latest"><img src="https://img.shields.io/github/v/release/ScriptedAlchemy/tracedecay" alt="GitHub release"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.85+-orange.svg" alt="Rust"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.97.1-orange.svg" alt="Rust 1.97.1"></a>
   <img src="https://img.shields.io/badge/macOS-supported-blue.svg" alt="macOS">
   <img src="https://img.shields.io/badge/Linux-supported-blue.svg" alt="Linux">
   <img src="https://img.shields.io/badge/Windows-supported-blue.svg" alt="Windows">

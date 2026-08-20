@@ -737,21 +737,28 @@ impl PythonExtractor {
     /// Extract the function signature (def name(params) or async def name(params)).
     fn extract_function_signature(state: &ExtractionState<'_>, node: TsNode<'_>) -> String {
         // Use the block child's start byte to find where the body begins,
-        // so we don't truncate at `:` inside type annotations.
-        if let Some(block) = find_direct_child_by_kind(node, "block") {
+        // so we don't truncate at `:` inside type annotations. Fall back to
+        // the `body` field for suite shapes that are not a `block` kind, so
+        // the whole huge item is never copied while a body child exists.
+        let body =
+            find_direct_child_by_kind(node, "block").or_else(|| node.child_by_field_name("body"));
+        if let Some(block) = body {
             let text = state.node_text(node);
             let block_offset = block.start_byte() - node.start_byte();
             let before_block = &text[..block_offset];
             // Strip the trailing `:` and whitespace before the block.
             before_block.trim().trim_end_matches(':').trim().to_string()
         } else {
+            // Body-less definition: the whole (small) text is the signature.
             state.node_text(node).trim().to_string()
         }
     }
 
     /// Extract the class signature (class Name or class Name(Base)).
     fn extract_class_signature(state: &ExtractionState<'_>, node: TsNode<'_>) -> String {
-        if let Some(block) = find_direct_child_by_kind(node, "block") {
+        let body =
+            find_direct_child_by_kind(node, "block").or_else(|| node.child_by_field_name("body"));
+        if let Some(block) = body {
             let text = state.node_text(node);
             let block_offset = block.start_byte() - node.start_byte();
             let before_block = &text[..block_offset];

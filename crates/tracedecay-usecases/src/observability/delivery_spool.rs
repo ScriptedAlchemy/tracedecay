@@ -6,10 +6,10 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::framed_log::{
+use tracedecay_domain::{DeliverySettlementV1, canonical_json_bytes, canonical_sha256};
+use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, atomic_write, read_bounded, sync_directory, validate_regular_or_missing,
 };
-use tracedecay_domain::{DeliverySettlementV1, canonical_json_bytes, canonical_sha256};
 
 const MAX_PENDING_RECEIPTS: usize = 16_384;
 const MAX_RECEIPT_BYTES: usize = 8 * 1024;

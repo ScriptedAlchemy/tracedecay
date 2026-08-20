@@ -201,6 +201,10 @@ impl MaintenanceCheckpointRequest {
         self.mode
     }
 
+    pub fn permit(&self) -> &ExclusiveMaintenancePermit {
+        &self.permit
+    }
+
     pub fn blockers(&self) -> &CheckpointBlockers {
         &self.blockers
     }

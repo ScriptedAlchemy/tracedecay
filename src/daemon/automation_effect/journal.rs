@@ -11,11 +11,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_agent_hosts::automation::run_ledger::ExactRunPublication;
 use tracedecay_application::{
-    CancellationSignal, CapabilityGrantId, DirectorySyncPolicy, DisclosureClass, EffectReceipt,
-    RequestId, ResolvedScope,
+    CancellationSignal, CapabilityGrantId, DisclosureClass, EffectReceipt, RequestId,
+    ResolvedScope,
     retained_surfaces::{AutomationRunRequestV1, AutomationTaskV1},
 };
 use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest};
+use tracedecay_private_fs::framed_log::{
+    DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
+};
 
 use super::retirement::RetirementBinding;
 use super::{AutomationSettledProblem, AutomationSettledTerminal, contract_error};
@@ -928,11 +931,7 @@ pub(super) fn abandon_reservation_blocking(
 ) -> Result<()> {
     with_journal_lock(path, || {
         let Some(record) = read_stabilized_record(path)? else {
-            return tracedecay_application::sync_parent_directory(
-                path,
-                DirectorySyncPolicy::Strict,
-            )
-            .map_err(|error| {
+            return sync_parent_directory(path, DirectorySyncPolicy::Strict).map_err(|error| {
                 contract_error(format!(
                     "memory automation reservation rollback directory sync failed: {error}"
                 ))
@@ -964,13 +963,11 @@ pub(super) fn abandon_reservation_blocking(
                 "memory automation reservation rollback failed: {error}"
             ))
         })?;
-        tracedecay_application::sync_parent_directory(path, DirectorySyncPolicy::Strict).map_err(
-            |error| {
-                contract_error(format!(
-                    "memory automation reservation rollback directory sync failed: {error}"
-                ))
-            },
-        )
+        sync_parent_directory(path, DirectorySyncPolicy::Strict).map_err(|error| {
+            contract_error(format!(
+                "memory automation reservation rollback directory sync failed: {error}"
+            ))
+        })
     })
 }
 
@@ -1182,7 +1179,7 @@ fn write_record_with_publisher(
 ) -> Result<()> {
     let mut bytes = BoundedJournalBytes::new(MAX_AUTOMATION_JOURNAL_BYTES as usize);
     serde_json::to_writer_pretty(&mut bytes, record).map_err(contract_error)?;
-    tracedecay_domain::with_owned_temp_publish(
+    with_owned_temp_publish(
         path,
         "automation-run-terminal",
         publish,
@@ -1284,7 +1281,7 @@ fn write_terminal_sidecar_with_publisher(
             "automation terminal sidecar conflicts with its durable binding",
         ));
     }
-    tracedecay_domain::with_owned_temp_publish(
+    with_owned_temp_publish(
         &path,
         "automation-terminal-sidecar",
         publish,

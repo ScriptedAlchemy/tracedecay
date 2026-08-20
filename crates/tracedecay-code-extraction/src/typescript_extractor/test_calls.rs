@@ -25,13 +25,13 @@ const TEST_CALLEES: &[&str] = &[
 /// member accesses (`describe.only`, `it.each`) and curried calls
 /// (`test.each([...])('t', fn)`). Returns the base identifier text, e.g.
 /// `describe`, `it`, `test`.
-fn test_call_root_callee(state: &ExtractionState<'_>, call: TsNode<'_>) -> Option<String> {
+fn test_call_root_callee<'s>(state: &ExtractionState<'s>, call: TsNode<'_>) -> Option<&'s str> {
     // The callee is the first named child of the call_expression (the
     // "function" field); arguments follow.
     let mut callee = call.named_child(0)?;
     loop {
         match callee.kind() {
-            "identifier" => return Some(state.node_text(callee).to_string()),
+            "identifier" => return Some(state.node_text(callee)),
             // `describe.only`, `it.each`, `test.skip` — recurse into the
             // object side of the member access. Curried calls like
             // `test.each([...])(...)` are their own `call_expression`, so we
@@ -47,7 +47,7 @@ fn test_call_root_callee(state: &ExtractionState<'_>, call: TsNode<'_>) -> Optio
 /// Returns true if the given `call_expression` is a recognized test-framework
 /// call (`describe`, `it`, `test`, …) based on its root callee.
 pub(super) fn is_test_framework_call(state: &ExtractionState<'_>, call: TsNode<'_>) -> bool {
-    test_call_root_callee(state, call).is_some_and(|root| TEST_CALLEES.contains(&root.as_str()))
+    test_call_root_callee(state, call).is_some_and(|root| TEST_CALLEES.contains(&root))
 }
 
 /// Find the title argument (first string / template) of a test call's
@@ -130,9 +130,8 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
         return;
     };
 
-    let root = test_call_root_callee(state, call);
     let title = test_call_title(state, args)
-        .or(root)
+        .or_else(|| test_call_root_callee(state, call).map(str::to_string))
         .unwrap_or_else(TypeScriptExtractor::anonymous_name);
 
     let start_line = call.start_position().row as u32;

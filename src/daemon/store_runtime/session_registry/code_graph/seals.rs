@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tracedecay_graph_db::{GraphBudgetKind, GraphDbError, SealedGraphStateDigest};
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
 static STAGED_SEAL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -566,11 +567,8 @@ fn remove_staged(staged: &Path, replay_root: &Path) -> Result<(), GraphDbError> 
 }
 
 fn sync_replay_root(replay_root: &Path) -> Result<(), GraphDbError> {
-    tracedecay_application::sync_directory(
-        replay_root,
-        tracedecay_application::DirectorySyncPolicy::Strict,
-    )
-    .map_err(|error| GraphDbError::unavailable(error.to_string()))
+    sync_directory(replay_root, DirectorySyncPolicy::Strict)
+        .map_err(|error| GraphDbError::unavailable(error.to_string()))
 }
 
 pub(super) fn verify_seal_digest(
