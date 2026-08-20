@@ -58,13 +58,13 @@ impl tracedecay_graph_db::GraphCancellation for SharedGraphCancellation {
 /// Canonical source rows paired with the lineage-append stamp observed in the
 /// same read snapshot.
 #[derive(Debug)]
-pub(in crate::store::memory) struct LoadedMemoryGraphSource {
-    pub(in crate::store::memory) source: MemoryGraphSource,
+struct LoadedMemoryGraphSource {
+    source: MemoryGraphSource,
     /// Highest `memory_v2_lineage_events.event_sequence` visible to the
     /// snapshot that produced [`Self::source`], or `None` when no lineage
     /// event exists yet. See [`source_unchanged_since`] for the invariant
     /// that makes this a change token for the projected source.
-    pub(in crate::store::memory) lineage_stamp: Option<i64>,
+    lineage_stamp: Option<i64>,
 }
 
 #[derive(Default)]
@@ -890,25 +890,6 @@ fn ensure_projected_fact_exists(
         });
     }
     Ok(())
-}
-
-#[cfg(test)]
-pub(in crate::store::memory) async fn load_source_for_test(
-    db: &Database,
-    owner: &FactOwnerV1,
-    telemetry_database: Option<&Database>,
-) -> FactStoreResult<LoadedMemoryGraphSource> {
-    load_source(db, owner, None, telemetry_database).await
-}
-
-#[cfg(test)]
-pub(in crate::store::memory) async fn finish_reconciliation_watermark_for_test(
-    db: &Database,
-    owner: &FactOwnerV1,
-    watermark: tracedecay_graph_db::GraphWatermark,
-    source_stamp: Option<i64>,
-) -> FactStoreResult<()> {
-    finish_reconciliation_watermark(db, owner, watermark, source_stamp).await
 }
 
 #[cfg(test)]
