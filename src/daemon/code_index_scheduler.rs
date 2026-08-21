@@ -1045,6 +1045,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 .as_ref()
                 .map(|(_, revision, _)| revision.clone()),
             source_tree: exact_git_evidence.map(|(_, _, tree)| tree),
+            text_artifact: None,
         });
         generation_index.sort_by(|left, right| {
             (left.sealed_at_micros, left.generation_id.as_str())

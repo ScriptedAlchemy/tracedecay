@@ -49,6 +49,10 @@ pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 0;
 pub const MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1: usize = 32;
 pub const MAX_DURABLE_GENERATION_INDEX_BYTES_V1: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1: i64 = 7 * 24 * 60 * 60 * 1_000_000;
+pub const MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1: u64 = 512 * 1024;
+pub const ACTIVE_CODE_TEXT_ARTIFACT_FILE_V1: &str = "active-code-text-artifact-v1.json";
+pub const CODE_TEXT_ARTIFACT_HEAD_SCHEMA_V1: &str = "tracedecay.code-text-artifact-head.v1";
+pub const CODE_TEXT_ARTIFACTS_DIRECTORY_V1: &str = "code-text-artifacts-v1";
 
 /// How long a code-index scope root must have been untouched before it can be
 /// classified as stranded and collected. A worktree can be unmounted, moved, or
@@ -103,6 +107,23 @@ struct SealedGenerationSealMetadataV1 {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct DurableSealedCodeGenerationIdentityV1 {
+    pub locator: String,
+    pub digest: ManifestDigest,
+    pub size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DurableCodeTextArtifactDescriptorV1 {
+    pub generation_id: CodeGenerationId,
+    pub artifact_file: String,
+    pub artifact_digest: ManifestDigest,
+    pub artifact_size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DurableGenerationIndexEntryV1 {
     pub generation_id: String,
     pub snapshot_content_identity: String,
@@ -114,6 +135,8 @@ pub struct DurableGenerationIndexEntryV1 {
     pub source_reference: Option<String>,
     pub source_revision: Option<String>,
     pub source_tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_artifact: Option<DurableCodeTextArtifactDescriptorV1>,
 }
 
 /// Apply the durable exact-generation history bounds in canonical oldest-first
@@ -123,6 +146,18 @@ pub struct DurableGenerationIndexEntryV1 {
 pub fn retain_bounded_generation_index(
     entries: &mut Vec<DurableGenerationIndexEntryV1>,
     active_generation_id: &str,
+) -> usize {
+    retain_bounded_generation_index_with_text_head(entries, active_generation_id, None)
+}
+
+/// Apply durable history bounds while preserving both independently published
+/// heads. A newer sealed generation may become active before its text artifact
+/// is rebuilt, so the generation named by the incumbent text head remains live
+/// until that head advances.
+pub fn retain_bounded_generation_index_with_text_head(
+    entries: &mut Vec<DurableGenerationIndexEntryV1>,
+    active_generation_id: &str,
+    active_text_head_generation_id: Option<&str>,
 ) -> usize {
     entries.sort_by(|left, right| {
         (left.sealed_at_micros, left.generation_id.as_str())
@@ -136,27 +171,44 @@ pub fn retain_bounded_generation_index(
     let oldest_retained =
         active_sealed_at.saturating_sub(MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1);
     entries.retain(|entry| {
-        entry.generation_id == active_generation_id || entry.sealed_at_micros >= oldest_retained
+        entry.generation_id == active_generation_id
+            || active_text_head_generation_id == Some(entry.generation_id.as_str())
+            || entry.sealed_at_micros >= oldest_retained
     });
 
     loop {
-        let total_bytes = entries
-            .iter()
-            .fold(0_u64, |total, entry| total.saturating_add(entry.size_bytes));
+        let total_bytes = durable_generation_index_bytes(entries);
         if entries.len() <= MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1
             && total_bytes <= MAX_DURABLE_GENERATION_INDEX_BYTES_V1
         {
             break;
         }
-        let Some(index) = entries
-            .iter()
-            .position(|entry| entry.generation_id != active_generation_id)
-        else {
+        let Some(index) = entries.iter().position(|entry| {
+            entry.generation_id != active_generation_id
+                && active_text_head_generation_id != Some(entry.generation_id.as_str())
+        }) else {
             break;
         };
         entries.remove(index);
     }
     original_len.saturating_sub(entries.len())
+}
+
+fn durable_generation_index_bytes(entries: &[DurableGenerationIndexEntryV1]) -> u64 {
+    let generation_bytes = entries
+        .iter()
+        .fold(0_u64, |total, entry| total.saturating_add(entry.size_bytes));
+    let mut artifacts = BTreeSet::new();
+    entries.iter().fold(generation_bytes, |total, entry| {
+        let Some(artifact) = entry.text_artifact.as_ref() else {
+            return total;
+        };
+        if artifacts.insert(artifact.artifact_file.as_str()) {
+            total.saturating_add(artifact.artifact_size_bytes)
+        } else {
+            total
+        }
+    })
 }
 
 pub fn durable_generation_index_digest(
@@ -191,8 +243,82 @@ pub enum CodeGenerationRetentionErrorV1 {
     Storage(String),
     #[error("code-generation retention refused unsafe state: {0}")]
     UnsafeState(String),
+    #[error("code-generation retention conflict: {0}")]
+    Conflict(String),
     #[error("code-generation retention cancelled")]
     Cancelled,
+}
+
+/// Durably attach a verified text artifact to its sealed generation entry.
+///
+/// The lock is root-bound, so the caller can keep this exact guard while it
+/// advances the independent text head. Returning success proves the updated
+/// generation pointer and its parent directory were fsynced first.
+pub fn attach_verified_text_artifact_under_lock(
+    lock: &CodeGenerationStoreLockV1,
+    expected_pointer: &DurablePublicationPointerV1,
+    sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+    descriptor: DurableCodeTextArtifactDescriptorV1,
+) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
+    let store_root = lock.generation_store_root()?;
+    validate_sealed_generation_identity(sealed_identity)?;
+    validate_text_artifact_descriptor(&descriptor)?;
+    let mut pointer = read_active_pointer(store_root)?;
+    if &pointer != expected_pointer {
+        return Err(CodeGenerationRetentionErrorV1::Conflict(
+            "active generation pointer changed before text-artifact attachment".to_owned(),
+        ));
+    }
+    validate_durable_generation_index(&pointer)?;
+    let entry = pointer
+        .generation_index
+        .iter_mut()
+        .find(|entry| entry.generation_id == descriptor.generation_id.as_str())
+        .ok_or_else(|| {
+            CodeGenerationRetentionErrorV1::Conflict(
+                "text-artifact generation is no longer retained by the durable index".to_owned(),
+            )
+        })?;
+    if entry.generation_file != sealed_identity.locator
+        || entry.state_digest != sealed_identity.digest.as_str()
+        || entry.size_bytes != sealed_identity.size_bytes
+    {
+        return Err(CodeGenerationRetentionErrorV1::Conflict(
+            "text artifact does not match the retained sealed generation".to_owned(),
+        ));
+    }
+    match entry.text_artifact.as_ref() {
+        Some(existing) if existing == &descriptor => return Ok(pointer),
+        Some(_) => {
+            return Err(CodeGenerationRetentionErrorV1::Conflict(
+                "sealed generation already names a different text artifact".to_owned(),
+            ));
+        }
+        None => entry.text_artifact = Some(descriptor),
+    }
+    pointer.generation_index_digest = Some(durable_generation_index_digest(
+        &pointer.generation_index,
+        pointer.generation_index_truncated,
+    )?);
+    validate_durable_generation_index(&pointer)?;
+    let bytes = serde_json::to_vec(&pointer).map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "publication pointer serialization failed: {error}"
+        ))
+    })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1 {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "publication pointer exceeds its durable byte bound".to_owned(),
+        ));
+    }
+    atomic_write(
+        &store_root.join(ACTIVE_POINTER_FILE),
+        "code-generation-text-artifact-attachment",
+        &bytes,
+        DirectorySyncPolicy::Strict,
+    )
+    .map_err(storage)?;
+    Ok(pointer)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,6 +434,19 @@ pub struct CodeGenerationRetentionObservationV1 {
 #[must_use]
 pub fn scoped_code_index_store_root(store_root: &Path, canonical_project_root: &Path) -> PathBuf {
     store_root.join(code_index_scope_hash(canonical_project_root))
+}
+
+#[must_use]
+pub fn code_text_artifacts_root(store_root: &Path) -> PathBuf {
+    store_root.join(CODE_TEXT_ARTIFACTS_DIRECTORY_V1)
+}
+
+pub fn code_text_artifact_path(
+    store_root: &Path,
+    descriptor: &DurableCodeTextArtifactDescriptorV1,
+) -> Result<PathBuf, CodeGenerationRetentionErrorV1> {
+    validate_text_artifact_descriptor(descriptor)?;
+    Ok(code_text_artifacts_root(store_root).join(&descriptor.artifact_file))
 }
 
 /// The directory name `code-index-v1/` uses for one canonical project root.
@@ -1133,6 +1272,7 @@ fn validate_durable_generation_index(
         ));
     }
     let mut generation_ids = BTreeSet::new();
+    let mut text_artifacts = BTreeMap::new();
     for entry in &pointer.generation_index {
         validate_generation_file(&entry.generation_file)?;
         if entry.size_bytes == 0 || !generation_ids.insert(entry.generation_id.as_str()) {
@@ -1140,6 +1280,26 @@ fn validate_durable_generation_index(
                 "publication-pointer generation index contains an invalid or duplicate entry"
                     .to_owned(),
             ));
+        }
+        if let Some(artifact) = entry.text_artifact.as_ref() {
+            validate_text_artifact_descriptor(artifact)?;
+            if artifact.generation_id.as_str() != entry.generation_id {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                    "publication-pointer text artifact names a different generation".to_owned(),
+                ));
+            }
+            let identity = (
+                artifact.artifact_digest.as_str(),
+                artifact.artifact_size_bytes,
+            );
+            if text_artifacts
+                .insert(artifact.artifact_file.as_str(), identity)
+                .is_some_and(|prior| prior != identity)
+            {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                    "publication-pointer text artifact path has conflicting identity".to_owned(),
+                ));
+            }
         }
     }
     let Some(active_entry) = pointer
@@ -1171,6 +1331,62 @@ fn validate_durable_generation_index(
         ));
     }
     Ok(())
+}
+
+fn validate_sealed_generation_identity(
+    identity: &DurableSealedCodeGenerationIdentityV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    validate_generation_file(&identity.locator)?;
+    if identity.size_bytes == 0 {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "sealed generation identity has a zero byte size".to_owned(),
+        ));
+    }
+    let digest = sha256_file_component(&identity.digest, "sealed generation")?;
+    if identity.locator != format!("generation-{digest}.json") {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "sealed generation locator does not match its digest".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_text_artifact_descriptor(
+    descriptor: &DurableCodeTextArtifactDescriptorV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if descriptor.artifact_size_bytes == 0 {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "text artifact descriptor has a zero byte size".to_owned(),
+        ));
+    }
+    let digest = sha256_file_component(&descriptor.artifact_digest, "text artifact")?;
+    if descriptor.artifact_file != format!("text-artifact-{digest}.bin") {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "text artifact filename does not match its digest".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_file_component<'a>(
+    digest: &'a ManifestDigest,
+    resource: &str,
+) -> Result<&'a str, CodeGenerationRetentionErrorV1> {
+    let Some(value) = digest.as_str().strip_prefix("sha256:") else {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "{resource} digest is not SHA-256"
+        )));
+    };
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "{resource} digest is not lowercase SHA-256"
+        )));
+    }
+    Ok(value)
 }
 
 fn generation_file_name(path: &Path) -> Option<String> {
@@ -2564,6 +2780,21 @@ mod tests {
             source_reference: exact.then(|| format!("refs/heads/branch-{sequence}")),
             source_revision: exact.then(|| format!("{sequence:040x}")),
             source_tree: exact.then(|| format!("{:040x}", sequence + 1)),
+            text_artifact: None,
+        }
+    }
+
+    fn text_artifact(
+        generation_id: &CodeGenerationId,
+        sequence: usize,
+        artifact_size_bytes: u64,
+    ) -> DurableCodeTextArtifactDescriptorV1 {
+        DurableCodeTextArtifactDescriptorV1 {
+            generation_id: generation_id.clone(),
+            artifact_file: format!("text-artifact-{sequence:064x}.bin"),
+            artifact_digest: ManifestDigest::new(format!("sha256:{sequence:064x}"))
+                .expect("artifact digest"),
+            artifact_size_bytes,
         }
     }
 
@@ -2606,6 +2837,35 @@ mod tests {
             }),
             "dirty generations are not exempt from the TTL"
         );
+    }
+
+    #[test]
+    fn durable_index_counts_text_bytes_and_never_evicts_the_active_text_head() {
+        let now = MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1 * 2;
+        let active = indexed_generation(99, now, 32, true);
+        let mut text_head = indexed_generation(1, now - 3, 32, true);
+        let text_head_id = CodeGenerationId::new(text_head.generation_id.clone())
+            .expect("text-head generation id");
+        text_head.text_artifact = Some(text_artifact(
+            &text_head_id,
+            1,
+            MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
+        ));
+        let mut entries = vec![
+            indexed_generation(0, now - 4, 32, true),
+            text_head.clone(),
+            active.clone(),
+        ];
+
+        let removed = retain_bounded_generation_index_with_text_head(
+            &mut entries,
+            &active.generation_id,
+            Some(&text_head.generation_id),
+        );
+
+        assert_eq!(removed, 1, "artifact bytes must participate in the bound");
+        assert!(entries.contains(&active));
+        assert!(entries.contains(&text_head));
     }
 
     #[derive(Clone)]
@@ -2662,6 +2922,7 @@ mod tests {
             source_reference: None,
             source_revision: None,
             source_tree: None,
+            text_artifact: None,
         };
         let generation_index = vec![active_entry];
         let generation_index_digest =
@@ -2684,6 +2945,77 @@ mod tests {
         .expect("write active pointer");
 
         (store, generations)
+    }
+
+    #[test]
+    fn verified_text_artifact_attachment_is_durable_and_idempotent_under_the_store_lock() {
+        let (store, generations) = fixture_store(1);
+        let expected = read_active_pointer(store.path()).expect("active pointer");
+        let active = generations.last().expect("active generation");
+        let sealed_identity = DurableSealedCodeGenerationIdentityV1 {
+            locator: active.file.clone(),
+            digest: ManifestDigest::new(active.state_digest.clone()).expect("sealed digest"),
+            size_bytes: active.size_bytes,
+        };
+        let descriptor = text_artifact(&active.id, 7, 4096);
+        let lock = acquire_code_generation_store_lock(store.path()).expect("generation store lock");
+
+        let updated = attach_verified_text_artifact_under_lock(
+            &lock,
+            &expected,
+            &sealed_identity,
+            descriptor.clone(),
+        )
+        .expect("attach verified artifact");
+        let repeated = attach_verified_text_artifact_under_lock(
+            &lock,
+            &updated,
+            &sealed_identity,
+            descriptor.clone(),
+        )
+        .expect("repeat exact attachment");
+        drop(lock);
+
+        assert_eq!(repeated, updated);
+        assert_eq!(
+            read_active_pointer(store.path())
+                .expect("durable active pointer")
+                .generation_index[0]
+                .text_artifact,
+            Some(descriptor)
+        );
+    }
+
+    #[test]
+    fn text_artifact_attachment_refuses_a_stale_pointer_without_mutation() {
+        let (store, generations) = fixture_store(1);
+        let durable_before =
+            std::fs::read(store.path().join(ACTIVE_POINTER_FILE)).expect("durable pointer bytes");
+        let mut stale = read_active_pointer(store.path()).expect("active pointer");
+        stale.publication_digest = "sha256:stale".to_owned();
+        let active = generations.last().expect("active generation");
+        let sealed_identity = DurableSealedCodeGenerationIdentityV1 {
+            locator: active.file.clone(),
+            digest: ManifestDigest::new(active.state_digest.clone()).expect("sealed digest"),
+            size_bytes: active.size_bytes,
+        };
+        let lock = acquire_code_generation_store_lock(store.path()).expect("generation store lock");
+
+        let error = attach_verified_text_artifact_under_lock(
+            &lock,
+            &stale,
+            &sealed_identity,
+            text_artifact(&active.id, 9, 4096),
+        )
+        .expect_err("stale pointer must lose the attachment CAS");
+        drop(lock);
+
+        assert!(matches!(error, CodeGenerationRetentionErrorV1::Conflict(_)));
+        assert_eq!(
+            std::fs::read(store.path().join(ACTIVE_POINTER_FILE))
+                .expect("unchanged durable pointer"),
+            durable_before
+        );
     }
 
     fn pad_generation_file(
