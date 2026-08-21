@@ -84,6 +84,10 @@ fn anchored_observation_write(body: &str, receipt_id: &str) -> AnchoredObservati
 }
 
 fn anchored(write: ObservationWrite) -> AnchoredObservationWrite {
+    anchored_at(write, UtcMicros(1))
+}
+
+fn anchored_at(write: ObservationWrite, ingested_at: UtcMicros) -> AnchoredObservationWrite {
     let projection_generation = ProjectionGenerationId::new("projection.fixture.v1").unwrap();
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "runtime.fixture.v1")
@@ -91,11 +95,48 @@ fn anchored(write: ObservationWrite) -> AnchoredObservationWrite {
     let anchor = build_observation_retrieval_anchor_v2(
         write.observation(),
         projection_generation.clone(),
-        UtcMicros(1),
+        ingested_at,
         authorization,
     )
     .unwrap();
     AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap()
+}
+
+#[test]
+fn semantic_anchor_replay_ignores_local_ingest_clock() {
+    let mut connection = connection();
+    let first = anchored_at(
+        observation_write("semantic replay", "receipt.semantic-replay"),
+        UtcMicros(1),
+    );
+    let replay = anchored_at(
+        ObservationWrite::new(
+            first.observation().clone(),
+            None,
+            first.next_cursor().clone(),
+        )
+        .unwrap(),
+        UtcMicros(2),
+    );
+
+    execute(&mut connection, &first).unwrap();
+    execute(&mut connection, &replay)
+        .expect("local ingest clocks must not make immutable anchor replay collide");
+
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM observations", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM retrieval_anchors", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
 }
 
 fn connection() -> Connection {

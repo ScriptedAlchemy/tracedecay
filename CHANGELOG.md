@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.14](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.13...v0.1.0-beta.14) (2026-08-21)
+
+
+### Bug Fixes
+
+* **agent-hosts:** gate receiptless adoption on explicit authority ([6b07061](https://github.com/ScriptedAlchemy/tracedecay/commit/6b07061ad26376437f058a95a8c399b3ab71ec36))
+* **agent-hosts:** grant Claude plugin wildcard ([fbf65bf](https://github.com/ScriptedAlchemy/tracedecay/commit/fbf65bf6f2eceb577606979d8dea53f4e21914a7))
+* **agent-hosts:** report usable ownership recovery ([9c7ae7d](https://github.com/ScriptedAlchemy/tracedecay/commit/9c7ae7d27823031f41763301fe4faa28c0794dd0))
+* **cli:** require confirmed host adoption ([a275cc5](https://github.com/ScriptedAlchemy/tracedecay/commit/a275cc5b0c63ca2b8df5cde4209d6bb4dd1d2481))
+* **cli:** skip install checks for nested inspections ([89c1951](https://github.com/ScriptedAlchemy/tracedecay/commit/89c195195146808ff75a33ea7e330c7a2e21be49))
+* **code-index:** fail closed on late ceiling install ([63b012c](https://github.com/ScriptedAlchemy/tracedecay/commit/63b012ccaf3496532927edade960f364f57e02de))
+* **code-index:** honor daemon worker ceiling ([bf8f4fd](https://github.com/ScriptedAlchemy/tracedecay/commit/bf8f4fd15e9196364a8352a97bf1324761a10e3e))
+* **code-index:** serialize worker ceiling setup ([3b371c6](https://github.com/ScriptedAlchemy/tracedecay/commit/3b371c6490dca83728a0d46a8daf9378f1b8a3fc))
+* **graph-db:** stage generations in bounded pages ([eb841f7](https://github.com/ScriptedAlchemy/tracedecay/commit/eb841f70d2560526a46f1452a8ac405273ef5b6c))
+* **observation:** preserve store failure reasons ([328d0b1](https://github.com/ScriptedAlchemy/tracedecay/commit/328d0b1028bcf38ad6119ccfb428ae4dffa06a2e))
+
 ## [0.1.0-beta.13](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.12...v0.1.0-beta.13) (2026-08-21)
 
 
