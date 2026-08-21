@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
@@ -356,6 +356,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
             &GraphProjectorRevision::try_from(source.projector_revision.as_str().to_owned())?,
             check,
         )
+        .map(Arc::unwrap_or_clone)
         .map_err(classify_sealed_projection_build_error)
     }
 }

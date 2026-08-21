@@ -531,7 +531,7 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
                 &mut authority,
                 &context,
                 &record.publication.key,
-                Some(foreign),
+                Some(Arc::new(foreign)),
             )
             .unwrap_err(),
         GraphDbError::Conflict
@@ -546,7 +546,7 @@ fn sealed_code_generation_publishes_with_its_supplied_manifest() {
             &mut authority,
             &context,
             &record.publication.key,
-            Some(sealed_manifest.clone()),
+            Some(Arc::new(sealed_manifest.clone())),
         )
         .expect("the exact supplied sealed projection manifest must publish");
     assert_eq!(commit.head.key, record.publication.key);

@@ -69,7 +69,7 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
             &mut authority,
             &context,
             &record.publication.key,
-            Some(mismatched_manifest),
+            Some(Arc::new(mismatched_manifest)),
         ),
         Err(GraphDbError::Conflict)
     ));
@@ -81,7 +81,7 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
             &mut authority,
             &context,
             &record.publication.key,
-            Some(vector_manifest.clone()),
+            Some(Arc::new(vector_manifest.clone())),
         )
         .unwrap();
     assert_eq!(
@@ -115,7 +115,7 @@ fn omits_vectors_and_recovers_only_persisted_native_rows() {
             &mut authority,
             &replay_context,
             &record.publication.key,
-            Some(vector_manifest),
+            Some(Arc::new(vector_manifest)),
         )
         .unwrap();
     assert_eq!(exact_replay.head, expected_head);
@@ -167,7 +167,7 @@ fn incomplete_pending_generation_cannot_advance_verified_head() {
             &mut authority,
             &context,
             &record.publication.key,
-            Some(incomplete),
+            Some(Arc::new(incomplete)),
         ),
         Err(GraphDbError::Conflict)
     ));
