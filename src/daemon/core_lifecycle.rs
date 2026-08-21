@@ -253,6 +253,34 @@ impl DaemonLifecycle {
         }
     }
 
+    pub(super) async fn abort_shutdown_coordinator(&self) {
+        let coordinator_task = {
+            let shutdown = self
+                .inner
+                .shutdown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(&shutdown.coordinator_task)
+        };
+        if let Some(task) = coordinator_task.lock().await.as_ref() {
+            task.abort();
+        }
+    }
+
+    pub(super) fn time_out_in_flight_shutdown(&self, receipt: Arc<DaemonShutdownReceipt>) {
+        let attempt = {
+            let mut shutdown = self
+                .inner
+                .shutdown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            shutdown.in_flight.take()
+        };
+        if let Some(attempt) = attempt {
+            attempt.receipt.send_replace(Some(receipt));
+        }
+    }
+
     pub(super) fn finish_shutdown_attempt(
         &self,
         attempt: &Arc<DaemonShutdownAttempt>,

@@ -19,6 +19,9 @@ use crate::errors::Result;
 
 type ProjectServerShutdown = Pin<Box<dyn Future<Output = ShutdownTaskReceipt> + Send + 'static>>;
 
+const SHUTDOWN_COORDINATOR_RECEIPT_GRACE: tokio::time::Duration =
+    tokio::time::Duration::from_millis(100);
+
 pub(super) struct DaemonShutdownPlan {
     clients: JoinSet<Result<()>>,
     owner_phases: Vec<Vec<ShutdownOwner>>,
@@ -70,12 +73,12 @@ impl DaemonShutdownReceipt {
         }
     }
 
-    fn preparation_timed_out(deadline: tokio::time::Instant) -> Self {
+    fn coordinator_timed_out(deadline: tokio::time::Instant) -> Self {
         Self {
             in_flight: ShutdownStatus::TimedOut,
             clients: ShutdownStatus::TimedOut,
-            background: ShutdownReceipt::timed_out(deadline, "shutdown_prepare"),
-            project_servers: ShutdownTaskReceipt::timed_out("project_server_shutdown"),
+            background: ShutdownReceipt::timed_out(deadline, "shutdown_coordinator"),
+            project_servers: ShutdownTaskReceipt::timed_out("shutdown_coordinator"),
         }
     }
 
@@ -157,7 +160,20 @@ pub(super) async fn coordinate_daemon_shutdown<Prepare>(
 where
     Prepare: Future<Output = DaemonShutdownPlan> + Send + 'static,
 {
-    lifecycle.wait_for_finished_shutdown_coordinator().await;
+    if tokio::time::timeout_at(
+        shutdown_deadline,
+        lifecycle.wait_for_finished_shutdown_coordinator(),
+    )
+    .await
+    .is_err()
+    {
+        lifecycle.abort_shutdown_coordinator().await;
+        let receipt = Arc::new(DaemonShutdownReceipt::coordinator_timed_out(
+            shutdown_deadline,
+        ));
+        lifecycle.time_out_in_flight_shutdown(Arc::clone(&receipt));
+        return receipt;
+    }
     lifecycle.join_finished_shutdown_coordinator().await;
     lifecycle.begin_draining();
     let attempt = match lifecycle.claim_shutdown_coordination() {
@@ -175,20 +191,14 @@ where
             let coordinator_attempt = Arc::clone(&attempt);
             let mut coordinator_failures = failures.clone();
             let coordinator = async move {
-                let runner = tokio::spawn(async move {
-                    match tokio::time::timeout_at(shutdown_deadline, prepare).await {
-                        Ok(plan) => {
-                            run_daemon_shutdown(runner_lifecycle, plan, shutdown_deadline).await
-                        }
-                        Err(_) => DaemonShutdownReceipt::preparation_timed_out(shutdown_deadline),
-                    }
-                });
-                let mut receipt = match runner.await {
+                let mut receipt = match tokio::time::timeout_at(shutdown_deadline, async move {
+                    let plan = prepare.await;
+                    run_daemon_shutdown(runner_lifecycle, plan, shutdown_deadline).await
+                })
+                .await
+                {
                     Ok(receipt) => receipt,
-                    Err(error) => DaemonShutdownReceipt::coordinator_failed(
-                        shutdown_deadline,
-                        error.to_string(),
-                    ),
+                    Err(_) => DaemonShutdownReceipt::coordinator_timed_out(shutdown_deadline),
                 };
                 coordinator_failures.record(&receipt);
                 coordinator_failures.apply(&mut receipt);
@@ -211,14 +221,30 @@ where
         }
     };
 
-    let receipt = match attempt.wait_for_receipt().await {
-        Ok(receipt) => receipt,
-        Err(error) => Arc::new(DaemonShutdownReceipt::coordinator_failed(
-            shutdown_deadline,
-            error,
-        )),
+    let receipt_deadline = shutdown_deadline + SHUTDOWN_COORDINATOR_RECEIPT_GRACE;
+    let receipt = tokio::select! {
+        biased;
+        result = attempt.wait_for_receipt() => match result {
+            Ok(receipt) => receipt,
+            Err(error) => Arc::new(DaemonShutdownReceipt::coordinator_failed(
+                shutdown_deadline,
+                error,
+            )),
+        },
+        () = tokio::time::sleep_until(receipt_deadline) => {
+            lifecycle.abort_shutdown_coordinator().await;
+            let receipt = Arc::new(DaemonShutdownReceipt::coordinator_timed_out(
+                shutdown_deadline,
+            ));
+            lifecycle.time_out_in_flight_shutdown(Arc::clone(&receipt));
+            receipt
+        }
     };
-    lifecycle.wait_for_finished_shutdown_coordinator().await;
+    let _ = tokio::time::timeout_at(
+        receipt_deadline,
+        lifecycle.wait_for_finished_shutdown_coordinator(),
+    )
+    .await;
     lifecycle.join_finished_shutdown_coordinator().await;
     receipt
 }
@@ -724,7 +750,7 @@ mod tests {
         assert_eq!(receipt.clients, ShutdownStatus::TimedOut);
         assert!(matches!(
             receipt.background.owners.as_slice(),
-            [owner] if owner.name == "shutdown_prepare"
+            [owner] if owner.name == "shutdown_coordinator"
                 && owner.status == ShutdownStatus::TimedOut
         ));
         assert_eq!(receipt.project_servers.status(), ShutdownStatus::TimedOut,);
@@ -740,5 +766,41 @@ mod tests {
         .await;
 
         assert!(!retry.is_retryable());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn coordinator_receipt_wait_is_bounded_after_prepare_panics() {
+        struct PanickingPrepare;
+
+        impl Future for PanickingPrepare {
+            type Output = DaemonShutdownPlan;
+
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                _context: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                panic!("shutdown prepare panic probe");
+            }
+        }
+
+        let lifecycle = DaemonLifecycle::default();
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let shutdown_lifecycle = lifecycle.clone();
+        let shutdown = tokio::spawn(async move {
+            coordinate_daemon_shutdown(&shutdown_lifecycle, deadline, PanickingPrepare).await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(tokio::time::Duration::from_millis(1_100)).await;
+        let receipt = shutdown.await.expect("bounded coordinator receipt");
+
+        assert_eq!(receipt.in_flight, ShutdownStatus::TimedOut);
+        assert_eq!(receipt.clients, ShutdownStatus::TimedOut);
+        assert!(matches!(
+            receipt.background.owners.as_slice(),
+            [owner]
+                if owner.name == "shutdown_coordinator"
+                    && owner.status == ShutdownStatus::TimedOut
+        ));
+        assert_eq!(receipt.project_servers.status(), ShutdownStatus::TimedOut);
     }
 }
