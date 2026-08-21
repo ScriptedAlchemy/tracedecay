@@ -29,6 +29,14 @@ fn injected_activation_failures()
 }
 
 #[cfg(test)]
+fn injected_resident_memory_refusals()
+-> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
+    static REFUSALS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    REFUSALS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+}
+
+#[cfg(test)]
 pub(super) fn set_injected_activation_failures(worktree_id: &WorktreeId, failures: usize) {
     let mut injected = injected_activation_failures()
         .lock()
@@ -38,6 +46,26 @@ pub(super) fn set_injected_activation_failures(worktree_id: &WorktreeId, failure
     } else {
         injected.insert(worktree_id.as_str().to_owned(), failures);
     }
+}
+
+#[cfg(test)]
+pub(super) fn set_injected_resident_memory_refusal(worktree_id: &WorktreeId, refused: bool) {
+    let mut refusals = injected_resident_memory_refusals()
+        .lock()
+        .expect("injected resident-memory refusal gate must not be poisoned");
+    if refused {
+        refusals.insert(worktree_id.as_str().to_owned());
+    } else {
+        refusals.remove(worktree_id.as_str());
+    }
+}
+
+#[cfg(test)]
+fn has_injected_resident_memory_refusal(worktree_id: &WorktreeId) -> bool {
+    injected_resident_memory_refusals()
+        .lock()
+        .expect("injected resident-memory refusal gate must not be poisoned")
+        .contains(worktree_id.as_str())
 }
 
 #[cfg(test)]
@@ -75,6 +103,15 @@ impl CodeGraphActivationAuthorityV1 {
         replay_binding: CodeGraphReplayBindingV1,
         cancellation: Arc<AtomicBool>,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        let text_latest = latest.clone();
+        tokio::task::spawn_blocking(move || text_latest.activate_text_serving())
+            .await
+            .map_err(|error| {
+                CodeIndexSchedulerErrorV1::GraphActivation(format!(
+                    "code-index text activation task failed: {error}"
+                ))
+            })?
+            .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         match self {
             Self::Persistent {
                 runtime,
@@ -107,6 +144,17 @@ impl CodeGraphActivationAuthorityV1 {
             }
             #[cfg(test)]
             Self::Memory => {
+                if has_injected_resident_memory_refusal(worktree_id) {
+                    latest.refuse_graph_activation(
+                        "code graph activation was refused by the resident-memory policy",
+                    );
+                    return Err(CodeIndexSchedulerErrorV1::GraphProjection(
+                        CodeGraphProjectionError::BudgetExhausted {
+                            budget: "resident_memory".to_owned(),
+                            limit: tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+                        },
+                    ));
+                }
                 if take_injected_activation_failure(worktree_id) {
                     return Err(CodeIndexSchedulerErrorV1::GraphProjection(
                         CodeGraphProjectionError::DeadlineExceeded,
@@ -204,22 +252,12 @@ impl LatestCompleteCodeIndexV1 {
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?,
             graph_cancellation,
         )?;
-        self.install_query_owners(
+        self.install_graph_serving(
             reader,
+            Some(Arc::clone(&store)),
             CodeGraphServingAuthorityV1::Persistent { _lease: authority },
-            // Activation is the daemon's own background pass; on the
-            // ignored-dependency path it additionally runs past the durable
-            // commit boundary where requester deadlines stop binding. No
-            // request budget is in reach here, so the daemon retrieval
-            // ceiling applies: its unset `deadline_micros` truthfully keeps
-            // the crate build fallback instead of fabricating a deadline.
-            &super::queries::maximum_retrieval_budget(),
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
-        // First activation of a generation retains its store; a repeat
-        // activation keeps the original, which is pinned to the same verified
-        // snapshot and generation.
-        let _ = self.interactive_graph.set(store);
         let _ = self.generation.test_attribution_authority();
         let _ = self.record_index();
         Ok(())

@@ -9,7 +9,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak,
+        Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -1280,7 +1280,7 @@ type GenerationServingCachesV1 = (
     Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     Arc<OnceLock<queries::GenerationRecordIndexV1>>,
     Arc<Mutex<()>>,
-    Arc<OnceLock<Arc<CodeGraphProjectionStore>>>,
+    Arc<RwLock<CodeGraphActivationStateV1>>,
 );
 
 #[derive(Clone)]
@@ -1293,11 +1293,7 @@ pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     /// projection inline — N concurrent cold queries did N store-sized builds,
     /// each blowing its own dispatch deadline while the warm was still running.
     query_owners_build_gate: Arc<Mutex<()>>,
-    /// The verified-snapshot projection store retained by persistent graph
-    /// activation. Interactive readers open from it per request; a cold value
-    /// means the persistent Grafeo activation has not completed and every
-    /// interactive read answers its typed unavailable state.
-    interactive_graph: Arc<OnceLock<Arc<CodeGraphProjectionStore>>>,
+    graph_activation: Arc<RwLock<CodeGraphActivationStateV1>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1310,10 +1306,7 @@ pub(super) struct SemanticEvaluationCodeSnapshotV1 {
     pub capability_manifest_digest: ManifestDigest,
 }
 
-/// Production exact/lexical/graph owners bound to one immutable published
-/// generation. Lanes remain independently disableable by omitting a field from
-/// composition; this bundle only proves the daemon can mint all three from the
-/// same sealed generation evidence.
+/// Production exact/lexical owners bound to one immutable published generation.
 #[derive(Clone)]
 pub(super) struct ProductionCodeIndexQueryOwnersV1 {
     pub exact: ExactLane<
@@ -1321,8 +1314,18 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
         CodeExactProjectionAdapterV1<CentralExactAdmissionAuthorityV1>,
     >,
     pub lexical: LexicalLane<CodeLexicalProjectionAdapterV1>,
+}
+
+struct ProductionCodeGraphServingV1 {
     pub graph: GraphLane<CodeGraphEvidenceReader>,
+    store: Option<Arc<CodeGraphProjectionStore>>,
     _graph_authority: CodeGraphServingAuthorityV1,
+}
+
+enum CodeGraphActivationStateV1 {
+    Pending,
+    Refused(&'static str),
+    Ready(Arc<ProductionCodeGraphServingV1>),
 }
 
 #[derive(Clone)]
@@ -1368,10 +1371,32 @@ impl LatestCompleteCodeIndexV1 {
     /// closed on — the exact same checks.
     #[cfg(test)]
     pub(in crate::daemon) fn warm_serving_caches(&self) {
-        let _ = self.generation.admitted_chunks();
-        let _ = self.generation.test_attribution_authority();
+        self.warm_text_serving_caches();
+        let generation_id = self.generation.manifest().generation_id.clone();
+        let Ok(freshness) = self.source_freshness() else {
+            return;
+        };
+        let Ok(reader) = CodeGraphEvidenceReader::new(
+            generation_id,
+            Some(self.generation.snapshot().repository.clone()),
+            freshness,
+            self.generation.edges(),
+            self.generation.chunks().chunks(),
+        ) else {
+            return;
+        };
+        let _ = self.install_graph_serving(reader, None, CodeGraphServingAuthorityV1::Memory);
+    }
+
+    fn warm_text_serving_caches(&self) {
+        let _ = self.activate_text_serving();
+    }
+
+    fn activate_text_serving(&self) -> Result<(), RetrievalPortError> {
+        self.install_query_owners(&queries::maximum_retrieval_budget())?;
         let _ = self.record_index();
-        let _ = self.production_query_owners();
+        let _ = self.generation.test_attribution_authority();
+        Ok(())
     }
 
     /// Whether the record lookup indices are already built for this generation.
@@ -1380,7 +1405,7 @@ impl LatestCompleteCodeIndexV1 {
         self.record_index.get().is_some()
     }
 
-    /// Whether the exact/lexical/graph lane owners are already built.
+    /// Whether the exact/lexical lane owners are already built.
     #[cfg(test)]
     fn query_owners_are_warm(&self) -> bool {
         self.query_owners.get().is_some()
@@ -1435,8 +1460,8 @@ impl LatestCompleteCodeIndexV1 {
         self.generation.edge_abstentions()
     }
 
-    /// Return exact, lexical, and graph query owners bound to the latest
-    /// complete published generation.
+    /// Return exact and lexical query owners bound to the latest complete
+    /// published generation.
     pub fn production_query_owners(
         &self,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
@@ -1449,24 +1474,35 @@ impl LatestCompleteCodeIndexV1 {
         ));
         #[cfg(test)]
         {
-            let generation_id = self.generation.manifest().generation_id.clone();
-            let freshness = self.source_freshness()?;
-            let graph = CodeGraphEvidenceReader::new(
-                generation_id,
-                Some(self.generation.snapshot().repository.clone()),
-                freshness,
-                self.generation.edges(),
-                self.generation.chunks().chunks(),
-            )
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-            // No request reaches a cold memory build: this arm only exists in
-            // the test configuration, where the daemon ceiling is the budget
-            // in reach. Its unset deadline keeps the crate build fallback.
-            self.install_query_owners(
-                graph,
-                CodeGraphServingAuthorityV1::Memory,
-                &queries::maximum_retrieval_budget(),
-            )
+            self.install_query_owners(&queries::maximum_retrieval_budget())
+        }
+    }
+
+    fn production_graph_serving(
+        &self,
+    ) -> Result<Arc<ProductionCodeGraphServingV1>, RetrievalPortError> {
+        match &*self
+            .graph_activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            CodeGraphActivationStateV1::Ready(serving) => Ok(Arc::clone(serving)),
+            CodeGraphActivationStateV1::Refused(reason) => {
+                Err(RetrievalPortError::Contract((*reason).to_owned()))
+            }
+            CodeGraphActivationStateV1::Pending => Err(RetrievalPortError::Contract(
+                "code graph projection has not completed activation".to_owned(),
+            )),
+        }
+    }
+
+    fn refuse_graph_activation(&self, reason: &'static str) {
+        let mut state = self
+            .graph_activation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*state, CodeGraphActivationStateV1::Ready(_)) {
+            *state = CodeGraphActivationStateV1::Refused(reason);
         }
     }
 
@@ -1480,12 +1516,12 @@ impl LatestCompleteCodeIndexV1 {
         &self,
     ) -> Result<Arc<CodeGraphProjectionStore>, RetrievalPortError> {
         let store = self
-            .interactive_graph
-            .get()
-            .map(Arc::clone)
+            .production_graph_serving()?
+            .store
+            .clone()
             .ok_or_else(|| {
                 RetrievalPortError::Contract(
-                    "code graph projection has not completed activation".to_owned(),
+                    "code graph projection has no persistent interactive store".to_owned(),
                 )
             })?;
         match store.interactive_catalog_is_warm() {
@@ -1511,8 +1547,6 @@ impl LatestCompleteCodeIndexV1 {
     /// base budget must pass the tighter of the two (smaller deadline wins).
     fn install_query_owners(
         &self,
-        graph_reader: CodeGraphEvidenceReader,
-        graph_authority: CodeGraphServingAuthorityV1,
         build_budget: &RetrievalBudget,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
         if let Some(owners) = self.query_owners.get() {
@@ -1576,20 +1610,33 @@ impl LatestCompleteCodeIndexV1 {
             lexical_projection.exact_adapter(authority),
         );
         let lexical = LexicalLane::new(lexical_projection);
-        if graph_reader.generation() != &generation_id {
+        let owners = Arc::new(ProductionCodeIndexQueryOwnersV1 { exact, lexical });
+        let _ = self.query_owners.set(Arc::clone(&owners));
+        Ok(self.query_owners.get().map(Arc::clone).unwrap_or(owners))
+    }
+
+    fn install_graph_serving(
+        &self,
+        graph_reader: CodeGraphEvidenceReader,
+        store: Option<Arc<CodeGraphProjectionStore>>,
+        graph_authority: CodeGraphServingAuthorityV1,
+    ) -> Result<(), RetrievalPortError> {
+        if graph_reader.generation() != &self.generation.manifest().generation_id {
             return Err(RetrievalPortError::Contract(
                 "code graph reader generation does not match sealed generation".to_owned(),
             ));
         }
-        let graph = GraphLane::new(graph_reader);
-        let owners = Arc::new(ProductionCodeIndexQueryOwnersV1 {
-            exact,
-            lexical,
-            graph,
+        let serving = Arc::new(ProductionCodeGraphServingV1 {
+            graph: GraphLane::new(graph_reader),
+            store,
             _graph_authority: graph_authority,
         });
-        let _ = self.query_owners.set(Arc::clone(&owners));
-        Ok(self.query_owners.get().map(Arc::clone).unwrap_or(owners))
+        *self
+            .graph_activation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            CodeGraphActivationStateV1::Ready(serving);
+        Ok(())
     }
 }
 
@@ -1655,6 +1702,14 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::PublicationConflict(_)
             | Self::IgnoredDependency(_) => false,
         }
+    }
+
+    pub(super) fn is_graph_activation_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { budget, .. })
+                if budget == "resident_memory"
+        )
     }
 }
 
@@ -2500,7 +2555,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .query_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (query_owners, record_index, query_owners_build_gate, interactive_graph) = match cached
+        let (query_owners, record_index, query_owners_build_gate, graph_activation) = match cached
             .as_ref()
         {
             Some((cached_id, owners, index, gate, interactive)) if cached_id == &generation_id => (
@@ -2513,15 +2568,15 @@ impl CodeIndexWorktreeSchedulerV1 {
                 let owners = Arc::new(OnceLock::new());
                 let index = Arc::new(OnceLock::new());
                 let gate = Arc::new(Mutex::new(()));
-                let interactive = Arc::new(OnceLock::new());
+                let graph_activation = Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending));
                 *cached = Some((
                     generation_id,
                     Arc::clone(&owners),
                     Arc::clone(&index),
                     Arc::clone(&gate),
-                    Arc::clone(&interactive),
+                    Arc::clone(&graph_activation),
                 ));
-                (owners, index, gate, interactive)
+                (owners, index, gate, graph_activation)
             }
         };
         LatestCompleteCodeIndexV1 {
@@ -2529,7 +2584,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             query_owners,
             record_index,
             query_owners_build_gate,
-            interactive_graph,
+            graph_activation,
         }
     }
 
@@ -2580,7 +2635,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                         query_owners: Arc::new(OnceLock::new()),
                         record_index: Arc::new(OnceLock::new()),
                         query_owners_build_gate: Arc::new(Mutex::new(())),
-                        interactive_graph: Arc::new(OnceLock::new()),
+                        graph_activation: Arc::new(RwLock::new(
+                            CodeGraphActivationStateV1::Pending,
+                        )),
                     })
             })
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())

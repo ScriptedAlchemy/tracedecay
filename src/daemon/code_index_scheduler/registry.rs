@@ -2205,6 +2205,33 @@ impl CodeIndexSchedulerRegistryV1 {
                                 Err(error) => Err(error),
                             };
                             match activation {
+                                Err(error) if error.is_graph_activation_refusal() => {
+                                    next_seat_attempt_at = None;
+                                    seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
+                                    let swap_scheduler = Arc::clone(&scheduler);
+                                    let swap_serving = Arc::clone(&serving_generation);
+                                    let swap_serving_epoch = Arc::clone(&serving_generation_epoch);
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        let scheduler = swap_scheduler
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                        if scheduler
+                                            .active_publication_matches(&retained)
+                                            .unwrap_or(false)
+                                        {
+                                            let mut serving = swap_serving
+                                                .write()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                            *serving = Some(retained.clone());
+                                            swap_serving_epoch.fetch_add(1, Ordering::AcqRel);
+                                            drop(serving);
+                                            let _ = scheduler.schedule_semantic_generation(
+                                                retained.generation(),
+                                            );
+                                        }
+                                    })
+                                    .await;
+                                }
                                 Err(error) => {
                                     let retryable = error.is_retryable_activation();
                                     tracing::warn!(
@@ -2333,22 +2360,30 @@ impl CodeIndexSchedulerRegistryV1 {
                         )
                         .await;
                     if let Err(error) = activation {
-                        // The generation just sealed is complete; a retryable
-                        // activation failure arms the same seat backoff so the
-                        // next passes retry this artifact instead of resealing.
-                        if error.is_retryable_activation() {
-                            next_seat_attempt_at = Some(Instant::now() + seat_retry_backoff);
-                            let retry_wake = Arc::clone(&worker_wake);
-                            let retry_delay = seat_retry_backoff;
-                            tokio::spawn(async move {
-                                tokio::time::sleep(retry_delay).await;
-                                retry_wake.notify_one();
-                            });
-                            seat_retry_backoff = seat_retry_backoff
-                                .saturating_mul(2)
-                                .min(ACTIVATION_RETRY_BACKOFF_CEILING);
+                        if error.is_graph_activation_refusal() {
+                            tracing::warn!(
+                                event = "code_index_graph_activation_refused",
+                                error = %error,
+                                "code-index generation remains text-serving without native graph"
+                            );
+                        } else {
+                            // The generation just sealed is complete; a retryable
+                            // activation failure arms the same seat backoff so the
+                            // next passes retry this artifact instead of resealing.
+                            if error.is_retryable_activation() {
+                                next_seat_attempt_at = Some(Instant::now() + seat_retry_backoff);
+                                let retry_wake = Arc::clone(&worker_wake);
+                                let retry_delay = seat_retry_backoff;
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(retry_delay).await;
+                                    retry_wake.notify_one();
+                                });
+                                seat_retry_backoff = seat_retry_backoff
+                                    .saturating_mul(2)
+                                    .min(ACTIVATION_RETRY_BACKOFF_CEILING);
+                            }
+                            result = Ok((Err(error), None, None));
                         }
-                        result = Ok((Err(error), None, None));
                     }
                 }
                 if let Ok((Ok(_), Some(latest), _)) = &result {

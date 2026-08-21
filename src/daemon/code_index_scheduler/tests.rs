@@ -1508,7 +1508,9 @@ fn saved_edit_incremental_publish() {
         .expect("production exact/lexical/graph owners connect");
     let _ = owners.exact;
     let _ = owners.lexical;
-    let _ = owners.graph;
+    let _ = latest
+        .production_graph_serving()
+        .expect("graph owner is activated");
 }
 
 #[test]
@@ -2171,7 +2173,7 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
     assert!(
         std::mem::size_of_val(&owners.exact) > 0
             && std::mem::size_of_val(&owners.lexical) > 0
-            && std::mem::size_of_val(&owners.graph) > 0,
+            && latest.production_graph_serving().is_ok(),
         "exact/lexical/graph production owners must be concrete lane values"
     );
     let same_generation = scheduler.latest_complete().expect("same latest generation");
@@ -2201,17 +2203,6 @@ fn query_owner_build_honors_set_budget_and_keeps_crate_fallback_when_unset() {
     let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
     published(scheduler.reconcile_now().expect("publish"));
     let latest = scheduler.latest_complete().expect("latest generation");
-    let graph_reader = || {
-        crate::code_index::graph_projection::CodeGraphEvidenceReader::new(
-            latest.generation().manifest().generation_id.clone(),
-            Some(latest.generation().snapshot().repository.clone()),
-            latest.source_freshness().expect("source freshness"),
-            latest.generation().edges(),
-            latest.generation().chunks().chunks(),
-        )
-        .expect("memory graph reader")
-    };
-
     let expired = RetrievalBudget {
         max_candidates_per_lane: 1,
         max_fused_candidates: 1,
@@ -2219,11 +2210,7 @@ fn query_owner_build_honors_set_budget_and_keeps_crate_fallback_when_unset() {
         max_hydration_bytes: 1,
         deadline_micros: Some(0),
     };
-    let refusal = latest.install_query_owners(
-        graph_reader(),
-        super::CodeGraphServingAuthorityV1::Memory,
-        &expired,
-    );
+    let refusal = latest.install_query_owners(&expired);
     match refusal {
         Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded) => {}
         Err(error) => {
@@ -2241,11 +2228,7 @@ fn query_owner_build_honors_set_budget_and_keeps_crate_fallback_when_unset() {
         ..expired
     };
     let owners = latest
-        .install_query_owners(
-            graph_reader(),
-            super::CodeGraphServingAuthorityV1::Memory,
-            &unset,
-        )
+        .install_query_owners(&unset)
         .expect("an unset deadline keeps the crate build fallback");
     let repeat = latest
         .production_query_owners()
@@ -7657,6 +7640,76 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
             .is_some(),
         "successful retry installs the verified retained generation"
     );
+    registry.shutdown().await;
+}
+
+/// A verified sealed generation is independently useful to the exact and
+/// lexical lanes. Refusing the optional native graph under the process memory
+/// ceiling must therefore degrade only graph capability instead of withholding
+/// the generation from every query surface.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (scope, worktree_id) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        let worktree_id = snapshot.worktree.clone().expect("worktree id");
+        (
+            ResolvedScope::new(
+                test_project_id(),
+                snapshot.repository.clone(),
+                worktree_id.clone(),
+                snapshot.reference.clone(),
+            )
+            .expect("resolved scope"),
+            worktree_id,
+        )
+    };
+    super::graph_activation::set_injected_resident_memory_refusal(&worktree_id, true);
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount retained generation");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let latest = loop {
+        if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await {
+            break latest;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "resident graph refusal withheld the text-serving generation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        latest.production_query_owners().is_ok(),
+        "exact and lexical owners remain serving under graph refusal"
+    );
+    assert!(
+        latest.interactive_graph_store().is_err(),
+        "a budget-refused native graph must not gain a substitute store"
+    );
+
+    super::graph_activation::set_injected_resident_memory_refusal(&worktree_id, false);
     registry.shutdown().await;
 }
 

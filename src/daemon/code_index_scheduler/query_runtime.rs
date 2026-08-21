@@ -515,8 +515,8 @@ where
         RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
             detail: "exact and lexical lanes produced no graph seed".to_owned(),
         })
-    } else {
-        owners.graph.retrieve_graph(
+    } else if let Ok(graph_serving) = latest.production_graph_serving() {
+        graph_serving.graph.retrieve_graph(
             &GraphLaneRequest {
                 base: request.clone(),
                 generation: generation.clone(),
@@ -527,6 +527,10 @@ where
             },
             graph_control,
         )?
+    } else {
+        RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
+            detail: "persistent code graph is unavailable for this generation".to_owned(),
+        })
     };
     let lanes = vec![
         CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)

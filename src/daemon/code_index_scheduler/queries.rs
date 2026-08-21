@@ -1780,7 +1780,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 budget: graph_budget_for_request(base.budget, context.request),
                 base: base.clone(),
             };
-            let Ok(owners) = latest.production_query_owners() else {
+            let Ok(graph_serving) = latest.production_graph_serving() else {
                 return unavailable(finished_at);
             };
             let records = LatestCompleteNativeRecordReadPortV1 { latest };
@@ -1790,7 +1790,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 return unavailable_for_generation(finished_at, served_generation);
             };
             let graph_control = CallableGraphExecutionControl::for_request(context.request);
-            let outcome = owners.graph.retrieve_graph(&lane_request, graph_control);
+            let outcome = graph_serving
+                .graph
+                .retrieve_graph(&lane_request, graph_control);
             match outcome {
                 Ok(outcome) => {
                     let Ok(outcome) = native_context.graph(outcome, |path| {
