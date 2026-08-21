@@ -9,7 +9,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, Weak,
+        Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, TryLockError, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -1458,20 +1458,21 @@ impl LatestCompleteCodeIndexV1 {
 
     /// Return exact and lexical query owners bound to the latest complete
     /// published generation.
+    #[cfg(test)]
     pub fn production_query_owners(
         &self,
+    ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
+        self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())
+    }
+
+    fn production_query_owners_with_budget(
+        &self,
+        build_budget: &RetrievalBudget,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
         if let Some(owners) = self.query_owners.get() {
             return Ok(Arc::clone(owners));
         }
-        #[cfg(not(test))]
-        return Err(RetrievalPortError::Contract(
-            "code graph projection has not completed activation".to_owned(),
-        ));
-        #[cfg(test)]
-        {
-            self.install_query_owners(&queries::maximum_retrieval_budget())
-        }
+        self.install_query_owners(build_budget)
     }
 
     fn production_graph_serving(
@@ -1548,13 +1549,18 @@ impl LatestCompleteCodeIndexV1 {
         if let Some(owners) = self.query_owners.get() {
             return Ok(Arc::clone(owners));
         }
-        // Cold memo: exactly one caller builds; everyone else waits here and
-        // reads the memo the winner installed. The build is O(store), so
-        // duplicating it per racing query was the outage, not the wait.
-        let _build = self
-            .query_owners_build_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Cold memo: exactly one caller builds. The build is O(store), so
+        // racing queries fail with a typed warming state instead of duplicating
+        // the work or waiting beyond their own request budget.
+        let _build = match self.query_owners_build_gate.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                return Err(RetrievalPortError::AuthorityUnavailable(
+                    "code-index text serving owners are warming".to_owned(),
+                ));
+            }
+        };
         if let Some(owners) = self.query_owners.get() {
             return Ok(Arc::clone(owners));
         }

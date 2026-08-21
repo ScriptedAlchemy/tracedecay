@@ -120,15 +120,6 @@ impl CodeGraphActivationAuthorityV1 {
         replay_binding: CodeGraphReplayBindingV1,
         cancellation: Arc<AtomicBool>,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        let text_latest = latest.clone();
-        tokio::task::spawn_blocking(move || text_latest.activate_text_serving())
-            .await
-            .map_err(|error| {
-                CodeIndexSchedulerErrorV1::GraphActivation(format!(
-                    "code-index text activation task failed: {error}"
-                ))
-            })?
-            .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         let policy = match self {
             Self::Persistent { policy, .. } => *policy,
             #[cfg(test)]
@@ -139,6 +130,15 @@ impl CodeGraphActivationAuthorityV1 {
             latest.refuse_graph_activation(reason);
             return Err(CodeIndexSchedulerErrorV1::GraphActivationRefused(reason));
         }
+        let text_latest = latest.clone();
+        tokio::task::spawn_blocking(move || text_latest.activate_text_serving())
+            .await
+            .map_err(|error| {
+                CodeIndexSchedulerErrorV1::GraphActivation(format!(
+                    "code-index text activation task failed: {error}"
+                ))
+            })?
+            .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         match self {
             Self::Persistent {
                 runtime,

@@ -21,11 +21,11 @@ use tracedecay_domain::{
     ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision,
     ExactClass, FreshnessVectorDigest, FusedCandidate, FusionProfile, LogicalEvidenceId,
     ManifestDigest, OptionalStagePublicStatus, PrincipalId, PrivacyDomainId, ProjectId,
-    QueryNormalizationRevision, RankedCandidate, RefId, RelationEdgeKindV1, RepositoryId,
-    RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, RetrieverKind, SanitizerRevision, ScoreDomainCalibrationV1,
-    ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1, UtcMicros,
-    VectorWatermark, WorktreeId,
+    PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate, RefId, RelationEdgeKindV1,
+    RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId,
+    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1,
+    UtcMicros, VectorWatermark, WorktreeId,
 };
 
 #[cfg(feature = "semantic-fastembed")]
@@ -7803,7 +7803,47 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    assert!(latest.production_query_owners().is_ok());
+    assert!(
+        !latest.query_owners_are_warm(),
+        "configured retained mount entered serving-owner hydration before graph refusal"
+    );
+    registry
+        .mount_query_authority(
+            fixture.path(),
+            &scope,
+            query_authority(latest.generation.manifest().privacy_domain.clone()),
+        )
+        .await
+        .expect("mount retained query authority");
+    let executed = registry
+        .execute_query_search(&scope, core_search_request("alpha"))
+        .await
+        .expect("configured refusal preserves exact and lexical query serving");
+    assert_eq!(
+        executed
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::ExactLiteral),
+        Some(&PublicRetrieverStatus::Complete)
+    );
+    assert_eq!(
+        executed
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::Lexical),
+        Some(&PublicRetrieverStatus::Complete)
+    );
+    assert_eq!(
+        executed
+            .authorized
+            .fallback
+            .public_fallback_lane_coverage
+            .get(&RetrieverKind::Graph),
+        Some(&PublicRetrieverStatus::Unavailable)
+    );
+    assert!(latest.query_owners_are_warm());
     assert!(latest.production_graph_serving().is_err());
     assert!(latest.interactive_graph_store().is_err());
     registry.shutdown().await;

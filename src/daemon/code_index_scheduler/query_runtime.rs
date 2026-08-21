@@ -487,7 +487,7 @@ where
         .sanitize(input.sanitizer_revision, input.normalization_revision)?;
     let request = sanitized.request();
     let query_view = sanitized.query_view();
-    let owners = latest.production_query_owners()?;
+    let owners = latest.production_query_owners_with_budget(&request.budget)?;
     let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
     let exact = owners.exact.retrieve_exact(&ExactLaneRequest {
         base: request.clone(),

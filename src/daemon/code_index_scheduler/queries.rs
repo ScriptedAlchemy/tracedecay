@@ -1583,7 +1583,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 base: base.clone(),
                 query_view: &query_view,
             };
-            let Ok(owners) = latest.production_query_owners() else {
+            let Ok(owners) = latest.production_query_owners_with_budget(&base.budget) else {
                 return unavailable(finished_at);
             };
             let records = LatestCompleteNativeRecordReadPortV1 { latest };
@@ -1686,7 +1686,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 budget: base.budget,
                 base: base.clone(),
             };
-            let Ok(owners) = latest.production_query_owners() else {
+            let Ok(owners) = latest.production_query_owners_with_budget(&base.budget) else {
                 return unavailable(finished_at);
             };
             let records = LatestCompleteNativeRecordReadPortV1 { latest };
