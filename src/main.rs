@@ -1280,6 +1280,7 @@ async fn dispatch_knowledge_command(command: Commands) -> tracedecay::errors::Re
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandStartupPolicy {
     Full,
+    SkipAgentInstallCheck,
     SkipAll,
 }
 
@@ -1324,6 +1325,25 @@ impl CommandStartupPolicy {
             | Commands::Projects { .. }
             | Commands::Daemon { .. }
             | Commands::Serve { .. } => Self::SkipAll,
+            // Inspection-only commands retain ordinary startup maintenance but
+            // do not need the unrelated agent-install health check.
+            Commands::Memory { .. }
+            | Commands::Sessions {
+                action:
+                    SessionsAction::Search(_)
+                    | SessionsAction::Refresh {
+                        action: SessionsRefreshAction::Status(_),
+                    },
+            }
+            | Commands::Branch {
+                action:
+                    BranchAction::List { .. }
+                    | BranchAction::Autotrack {
+                        action: BranchAutotrackAction::Status { .. },
+                    },
+            }
+            | Commands::Channel { channel: None }
+            | Commands::Gitignore { action: None, .. } => Self::SkipAgentInstallCheck,
             _ => Self::Full,
         }
     }
