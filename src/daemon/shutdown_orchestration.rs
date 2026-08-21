@@ -167,12 +167,9 @@ where
     .await
     .is_err()
     {
-        lifecycle.abort_shutdown_coordinator().await;
-        let receipt = Arc::new(DaemonShutdownReceipt::coordinator_timed_out(
+        return Arc::new(DaemonShutdownReceipt::coordinator_timed_out(
             shutdown_deadline,
         ));
-        lifecycle.time_out_in_flight_shutdown(Arc::clone(&receipt));
-        return receipt;
     }
     lifecycle.join_finished_shutdown_coordinator().await;
     lifecycle.begin_draining();
@@ -191,14 +188,29 @@ where
             let coordinator_attempt = Arc::clone(&attempt);
             let mut coordinator_failures = failures.clone();
             let coordinator = async move {
-                let mut receipt = match tokio::time::timeout_at(shutdown_deadline, async move {
+                let mut runner = tokio::spawn(async move {
                     let plan = prepare.await;
                     run_daemon_shutdown(runner_lifecycle, plan, shutdown_deadline).await
-                })
-                .await
-                {
-                    Ok(receipt) => receipt,
-                    Err(_) => DaemonShutdownReceipt::coordinator_timed_out(shutdown_deadline),
+                });
+                let (mut receipt, runner_needs_join) = tokio::select! {
+                    biased;
+                    result = &mut runner => {
+                        let receipt = match result {
+                            Ok(receipt) => receipt,
+                            Err(error) => DaemonShutdownReceipt::coordinator_failed(
+                                shutdown_deadline,
+                                format!("daemon shutdown runner failed: {error}"),
+                            ),
+                        };
+                        (receipt, false)
+                    }
+                    () = tokio::time::sleep_until(shutdown_deadline) => {
+                        runner.abort();
+                        (
+                            DaemonShutdownReceipt::coordinator_timed_out(shutdown_deadline),
+                            true,
+                        )
+                    }
                 };
                 coordinator_failures.record(&receipt);
                 coordinator_failures.apply(&mut receipt);
@@ -207,6 +219,17 @@ where
                     Arc::new(receipt),
                     coordinator_failures,
                 );
+                // A timed-out runner may be inside synchronous third-party or
+                // filesystem work that cannot observe abort immediately. Keep
+                // the coordinator task owned until that runner actually exits;
+                // callers already have a typed timeout receipt, and retries
+                // remain fenced by wait_for_finished_shutdown_coordinator.
+                if runner_needs_join
+                    && let Err(error) = runner.await
+                    && !error.is_cancelled()
+                {
+                    tracing::error!(%error, "timed-out daemon shutdown runner failed while joining");
+                }
             };
             if !lifecycle.spawn_shutdown_coordinator(&attempt, coordinator) {
                 let receipt = Arc::new(DaemonShutdownReceipt::coordinator_failed(
@@ -232,12 +255,9 @@ where
             )),
         },
         () = tokio::time::sleep_until(receipt_deadline) => {
-            lifecycle.abort_shutdown_coordinator().await;
-            let receipt = Arc::new(DaemonShutdownReceipt::coordinator_timed_out(
+            Arc::new(DaemonShutdownReceipt::coordinator_timed_out(
                 shutdown_deadline,
-            ));
-            lifecycle.time_out_in_flight_shutdown(Arc::clone(&receipt));
-            receipt
+            ))
         }
     };
     let _ = tokio::time::timeout_at(
@@ -768,8 +788,8 @@ mod tests {
         assert!(!retry.is_retryable());
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn coordinator_receipt_wait_is_bounded_after_prepare_panics() {
+    #[tokio::test]
+    async fn prepare_panic_becomes_typed_coordinator_failure() {
         struct PanickingPrepare;
 
         impl Future for PanickingPrepare {
@@ -786,21 +806,143 @@ mod tests {
         let lifecycle = DaemonLifecycle::default();
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
         let shutdown_lifecycle = lifecycle.clone();
-        let shutdown = tokio::spawn(async move {
+        let receipt = tokio::spawn(async move {
             coordinate_daemon_shutdown(&shutdown_lifecycle, deadline, PanickingPrepare).await
-        });
-        tokio::task::yield_now().await;
-        tokio::time::advance(tokio::time::Duration::from_millis(1_100)).await;
-        let receipt = shutdown.await.expect("bounded coordinator receipt");
+        })
+        .await
+        .expect("typed coordinator receipt");
 
-        assert_eq!(receipt.in_flight, ShutdownStatus::TimedOut);
-        assert_eq!(receipt.clients, ShutdownStatus::TimedOut);
+        assert!(matches!(
+            &receipt.in_flight,
+            ShutdownStatus::Failed(error)
+                if error.contains("daemon shutdown runner failed")
+                    && error.contains("shutdown prepare panic probe")
+        ));
+        assert_eq!(receipt.clients, receipt.in_flight);
         assert!(matches!(
             receipt.background.owners.as_slice(),
             [owner]
                 if owner.name == "shutdown_coordinator"
-                    && owner.status == ShutdownStatus::TimedOut
+                    && owner.status == receipt.in_flight
         ));
-        assert_eq!(receipt.project_servers.status(), ShutdownStatus::TimedOut);
+        assert!(matches!(
+            receipt.project_servers.status(),
+            ShutdownStatus::Failed(error)
+                if error.contains("shutdown_coordinator")
+                    && error.contains("shutdown prepare panic probe")
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn timed_out_blocking_runner_stays_owned_until_it_exits() {
+        struct BlockingProjectServers {
+            entered: Option<tokio::sync::oneshot::Sender<()>>,
+            release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        }
+
+        impl Future for BlockingProjectServers {
+            type Output = ShutdownTaskReceipt;
+
+            fn poll(
+                mut self: Pin<&mut Self>,
+                _context: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                if let Some(entered) = self.entered.take() {
+                    let _ = entered.send(());
+                }
+                let (released, changed) = &*self.release;
+                let mut released = released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*released {
+                    released = changed
+                        .wait(released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                std::task::Poll::Ready(ShutdownTaskReceipt::default())
+            }
+        }
+
+        fn release_runner(release: &Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>) {
+            let (released, changed) = &**release;
+            *released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            changed.notify_all();
+        }
+
+        let lifecycle = DaemonLifecycle::default();
+        let prepares = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let first_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+        let first_lifecycle = lifecycle.clone();
+        let first_prepares = Arc::clone(&prepares);
+        let first_release = Arc::clone(&release);
+        let mut first = tokio::spawn(async move {
+            coordinate_daemon_shutdown(&first_lifecycle, first_deadline, async move {
+                first_prepares.fetch_add(1, Ordering::AcqRel);
+                DaemonShutdownPlan::new(
+                    JoinSet::new(),
+                    Vec::new(),
+                    BlockingProjectServers {
+                        entered: Some(entered_tx),
+                        release: first_release,
+                    },
+                )
+            })
+            .await
+        });
+        entered_rx.await.expect("shutdown runner entered");
+
+        let first_receipt =
+            match tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut first).await {
+                Ok(joined) => joined.expect("first shutdown coordinator"),
+                Err(_) => {
+                    release_runner(&release);
+                    let _ = first.await;
+                    panic!("timed-out shutdown did not publish before runner release");
+                }
+            };
+        assert!(first_receipt.is_retryable());
+        assert_eq!(first_receipt.in_flight, ShutdownStatus::TimedOut);
+
+        let second_prepares = Arc::clone(&prepares);
+        let second_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(100);
+        let second = coordinate_daemon_shutdown(&lifecycle, second_deadline, async move {
+            second_prepares.fetch_add(1, Ordering::AcqRel);
+            DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), async {
+                ShutdownTaskReceipt::default()
+            })
+        })
+        .await;
+        assert!(second.is_retryable());
+        assert_eq!(second.in_flight, ShutdownStatus::TimedOut);
+        assert_eq!(prepares.load(Ordering::Acquire), 1);
+
+        release_runner(&release);
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(2),
+            lifecycle.wait_for_finished_shutdown_coordinator(),
+        )
+        .await
+        .expect("timed-out runner ownership released");
+        lifecycle.join_finished_shutdown_coordinator().await;
+
+        let retry_prepares = Arc::clone(&prepares);
+        let retry = coordinate_daemon_shutdown(
+            &lifecycle,
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(1),
+            async move {
+                retry_prepares.fetch_add(1, Ordering::AcqRel);
+                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), async {
+                    ShutdownTaskReceipt::default()
+                })
+            },
+        )
+        .await;
+
+        assert!(!retry.is_retryable());
+        assert_eq!(prepares.load(Ordering::Acquire), 2);
     }
 }
