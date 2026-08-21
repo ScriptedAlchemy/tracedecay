@@ -851,10 +851,20 @@ async fn hook_orchestrator_shutdown_fences_and_joins_pending_work() {
 
 #[tokio::test]
 async fn hook_orchestrator_shutdown_reports_a_failed_worker() {
-    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| async move {
-        panic!("hook worker failure probe");
-    })
-    .unwrap();
+    struct PanickingWork;
+
+    impl std::future::Future for PanickingWork {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            panic!("hook worker failure probe");
+        }
+    }
+
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| PanickingWork).unwrap();
     let request = HookOrchestrationRequestV1::from_envelope(
         hook_envelope(HookEventV2::SavedEdit {
             file_id: [7; 16],
