@@ -130,14 +130,6 @@ pub(crate) async fn handle_host_bundle_component_command(
                 &lifecycle_root,
             )?;
         } else {
-            require_adoption_confirmation(
-                agent_id,
-                operation,
-                &component_set,
-                &options,
-                &home,
-                &lifecycle_root,
-            )?;
             apply_canonical_component_set(
                 agent_id,
                 operation,
@@ -164,37 +156,26 @@ pub(crate) async fn handle_host_bundle_component_command(
     Ok(())
 }
 
-/// Refuse an explicit component mutation that would claim a file no receipt
-/// records unless the operator confirmed adoption specifically.
+/// Refuse a mutation that would claim a file no receipt records unless the
+/// operator confirmed adoption specifically.
 ///
 /// `--yes` confirms the plan the preview showed; taking ownership of somebody
 /// else's bytes is a separate decision, so it needs its own `--adopt`. This is
 /// a confirmation gate only: the planner's adoption boundary is unchanged, a
 /// file another owner claims is still refused with a typed ownership conflict,
-/// and the automatic install/update/repair paths that migrate pre-receipt
-/// deployments do not route through this command.
+/// The caller supplies the transaction's authoritative preview so confirmation
+/// and execution cannot disagree about which paths are being adopted.
 fn require_adoption_confirmation(
     agent_id: &str,
-    operation: HostBundleCliOperation,
-    component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
+    preview: &tracedecay::agents::host_bundle_v2::HostComponentSetLifecyclePreviewV1,
     options: &crate::cli::HostBundleCliOptions,
-    home: &Path,
     lifecycle_root: &Path,
+    host: tracedecay::agents::host_bundle_v2::HostKindV1,
 ) -> tracedecay::errors::Result<()> {
     if options.adopt {
         return Ok(());
     }
-    let preview = preview_canonical_component_set(
-        agent_id,
-        operation,
-        component_set,
-        options,
-        home,
-        lifecycle_root,
-        None,
-    )?;
-    let adopted =
-        adopted_relative_paths(&preview, lifecycle_root, component_set.component_set.host);
+    let adopted = adopted_relative_paths(preview, lifecycle_root, host);
     if adopted.is_empty() {
         return Ok(());
     }
@@ -579,7 +560,8 @@ fn artifact_disposition(
     use tracedecay::agents::host_bundle_v2::HostArtifactActionV1 as Action;
 
     match action {
-        Action::Noop => "unchanged",
+        Action::Noop if receipt_owned.contains(relative_path) => "unchanged",
+        Action::Noop => "adopt",
         Action::WriteNew => "write-new",
         Action::BackupThenRemove => "backup-then-remove",
         Action::BackupThenReplace if receipt_owned.contains(relative_path) => "backup-then-replace",
@@ -599,7 +581,7 @@ fn adopted_relative_paths(
     for plan in &preview.component_plans {
         let owned = receipt_owned_paths(lifecycle_root, host, plan.component);
         for mutation in &plan.mutations {
-            if mutation.action == Action::BackupThenReplace
+            if matches!(mutation.action, Action::BackupThenReplace | Action::Noop)
                 && !owned.contains(&mutation.relative_path)
             {
                 adopted.push(mutation.relative_path.clone());
@@ -796,6 +778,13 @@ fn apply_canonical_component_set(
             &mut registration,
         )
         .map_err(|error| host_bundle_error_for_agent(agent_id, error))?;
+    require_adoption_confirmation(
+        agent_id,
+        &preview,
+        options,
+        lifecycle_root,
+        component_set.component_set.host,
+    )?;
     // A full default install is otherwise treated as confirmed. A competing
     // third-party claim is exactly the ambiguity that must not be resolved on
     // the operator's behalf, so it demands an explicit `--yes`.
@@ -831,6 +820,12 @@ fn apply_canonical_component_set(
         receipt.component_receipts.len(),
         hex::encode(receipt.operation_id)
     );
+    if agent_id == "cursor"
+        && request.lifecycle.operation
+            != tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall
+    {
+        tracedecay::agents::cursor::sweep_retired_cursor_plugin_artifacts(home)?;
+    }
     // Hook trust is the one Codex activation step that stays host-owned, so a
     // successful (re)install finishes with the exact remaining action.
     if agent_id == "codex"
@@ -851,6 +846,7 @@ fn apply_default_canonical_component_set(
     operation: HostBundleCliOperation,
     home: &Path,
     dashboard: bool,
+    adopt: bool,
 ) -> tracedecay::errors::Result<()> {
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -876,7 +872,7 @@ fn apply_default_canonical_component_set(
             component: None,
             dry_run: false,
             yes: true,
-            adopt: false,
+            adopt,
         },
         home,
         &lifecycle_root,
@@ -2663,6 +2659,7 @@ pub(crate) async fn handle_install_command(
     local: bool,
     no_dashboard: bool,
     automation: Option<CodexAutomationInstall>,
+    adopt: bool,
 ) -> tracedecay::errors::Result<()> {
     validate_codex_automation_flags(agent.as_deref(), automation)?;
     if local {
@@ -2704,6 +2701,7 @@ pub(crate) async fn handle_install_command(
             HostBundleCliOperation::Install,
             &home,
             !no_dashboard,
+            adopt,
         )?;
         refreshed_ids.insert(id.clone());
         if let Some(options) = automation.filter(|_| id == "codex") {
@@ -2733,6 +2731,7 @@ pub(crate) async fn handle_install_command(
                 HostBundleCliOperation::Uninstall,
                 &home,
                 true,
+                false,
             )?;
             removed_names.push(ag.name().to_string());
             user_cfg.installed_agents.retain(|a| a != id);
@@ -2753,6 +2752,7 @@ pub(crate) async fn handle_install_command(
                 HostBundleCliOperation::Install,
                 &home,
                 !no_dashboard,
+                adopt,
             )?;
             refreshed_ids.insert(id.clone());
             installed_names.push(ag.name().to_string());
@@ -2805,7 +2805,7 @@ pub(crate) async fn handle_install_command(
     Ok(())
 }
 
-pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()> {
+pub(crate) async fn handle_reinstall_command(adopt: bool) -> tracedecay::errors::Result<()> {
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
@@ -2840,7 +2840,14 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
             agents.len(),
             agents.join(", ")
         );
-        let results = reinstall_agent_integrations(&agents, &home, &tracedecay_bin).await;
+        let results = reinstall_agent_integrations_with_dashboard_policies(
+            &agents,
+            &home,
+            &tracedecay_bin,
+            &user_cfg.agent_dashboard_enabled,
+            adopt,
+        )
+        .await;
         // Reporting lives in `partition_reinstall_results`, which every
         // reinstall pass shares. Keep the reason with the name — a bare id list
         // left "failed for: claude, cursor, hermes, kimi" undiagnosable.
@@ -2862,7 +2869,7 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
     Ok(())
 }
 
-pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result<()> {
+pub(crate) async fn handle_update_plugin_command(adopt: bool) -> tracedecay::errors::Result<()> {
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
@@ -2891,6 +2898,7 @@ pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result
             HostBundleCliOperation::Update,
             &home,
             dashboard,
+            adopt,
         )?;
     }
     Ok(())
@@ -3119,6 +3127,7 @@ async fn reinstall_agent_integrations_with_persisted_dashboard_policies(
         home,
         tracedecay_bin,
         &user_config.agent_dashboard_enabled,
+        false,
     )
     .await
 }
@@ -3128,6 +3137,7 @@ async fn reinstall_agent_integrations_with_dashboard_policies(
     home: &Path,
     tracedecay_bin: &str,
     dashboard_policies: &std::collections::BTreeMap<String, bool>,
+    adopt: bool,
 ) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
     let mut results = Vec::new();
     for id in agent_ids {
@@ -3158,6 +3168,7 @@ async fn reinstall_agent_integrations_with_dashboard_policies(
             HostBundleCliOperation::Repair,
             home,
             dashboard,
+            adopt,
         ) {
             Ok(()) => {
                 results.push((id.clone(), Ok(AgentReinstallOutcome::Installed)));
@@ -3183,7 +3194,13 @@ pub(crate) async fn handle_uninstall_command(
     let mut user_cfg = load_host_lifecycle_user_config()?;
 
     if let Some(id) = agent {
-        apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home, true)?;
+        apply_default_canonical_component_set(
+            &id,
+            HostBundleCliOperation::Uninstall,
+            &home,
+            true,
+            false,
+        )?;
         user_cfg.installed_agents.retain(|a| a != &id);
         user_cfg.agent_dashboard_enabled.remove(&id);
         user_cfg
@@ -3198,6 +3215,7 @@ pub(crate) async fn handle_uninstall_command(
                 HostBundleCliOperation::Uninstall,
                 &home,
                 true,
+                false,
             )?;
         }
         user_cfg.installed_agents.clear();
@@ -3306,6 +3324,10 @@ mod tests {
             super::artifact_disposition(&Action::Noop, &owned, "plugins/tracedecay.json"),
             "unchanged"
         );
+        assert_eq!(
+            super::artifact_disposition(&Action::Noop, &owned, "plugins/unowned.json"),
+            "adopt"
+        );
     }
 
     /// An explicit component mutation that would claim an unrecorded file is
@@ -3337,13 +3359,22 @@ mod tests {
             adopt: false,
         };
 
-        let error = super::require_adoption_confirmation(
+        let preview = super::preview_canonical_component_set(
             "cursor",
             HostBundleCliOperation::Repair,
             &component_set,
             &options,
             home.path(),
             lifecycle.path(),
+            None,
+        )
+        .unwrap();
+        let error = super::require_adoption_confirmation(
+            "cursor",
+            &preview,
+            &options,
+            lifecycle.path(),
+            component_set.component_set.host,
         )
         .unwrap_err()
         .to_string();
@@ -3359,11 +3390,10 @@ mod tests {
         };
         super::require_adoption_confirmation(
             "cursor",
-            HostBundleCliOperation::Repair,
-            &component_set,
+            &preview,
             &confirmed,
-            home.path(),
             lifecycle.path(),
+            component_set.component_set.host,
         )
         .unwrap();
         assert_eq!(
@@ -3371,6 +3401,131 @@ mod tests {
             b"pre-receipt",
             "the confirmation gate is read-only"
         );
+    }
+
+    #[test]
+    fn component_apply_refuses_receiptless_bytes_without_adoption_authority() {
+        let _profile = pinned_host_profile();
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let component_set = canonical_host_component_set_with_tracedecay_bin(
+            "cursor",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+            KIRO_FIXTURE_BIN,
+        )
+        .unwrap()
+        .unwrap();
+        let relative =
+            &component_set.component_set.components[0].manifest.artifacts[0].relative_path;
+        let deployed = home.path().join(relative);
+        std::fs::create_dir_all(deployed.parent().unwrap()).unwrap();
+        std::fs::write(&deployed, b"operator-owned").unwrap();
+
+        let error = super::apply_canonical_component_set(
+            "cursor",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &crate::cli::HostBundleCliOptions {
+                component: Some(crate::cli::HostBundleComponentArg::Core),
+                dry_run: false,
+                yes: true,
+                adopt: false,
+            },
+            home.path(),
+            lifecycle.path(),
+            &ComponentSetApplyContext::with_tracedecay_bin(KIRO_FIXTURE_BIN),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains(relative.as_str()), "{error}");
+        assert!(error.contains("--adopt"), "{error}");
+        assert_eq!(std::fs::read(deployed).unwrap(), b"operator-owned");
+    }
+
+    #[test]
+    fn default_component_apply_honors_explicit_adoption_authority() {
+        let _profile = pinned_host_profile();
+        let home = tempfile::tempdir().unwrap();
+        let component_set = canonical_host_component_set("cursor", None, 0)
+            .unwrap()
+            .unwrap();
+        let relative =
+            &component_set.component_set.components[0].manifest.artifacts[0].relative_path;
+        let deployed = home.path().join(relative);
+        std::fs::create_dir_all(deployed.parent().unwrap()).unwrap();
+        std::fs::write(&deployed, b"pre-receipt").unwrap();
+
+        let error = apply_default_canonical_component_set(
+            "cursor",
+            HostBundleCliOperation::Install,
+            home.path(),
+            true,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--adopt"), "{error}");
+        assert_eq!(std::fs::read(&deployed).unwrap(), b"pre-receipt");
+
+        apply_default_canonical_component_set(
+            "cursor",
+            HostBundleCliOperation::Install,
+            home.path(),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_ne!(std::fs::read(deployed).unwrap(), b"pre-receipt");
+    }
+
+    #[test]
+    fn cursor_adoption_sweeps_retired_artifacts_and_preserves_user_files() {
+        let _profile = pinned_host_profile();
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let component_set =
+            canonical_host_component_set_with_tracedecay_bin("cursor", None, 0, KIRO_FIXTURE_BIN)
+                .unwrap()
+                .unwrap();
+        let relative =
+            &component_set.component_set.components[0].manifest.artifacts[0].relative_path;
+        let deployed = home.path().join(relative);
+        std::fs::create_dir_all(deployed.parent().unwrap()).unwrap();
+        std::fs::write(&deployed, b"pre-receipt").unwrap();
+        let plugin_dir = tracedecay::agents::cursor::cursor_plugin_install_dir(home.path());
+        let retired = plugin_dir.join("rules/tracedecay-memory.mdc");
+        std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
+        std::fs::write(
+            &retired,
+            "<!-- generated by tracedecay from the project fact store; do not edit by hand -->",
+        )
+        .unwrap();
+        let user_file = plugin_dir.join("operator-notes.md");
+        std::fs::write(&user_file, b"keep me").unwrap();
+
+        super::apply_canonical_component_set(
+            "cursor",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &crate::cli::HostBundleCliOptions {
+                component: None,
+                dry_run: false,
+                yes: true,
+                adopt: true,
+            },
+            home.path(),
+            lifecycle.path(),
+            &ComponentSetApplyContext::with_tracedecay_bin(KIRO_FIXTURE_BIN),
+        )
+        .unwrap();
+
+        assert!(
+            !retired.exists(),
+            "a known retired Cursor artifact must not survive adoption"
+        );
+        assert_eq!(std::fs::read(user_file).unwrap(), b"keep me");
     }
 
     #[test]
@@ -4186,6 +4341,14 @@ esac
         use tracedecay::agents::host_bundle_v2::HostBundleError;
 
         let _profile = pinned_host_profile();
+        #[cfg(unix)]
+        let kiro_cli_dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
+        #[cfg(unix)]
+        write_fake_kiro_cli(&kiro_cli_path);
+        #[cfg(unix)]
+        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set =
@@ -4193,8 +4356,28 @@ esac
                 .unwrap()
                 .unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
+        let install_options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+            adopt: false,
+        };
+        // A receipt-backed install claims the artifact path first: only a
+        // receipt makes a later foreign edit a standing conflict rather than
+        // an adoptable pre-receipt deployment.
+        apply_canonical_component_set(
+            "kiro",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &install_options,
+            home.path(),
+            lifecycle.path(),
+            &ComponentSetApplyContext::with_tracedecay_bin(KIRO_FIXTURE_BIN),
+        )
+        .expect("the packaged Kiro set must install cleanly");
+
         let request =
-            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+            component_set_request(&component_set, HostBundleCliOperation::Update, true).unwrap();
         let mut writer =
             tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
                 home.path(),
@@ -4219,11 +4402,12 @@ esac
             )
             .unwrap();
 
-        // Somebody else takes the artifact path between preview and apply.
+        // Somebody else rewrites the receipt-owned bytes between preview and
+        // apply. The bytes now match neither the catalog nor the receipt, so
+        // no retry can ever clear this.
         let artifact_path = home
             .path()
             .join(&component_set.component_set.components[0].manifest.artifacts[0].relative_path);
-        std::fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
         std::fs::write(&artifact_path, b"{\"owner\":\"somebody else\"}").unwrap();
 
         let error = transaction
@@ -4234,7 +4418,7 @@ esac
                 &component_set,
                 &mut registration,
             )
-            .expect_err("an unowned file on the artifact path must refuse the apply");
+            .expect_err("a foreign edit to a receipt-owned file must refuse the apply");
         assert!(
             !matches!(error, HostBundleError::StalePreview(_)),
             "a standing refusal must not be laundered into a retryable staleness report"
@@ -5564,12 +5748,14 @@ esac
             HostBundleCliOperation::Install,
             home.path(),
             false,
+            false,
         )
         .unwrap();
         apply_default_canonical_component_set(
             "hermes",
             HostBundleCliOperation::Update,
             home.path(),
+            false,
             false,
         )
         .unwrap();
@@ -5583,6 +5769,7 @@ esac
             home.path(),
             &tracedecay_bin,
             &policies,
+            false,
         )
         .await;
         assert!(matches!(
