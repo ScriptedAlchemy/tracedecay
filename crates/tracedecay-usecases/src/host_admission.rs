@@ -1210,14 +1210,11 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
             false,
             Some("privacy_boundary_failed"),
         ),
-        ObservationApplicationError::Store(_)
-        | ObservationApplicationError::PersistedObservationUnavailable => {
-            HostAdmissionOutcome::new(
-                HostAdmissionStatus::Degraded,
-                false,
-                Some("observation_commit_failed"),
-            )
-        }
+        ObservationApplicationError::Store(_) => HostAdmissionOutcome::new(
+            HostAdmissionStatus::Degraded,
+            false,
+            Some("observation_commit_failed"),
+        ),
     }
 }
 

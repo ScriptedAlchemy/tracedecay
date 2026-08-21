@@ -94,18 +94,6 @@ fn claude_observation_application_store_errors_keep_bounded_context() {
 }
 
 #[test]
-fn unavailable_persisted_observation_is_a_bounded_hook_error() {
-    let error = ClaudeObservationIngestError::Application(
-        ObservationApplicationError::PersistedObservationUnavailable,
-    );
-    let mapped = map_claude_observation_ingest_error(&error);
-    let rendered = mapped.to_string();
-
-    assert!(rendered.contains("Claude observation application failed"));
-    assert!(!rendered.contains("persisted Claude observation"));
-}
-
-#[test]
 fn claude_observation_projection_errors_keep_bounded_context_without_source_detail() {
     let error = ClaudeObservationIngestError::Projection(ProjectionStoreError::Storage {
         operation: "private projection operation",
