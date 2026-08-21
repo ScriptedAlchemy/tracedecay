@@ -1033,6 +1033,8 @@ impl StoreAdministration {
     pub(super) async fn shutdown_retirement_reapers(&self) {
         loop {
             let changed = self.retirement_reapers.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             let (pending, reapers) = {
                 let mut state = self.retirement_reapers.state();
                 state.accepting = false;
@@ -1068,6 +1070,12 @@ impl StoreAdministration {
                 termination.wait().await;
             }
         }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn retirement_reaper_counts(&self) -> (usize, usize) {
+        let state = self.retirement_reapers.state();
+        (state.pending.values().copied().sum(), state.reapers.len())
     }
 
     #[cfg(unix)]

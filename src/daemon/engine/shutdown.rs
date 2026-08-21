@@ -154,11 +154,36 @@ impl DaemonEngine {
                     },
                 ),
             ],
-            vec![ShutdownOwner::new(
+            vec![ShutdownOwner::with_deadline(
                 "retirement_reapers",
                 || {},
-                async move {
+                move |deadline| async move {
+                    let (pending, reapers) = reaper_join.retirement_reaper_counts();
+                    log_daemon_event(
+                        "daemon_shutdown",
+                        &[
+                            ("outcome", "retirement_reapers_join_start".to_owned()),
+                            ("pending", pending.to_string()),
+                            ("reapers", reapers.to_string()),
+                            (
+                                "deadline_remaining_ms",
+                                deadline
+                                    .saturating_duration_since(tokio::time::Instant::now())
+                                    .as_millis()
+                                    .to_string(),
+                            ),
+                        ],
+                    );
                     reaper_join.shutdown_retirement_reapers().await;
+                    let (pending, reapers) = reaper_join.retirement_reaper_counts();
+                    log_daemon_event(
+                        "daemon_shutdown",
+                        &[
+                            ("outcome", "retirement_reapers_joined".to_owned()),
+                            ("pending", pending.to_string()),
+                            ("reapers", reapers.to_string()),
+                        ],
+                    );
                 },
             )],
         ]

@@ -120,6 +120,48 @@ async fn automation_shutdown_timeout_keeps_unfinished_task_tracked() {
 }
 
 #[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retirement_reaper_shutdown_observes_a_reservation_release_after_snapshot() {
+    let engine = DaemonEngine::default();
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profiles/reaper-release-race"),
+            global_db_path: PathBuf::from("/profiles/reaper-release-race/global.db"),
+            project_id: Some("reaper-release-race".to_owned()),
+            store_root: PathBuf::from("/stores/reaper-release-race"),
+            graph_db_path: PathBuf::from("/stores/reaper-release-race/graph.db"),
+        },
+        project_root: PathBuf::from("/projects/reaper-release-race"),
+        scope_prefix: None,
+    };
+    let reservation = engine
+        .store_administration
+        .reserve_retirement_reaper(&key)
+        .expect("reserve retirement handoff");
+    let previous_pass = engine
+        .store_administration
+        .retirement_reaper_shutdown_passes_for_test();
+    let shutdown_administration = engine.store_administration.clone();
+    let shutdown = tokio::spawn(async move {
+        shutdown_administration.shutdown_retirement_reapers().await;
+    });
+    engine
+        .store_administration
+        .wait_for_retirement_reaper_shutdown_pass_for_test(previous_pass)
+        .await;
+
+    drop(reservation);
+    tokio::time::timeout(std::time::Duration::from_secs(1), shutdown)
+        .await
+        .expect("reservation release must wake terminal reaper shutdown")
+        .expect("retirement reaper shutdown task");
+    assert_eq!(
+        engine.store_administration.retirement_reaper_counts(),
+        (0, 0)
+    );
+}
+
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
     use crate::dashboard::AutomationSchedulerReconcileOutcome;
