@@ -47,7 +47,9 @@ pub fn lexical_projection_build_deadline_micros(request_deadline_micros: Option<
 }
 
 fn map_postings_build_error(error: String) -> RetrievalPortError {
-    if error == postings::LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED {
+    if error == postings::LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED
+        || error.starts_with(postings::LEXICAL_PROJECTION_NGRAM_MEMORY_BUDGET_EXCEEDED)
+    {
         RetrievalPortError::BudgetExceeded
     } else {
         RetrievalPortError::Contract(error)
@@ -1636,5 +1638,18 @@ mod deadline_budget_tests {
             matches!(error, RetrievalPortError::BudgetExceeded),
             "Some(0) is a set deadline, not the crate fallback: {error:?}"
         );
+    }
+
+    #[test]
+    fn ngram_resident_budget_refusal_is_typed_budget_exceeded() {
+        let error = format!(
+            "{}: maximum 0 bytes",
+            postings::LEXICAL_PROJECTION_NGRAM_MEMORY_BUDGET_EXCEEDED
+        );
+
+        assert!(matches!(
+            map_postings_build_error(error),
+            RetrievalPortError::BudgetExceeded
+        ));
     }
 }

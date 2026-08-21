@@ -1,18 +1,76 @@
-use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use fst::{IntoStreamer, Set, Streamer, automaton::Levenshtein};
 use roaring::RoaringBitmap;
 
-const NGRAM_KEY_ESTIMATED_BYTES: usize = 64;
-const NGRAM_DOCUMENT_POSTING_ESTIMATED_BYTES: usize = 8;
+const NGRAM_PAGE_BACKING_BYTES: usize = 1024 * 1024;
+const NGRAM_PAGE_ENTRY_CAPACITY: usize = NGRAM_PAGE_BACKING_BYTES / std::mem::size_of::<u64>();
+const NGRAM_MAXIMUM_PAGE_COUNT: usize = 512;
 pub(super) const LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED: &str =
     "lexical projection exceeded its build deadline";
+pub(super) const LEXICAL_PROJECTION_NGRAM_MEMORY_BUDGET_EXCEEDED: &str =
+    "lexical projection n-gram posting memory budget exceeded";
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub(super) struct ByteNgramPostings {
-    postings: BTreeMap<u32, RoaringBitmap>,
+    pages: Vec<PackedNgramPage>,
+    entry_count: usize,
+}
+
+#[derive(Debug)]
+struct PackedNgramPage {
+    entries: Vec<u64>,
+    // Full pages are immutable sorted runs. Only the single trailing page is
+    // scanned; this avoids a second O(generation) merge allocation at finish.
+    sorted: bool,
+}
+
+impl PackedNgramPage {
+    fn try_new() -> Result<Self, String> {
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(NGRAM_PAGE_ENTRY_CAPACITY)
+            .map_err(|error| {
+                format!("lexical projection could not allocate a bounded n-gram page: {error}")
+            })?;
+        debug_assert_eq!(entries.capacity(), NGRAM_PAGE_ENTRY_CAPACITY);
+        Ok(Self {
+            entries,
+            sorted: false,
+        })
+    }
+
+    fn push(&mut self, entry: u64) {
+        debug_assert!(self.entries.len() < NGRAM_PAGE_ENTRY_CAPACITY);
+        self.entries.push(entry);
+        if self.entries.len() == NGRAM_PAGE_ENTRY_CAPACITY {
+            self.entries.sort_unstable();
+            self.sorted = true;
+        }
+    }
+
+    fn add_documents(&self, ngram: u32, documents: &mut RoaringBitmap) {
+        if self.sorted {
+            let lower = self
+                .entries
+                .partition_point(|entry| unpack_ngram(*entry) < ngram);
+            let upper = self.entries[lower..]
+                .partition_point(|entry| unpack_ngram(*entry) == ngram)
+                .saturating_add(lower);
+            for entry in &self.entries[lower..upper] {
+                documents.insert(unpack_document(*entry));
+            }
+        } else {
+            for entry in self
+                .entries
+                .iter()
+                .filter(|entry| unpack_ngram(**entry) == ngram)
+            {
+                documents.insert(unpack_document(*entry));
+            }
+        }
+    }
 }
 
 impl ByteNgramPostings {
@@ -22,27 +80,90 @@ impl ByteNgramPostings {
         bytes: &[u8],
         budget: &mut ByteNgramBudget,
     ) -> Result<(), String> {
+        let scratch_entries = (1..=bytes.len().min(3)).try_fold(0usize, |entries, width| {
+            entries
+                .checked_add(bytes.len().saturating_sub(width).saturating_add(1))
+                .ok_or_else(|| budget.exceeded())
+        })?;
+        let scratch_bytes = scratch_entries
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| budget.exceeded())?;
+        budget.ensure_peak(scratch_bytes, 0)?;
+
+        let mut unique = Vec::new();
+        unique.try_reserve_exact(scratch_entries).map_err(|error| {
+            format!("lexical projection could not allocate bounded n-gram scratch: {error}")
+        })?;
+        debug_assert_eq!(unique.capacity(), scratch_entries);
         for width in 1..=bytes.len().min(3) {
-            let unique = bytes
-                .windows(width)
-                .map(pack_byte_ngram)
-                .collect::<BTreeSet<_>>();
-            for ngram in unique {
-                match self.postings.entry(ngram) {
-                    Entry::Vacant(entry) => {
-                        budget.charge(NGRAM_KEY_ESTIMATED_BYTES)?;
-                        budget.charge(NGRAM_DOCUMENT_POSTING_ESTIMATED_BYTES)?;
-                        let mut posting = RoaringBitmap::new();
-                        posting.insert(document);
-                        entry.insert(posting);
-                    }
-                    Entry::Occupied(mut entry) => {
-                        if entry.get_mut().insert(document) {
-                            budget.charge(NGRAM_DOCUMENT_POSTING_ESTIMATED_BYTES)?;
-                        }
-                    }
+            unique.extend(bytes.windows(width).map(pack_byte_ngram));
+        }
+        unique.sort_unstable();
+        unique.dedup();
+        if unique.is_empty() {
+            return Ok(());
+        }
+
+        let available_entries = self
+            .pages
+            .len()
+            .saturating_mul(NGRAM_PAGE_ENTRY_CAPACITY)
+            .saturating_sub(self.entry_count);
+        let required_pages = unique
+            .len()
+            .saturating_sub(available_entries)
+            .div_ceil(NGRAM_PAGE_ENTRY_CAPACITY);
+        let descriptor_capacity = if self.pages.capacity() == 0 {
+            budget.page_descriptor_capacity()
+        } else {
+            0
+        };
+        if self.pages.len().saturating_add(required_pages)
+            > self.pages.capacity().max(descriptor_capacity)
+        {
+            return Err(budget.exceeded());
+        }
+        let descriptor_bytes = descriptor_capacity
+            .checked_mul(std::mem::size_of::<PackedNgramPage>())
+            .ok_or_else(|| budget.exceeded())?;
+        let page_bytes = required_pages
+            .checked_mul(NGRAM_PAGE_BACKING_BYTES)
+            .ok_or_else(|| budget.exceeded())?;
+        let retained_bytes = descriptor_bytes
+            .checked_add(page_bytes)
+            .ok_or_else(|| budget.exceeded())?;
+        budget.reserve_retained_at_peak(scratch_bytes, retained_bytes)?;
+
+        if descriptor_capacity > 0
+            && let Err(error) = self.pages.try_reserve_exact(descriptor_capacity)
+        {
+            budget.release_retained(retained_bytes);
+            return Err(format!(
+                "lexical projection could not allocate bounded n-gram page metadata: {error}"
+            ));
+        }
+        debug_assert!(descriptor_capacity == 0 || self.pages.capacity() == descriptor_capacity);
+        for allocated in 0..required_pages {
+            match PackedNgramPage::try_new() {
+                Ok(page) => self.pages.push(page),
+                Err(error) => {
+                    let unallocated_pages = required_pages.saturating_sub(allocated);
+                    budget.release_retained(
+                        unallocated_pages.saturating_mul(NGRAM_PAGE_BACKING_BYTES),
+                    );
+                    return Err(error);
                 }
             }
+        }
+
+        for ngram in unique {
+            let page_index = self.entry_count / NGRAM_PAGE_ENTRY_CAPACITY;
+            let page = self
+                .pages
+                .get_mut(page_index)
+                .ok_or_else(|| "lexical n-gram page reservation was incomplete".to_owned())?;
+            page.push(pack_posting(ngram, document));
+            self.entry_count = self.entry_count.saturating_add(1);
         }
         Ok(())
     }
@@ -78,14 +199,9 @@ impl ByteNgramPostings {
         let Some(first) = ngrams.next() else {
             return RoaringBitmap::new();
         };
-        let Some(mut documents) = self.postings.get(&first).cloned() else {
-            return RoaringBitmap::new();
-        };
+        let mut documents = self.documents_for_ngram(first);
         for ngram in ngrams {
-            let Some(posting) = self.postings.get(&ngram) else {
-                return RoaringBitmap::new();
-            };
-            documents &= posting;
+            documents &= self.documents_for_ngram(ngram);
             if documents.is_empty() {
                 break;
             }
@@ -94,13 +210,31 @@ impl ByteNgramPostings {
     }
 
     pub(super) fn retained_owned_bytes(&self) -> usize {
-        self.postings.iter().fold(0, |bytes, (_, documents)| {
-            bytes
-                .saturating_add(std::mem::size_of::<u32>())
-                .saturating_add(
-                    (documents.len() as usize).saturating_mul(std::mem::size_of::<u32>()),
+        self.pages.iter().fold(
+            self.pages
+                .capacity()
+                .saturating_mul(std::mem::size_of::<PackedNgramPage>()),
+            |bytes, page| {
+                bytes.saturating_add(
+                    page.entries
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<u64>()),
                 )
-        })
+            },
+        )
+    }
+
+    fn documents_for_ngram(&self, ngram: u32) -> RoaringBitmap {
+        let mut documents = RoaringBitmap::new();
+        for page in &self.pages {
+            page.add_documents(ngram, &mut documents);
+        }
+        documents
+    }
+
+    #[cfg(test)]
+    fn page_count(&self) -> usize {
+        self.pages.len()
     }
 }
 
@@ -118,22 +252,51 @@ impl ByteNgramBudget {
         }
     }
 
-    fn charge(&mut self, bytes: usize) -> Result<(), String> {
+    fn ensure_peak(&self, temporary_bytes: usize, retained_bytes: usize) -> Result<(), String> {
         let consumed = self
             .consumed_bytes
-            .checked_add(bytes)
+            .checked_add(temporary_bytes)
+            .and_then(|bytes| bytes.checked_add(retained_bytes))
             .ok_or_else(|| self.exceeded())?;
         if consumed > self.maximum_bytes {
             return Err(self.exceeded());
         }
-        self.consumed_bytes = consumed;
         Ok(())
+    }
+
+    fn reserve_retained_at_peak(
+        &mut self,
+        temporary_bytes: usize,
+        retained_bytes: usize,
+    ) -> Result<(), String> {
+        self.ensure_peak(temporary_bytes, retained_bytes)?;
+        self.consumed_bytes = self
+            .consumed_bytes
+            .checked_add(retained_bytes)
+            .ok_or_else(|| self.exceeded())?;
+        Ok(())
+    }
+
+    fn release_retained(&mut self, bytes: usize) {
+        self.consumed_bytes = self.consumed_bytes.saturating_sub(bytes);
+    }
+
+    fn page_descriptor_capacity(&self) -> usize {
+        self.maximum_bytes
+            .checked_div(NGRAM_PAGE_BACKING_BYTES)
+            .unwrap_or_default()
+            .clamp(1, NGRAM_MAXIMUM_PAGE_COUNT)
+    }
+
+    #[cfg(test)]
+    const fn consumed_bytes(&self) -> usize {
+        self.consumed_bytes
     }
 
     fn exceeded(&self) -> String {
         format!(
-            "lexical projection exceeds the {}-byte n-gram posting memory budget",
-            self.maximum_bytes
+            "{}: maximum {} bytes",
+            LEXICAL_PROJECTION_NGRAM_MEMORY_BUDGET_EXCEEDED, self.maximum_bytes
         )
     }
 }
@@ -146,6 +309,18 @@ fn pack_byte_ngram(bytes: &[u8]) -> u32 {
         .fold((bytes.len() as u32) << 24, |packed, (index, byte)| {
             packed | (u32::from(*byte) << (index * 8))
         })
+}
+
+fn pack_posting(ngram: u32, document: u32) -> u64 {
+    (u64::from(ngram) << 32) | u64::from(document)
+}
+
+fn unpack_ngram(posting: u64) -> u32 {
+    (posting >> 32) as u32
+}
+
+fn unpack_document(posting: u64) -> u32 {
+    posting as u32
 }
 
 #[derive(Clone, Debug)]
@@ -228,7 +403,7 @@ mod tests {
 
     #[test]
     fn ngram_postings_prune_without_false_negatives() {
-        let mut budget = ByteNgramBudget::new(1024 * 1024);
+        let mut budget = ByteNgramBudget::new(2 * 1024 * 1024);
         let postings = ByteNgramPostings::from_documents(
             [
                 b"alpha connection refused".as_slice(),
@@ -267,6 +442,53 @@ mod tests {
         let error = ByteNgramPostings::from_documents([b"abcdef".as_slice()], &mut budget, None)
             .expect_err("posting memory must be bounded");
         assert!(error.contains("n-gram posting memory budget"));
+    }
+
+    #[test]
+    fn ngram_postings_charge_flat_page_capacity_and_preserve_candidates() {
+        let documents = (0..70_000_u32)
+            .map(|document| {
+                [
+                    (document & 0xff) as u8,
+                    ((document >> 8) & 0xff) as u8,
+                    ((document >> 16) & 0xff) as u8,
+                ]
+            })
+            .collect::<Vec<_>>();
+        let mut budget = ByteNgramBudget::new(8 * 1024 * 1024);
+        let postings = ByteNgramPostings::from_documents(
+            documents.iter().map(|document| document.as_slice()),
+            &mut budget,
+            None,
+        )
+        .expect("flat pages fit the resident budget");
+
+        assert!(postings.page_count() > 1, "fixture must cross a page");
+        assert_eq!(postings.retained_owned_bytes(), budget.consumed_bytes());
+        for document in [0_u32, 65_535, 69_999] {
+            assert_eq!(
+                postings
+                    .candidate_documents(&documents[document as usize])
+                    .iter()
+                    .collect::<Vec<_>>(),
+                vec![document]
+            );
+        }
+    }
+
+    #[test]
+    fn ngram_postings_refuse_before_allocating_a_page_or_unique_scratch() {
+        let bytes = vec![b'a'; 256 * 1024];
+        let mut postings = ByteNgramPostings::default();
+        let mut budget = ByteNgramBudget::new(NGRAM_PAGE_BACKING_BYTES);
+
+        let error = postings
+            .insert_document(0, &bytes, &mut budget)
+            .expect_err("page plus document scratch must exceed the budget");
+
+        assert!(error.contains("n-gram posting memory budget"));
+        assert_eq!(postings.retained_owned_bytes(), 0);
+        assert_eq!(budget.consumed_bytes(), 0);
     }
 
     #[test]
