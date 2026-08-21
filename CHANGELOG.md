@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.26](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.25...v0.1.0-beta.26) (2026-08-21)
+
+
+### Bug Fixes
+
+* **daemon:** retain session sync tasks through shutdown ([04da6df](https://github.com/ScriptedAlchemy/tracedecay/commit/04da6dfc9015bcba31bba5741792f8b52cfc2c7e))
+* **observation:** accept bound Codex source revisions ([62ab4c0](https://github.com/ScriptedAlchemy/tracedecay/commit/62ab4c00378cdcdf9a2d0259a3da23a670dbd8f5))
+
 ## [0.1.0-beta.25](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.24...v0.1.0-beta.25) (2026-08-21)
 
 
