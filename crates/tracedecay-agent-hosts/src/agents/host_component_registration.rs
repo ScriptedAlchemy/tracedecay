@@ -947,18 +947,22 @@ impl CatalogHostComponentRegistrationAuthority {
         let current_registration_paths = self.registration_paths(component_set)?;
         // The inventory recorded at backup time is what the backup markers are
         // indexed by, so it -- not a fresh recomputation -- is the set to
-        // restore. Some inventories are derived from state the operation
-        // itself rewrites: Codex's `.tracedecay-managed-agents.json` is both a
-        // registration path and the record naming the previous bundle's
-        // exports, so a Core apply that retires a stale export shrinks the
-        // recomputed set. Require the recorded inventory to cover everything
-        // the registration surface is today, which rules out restoring a
-        // backup taken for a different target.
-        if current_registration_paths
+        // restore. A newer binary may legitimately add version-scoped paths to
+        // that recomputation while recovering an older journal. Admit those
+        // paths only while they are absent: there are no bytes to restore, and
+        // the new transaction will snapshot them after recovery. Any live,
+        // symlinked, or unreadable path outside the persisted inventory stays
+        // fail-closed as a different target.
+        for path in current_registration_paths
             .iter()
-            .any(|path| !persisted_paths.contains(path))
+            .filter(|path| !persisted_paths.contains(path))
         {
-            return Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget);
+            if !matches!(
+                fs::symlink_metadata(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            ) {
+                return Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget);
+            }
         }
         let registration_paths = persisted_paths.clone();
         let registration_directories = mutation_plan.directories.clone();
@@ -2008,6 +2012,96 @@ mod tests {
         assert_eq!(
             future_identity.validate("codex", home.path(), profile.path()),
             Err(HostBundleError::UnsupportedRecoveryFormat)
+        );
+    }
+
+    #[test]
+    fn rollback_accepts_absent_registration_paths_added_by_a_new_binary() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle_root = tempfile::tempdir().unwrap();
+        let component_set =
+            crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
+                HostKindV1::Codex,
+                0,
+            )
+            .expect("Codex has a compiled default set");
+        let authority = CatalogHostComponentRegistrationAuthority::new(
+            "codex",
+            home.path(),
+            lifecycle_root.path(),
+            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update,
+        )
+        .expect("catalog registration authority");
+        let operation_id = [19; 16];
+        let current_paths = authority
+            .registration_paths(&component_set.component_set)
+            .unwrap();
+        let current_cache = home
+            .path()
+            .join(".codex/plugins/cache/personal/tracedecay")
+            .join(crate::PRODUCT_VERSION);
+        let persisted_paths = current_paths
+            .iter()
+            .filter(|path| !path.starts_with(&current_cache))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            persisted_paths.len() < current_paths.len(),
+            "the fixture must omit the newer binary's version-scoped cache paths"
+        );
+
+        let backup_dir = authority.backup_dir(operation_id);
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let identity = RegistrationBackupIdentityV1::new(
+            authority.integration.id(),
+            home.path(),
+            lifecycle_root.path(),
+        )
+        .unwrap();
+        write_registration_backup(
+            &authority.identity_path(operation_id),
+            &serde_json::to_vec(&identity).unwrap(),
+        )
+        .unwrap();
+        let mutation_plan = RegistrationMutationPlanV1 {
+            schema_version: REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION,
+            integration_id: authority.integration.id().to_string(),
+            operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update,
+            paths: persisted_paths.clone(),
+            directories: Vec::new(),
+        };
+        write_registration_backup(
+            &authority.mutation_plan_path(operation_id),
+            &serde_json::to_vec(&mutation_plan).unwrap(),
+        )
+        .unwrap();
+        for (index, path) in persisted_paths.iter().enumerate() {
+            write_registration_backup(
+                &authority.registration_path_marker(operation_id, index),
+                &serde_json::to_vec(path).unwrap(),
+            )
+            .unwrap();
+            write_registration_backup(
+                &authority.missing_marker_path(operation_id, index),
+                b"missing",
+            )
+            .unwrap();
+        }
+
+        authority
+            .restore_registration(&component_set.component_set, operation_id)
+            .expect("absent paths introduced by a newer binary are not rollback targets");
+
+        let live_unjournaled = current_paths
+            .iter()
+            .find(|path| path.starts_with(&current_cache))
+            .expect("fixture has a current-version cache path");
+        std::fs::create_dir_all(live_unjournaled.parent().unwrap()).unwrap();
+        std::fs::write(live_unjournaled, b"not covered by the older journal").unwrap();
+        assert_eq!(
+            authority.restore_registration(&component_set.component_set, operation_id),
+            Err(HostBundleError::WrongTarget),
+            "a live path outside the persisted inventory remains fail-closed"
         );
     }
 }
