@@ -476,16 +476,30 @@ fn plan_artifact_action(
         // host-recognized legacy provenance, or the operator's explicit
         // adoption. Everything else with a foreign or absent marker conflicts.
         if !adopts_pre_receipt_artifact(operation, artifact, state, adopt_receiptless) {
+            let reason = if let Some(marker) = state.ownership_marker.as_deref() {
+                format!(
+                    "a receipt records ownership marker {marker:?}, expected {:?}; uninstall the \
+                     component named by the recorded marker before retrying",
+                    artifact.ownership_marker
+                )
+            } else if state.cataloged_ownership_marker.as_deref()
+                != Some(artifact.ownership_marker.as_str())
+            {
+                format!(
+                    "the observation is neither owned by this component nor a receiptless \
+                     cataloged deploy (expected marker {:?}); move or remove the conflicting \
+                     file before retrying",
+                    artifact.ownership_marker
+                )
+            } else {
+                "a receiptless file at a cataloged deploy path is adopted only when it matches \
+                 the staged bytes, carries recognizable legacy first-party provenance, or the \
+                 operator re-runs with `--yes --adopt`"
+                    .to_string()
+            };
             return Err(HostBundleError::OwnershipConflict(format!(
-                "{}: existing file is not owned by this component (observed ownership marker {}, expected {:?}); \
-                 a receiptless file at a cataloged deploy path is adopted only when it matches the staged bytes, \
-                 carries recognizable legacy first-party provenance, or the operator re-runs with `--yes --adopt`",
+                "{}: existing file is not owned by this component; {reason}",
                 artifact.relative_path,
-                match state.ownership_marker.as_deref() {
-                    Some(marker) => format!("{marker:?}"),
-                    None => "recorded by no receipt".to_string(),
-                },
-                artifact.ownership_marker,
             )));
         }
         return Ok(if state.artifact_digest == Some(artifact.artifact_digest) {
@@ -6833,6 +6847,12 @@ mod tests {
                 .contains(&artifact.relative_path),
             "the conflict must name the contested path: {foreign_conflict}"
         );
+        assert!(
+            foreign_conflict
+                .to_string()
+                .contains("move or remove the conflicting file"),
+            "an uncataloged observation must name a usable recovery: {foreign_conflict}"
+        );
         // So is an absent marker: receipt- and orphan-derived observations
         // never carry one, so they can never be adopted.
         assert!(matches!(
@@ -6853,15 +6873,29 @@ mod tests {
             HostBundleComponentV1::Core,
         ));
         claimed.owned_artifact_digest = Some(Sha256::digest(b"pre-v2").into());
+        let claimed_conflict = plan_artifact_action(
+            HostBundleLifecycleOpV1::Repair,
+            artifact,
+            Some(&claimed),
+            true,
+        )
+        .expect_err("a foreign receipt marker must refuse");
         assert!(matches!(
-            plan_artifact_action(
-                HostBundleLifecycleOpV1::Repair,
-                artifact,
-                Some(&claimed),
-                true
-            ),
-            Err(HostBundleError::OwnershipConflict(_))
+            claimed_conflict,
+            HostBundleError::OwnershipConflict(_)
         ));
+        assert!(
+            claimed_conflict
+                .to_string()
+                .contains("uninstall the component named by the recorded marker"),
+            "a receipt-backed conflict must name the recorded-owner recovery: {claimed_conflict}"
+        );
+        assert!(
+            !claimed_conflict
+                .to_string()
+                .contains("re-runs with `--yes --adopt`"),
+            "receipt-backed conflicts must not advertise a receiptless-only remedy: {claimed_conflict}"
+        );
     }
 
     /// Discovery and planning must agree on the ownership boundary: whenever
