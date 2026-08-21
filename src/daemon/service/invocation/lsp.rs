@@ -57,6 +57,7 @@ impl DaemonInvocationService {
         *self.lsp_admission_open.lock().await = false;
         self.code_index_schedulers.cancel();
         self.project_runtimes.begin_shutdown();
+        self.work_attempt_processes.begin_shutdown();
     }
 
     pub(super) async fn install_lsp_owner(
@@ -337,6 +338,7 @@ impl DaemonInvocationService {
     pub(crate) async fn expire_all(&self) {
         self.begin_shutdown().await;
         let lease_shutdown = self.lsp_lease_tasks.shutdown().await;
+        let work_attempts_clean = self.work_attempt_processes.shutdown().await;
         self.lsp_sessions.lock().await.clear();
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
@@ -348,6 +350,9 @@ impl DaemonInvocationService {
                 ?problem,
                 "daemon LSP lease task failed while shutdown joined it"
             );
+        }
+        if !work_attempts_clean {
+            tracing::error!("active Work attempt process failed while shutdown joined it");
         }
     }
 

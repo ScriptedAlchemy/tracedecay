@@ -1877,6 +1877,81 @@ async fn the_process_registry_admits_one_live_owner_per_attempt() {
     );
 }
 
+#[tokio::test]
+async fn attempt_process_registry_shutdown_fences_and_joins_cooperative_owner() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let fixture = leased_attempt(
+        directory.path(),
+        "Shutdown ownership.",
+        &SnapshotShape::default(),
+    );
+    let worktree_id: WorktreeId = id("worktree.registry.shutdown");
+    let registry = Arc::new(WorkAttemptProcessRegistryV1::default());
+    let entered = Arc::new(Notify::new());
+    let task_entered = Arc::clone(&entered);
+
+    assert!(registry.spawn_for_worktree(
+        fixture.identity(),
+        &worktree_id,
+        move |cancellation| async move {
+            task_entered.notify_one();
+            cancellation.notified().await;
+        },
+    ));
+    entered.notified().await;
+    assert!(
+        registry.shutdown().await,
+        "cooperative attempt must join cleanly"
+    );
+    assert!(!registry.accepting(), "shutdown must fence later attempts");
+    assert!(!registry.holds_attempt(&worktree_id, fixture.identity()));
+    assert!(
+        !registry.spawn_for_worktree(fixture.identity(), &worktree_id, |_| std::future::ready(()),),
+        "a terminal registry must reject later attempt execution"
+    );
+}
+
+#[tokio::test]
+async fn attempt_process_registry_shutdown_bounds_an_uncooperative_owner() {
+    struct LeaseProbe(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for LeaseProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let directory = tempfile::TempDir::new().unwrap();
+    let fixture = leased_attempt(
+        directory.path(),
+        "Bounded shutdown.",
+        &SnapshotShape::default(),
+    );
+    let worktree_id: WorktreeId = id("worktree.registry.forced-shutdown");
+    let registry = Arc::new(WorkAttemptProcessRegistryV1::default());
+    let entered = Arc::new(Notify::new());
+    let task_entered = Arc::clone(&entered);
+    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_released = Arc::clone(&released);
+
+    assert!(
+        registry.spawn_for_worktree(fixture.identity(), &worktree_id, move |_| async move {
+            let _lease = LeaseProbe(task_released);
+            task_entered.notify_one();
+            std::future::pending::<()>().await;
+        },)
+    );
+    entered.notified().await;
+    assert!(
+        !registry.shutdown().await,
+        "forced termination must remain a typed unclean shutdown"
+    );
+    assert!(
+        released.load(std::sync::atomic::Ordering::Acquire),
+        "bounded shutdown must drop every retained attempt lease before returning"
+    );
+}
+
 #[test]
 fn the_process_registry_isolates_equal_attempt_ids_by_worktree() {
     let directory = tempfile::TempDir::new().unwrap();
