@@ -561,6 +561,156 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
+    use crate::daemon::code_index_scheduler::{
+        CodeIndexSchedulerRegistryV1, identity::IndexingIdentityV1,
+    };
+    use tracedecay_domain::configuration::{
+        ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
+        ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+        ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationValueV1,
+        INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, SettingKey,
+    };
+    use tracedecay_domain::{AccessPolicyDigest, ActorId, UtcMicros};
+    use tracedecay_usecases::configuration::{
+        ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
+    };
+
+    let repo = tempfile::tempdir().expect("repository root");
+    let linked_parent = tempfile::tempdir().expect("linked-worktree parent");
+    let linked = linked_parent.path().join("linked");
+    init_manual_branch_repo(repo.path(), "feature-retained-refusal");
+
+    let graph = crate::tracedecay::TraceDecay::open(repo.path())
+        .await
+        .expect("open writable parent graph");
+    let current = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("read parent configuration");
+    let project_id = current.target.project_id.clone();
+    let mutation = DirectConfigurationMutation::Set {
+        layer: ConfigurationLayerIdV1::Project {
+            project_id: project_id.clone(),
+        },
+        key: SettingKey::new(INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY)
+            .expect("native graph activation key"),
+        value: Box::new(ConfigurationValueV1::Boolean(false)),
+    };
+    let authority = ConfigurationMutationAuthority {
+        receipt: ConfigurationMutationGrantReceiptV1::issue(
+            ConfigurationGrantReceiptId::new("configuration.grant-receipt.linked-graph-refusal")
+                .expect("grant receipt id"),
+            ConfigurationGrantId::new("configuration.grant.linked-graph-refusal")
+                .expect("grant id"),
+            ActorId::new("actor.linked-graph-refusal").expect("actor id"),
+            ConfigurationMutationOperationV1::DirectMutation,
+            mutation
+                .target_scope_digest()
+                .expect("mutation target scope"),
+            current.revision_id.clone(),
+            1,
+            AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).expect("policy digest"),
+            ConfigurationMutationSinkV1::ConfigurationStore,
+            ConfigurationMutationEffectV1::CommitConfigurationRevision,
+            Some(
+                ConfigurationIdempotencyKey::new("configuration.idempotency.linked-graph-refusal")
+                    .expect("idempotency key"),
+            ),
+            UtcMicros(1),
+            UtcMicros(100),
+        )
+        .expect("issue mutation grant"),
+    };
+    ConfigurationControlStore::commit_direct(
+        &graph.configuration_runtime().configuration_store(),
+        &authority,
+        &mutation,
+        &current.revision_id,
+    )
+    .await
+    .expect("persist native graph refusal");
+    let data_root = graph.store_layout().data_root.clone();
+    graph.close();
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open_read_only(repo.path())
+            .await
+            .expect("reopen parent graph from persisted configuration"),
+    );
+    assert!(
+        !graph.get_config().native_graph_activation,
+        "the parent graph must carry the persisted refusal into linked-worktree activation"
+    );
+
+    let head = resolve_branch_head(
+        repo.path(),
+        "feature-retained-refusal",
+        default_pr_command_control(),
+    )
+    .expect("resolve linked-worktree head");
+    let artifacts = ManualBranchArtifactsV1::for_branch(&data_root, "feature-retained-refusal");
+    prepare_manual_branch_worktree(
+        repo.path(),
+        &linked,
+        &artifacts.tracking_ref,
+        &artifacts.label,
+        &head,
+        default_pr_command_control(),
+    )
+    .expect("prepare linked worktree");
+
+    let code_index_store = data_root.join("code-index-v1");
+    let seeder = CodeIndexSchedulerRegistryV1::new(1);
+    seeder
+        .mount_worktree(project_id.clone(), &linked, code_index_store.clone(), None)
+        .await
+        .expect("mount retained-generation seeder");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while seeder.latest_generation_id(&linked).await.is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("seal retained linked-worktree generation");
+    seeder.shutdown().await;
+
+    let identity = IndexingIdentityV1::resolve(&linked).expect("linked-worktree identity");
+    let scope = tracedecay_application::ResolvedScope::new(
+        project_id,
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("linked-worktree scope");
+    let schedulers = CodeIndexSchedulerRegistryV1::new(1);
+    activate_linked_worktree(&schedulers, &graph, &linked)
+        .await
+        .expect("mount retained linked-worktree generation");
+    let latest = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(latest) = schedulers.latest_complete_serving_for_scope(&scope).await {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("configured graph refusal must still seat retained text serving");
+    assert!(
+        latest.production_query_owners().is_ok(),
+        "exact and lexical owners must warm from the retained generation"
+    );
+    assert!(
+        latest.interactive_graph_store().is_err(),
+        "configured refusal must not open the persistent Grafeo graph"
+    );
+    schedulers.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
     use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
