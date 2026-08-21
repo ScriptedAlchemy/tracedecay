@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.20](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.19...v0.1.0-beta.20) (2026-08-21)
+
+
+### Bug Fixes
+
+* **agent-hosts:** recover versioned registration paths ([bda88ee](https://github.com/ScriptedAlchemy/tracedecay/commit/bda88ee2825694a1eedc256e51e8dfd6c043630f))
+
 ## [0.1.0-beta.19](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.18...v0.1.0-beta.19) (2026-08-21)
 
 
