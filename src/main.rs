@@ -410,89 +410,8 @@ async fn run_startup_preamble(command: &Commands) {
     // and beta users now stay on beta until they explicitly switch off.
 
     // Best-effort check: warn if install needs re-running.
-    if startup_policy.runs_agent_install_maintenance() {
+    if startup_policy.runs_agent_install_check() {
         tracedecay::agents::claude::check_install_stale();
-        maybe_run_silent_reinstall(&mut user_config).await;
-    }
-}
-
-/// What startup maintenance should do about the version markers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SilentReinstallAction {
-    /// Re-run install for every tracked agent.
-    Reinstall,
-    /// Patch-only bump (or nothing to reinstall): just advance the marker.
-    AdvanceMarker,
-    /// Markers already match the running version — nothing to do.
-    Nothing,
-}
-
-fn silent_reinstall_action(
-    user_config: &tracedecay::user_config::UserConfig,
-    running: &str,
-) -> SilentReinstallAction {
-    // Two signals can trigger a reinstall:
-    //   (a) `previous_version` (set by `tracedecay upgrade` / `channel switch`
-    //       just before replacing the binary) differs from the running version
-    //       AND the transition is a minor/major bump. Patch bumps are no-ops:
-    //       we just advance `previous_version` and skip reinstall.
-    //   (b) Fallback for external upgrades (`brew upgrade`, `cargo install`):
-    //       the running version is newer than `last_installed_version`.
-    //
-    // A successful `post-update` performs the same full tracked-agent
-    // install pass and then advances both markers (see
-    // `UserConfig::mark_version_installed`), so the next ordinary command
-    // does not repeat the reinstall it just performed.
-    let previous_version = if user_config.previous_version.is_empty() {
-        "6.0.0".to_string()
-    } else {
-        user_config.previous_version.clone()
-    };
-    let upgrade_detected = previous_version != running;
-    let transition_needs_reinstall = upgrade_detected
-        && (tracedecay::cloud::is_newer_minor_version(&previous_version, running)
-            || tracedecay::cloud::is_newer_minor_version(running, &previous_version));
-    let external_upgrade_needs_reinstall = !upgrade_detected
-        && (user_config.last_installed_version.is_empty()
-            || tracedecay::cloud::is_newer_version(&user_config.last_installed_version, running));
-    let needs_reinstall = transition_needs_reinstall || external_upgrade_needs_reinstall;
-
-    if !user_config.installed_agents.is_empty() && !running.is_empty() && needs_reinstall {
-        SilentReinstallAction::Reinstall
-    } else if upgrade_detected {
-        SilentReinstallAction::AdvanceMarker
-    } else {
-        SilentReinstallAction::Nothing
-    }
-}
-
-async fn maybe_run_silent_reinstall(user_config: &mut tracedecay::user_config::UserConfig) {
-    // Silent reinstall: re-run install for every tracked agent so permissions,
-    // hooks, and MCP config stay in sync with the new binary.
-    let running = env!("CARGO_PKG_VERSION");
-    match silent_reinstall_action(user_config, running) {
-        SilentReinstallAction::Reinstall => run_silent_reinstall(user_config, running).await,
-        SilentReinstallAction::AdvanceMarker => {
-            user_config.previous_version = running.to_string();
-            if let Err(err) = user_config.save() {
-                eprintln!("warning: could not save tracedecay config: {err}");
-            }
-        }
-        SilentReinstallAction::Nothing => {}
-    }
-}
-
-async fn run_silent_reinstall(
-    user_config: &mut tracedecay::user_config::UserConfig,
-    running: &str,
-) {
-    if let update_cmd::ReinstallOutcome::AllOk =
-        update_cmd::reinstall_tracked_agents(user_config).await
-    {
-        user_config.mark_version_installed(running);
-        if let Err(err) = user_config.save() {
-            eprintln!("warning: could not save tracedecay config: {err}");
-        }
     }
 }
 
@@ -1378,7 +1297,7 @@ impl CommandStartupPolicy {
         !matches!(self, Self::SkipAll)
     }
 
-    fn runs_agent_install_maintenance(self) -> bool {
+    fn runs_agent_install_check(self) -> bool {
         matches!(self, Self::Full)
     }
 }
@@ -1389,8 +1308,8 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
 }
 
 #[cfg(test)]
-fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
-    !CommandStartupPolicy::for_command(command).runs_agent_install_maintenance()
+fn should_skip_agent_install_check(command: &Commands) -> bool {
+    !CommandStartupPolicy::for_command(command).runs_agent_install_check()
 }
 
 fn is_local_install_command(command: &Commands) -> bool {
