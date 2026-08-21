@@ -563,12 +563,13 @@ pub(crate) async fn capture_exact_branch_source(
             ));
         }
     };
-    if snapshot_branch != branch {
+    let expected_reference = format!("refs/heads/{branch}");
+    if snapshot_branch != expected_reference {
         return Err(TraceDecayError::project_route(
             CODE_INDEX_IDENTITY_MISMATCH,
             false,
             format!(
-                "exact Git snapshot is attached to branch '{snapshot_branch}', not requested branch '{branch}'"
+                "exact Git snapshot is attached to branch '{snapshot_branch}', not requested branch '{expected_reference}'"
             ),
         ));
     }
@@ -577,7 +578,7 @@ pub(crate) async fn capture_exact_branch_source(
         repository_id: scope.repository_id.as_str().to_owned(),
         worktree_id: scope.worktree_id.as_str().to_owned(),
         worktree_root: canonical_worktree_root.to_string_lossy().into_owned(),
-        reference: format!("refs/heads/{branch}"),
+        reference: snapshot_branch,
         source_oid,
     })
 }
