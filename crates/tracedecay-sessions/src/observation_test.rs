@@ -496,7 +496,10 @@ async fn committed_capture_with_missed_read_back_stays_persisted_as_queued() {
             ..
         } => {
             assert!(matches!(*outcome, ObservationPersistOutcome::Committed(_)));
-            assert_eq!(projection_status, ObservationProjectionStatus::Queued);
+            assert_eq!(
+                projection_status,
+                ObservationProjectionReadback::Authoritative(ObservationProjectionStatus::Queued)
+            );
         }
         other => panic!("capture must stay persisted, got {other:?}"),
     }
@@ -537,7 +540,12 @@ async fn exact_duplicate_reports_authoritative_projection_status() {
                 *outcome,
                 ObservationPersistOutcome::ExactDuplicate(_)
             ));
-            assert_eq!(projection_status, ObservationProjectionStatus::NotQueued);
+            assert_eq!(
+                projection_status,
+                ObservationProjectionReadback::Authoritative(
+                    ObservationProjectionStatus::NotQueued
+                )
+            );
             assert_eq!(sanitized_record, first_sanitized_record);
         }
         other => panic!("duplicate must persist, got {other:?}"),
@@ -551,7 +559,7 @@ enum DuplicatePersistKind {
     Covered,
 }
 
-async fn assert_duplicate_read_miss_is_not_queued(
+async fn assert_duplicate_read_miss_status_is_unavailable(
     duplicate_kind: DuplicatePersistKind,
     seeded_projection_status: ObservationProjectionStatus,
 ) {
@@ -604,7 +612,10 @@ async fn assert_duplicate_read_miss_is_not_queued(
                 ),
                 "persist outcome must match {duplicate_kind:?}, got {outcome:?}"
             );
-            assert_eq!(projection_status, ObservationProjectionStatus::NotQueued);
+            assert_eq!(
+                projection_status,
+                ObservationProjectionReadback::Unavailable
+            );
         }
         other => panic!("duplicate must stay persisted, got {other:?}"),
     }
@@ -616,8 +627,8 @@ async fn assert_duplicate_read_miss_is_not_queued(
 }
 
 #[tokio::test]
-async fn exact_duplicate_with_missed_read_back_stays_persisted_as_not_queued() {
-    assert_duplicate_read_miss_is_not_queued(
+async fn exact_duplicate_with_missed_read_back_has_unavailable_projection_status() {
+    assert_duplicate_read_miss_status_is_unavailable(
         DuplicatePersistKind::Exact,
         ObservationProjectionStatus::Queued,
     )
@@ -625,8 +636,8 @@ async fn exact_duplicate_with_missed_read_back_stays_persisted_as_not_queued() {
 }
 
 #[tokio::test]
-async fn not_queued_exact_duplicate_with_missed_read_back_stays_not_queued() {
-    assert_duplicate_read_miss_is_not_queued(
+async fn not_queued_exact_duplicate_with_missed_read_back_has_unavailable_projection_status() {
+    assert_duplicate_read_miss_status_is_unavailable(
         DuplicatePersistKind::Exact,
         ObservationProjectionStatus::NotQueued,
     )
@@ -634,8 +645,8 @@ async fn not_queued_exact_duplicate_with_missed_read_back_stays_not_queued() {
 }
 
 #[tokio::test]
-async fn covered_duplicate_with_missed_read_back_stays_persisted_as_not_queued() {
-    assert_duplicate_read_miss_is_not_queued(
+async fn covered_duplicate_with_missed_read_back_has_unavailable_projection_status() {
+    assert_duplicate_read_miss_status_is_unavailable(
         DuplicatePersistKind::Covered,
         ObservationProjectionStatus::Queued,
     )
@@ -643,8 +654,8 @@ async fn covered_duplicate_with_missed_read_back_stays_persisted_as_not_queued()
 }
 
 #[tokio::test]
-async fn not_queued_covered_duplicate_with_missed_read_back_stays_not_queued() {
-    assert_duplicate_read_miss_is_not_queued(
+async fn not_queued_covered_duplicate_with_missed_read_back_has_unavailable_projection_status() {
+    assert_duplicate_read_miss_status_is_unavailable(
         DuplicatePersistKind::Covered,
         ObservationProjectionStatus::NotQueued,
     )

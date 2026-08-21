@@ -163,12 +163,19 @@ impl ReplayObservationsRequest {
     }
 }
 
+/// What the authoritative point read established about projection work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObservationProjectionReadback {
+    Authoritative(ObservationProjectionStatus),
+    Unavailable,
+}
+
 /// Result of mandatory sanitization and, when permitted, authoritative persistence.
 #[derive(Debug)]
 pub enum CaptureObservationOutcome {
     Persisted {
         outcome: Box<ObservationPersistOutcome>,
-        projection_status: ObservationProjectionStatus,
+        projection_status: ObservationProjectionReadback,
         sanitized_record: Box<SanitizedObservationRecordV1>,
         findings: Vec<SanitizationFindingV1>,
     },
@@ -438,14 +445,18 @@ where
                     if cancellation.is_cancelled() {
                         return Err(ObservationApplicationError::Cancelled);
                     }
-                    // Preserve authoritative projection state when visible.
-                    // A new commit establishes queued state; duplicate
-                    // receipts perform no projection write, so a trailing
-                    // reader snapshot must not fabricate queued work.
+                    // Preserve authoritative projection state when visible. A
+                    // new commit establishes queued state. Duplicate receipts
+                    // prove durability but carry no projection status, so a
+                    // trailing reader snapshot remains explicitly unavailable.
                     let projection_status = match stored {
-                        Some(stored) => stored.projection_status(),
+                        Some(stored) => {
+                            ObservationProjectionReadback::Authoritative(stored.projection_status())
+                        }
                         None if matches!(&outcome, ObservationPersistOutcome::Committed(_)) => {
-                            ObservationProjectionStatus::Queued
+                            ObservationProjectionReadback::Authoritative(
+                                ObservationProjectionStatus::Queued,
+                            )
                         }
                         None if matches!(
                             &outcome,
@@ -453,7 +464,7 @@ where
                                 | ObservationPersistOutcome::CoveredDuplicate(_)
                         ) =>
                         {
-                            ObservationProjectionStatus::NotQueued
+                            ObservationProjectionReadback::Unavailable
                         }
                         None => {
                             return Err(
