@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.33](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.32...v0.1.0-beta.33) (2026-08-21)
+
+
+### Bug Fixes
+
+* **build:** restore root lint gate ([c25e8a1](https://github.com/ScriptedAlchemy/tracedecay/commit/c25e8a1d99b11a2051c7fcbe5eb48da2866a6c93))
+* **code-index:** restore lexical source lint gates ([484510c](https://github.com/ScriptedAlchemy/tracedecay/commit/484510c7449894bb49884a4b6b7cadaa68b033df))
+* **context:** preserve fallback results during warmup ([89cbecc](https://github.com/ScriptedAlchemy/tracedecay/commit/89cbecc232cbcfa007709afa81433ee0b3a3d821))
+* **query:** right-size lexical ngram pages ([cdfe2ea](https://github.com/ScriptedAlchemy/tracedecay/commit/cdfe2ea97bcef3780085d6c0059be4d11025e70c))
+* **runtime:** preserve context during index warmup ([da6eb98](https://github.com/ScriptedAlchemy/tracedecay/commit/da6eb987f0b71651745fe9e9481f2d0226001514))
+
 ## [0.1.0-beta.32](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.31...v0.1.0-beta.32) (2026-08-21)
 
 
