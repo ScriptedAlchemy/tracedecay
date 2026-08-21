@@ -3,9 +3,9 @@ use super::{
     DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, GitAction, GitProjectArgs, HostBundleCliOptions,
     HostBundleComponentArg, MAX_ASYNC_WORKER_THREADS, MAX_BLOCKING_THREADS, PackageHookAction,
     ProfileStorageAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, StderrTracingDefault,
-    async_worker_threads, daemon_cpu_threads_from, is_daemon_run, is_local_install_command,
-    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
-    validate_host_bundle_options,
+    async_worker_threads, daemon_cpu_threads_from, is_daemon_run, is_full_component_set_adoption,
+    is_local_install_command, should_skip_agent_install_check, should_skip_startup_maintenance,
+    stderr_tracing_default, validate_host_bundle_options,
 };
 use clap::Parser;
 use std::path::PathBuf;
@@ -161,6 +161,85 @@ fn sibling_project_commands_still_reject_the_confirmation_flag() {
         validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
             .is_err()
     );
+}
+
+#[test]
+fn default_component_set_adoption_requires_confirmation_and_reaches_dispatch() {
+    for args in [
+        &[
+            "tracedecay",
+            "install",
+            "--agent",
+            "cursor",
+            "--yes",
+            "--adopt",
+        ][..],
+        &["tracedecay", "update-plugin", "--yes", "--adopt"][..],
+        &["tracedecay", "reinstall", "--yes", "--adopt"][..],
+    ] {
+        let cli = Cli::try_parse_from(args).expect("documented adoption invocation must parse");
+        let command = cli.command.expect("adoption subcommand");
+        let options = HostBundleCliOptions {
+            component: cli.component,
+            dry_run: cli.dry_run,
+            yes: cli.yes,
+            adopt: cli.adopt,
+        };
+        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
+            .expect("confirmed default component-set adoption must pass validation");
+        assert!(
+            is_full_component_set_adoption(&command, &options),
+            "confirmed default adoption must reach the full component-set handler path"
+        );
+        assert!(options.yes && options.adopt);
+    }
+}
+
+#[test]
+fn adoption_without_confirmation_is_refused() {
+    let cli = Cli::try_parse_from(["tracedecay", "update-plugin", "--adopt"])
+        .expect("global adoption flag must parse before scoped validation");
+    let command = cli.command.expect("update-plugin subcommand");
+    let options = HostBundleCliOptions {
+        component: cli.component,
+        dry_run: cli.dry_run,
+        yes: cli.yes,
+        adopt: cli.adopt,
+    };
+    let error =
+        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
+            .expect_err("adoption without --yes must fail closed");
+    assert!(error.to_string().contains("--adopt requires --yes"));
+}
+
+#[test]
+fn unrelated_and_uninstall_commands_reject_adoption() {
+    for args in [
+        &["tracedecay", "status", "--yes", "--adopt"][..],
+        &[
+            "tracedecay",
+            "uninstall",
+            "--agent",
+            "cursor",
+            "--yes",
+            "--adopt",
+        ][..],
+    ] {
+        let cli =
+            Cli::try_parse_from(args).expect("global flags must parse before scoped validation");
+        let command = cli.command.expect("subcommand");
+        let options = HostBundleCliOptions {
+            component: cli.component,
+            dry_run: cli.dry_run,
+            yes: cli.yes,
+            adopt: cli.adopt,
+        };
+        assert!(
+            validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
+                .is_err(),
+            "adoption must not leak onto unrelated or uninstall commands"
+        );
+    }
 }
 
 #[test]
