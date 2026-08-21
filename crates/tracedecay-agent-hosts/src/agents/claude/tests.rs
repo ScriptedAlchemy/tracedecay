@@ -1,4 +1,4 @@
-use super::super::safe_write_json_file;
+use super::super::{load_json_file_strict, safe_write_json_file};
 use super::*;
 use serde_json::json;
 use std::path::PathBuf;
@@ -687,5 +687,57 @@ fn plugin_permission_coverage_accepts_wildcard_or_full_per_tool_grants() {
     assert!(
         plugin_perms_covered(&[wildcard.as_str()], &[]),
         "the wildcard rule covers the namespace even without a registered catalog"
+    );
+}
+
+#[test]
+fn activation_adds_wildcard_permission_without_replacing_user_settings() {
+    let home = tempfile::tempdir().unwrap();
+    let tracedecay_bin = "/bin/tracedecay";
+    deploy_plugin_bundle(home.path(), tracedecay_bin).unwrap();
+    write_native_activation(home.path(), tracedecay_bin);
+
+    let settings_path = home.path().join(".claude/settings.json");
+    let existing = json!({
+        "enabledPlugins": {
+            "foreign@market": true,
+            "tracedecay@tracedecay": true
+        },
+        "env": { "FOREIGN_SETTING": "preserved" },
+        "permissions": {
+            "allow": ["Read"],
+            "deny": ["Bash(rm:*)"]
+        }
+    });
+    safe_write_json_file(&settings_path, &existing, None).unwrap();
+    let ctx = InstallContext {
+        home: home.path().to_path_buf(),
+        tracedecay_bin: tracedecay_bin.to_string(),
+        tool_permissions: Vec::new(),
+        project_root: None,
+        dashboard: true,
+    };
+
+    ClaudeIntegration
+        .activate_deployed_host_registration(&ctx)
+        .unwrap();
+    ClaudeIntegration
+        .activate_deployed_host_registration(&ctx)
+        .unwrap();
+
+    let updated = load_json_file_strict(&settings_path).unwrap();
+    assert_eq!(updated["env"], existing["env"]);
+    assert_eq!(
+        updated["enabledPlugins"]["foreign@market"],
+        existing["enabledPlugins"]["foreign@market"]
+    );
+    assert_eq!(
+        updated["permissions"]["deny"],
+        existing["permissions"]["deny"]
+    );
+    assert_eq!(
+        updated["permissions"]["allow"],
+        json!(["Read", "mcp__plugin_tracedecay_graph__*"]),
+        "activation must add the one documented plugin wildcard exactly once"
     );
 }
