@@ -118,7 +118,9 @@ pub async fn patch_config(
                 vec![DirectConfigurationMutation::Set {
                     layer: ConfigurationLayerIdV1::Project { project_id },
                     key,
-                    value: Box::new(ConfigurationValueV1::AutomationSettings(candidate)),
+                    value: Box::new(ConfigurationValueV1::AutomationSettings(Box::new(
+                        candidate,
+                    ))),
                 }],
                 expected_revision,
                 idempotency_key,

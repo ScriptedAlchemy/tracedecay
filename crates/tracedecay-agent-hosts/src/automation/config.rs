@@ -35,7 +35,7 @@ pub fn from_configuration_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result
         });
     };
     validate_config(config)?;
-    Ok(config.clone())
+    Ok((**config).clone())
 }
 
 pub fn effective_config(

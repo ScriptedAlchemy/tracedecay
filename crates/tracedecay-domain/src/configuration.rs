@@ -1117,7 +1117,7 @@ pub enum ConfigurationValueV1 {
     WorkExecutableBindings(Vec<WorkExecutableBindingV1>),
     WorkExpertiseConsent(WorkExpertiseConsentV1),
     ContextScoutSettings(ContextScoutSettingsV1),
-    AutomationSettings(AutomationSettingsV1),
+    AutomationSettings(Box<AutomationSettingsV1>),
     CredentialReference(CredentialReferenceMetadataV1),
 }
 
