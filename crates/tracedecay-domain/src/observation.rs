@@ -2165,8 +2165,9 @@ fn normalize_codex_payload_revision(existing: &mut Value, current: &Value) -> bo
                 if current_fact.contains_key("transcript_path") {
                     return false;
                 }
-                changed |=
-                    replace_with_current_field(existing_fact, current_fact, "transcript_path");
+                for key in ["project_path", "location_path", "transcript_path"] {
+                    changed |= replace_with_current_field(existing_fact, current_fact, key);
+                }
             }
             Some("provider_usage") if is_unknown_absent_model(current_fact.get("model")) => {
                 changed |= replace_with_current_field(existing_fact, current_fact, "model");

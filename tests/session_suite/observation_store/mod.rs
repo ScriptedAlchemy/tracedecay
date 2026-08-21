@@ -416,8 +416,16 @@ fn canonical_revision_observation(
     }
     let session = match provider {
         "codex" => CanonicalObservationFactV1::Session {
-            project_path: Some("/stable/project".to_owned()),
-            location_path: Some("/stable/project".to_owned()),
+            project_path: Some(if legacy {
+                "/route/project".to_owned()
+            } else {
+                "/stable/project".to_owned()
+            }),
+            location_path: Some(if legacy {
+                "/route/location".to_owned()
+            } else {
+                "/stable/project".to_owned()
+            }),
             transcript_path: legacy.then(|| "/route/rollout.jsonl".to_owned()),
             title: None,
             started_at: None,
@@ -1285,29 +1293,44 @@ async fn canonical_payload_revision_compatibility_rejects_unshipped_differences(
         ];
         match provider {
             "codex" => candidates.push((
-                "project-location",
+                "session-fixed-field",
                 mutate_observation_payload(
                     &current,
-                    "receipt.codex.changed.project-location",
+                    "receipt.codex.changed.session-fixed-field",
                     |payload| {
-                        payload["facts"][0]["project_path"] = json!("/different/project");
-                        payload["facts"][0]["location_path"] = json!("/different/project");
+                        payload["facts"][0]["location_provenance"] =
+                            json!("unrelated_location_authority");
                     },
                 ),
                 None,
             )),
-            "cursor" => candidates.push((
-                "native-timestamp",
-                mutate_observation_payload(
-                    &current,
-                    "receipt.cursor.changed.native-timestamp",
-                    |payload| {
-                        payload["facts"][1]["timestamp"] = json!(1_800_000_000_000_000_i64);
-                        payload["evidence"]["native_timestamp"] = json!(1_800_000_000_000_000_i64);
-                    },
-                ),
-                None,
-            )),
+            "cursor" => {
+                candidates.push((
+                    "project-location",
+                    mutate_observation_payload(
+                        &current,
+                        "receipt.cursor.changed.project-location",
+                        |payload| {
+                            payload["facts"][0]["project_path"] = json!("/different/project");
+                            payload["facts"][0]["location_path"] = json!("/different/project");
+                        },
+                    ),
+                    None,
+                ));
+                candidates.push((
+                    "native-timestamp",
+                    mutate_observation_payload(
+                        &current,
+                        "receipt.cursor.changed.native-timestamp",
+                        |payload| {
+                            payload["facts"][1]["timestamp"] = json!(1_800_000_000_000_000_i64);
+                            payload["evidence"]["native_timestamp"] =
+                                json!(1_800_000_000_000_000_i64);
+                        },
+                    ),
+                    None,
+                ));
+            }
             _ => unreachable!("fixture provider is allowlisted"),
         }
 
