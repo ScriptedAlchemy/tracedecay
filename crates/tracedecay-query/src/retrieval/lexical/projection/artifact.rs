@@ -60,6 +60,15 @@ fn sqlite_error(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Io(error.to_string())
 }
 
+fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
+    match error.sqlite_error_code() {
+        Some(
+            rusqlite::ffi::ErrorCode::DatabaseCorrupt | rusqlite::ffi::ErrorCode::NotADatabase,
+        ) => CodeLexicalArtifactErrorV1::Corrupt(error.to_string()),
+        _ => CodeLexicalArtifactErrorV1::Io(error.to_string()),
+    }
+}
+
 fn open_builder_connection(
     path: &Path,
 ) -> Result<rusqlite::Connection, CodeLexicalArtifactErrorV1> {

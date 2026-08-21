@@ -21,7 +21,8 @@ use super::format::{
 };
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, query_ngrams};
 use super::{
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1, sqlite_error,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1, checkpoint,
+    sqlite_corrupt, sqlite_error,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::{
@@ -64,6 +65,16 @@ impl CodeLexicalArtifactReaderV1 {
         expected: &VerifiedCodeLexicalArtifactV1,
         cache_budget_bytes: usize,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        Self::open_with_control(path, expected, cache_budget_bytes, &NeverInterrupted)
+    }
+
+    pub fn open_with_control(
+        path: impl AsRef<Path>,
+        expected: &VerifiedCodeLexicalArtifactV1,
+        cache_budget_bytes: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        checkpoint(control)?;
         if cache_budget_bytes == 0
             || cache_budget_bytes > CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1
         {
@@ -87,6 +98,7 @@ impl CodeLexicalArtifactReaderV1 {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(sqlite_error)?;
+        checkpoint(control)?;
         connection
             .pragma_update(None, "query_only", true)
             .map_err(sqlite_error)?;
@@ -126,10 +138,11 @@ impl CodeLexicalArtifactReaderV1 {
             .map_err(sqlite_error)?;
         let integrity: String = connection
             .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
-            .map_err(sqlite_error)?;
+            .map_err(sqlite_corrupt)?;
         if integrity != "ok" {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(integrity));
         }
+        checkpoint(control)?;
         let receipt_bytes: Vec<u8> = connection
             .query_row(
                 "SELECT receipt FROM artifact_state WHERE singleton = 1",
@@ -164,7 +177,7 @@ impl CodeLexicalArtifactReaderV1 {
                 "lexical artifact metadata digest does not verify".to_owned(),
             ));
         }
-        let sections = compute_section_digests(&connection, &NeverInterrupted)?;
+        let sections = compute_section_digests(&connection, control)?;
         if sections != stored.section_digests() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact section digests do not verify".to_owned(),
@@ -188,6 +201,7 @@ impl CodeLexicalArtifactReaderV1 {
                 "lexical artifact content digest does not verify".to_owned(),
             ));
         }
+        checkpoint(control)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             metadata,

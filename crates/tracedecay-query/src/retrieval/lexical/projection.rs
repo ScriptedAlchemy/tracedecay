@@ -12,7 +12,7 @@ use tracedecay_domain::{
     FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1, LanguageDescriptorRevision,
     LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
-    SourceOccurrenceId,
+    SourceOccurrenceId, validate_code_logical_path,
 };
 
 use super::{
@@ -97,11 +97,7 @@ impl CodeLexicalProjectionMetadataV1 {
         }
         for (file, path) in &self.logical_paths {
             file.validate().map_err(contract_error)?;
-            if path.is_empty() {
-                return Err(RetrievalPortError::Contract(
-                    "lexical projection logical paths must not be empty".to_owned(),
-                ));
-            }
+            validate_code_logical_path(path).map_err(contract_error)?;
         }
         self.freshness
             .source_namespace
