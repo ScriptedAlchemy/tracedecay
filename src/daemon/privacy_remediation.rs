@@ -21,10 +21,11 @@ use crate::tracedecay::TraceDecay;
 
 /// Spawns the bounded background rescan for one adopted project store.
 pub(crate) fn spawn_at_rest_privacy_remediation(
+    owner: &crate::mcp::McpServer,
     graph: Arc<TraceDecay>,
     session_db: RegisteredGlobalDbLeaseV1,
-) {
-    tokio::spawn(async move {
+) -> bool {
+    owner.spawn_background_task(async move {
         let project = graph.project_root().display().to_string();
         match run_project_memory_privacy_remediation(&graph).await {
             Ok(receipt) => {
@@ -70,7 +71,7 @@ pub(crate) fn spawn_at_rest_privacy_remediation(
                 );
             }
         }
-    });
+    })
 }
 
 async fn run_project_memory_privacy_remediation(

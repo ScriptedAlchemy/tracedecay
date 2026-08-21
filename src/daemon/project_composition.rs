@@ -820,6 +820,7 @@ pub(super) async fn production_project_server(
                     project_open_owners::register_project_open_dependent_owners(
                         invocation,
                         canonical_project_path,
+                        full_candidate.as_ref(),
                         dependent_owners,
                     )
                     .await?;

@@ -9,11 +9,12 @@ use super::{
 use tracedecay_application::now_micros;
 
 pub(super) fn spawn(
+    owner: &crate::mcp::McpServer,
     invocation: DaemonInvocationState,
     project_root: PathBuf,
     mut state: ProjectOpenDependentOwnerState,
-) {
-    tokio::spawn(async move {
+) -> bool {
+    owner.spawn_background_task(async move {
         let mut publications = invocation
             .code_index_schedulers
             .subscribe_generation_publications();
@@ -51,7 +52,7 @@ pub(super) fn spawn(
                 }
             }
         }
-    });
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

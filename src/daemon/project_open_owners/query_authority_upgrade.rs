@@ -38,12 +38,13 @@ pub(super) enum DeferredQueryAuthorityMountV1 {
 /// fresh build; a restart that restores the same sealed generation records
 /// `Noop` and never repeats that event, so the serving slot is polled too.
 pub(super) fn spawn_deferred_query_authority_mount(
+    owner: &crate::mcp::McpServer,
     invocation: DaemonInvocationState,
     project_root: PathBuf,
     scope: ResolvedScope,
     mount: DeferredQueryAuthorityMountV1,
-) {
-    tokio::spawn(async move {
+) -> bool {
+    owner.spawn_background_task(async move {
         let mut publications = invocation
             .code_index_schedulers
             .subscribe_generation_publications();
@@ -73,7 +74,7 @@ pub(super) fn spawn_deferred_query_authority_mount(
                 }
             }
         }
-    });
+    })
 }
 
 /// One deferred mount attempt, terminal unless the generation is still

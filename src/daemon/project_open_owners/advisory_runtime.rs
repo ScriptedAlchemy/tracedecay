@@ -96,6 +96,7 @@ use crate::daemon::service::invocation::{
 };
 use crate::daemon::service::project_runtime::RegisteredDeliveryReadAuthorityV1;
 use crate::errors::{Result, TraceDecayError};
+use crate::mcp::McpServer;
 use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 
 mod deferred;
@@ -943,6 +944,7 @@ pub(super) async fn register_production_feedback_and_advisory(
 pub(in crate::daemon) async fn register_project_open_dependent_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,
+    server: &McpServer,
     state: ProjectOpenDependentOwnerState,
 ) -> Result<()> {
     let state = state;
@@ -958,6 +960,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         register_semantic_activation_owner(
             invocation,
             project_root,
+            server,
             &state.graph,
             state.session_db.clone(),
             state.scope,
@@ -992,13 +995,19 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
             register_semantic_activation_owner(
                 invocation,
                 project_root,
+                server,
                 &state.graph,
                 state.session_db.clone(),
                 state.scope.clone(),
                 &state.scout_configuration,
             )
             .await?;
-            deferred::spawn(invocation.clone(), project_root.to_path_buf(), state);
+            let _deferred_advisory_admitted = deferred::spawn(
+                server,
+                invocation.clone(),
+                project_root.to_path_buf(),
+                state,
+            );
             return Ok(());
         }
         tracing::info!(
@@ -1010,6 +1019,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         register_semantic_activation_owner(
             invocation,
             project_root,
+            server,
             &state.graph,
             state.session_db.clone(),
             state.scope.clone(),
@@ -1029,6 +1039,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
     register_semantic_activation_owner(
         invocation,
         project_root,
+        server,
         &state.graph,
         state.session_db.clone(),
         state.scope.clone(),
@@ -1047,7 +1058,12 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         phase = "feedback_advisory_deferred",
         reason = "current sealed code-index generation is unavailable",
     );
-    deferred::spawn(invocation.clone(), project_root.to_path_buf(), state);
+    let _deferred_advisory_admitted = deferred::spawn(
+        server,
+        invocation.clone(),
+        project_root.to_path_buf(),
+        state,
+    );
     Ok(())
 }
 

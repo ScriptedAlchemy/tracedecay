@@ -334,6 +334,13 @@ impl CooldownGate {
 }
 
 impl McpServer {
+    pub(crate) fn spawn_background_task<Task>(&self, task: Task) -> bool
+    where
+        Task: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.background_tasks.spawn(task)
+    }
+
     pub(crate) fn project_server_response_lifecycle(&self) -> ProjectServerResponseLifecycle {
         self.project_server_lifecycle.clone()
     }

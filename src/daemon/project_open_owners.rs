@@ -1088,10 +1088,12 @@ pub(super) async fn register_project_open_production_owners(
 
     // At-rest privacy remediation is bounded background work after fail-closed
     // admission; it never blocks admission or retrieval.
-    crate::daemon::privacy_remediation::spawn_at_rest_privacy_remediation(
-        Arc::clone(&graph),
-        session_db.clone(),
-    );
+    let _privacy_remediation_admitted =
+        crate::daemon::privacy_remediation::spawn_at_rest_privacy_remediation(
+            server,
+            Arc::clone(&graph),
+            session_db.clone(),
+        );
 
     // Once-per-project-open adoption-eligibility census over the composed
     // capability catalog, recorded through the project-bound session
@@ -1099,7 +1101,7 @@ pub(super) async fn register_project_open_production_owners(
     // fails on observation storage.
     let census_db = session_db.clone();
     let census_project_root = project_root.to_path_buf();
-    tokio::spawn(async move {
+    let _adoption_census_admitted = server.spawn_background_task(async move {
         super::adoption_observation::record_project_open_adoption_census(
             census_db.as_ref(),
             &census_project_root,
@@ -1136,6 +1138,7 @@ pub(super) async fn register_project_open_production_owners(
 async fn register_semantic_activation_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
+    server: &McpServer,
     graph: &Arc<crate::tracedecay::TraceDecay>,
     session_db: crate::global_db::RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
@@ -1224,6 +1227,7 @@ async fn register_semantic_activation_owner(
                 crate::daemon::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::GenerationUnavailable
             ) {
                 query_authority_upgrade::spawn_deferred_query_authority_mount(
+                    server,
                     invocation.clone(),
                     project_root.to_path_buf(),
                     scope.clone(),
@@ -1271,6 +1275,7 @@ async fn register_semantic_activation_owner(
                         crate::daemon::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::GenerationUnavailable
                     ) {
                         query_authority_upgrade::spawn_deferred_query_authority_mount(
+                            server,
                             invocation.clone(),
                             project_root.to_path_buf(),
                             scope.clone(),
