@@ -7849,6 +7849,84 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
     registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_root_remount_updates_retained_graph_policy_before_worker_activation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let scope = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed retained generation"));
+        let latest = scheduler.latest_complete().expect("retained generation");
+        let snapshot = latest.generation.snapshot();
+        ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree id"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope")
+    };
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let activation = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold retained activation");
+    assert!(
+        registry
+            .mount_worktree_with_graph_policy(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+                super::CodeGraphActivationPolicyV1::Enabled,
+            )
+            .await
+            .expect("mount initial owner")
+    );
+    assert!(
+        !registry
+            .mount_worktree_with_graph_policy(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+                super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+            )
+            .await
+            .expect("remount existing owner with configured refusal"),
+        "same-root remount must reuse the existing owner"
+    );
+    drop(activation);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let latest = loop {
+        if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await {
+            break latest;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "updated same-root policy did not seat the retained generation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        !latest.query_owners_are_warm(),
+        "same-root refusal was lost and entered retained owner hydration"
+    );
+    assert!(latest.production_graph_serving().is_err());
+    registry.shutdown().await;
+}
+
 /// A retryable graph-activation failure of an already-sealed complete
 /// generation must retry activation of that exact immutable artifact with
 /// backoff. It must not fall through into reconcile and seal a duplicate

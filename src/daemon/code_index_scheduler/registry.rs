@@ -1861,7 +1861,7 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeGraphActivationAuthorityV1::Persistent {
                 runtime: graph_runtime,
                 project_database,
-                policy: graph_activation_policy,
+                policy: Arc::new(AtomicBool::new(graph_activation_policy.is_enabled())),
             },
         )
         .await
@@ -1883,7 +1883,7 @@ impl CodeIndexSchedulerRegistryV1 {
             store_root,
             semantic_schedule,
             CodeGraphActivationAuthorityV1::Memory {
-                policy: CodeGraphActivationPolicyV1::Enabled,
+                policy: Arc::new(AtomicBool::new(true)),
             },
         )
         .await
@@ -1905,7 +1905,9 @@ impl CodeIndexSchedulerRegistryV1 {
             project_root,
             store_root,
             semantic_schedule,
-            CodeGraphActivationAuthorityV1::Memory { policy },
+            CodeGraphActivationAuthorityV1::Memory {
+                policy: Arc::new(AtomicBool::new(policy.is_enabled())),
+            },
         )
         .await
     }
@@ -1999,6 +2001,9 @@ impl CodeIndexSchedulerRegistryV1 {
             }
             let mounted = self.mounted.lock().await;
             if let Some(existing) = mounted.get(&project_root) {
+                existing
+                    .graph_activation
+                    .update_policy(graph_activation.policy());
                 let scheduler = Arc::clone(&existing.scheduler);
                 let serving_generation = Arc::clone(&existing.serving_generation);
                 drop(mounted);
@@ -2115,6 +2120,9 @@ impl CodeIndexSchedulerRegistryV1 {
             // rechecked after the asynchronous update so a retirement or
             // replacement cannot turn this remount into a success for a
             // detached worker.
+            existing
+                .graph_activation
+                .update_policy(graph_activation.policy());
             let scheduler = Arc::clone(&existing.scheduler);
             let serving_generation = Arc::clone(&existing.serving_generation);
             drop(mounted);

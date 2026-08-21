@@ -88,10 +88,10 @@ pub(super) enum CodeGraphActivationAuthorityV1 {
         runtime:
             Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
         project_database: Arc<crate::db::Database>,
-        policy: CodeGraphActivationPolicyV1,
+        policy: Arc<AtomicBool>,
     },
     #[cfg(test)]
-    Memory { policy: CodeGraphActivationPolicyV1 },
+    Memory { policy: Arc<AtomicBool> },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,9 +108,30 @@ impl CodeGraphActivationPolicyV1 {
             Self::RefusedByConfiguration
         }
     }
+
+    pub(super) const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
 }
 
 impl CodeGraphActivationAuthorityV1 {
+    fn policy_cell(&self) -> &Arc<AtomicBool> {
+        match self {
+            Self::Persistent { policy, .. } => policy,
+            #[cfg(test)]
+            Self::Memory { policy } => policy,
+        }
+    }
+
+    pub(super) fn update_policy(&self, policy: CodeGraphActivationPolicyV1) {
+        self.policy_cell()
+            .store(policy.is_enabled(), Ordering::Release);
+    }
+
+    pub(super) fn policy(&self) -> CodeGraphActivationPolicyV1 {
+        CodeGraphActivationPolicyV1::from_enabled(self.policy_cell().load(Ordering::Acquire))
+    }
+
     pub(super) async fn activate(
         &self,
         project_id: &ProjectId,
@@ -120,11 +141,7 @@ impl CodeGraphActivationAuthorityV1 {
         replay_binding: CodeGraphReplayBindingV1,
         cancellation: Arc<AtomicBool>,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        let policy = match self {
-            Self::Persistent { policy, .. } => *policy,
-            #[cfg(test)]
-            Self::Memory { policy } => *policy,
-        };
+        let policy = self.policy();
         if policy == CodeGraphActivationPolicyV1::RefusedByConfiguration {
             let reason = "code graph activation was refused by project configuration";
             latest.refuse_graph_activation(reason);
