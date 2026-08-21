@@ -7,7 +7,7 @@
 //! renders it. Keeping the family in the query kernel lets both sides depend on
 //! the retrieval crate instead of on each other.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -108,6 +108,9 @@ pub mod lane_reason {
     pub const GENERATION_UNAVAILABLE: &str = "generation_unavailable";
     /// The lane exists but this request was denied, cancelled, or timed out.
     pub const REQUEST_TERMINATED: &str = "request_terminated";
+    /// The authenticated fallback payload reports that this retriever could
+    /// not serve the request.
+    pub const RETRIEVER_UNAVAILABLE: &str = "retriever_unavailable";
 }
 
 /// Per-lane serving status for one search response.
@@ -123,6 +126,10 @@ pub enum CodeIndexLaneStatusV1 {
     /// still being built. Recall is sound for that generation; freshness is
     /// not, and the caller is told which generation answered.
     Stale { generation: String },
+    /// The lane served some evidence, but its authenticated retriever outcome
+    /// says recall is incomplete. `generation` is present when the whole
+    /// request also served an older complete code generation.
+    Partial { generation: Option<String> },
     /// The lane could not run at all for this request.
     Unavailable { reason: &'static str },
 }
@@ -130,13 +137,17 @@ pub enum CodeIndexLaneStatusV1 {
 impl CodeIndexLaneStatusV1 {
     /// Whether this lane contributed results to the response.
     pub const fn is_servable(&self) -> bool {
-        matches!(self, Self::Complete | Self::Stale { .. })
+        matches!(
+            self,
+            Self::Complete | Self::Stale { .. } | Self::Partial { .. }
+        )
     }
 
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Complete => "complete",
             Self::Stale { .. } => "stale",
+            Self::Partial { .. } => "partial",
             Self::Unavailable { .. } => "unavailable",
         }
     }
@@ -192,6 +203,78 @@ impl CodeIndexSearchCoverageV1 {
             lexical: stale.clone(),
             graph: stale,
             ..Self::fused(semantic)
+        }
+    }
+
+    /// Build response coverage from the authenticated exact/lexical/graph
+    /// fallback receipt instead of assuming every admitted lane completed.
+    pub fn from_fallback_lane_coverage(
+        fallback: &BTreeMap<
+            tracedecay_domain::RetrieverKind,
+            tracedecay_domain::PublicRetrieverStatus,
+        >,
+        generation: &str,
+        served_stale: bool,
+        semantic: &CodeIndexSemanticStatusV1,
+    ) -> Self {
+        fn lane(
+            fallback: &BTreeMap<
+                tracedecay_domain::RetrieverKind,
+                tracedecay_domain::PublicRetrieverStatus,
+            >,
+            kind: tracedecay_domain::RetrieverKind,
+            generation: &str,
+            served_stale: bool,
+        ) -> CodeIndexLaneStatusV1 {
+            match fallback
+                .get(&kind)
+                .copied()
+                .unwrap_or(tracedecay_domain::PublicRetrieverStatus::Unavailable)
+            {
+                tracedecay_domain::PublicRetrieverStatus::Complete if served_stale => {
+                    CodeIndexLaneStatusV1::Stale {
+                        generation: generation.to_owned(),
+                    }
+                }
+                tracedecay_domain::PublicRetrieverStatus::Complete => {
+                    CodeIndexLaneStatusV1::Complete
+                }
+                tracedecay_domain::PublicRetrieverStatus::Partial => {
+                    CodeIndexLaneStatusV1::Partial {
+                        generation: served_stale.then(|| generation.to_owned()),
+                    }
+                }
+                tracedecay_domain::PublicRetrieverStatus::Stale => CodeIndexLaneStatusV1::Stale {
+                    generation: generation.to_owned(),
+                },
+                tracedecay_domain::PublicRetrieverStatus::Unavailable => {
+                    CodeIndexLaneStatusV1::Unavailable {
+                        reason: lane_reason::RETRIEVER_UNAVAILABLE,
+                    }
+                }
+            }
+        }
+
+        Self {
+            exact: lane(
+                fallback,
+                tracedecay_domain::RetrieverKind::ExactLiteral,
+                generation,
+                served_stale,
+            ),
+            lexical: lane(
+                fallback,
+                tracedecay_domain::RetrieverKind::Lexical,
+                generation,
+                served_stale,
+            ),
+            graph: lane(
+                fallback,
+                tracedecay_domain::RetrieverKind::Graph,
+                generation,
+                served_stale,
+            ),
+            semantic: Self::fused(semantic).semantic,
         }
     }
 
@@ -412,6 +495,57 @@ mod tests {
                 .degraded_or_fail(CodeIndexSearchUnavailableReasonV1::Internal)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn fallback_lane_coverage_preserves_unavailable_and_partial_states() {
+        let fallback = std::collections::BTreeMap::from([
+            (
+                tracedecay_domain::RetrieverKind::ExactLiteral,
+                tracedecay_domain::PublicRetrieverStatus::Complete,
+            ),
+            (
+                tracedecay_domain::RetrieverKind::Lexical,
+                tracedecay_domain::PublicRetrieverStatus::Complete,
+            ),
+            (
+                tracedecay_domain::RetrieverKind::Graph,
+                tracedecay_domain::PublicRetrieverStatus::Unavailable,
+            ),
+        ]);
+        let unavailable = CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
+            &fallback,
+            "generation.current",
+            false,
+            &CodeIndexSemanticStatusV1::Complete,
+        );
+        assert_eq!(
+            unavailable.graph,
+            CodeIndexLaneStatusV1::Unavailable {
+                reason: lane_reason::RETRIEVER_UNAVAILABLE,
+            }
+        );
+        assert_eq!(unavailable.exact, CodeIndexLaneStatusV1::Complete);
+        assert_eq!(unavailable.lexical, CodeIndexLaneStatusV1::Complete);
+
+        let mut partial_fallback = fallback;
+        partial_fallback.insert(
+            tracedecay_domain::RetrieverKind::Graph,
+            tracedecay_domain::PublicRetrieverStatus::Partial,
+        );
+        let partial = CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
+            &partial_fallback,
+            "generation.previous",
+            true,
+            &CodeIndexSemanticStatusV1::Complete,
+        );
+        assert_eq!(
+            partial.graph,
+            CodeIndexLaneStatusV1::Partial {
+                generation: Some("generation.previous".to_owned()),
+            }
+        );
+        assert!(partial.graph.is_servable());
     }
 
     #[test]

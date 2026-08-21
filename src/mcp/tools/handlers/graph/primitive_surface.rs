@@ -38,6 +38,13 @@ fn lane_status(status: &crate::mcp::server::CodeIndexLaneStatusV1) -> PrimitiveL
                 reason: None,
             }
         }
+        crate::mcp::server::CodeIndexLaneStatusV1::Partial { generation } => {
+            PrimitiveLaneStatusV1::State {
+                status: PrimitiveLaneStateV1::Partial,
+                generation: generation.clone(),
+                reason: None,
+            }
+        }
         crate::mcp::server::CodeIndexLaneStatusV1::Unavailable { reason } => {
             PrimitiveLaneStatusV1::State {
                 status: PrimitiveLaneStateV1::Unavailable,

@@ -128,6 +128,10 @@ fn coverage_value(coverage: &crate::mcp::server::CodeIndexSearchCoverageV1) -> V
                 "status": "stale",
                 "generation": generation,
             }),
+            crate::mcp::server::CodeIndexLaneStatusV1::Partial { generation } => json!({
+                "status": "partial",
+                "generation": generation,
+            }),
             crate::mcp::server::CodeIndexLaneStatusV1::Unavailable { reason } => json!({
                 "status": "unavailable",
                 "reason": reason,

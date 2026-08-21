@@ -158,6 +158,7 @@ pub struct ContextCodeBlockV1 {
 #[serde(rename_all = "snake_case")]
 pub enum PrimitiveLaneStateV1 {
     Stale,
+    Partial,
     Unavailable,
 }
 

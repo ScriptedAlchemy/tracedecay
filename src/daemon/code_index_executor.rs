@@ -1060,14 +1060,16 @@ pub(super) fn code_index_search_executor(
             // fall back to the last complete generation because no current one
             // was admissible, the same lanes are reported stale against the
             // generation that actually answered.
-            let coverage = if executed.query.served_stale {
-                code_search::CodeIndexSearchCoverageV1::fused_stale(
-                    executed.query.generation.as_str(),
-                    &semantic,
-                )
-            } else {
-                code_search::CodeIndexSearchCoverageV1::fused(&semantic)
-            };
+            let coverage = code_search::CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
+                &executed
+                    .query
+                    .authorized
+                    .fallback
+                    .public_fallback_lane_coverage,
+                executed.query.generation.as_str(),
+                executed.query.served_stale,
+                &semantic,
+            );
             code_search::CodeIndexSearchOutcomeV1::Complete(
                 code_search::CodeIndexSearchCompletedV1 {
                     code_generation: executed.query.generation.as_str().to_owned(),
