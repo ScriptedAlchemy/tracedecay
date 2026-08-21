@@ -25,7 +25,7 @@ use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::LspRuntimeFailure;
 
-use super::graph_activation::CodeGraphActivationAuthorityV1;
+use super::graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1};
 use super::{
     CodeIndexArrivalV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1,
     CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1,
@@ -1851,6 +1851,7 @@ impl CodeIndexSchedulerRegistryV1 {
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
         >,
         project_database: Arc<crate::db::Database>,
+        graph_activation_policy: CodeGraphActivationPolicyV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         self.mount_worktree_inner(
             project_id,
@@ -1860,6 +1861,7 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeGraphActivationAuthorityV1::Persistent {
                 runtime: graph_runtime,
                 project_database,
+                policy: graph_activation_policy,
             },
         )
         .await
@@ -1880,7 +1882,30 @@ impl CodeIndexSchedulerRegistryV1 {
             project_root,
             store_root,
             semantic_schedule,
-            CodeGraphActivationAuthorityV1::Memory,
+            CodeGraphActivationAuthorityV1::Memory {
+                policy: CodeGraphActivationPolicyV1::Enabled,
+            },
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(in crate::daemon) async fn mount_worktree_with_graph_policy(
+        &self,
+        project_id: ProjectId,
+        project_root: &Path,
+        store_root: PathBuf,
+        semantic_schedule: Option<
+            tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
+        >,
+        policy: CodeGraphActivationPolicyV1,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        self.mount_worktree_inner(
+            project_id,
+            project_root,
+            store_root,
+            semantic_schedule,
+            CodeGraphActivationAuthorityV1::Memory { policy },
         )
         .await
     }

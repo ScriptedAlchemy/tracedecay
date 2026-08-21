@@ -18,6 +18,7 @@ pub(super) struct CodeIndexActivationMountInputs {
     pub(super) semantic_runtime: crate::semantic_code::DaemonSemanticRuntimeHandleV1,
     pub(super) semantic_lifecycle: Option<Arc<crate::semantic_code::SemanticModelLifecycleOwnerV1>>,
     pub(super) semantic_resources: crate::config::SemanticResourceCeilings,
+    pub(super) native_graph_activation: bool,
     pub(super) scope: tracedecay_application::ResolvedScope,
     pub(super) route_registered: Arc<AtomicBool>,
     pub(super) cancellation: CancellationToken,
@@ -42,6 +43,7 @@ pub(super) fn code_index_activation_mount(
         semantic_runtime,
         semantic_lifecycle,
         semantic_resources,
+        native_graph_activation,
         scope,
         route_registered,
         cancellation,
@@ -57,6 +59,7 @@ pub(super) fn code_index_activation_mount(
         let semantic_runtime = semantic_runtime.clone();
         let semantic_lifecycle = semantic_lifecycle.clone();
         let semantic_resources = semantic_resources;
+        let native_graph_activation = native_graph_activation;
         let scope = scope.clone();
         let route_registered = Arc::clone(&route_registered);
         let cancellation = cancellation.clone();
@@ -79,6 +82,7 @@ pub(super) fn code_index_activation_mount(
                 Some(&semantic_runtime),
                 semantic_lifecycle,
                 Some(semantic_resources),
+                native_graph_activation,
                 graph_runtime,
                 graph_publication_database,
             );

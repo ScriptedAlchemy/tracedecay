@@ -1658,6 +1658,8 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     GraphProjection(#[from] CodeGraphProjectionError),
     #[error("code-index graph activation failed: {0}")]
     GraphActivation(String),
+    #[error("code-index graph activation refused: {0}")]
+    GraphActivationRefused(&'static str),
     #[error("code-index semantic scheduling failed: {0}")]
     SemanticSchedule(String),
     #[error("code-index publication changed before serving activation: {0}")]
@@ -1698,6 +1700,7 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::Production(_)
             | Self::ProductionOpen(_)
             | Self::Privacy(_)
+            | Self::GraphActivationRefused(_)
             | Self::SemanticSchedule(_)
             | Self::PublicationConflict(_)
             | Self::IgnoredDependency(_) => false,
@@ -1705,11 +1708,12 @@ impl CodeIndexSchedulerErrorV1 {
     }
 
     pub(super) fn is_graph_activation_refusal(&self) -> bool {
-        matches!(
-            self,
-            Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { budget, .. })
-                if budget == "resident_memory"
-        )
+        matches!(self, Self::GraphActivationRefused(_))
+            || matches!(
+                self,
+                Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { budget, .. })
+                    if budget == "resident_memory"
+            )
     }
 }
 
@@ -2960,6 +2964,7 @@ pub(crate) use cadence::{
     CodeIndexArrivalV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1,
     CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, newly_eligible_percentile,
 };
+pub(in crate::daemon) use graph_activation::CodeGraphActivationPolicyV1;
 pub(crate) use graph_activation::CodeGraphReplayBindingV1;
 pub(in crate::daemon) use ignored_dependencies::{
     CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexIgnoredDependencyRefusalV1,

@@ -2089,6 +2089,7 @@ async fn activate_linked_worktree(
             None,
             graph_runtime,
             project_database,
+            crate::daemon::code_index_scheduler::CodeGraphActivationPolicyV1::Enabled,
         )
         .await
         .map(|_| ())

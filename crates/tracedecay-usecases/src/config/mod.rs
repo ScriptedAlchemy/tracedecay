@@ -30,9 +30,9 @@ use tracedecay_domain::configuration::{
     ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
     DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
-    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-    TELEMETRY_TIMINGS_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
@@ -47,6 +47,7 @@ pub struct TraceDecayConfig {
     pub track_call_sites: bool,
     pub git_ignore: bool,
     pub diagnostics_prewarm: bool,
+    pub native_graph_activation: bool,
     pub semantic: SemanticConfig,
     pub sync: SyncConfig,
     pub telemetry: TelemetryConfig,
@@ -62,6 +63,7 @@ impl Default for TraceDecayConfig {
             track_call_sites: true,
             git_ignore: true,
             diagnostics_prewarm: false,
+            native_graph_activation: true,
             semantic: SemanticConfig::default(),
             sync: SyncConfig::default(),
             telemetry: TelemetryConfig::default(),
@@ -221,6 +223,10 @@ fn runtime_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<Tr
         track_call_sites: required_bool(snapshot, INDEX_TRACK_CALL_SITES_SETTING_KEY)?,
         git_ignore: required_bool(snapshot, INDEX_GIT_IGNORE_SETTING_KEY)?,
         diagnostics_prewarm: required_bool(snapshot, DIAGNOSTICS_PREWARM_SETTING_KEY)?,
+        native_graph_activation: required_bool(
+            snapshot,
+            INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+        )?,
         semantic: SemanticConfig::default(),
         sync: SyncConfig {
             auto_track_pr_branches: required_bool(

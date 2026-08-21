@@ -209,6 +209,7 @@ pub(super) async fn production_project_server(
         semantic_runtime: semantic_runtime.clone(),
         semantic_lifecycle: semantic_lifecycle.clone(),
         semantic_resources,
+        native_graph_activation: runtime_configuration.config.native_graph_activation,
         scope: code_search_scope.clone(),
         route_registered: Arc::clone(&route_registered),
         cancellation: cancellation.clone(),

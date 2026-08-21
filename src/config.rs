@@ -11,8 +11,8 @@ use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
     DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
-    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
@@ -165,6 +165,11 @@ pub struct TraceDecayConfig {
     /// pinned snapshot during legacy migration, never during a tool call.
     #[serde(default)]
     pub diagnostics_prewarm: bool,
+    /// Whether the persistent native code graph may activate for this project.
+    /// Disabling it leaves exact and lexical retrieval available and reports
+    /// graph capability as unavailable.
+    #[serde(default = "default_native_graph_activation")]
+    pub native_graph_activation: bool,
     /// Optional installed local semantic profile selection. Missing or
     /// unavailable semantics never disables exact, lexical, or graph search.
     #[serde(default)]
@@ -180,6 +185,10 @@ pub struct TraceDecayConfig {
 }
 
 fn default_git_ignore() -> bool {
+    true
+}
+
+fn default_native_graph_activation() -> bool {
     true
 }
 
@@ -602,6 +611,7 @@ impl Default for TraceDecayConfig {
             track_call_sites: true,
             git_ignore: default_git_ignore(),
             diagnostics_prewarm: false,
+            native_graph_activation: default_native_graph_activation(),
             semantic: SemanticConfig::default(),
             sync: SyncConfig::default(),
             telemetry: TelemetryConfig::default(),
@@ -1400,6 +1410,10 @@ pub fn runtime_config_from_snapshot(
         track_call_sites: required_bool(snapshot, INDEX_TRACK_CALL_SITES_SETTING_KEY)?,
         git_ignore: required_bool(snapshot, INDEX_GIT_IGNORE_SETTING_KEY)?,
         diagnostics_prewarm: required_bool(snapshot, DIAGNOSTICS_PREWARM_SETTING_KEY)?,
+        native_graph_activation: required_bool(
+            snapshot,
+            INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+        )?,
         semantic: semantic_config_from_snapshot(snapshot)?,
         sync: SyncConfig {
             auto_watch: required_bool(snapshot, SYNC_AUTO_WATCH_SETTING_KEY)?,

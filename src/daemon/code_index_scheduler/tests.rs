@@ -7435,6 +7435,7 @@ async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
             None,
             Arc::clone(&graph_runtime),
             read_only_project_database,
+            super::CodeGraphActivationPolicyV1::Enabled,
         )
         .await
         .expect("mount retained generation");
@@ -7710,6 +7711,101 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
     );
 
     super::graph_activation::set_injected_resident_memory_refusal(&worktree_id, false);
+    registry.shutdown().await;
+}
+
+/// The canonical project setting must reach the scheduler's production policy
+/// boundary. A configured refusal still verifies and seats the sealed text
+/// generation, while the graph authority is never activated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let scope = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree id"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope")
+    };
+
+    let configuration_registry =
+        crate::config::registry::ConfigurationRegistry::core().expect("configuration registry");
+    let setting = tracedecay_domain::configuration::SettingKey::new(
+        tracedecay_domain::configuration::INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+    )
+    .expect("native graph setting key");
+    let layer = crate::config::resolver::ConfigurationLayerV1 {
+        layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+            project_id: test_project_id(),
+        },
+        revision_id: tracedecay_domain::configuration::ConfigurationRevisionId::new(
+            "revision.native-graph-refusal.1",
+        )
+        .expect("configuration revision"),
+        entries: std::collections::BTreeMap::from([(
+            setting,
+            tracedecay_domain::configuration::ConfigurationValueV1::Boolean(false),
+        )]),
+    };
+    let snapshot =
+        crate::config::resolver::resolve_configuration(&configuration_registry, &[layer])
+            .expect("resolve configured native graph refusal")
+            .snapshot;
+    let config = tracedecay_usecases::config::PinnedRuntimeConfiguration::new(
+        tracedecay_usecases::config::RuntimeConfigurationTarget {
+            project_id: test_project_id(),
+            project_root: fixture.path().to_path_buf(),
+        },
+        tracedecay_domain::configuration::ConfigurationRevisionId::new(
+            "revision.native-graph-refusal.1",
+        )
+        .expect("pinned configuration revision"),
+        snapshot,
+    )
+    .expect("materialize pinned runtime configuration");
+    assert!(!config.config.native_graph_activation);
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::from_enabled(config.config.native_graph_activation),
+        )
+        .await
+        .expect("mount scheduler under configured graph policy");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let latest = loop {
+        if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await {
+            break latest;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "configured graph refusal withheld the text-serving generation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(latest.production_query_owners().is_ok());
+    assert!(latest.production_graph_serving().is_err());
+    assert!(latest.interactive_graph_store().is_err());
     registry.shutdown().await;
 }
 

@@ -88,9 +88,26 @@ pub(super) enum CodeGraphActivationAuthorityV1 {
         runtime:
             Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
         project_database: Arc<crate::db::Database>,
+        policy: CodeGraphActivationPolicyV1,
     },
     #[cfg(test)]
-    Memory,
+    Memory { policy: CodeGraphActivationPolicyV1 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::daemon) enum CodeGraphActivationPolicyV1 {
+    Enabled,
+    RefusedByConfiguration,
+}
+
+impl CodeGraphActivationPolicyV1 {
+    pub const fn from_enabled(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::RefusedByConfiguration
+        }
+    }
 }
 
 impl CodeGraphActivationAuthorityV1 {
@@ -112,10 +129,19 @@ impl CodeGraphActivationAuthorityV1 {
                 ))
             })?
             .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
+        let policy = match self {
+            Self::Persistent { policy, .. } | Self::Memory { policy } => *policy,
+        };
+        if policy == CodeGraphActivationPolicyV1::RefusedByConfiguration {
+            let reason = "code graph activation was refused by project configuration";
+            latest.refuse_graph_activation(reason);
+            return Err(CodeIndexSchedulerErrorV1::GraphActivationRefused(reason));
+        }
         match self {
             Self::Persistent {
                 runtime,
                 project_database,
+                ..
             } => {
                 let generation_id = latest.generation().manifest().generation_id.clone();
                 let retained = runtime
@@ -143,7 +169,7 @@ impl CodeGraphActivationAuthorityV1 {
                 })?
             }
             #[cfg(test)]
-            Self::Memory => {
+            Self::Memory { .. } => {
                 if has_injected_resident_memory_refusal(worktree_id) {
                     latest.refuse_graph_activation(
                         "code graph activation was refused by the resident-memory policy",

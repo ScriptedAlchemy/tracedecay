@@ -303,6 +303,7 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
             None,
             Arc::clone(&graph_runtime),
             Arc::clone(&project_database),
+            super::super::CodeGraphActivationPolicyV1::Enabled,
         )
         .await
         .expect("mount persistent graph-backed scheduler");

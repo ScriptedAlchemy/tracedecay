@@ -99,6 +99,9 @@ fn clone_scheduler_error(error: &CodeIndexSchedulerErrorV1) -> CodeIndexSchedule
         CodeIndexSchedulerErrorV1::GraphActivation(error) => {
             CodeIndexSchedulerErrorV1::GraphActivation(error.clone())
         }
+        CodeIndexSchedulerErrorV1::GraphActivationRefused(reason) => {
+            CodeIndexSchedulerErrorV1::GraphActivationRefused(*reason)
+        }
         CodeIndexSchedulerErrorV1::SemanticSchedule(error) => {
             CodeIndexSchedulerErrorV1::SemanticSchedule(error.clone())
         }

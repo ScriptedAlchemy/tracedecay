@@ -269,6 +269,7 @@ impl DaemonInvocationState {
         semantic_runtime: Option<&crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
         semantic_lifecycle: Option<Arc<crate::semantic_code::SemanticModelLifecycleOwnerV1>>,
         semantic_resources: Option<crate::config::SemanticResourceCeilings>,
+        native_graph_activation: bool,
         graph_runtime: Arc<
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
         >,
@@ -338,6 +339,9 @@ impl DaemonInvocationState {
                 semantic_schedule,
                 graph_runtime,
                 graph_publication_database,
+                code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
+                    native_graph_activation,
+                ),
             )
             .await
             .map_err(|error| TraceDecayError::Config {
