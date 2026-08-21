@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.24](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.23...v0.1.0-beta.24) (2026-08-21)
+
+
+### Bug Fixes
+
+* **code-index:** refuse graph before retained hydration ([70d091e](https://github.com/ScriptedAlchemy/tracedecay/commit/70d091e7995b92cd79a2b08375099321f1854219))
+* **code-index:** update graph policy on remount ([99c50aa](https://github.com/ScriptedAlchemy/tracedecay/commit/99c50aa3c6e9a9d79630fb531eb56f1c6c6a050d))
+* **observation:** converge canonical payload revisions ([fcb452c](https://github.com/ScriptedAlchemy/tracedecay/commit/fcb452c4e1e8039bb3482684bd4d1df1584873dd))
+* **projection:** key Claude outputs by row identity ([49acab5](https://github.com/ScriptedAlchemy/tracedecay/commit/49acab5e929a31baa8e76861c2a7c0d3a5b0b407))
+
+
+### Performance Improvements
+
+* **query:** resume lexical projection builds ([4817fab](https://github.com/ScriptedAlchemy/tracedecay/commit/4817fab12abcfeb1a419be54ff0e53f4113873d2))
+
 ## [0.1.0-beta.23](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.22...v0.1.0-beta.23) (2026-08-21)
 
 
