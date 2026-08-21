@@ -553,9 +553,9 @@ fn validate_host_bundle_options(
     // of an interactive-only `go!` prompt. It owns no host component and has no
     // preview, so `--component` and `--dry-run` stay rejected.
     if matches!(command, Commands::Wipe { .. }) {
-        if host_bundle.component.is_some() || host_bundle.dry_run {
+        if host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.adopt {
             return Err(tracedecay::errors::TraceDecayError::Config {
-                message: "wipe accepts --yes to confirm; --component and --dry-run are only valid \
+                message: "wipe accepts --yes to confirm; --component, --dry-run, and --adopt are only valid \
                           with install, update-plugin, reinstall, or uninstall"
                     .to_string(),
             });
@@ -572,9 +572,9 @@ fn validate_host_bundle_options(
                 | ProfileStorageAction::ResetProjectStore { .. },
         }
     ) {
-        if host_bundle.component.is_some() || host_bundle.dry_run {
+        if host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.adopt {
             return Err(tracedecay::errors::TraceDecayError::Config {
-                message: "storage resets accept --yes to confirm; --component and --dry-run are \
+                message: "storage resets accept --yes to confirm; --component, --dry-run, and --adopt are \
                           only valid with install, update-plugin, reinstall, or uninstall"
                     .to_string(),
             });
@@ -588,15 +588,47 @@ fn validate_host_bundle_options(
     // from leaking a spurious `--component` requirement onto unrelated verbs
     // such as `branch gc` and `storage report`.
     if !matches!(family, CommandFamily::Agent)
-        && (host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.yes)
+        && (host_bundle.component.is_some()
+            || host_bundle.dry_run
+            || host_bundle.yes
+            || host_bundle.adopt)
     {
         return Err(tracedecay::errors::TraceDecayError::Config {
             message:
-                "--component, --dry-run, and --yes are only valid with install, update-plugin, reinstall, or uninstall"
+                "--component, --dry-run, --yes, and --adopt are only valid with install, update-plugin, reinstall, or uninstall"
                     .to_string(),
         });
     }
+    if host_bundle.adopt && !host_bundle.yes {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message:
+                "--adopt requires --yes because it authorizes taking ownership of existing bytes"
+                    .to_string(),
+        });
+    }
+    if host_bundle.adopt
+        && !matches!(
+            command,
+            Commands::Install { .. } | Commands::UpdatePlugin { .. } | Commands::Reinstall { .. }
+        )
+    {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "--adopt is valid only with install, update-plugin, or reinstall".to_string(),
+        });
+    }
     Ok(())
+}
+
+fn is_full_component_set_adoption(command: &Commands, host_bundle: &HostBundleCliOptions) -> bool {
+    host_bundle.component.is_none()
+        && host_bundle.yes
+        && host_bundle.adopt
+        && matches!(
+            command,
+            Commands::Install { local: false, .. }
+                | Commands::Reinstall { local: false, .. }
+                | Commands::UpdatePlugin { local: false, .. }
+        )
 }
 
 async fn dispatch_command(
@@ -883,6 +915,7 @@ async fn dispatch_agent_command(
     ) && host_bundle.component.is_none()
         && host_bundle.dry_run
         && !host_bundle.yes;
+    let full_component_set_adoption = is_full_component_set_adoption(&command, &host_bundle);
     // `--dry-run` / `--yes` preview or confirm a first-party component
     // mutation, so they normally require `--component` to name the target.
     // Full `reinstall --dry-run` is the read-only exception: it validates the
@@ -893,6 +926,7 @@ async fn dispatch_agent_command(
     ) && host_bundle.component.is_none()
         && (host_bundle.dry_run || host_bundle.yes)
         && !full_reinstall_preflight
+        && !full_component_set_adoption
     {
         return Err(tracedecay::errors::TraceDecayError::Config {
             message: "--dry-run and --yes require --component to select the target host component"
