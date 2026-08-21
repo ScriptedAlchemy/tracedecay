@@ -168,6 +168,29 @@ exit 2
     command.env("PATH", joined);
 }
 
+fn arm_implicit_cursor_reinstall(home: &Path) {
+    let profile = profile_root(home);
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(
+        profile.join("config.toml"),
+        concat!(
+            "installed_agents = [\"cursor\"]\n",
+            "previous_version = \"0.0.0-beta.1\"\n",
+            "last_installed_version = \"0.0.0-beta.1\"\n",
+        ),
+    )
+    .unwrap();
+}
+
+fn assert_cursor_plugin_was_not_implicitly_installed(home: &Path) {
+    assert!(
+        !canonical_temp_path(home)
+            .join(".cursor/plugins/local/tracedecay")
+            .exists(),
+        "ordinary CLI entrypoint repaired the Cursor host bundle before dispatch"
+    );
+}
+
 /// Initializes the profile-sharded project store through the daemon-owned
 /// runtime. Only for tests where init is setup, not the behaviour under test.
 fn init_project_fixture(home: &Path, project: &Path) {
@@ -634,6 +657,33 @@ fn read_codex_daemon_automation_config(home: &TempDir, project_root: &Path) -> s
     );
     serde_json::from_slice(&output.stdout)
         .expect("codex automation config read should return canonical JSON")
+}
+
+#[test]
+fn automation_config_get_does_not_repair_host_bundles_before_dispatch() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    std::fs::create_dir_all(project_root.join("src")).unwrap();
+    std::fs::write(project_root.join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
+    arm_implicit_cursor_reinstall(home.path());
+
+    let mut get = tracedecay_command_without_daemon(home.path(), &project_root);
+    get.args(["automation", "config", "get", "--json"]);
+    let output = run_with_timeout(get, cli_timeout());
+
+    assert!(
+        !output.status.success(),
+        "automation config get should report the deliberately absent daemon\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("daemon"),
+        "config read should fail at its dispatcher, not during startup maintenance\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_cursor_plugin_was_not_implicitly_installed(home.path());
 }
 
 #[test]
@@ -1413,7 +1463,7 @@ async fn projects_context_resolves_linked_worktree_path_by_git_common_dir() {
 }
 
 #[tokio::test]
-async fn wipe_all_removes_profile_sharded_store_and_global_row() {
+async fn wipe_all_does_not_repair_host_bundles_before_removing_profile_store() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
@@ -1425,6 +1475,7 @@ async fn wipe_all_removes_profile_sharded_store_and_global_row() {
     register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
     runtime.checkpoint_profile_database_for_test().await;
     drop(runtime);
+    arm_implicit_cursor_reinstall(home.path());
 
     let mut command = tracedecay_command_with_stdin_without_daemon(home.path(), project.path());
     command.args(["wipe", "--all"]);
@@ -1444,6 +1495,7 @@ async fn wipe_all_removes_profile_sharded_store_and_global_row() {
     );
     assert!(!shard_root.join("tracedecay.db").exists());
     assert!(!shard_root.join(STORE_MANIFEST_FILENAME).exists());
+    assert_cursor_plugin_was_not_implicitly_installed(home.path());
     let reopened = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();

@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use rayon::prelude::*;
@@ -427,10 +427,12 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// full check on every call. Clones inherit the mark because a clone is
     /// deep-equal to an already-verified value.
     validated: OnceLock<()>,
-    /// Amortized parser-backed exact admission. `admit_all` re-canonicalizes and
-    /// re-hashes every chunk, which is pure waste on the serving path once the
-    /// immutable chunk set has been admitted. Only success is cached.
-    admitted: OnceLock<Arc<Vec<ExtractionAdmittedCodeSearchChunkV1>>>,
+    /// Reclaimable parser-backed exact-admission staging. `admit_all`
+    /// re-canonicalizes and re-hashes every chunk, so concurrent consumers
+    /// share one build while any consumer still owns it. Once the retained
+    /// exact and lexical query owners have consumed the staging corpus, the
+    /// weak memo lets its duplicate chunk allocation be reclaimed.
+    admitted: OnceLock<Arc<Mutex<Weak<Vec<ExtractionAdmittedCodeSearchChunkV1>>>>>,
     /// Amortized test-attribution join. Query admission rebuilds this authority
     /// per call even when the generation is unchanged; the traversal and its
     /// evidence digest are a pure function of the immutable generation. Only
@@ -524,16 +526,23 @@ impl CodeIndexPublishedGenerationV1 {
         self.validated.get().is_some()
     }
 
-    /// Whether this generation's parser-backed exact admission has already been
-    /// computed.
+    /// Whether this generation's parser-backed exact-admission staging still
+    /// has a live consumer.
     ///
     /// [`Self::admitted_chunks`] re-canonicalizes and re-hashes every chunk on
-    /// its first call, so whoever calls it first pays an O(store) sweep. This
-    /// lets an activation path prove it warmed that memo instead of leaving the
-    /// cost to the first query. Like [`Self::is_validated`] it reports memo
-    /// state only and never short-circuits a gate.
+    /// its first call, so concurrent callers share a single build. The memo is
+    /// deliberately weak: persistent query owners retain their serving
+    /// projections, not this duplicate staging corpus. Like
+    /// [`Self::is_validated`] it reports memo state only and never
+    /// short-circuits a gate.
     pub fn is_exact_admission_warm(&self) -> bool {
-        self.admitted.get().is_some()
+        self.admitted.get().is_some_and(|admitted| {
+            let admitted = match admitted.lock() {
+                Ok(admitted) => admitted,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            admitted.strong_count() > 0
+        })
     }
 
     /// Build the production generation-bound affected-test authority.
@@ -776,15 +785,24 @@ impl CodeIndexPublishedGenerationV1 {
     /// Downstream exact/phrase/BM25 projections must consume this value rather
     /// than raw chunks, preserving the non-demotable exact tier.
     ///
-    /// The admitted sweep is memoized per sealed generation and handed out as
-    /// a shared reference. Returning an owned `Vec` here deep-copied ~150K
-    /// chunks (content included) on every memo hit, which put an O(store)
-    /// memcpy on every search's request path.
+    /// The admitted sweep is shared while a consumer owns it, then reclaimed
+    /// after the persistent query owners have built their serving projections.
+    /// Returning an owned `Vec` here deep-copied ~150K chunks (content included)
+    /// on every memo hit, which put an O(store) memcpy on every search's request
+    /// path. Holding the memo lock through construction preserves single-flight
+    /// admission for concurrent cold consumers.
     pub fn admitted_chunks(
         &self,
     ) -> Result<Arc<Vec<ExtractionAdmittedCodeSearchChunkV1>>, ChunkingFailureV1> {
-        if let Some(admitted) = self.admitted.get() {
-            return Ok(Arc::clone(admitted));
+        let admitted = self
+            .admitted
+            .get_or_init(|| Arc::new(Mutex::new(Weak::new())));
+        let mut memo = match admitted.lock() {
+            Ok(memo) => memo,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(admitted) = memo.upgrade() {
+            return Ok(admitted);
         }
         let mut chunks = Vec::new();
         for file in &self.files {
@@ -795,7 +813,7 @@ impl CodeIndexPublishedGenerationV1 {
         }
         chunks.sort_by(|left, right| left.chunk().id.cmp(&right.chunk().id));
         let chunks = Arc::new(chunks);
-        let _ = self.admitted.set(Arc::clone(&chunks));
+        *memo = Arc::downgrade(&chunks);
         Ok(chunks)
     }
 

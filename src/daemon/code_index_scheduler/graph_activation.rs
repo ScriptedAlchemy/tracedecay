@@ -220,7 +220,6 @@ impl LatestCompleteCodeIndexV1 {
         // activation keeps the original, which is pinned to the same verified
         // snapshot and generation.
         let _ = self.interactive_graph.set(store);
-        let _ = self.generation.admitted_chunks();
         let _ = self.generation.test_attribution_authority();
         let _ = self.record_index();
         Ok(())

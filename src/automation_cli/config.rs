@@ -154,7 +154,7 @@ pub(crate) async fn load_canonical_automation_config(
     {
         tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(config) => {
             tracedecay_agent_hosts::automation::config::validate_config(&config)?;
-            Ok(config)
+            Ok(*config)
         }
         _ => Err(config_error(
             "automation setting has the wrong canonical value kind",
@@ -176,9 +176,9 @@ pub(crate) async fn apply_project_automation_patch(
         let mutation = crate::commands::project_configuration_set(
             &resolved.project_id,
             tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
-            tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(
+            tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(Box::new(
                 effective.clone(),
-            ),
+            )),
         )?;
         let receipt = crate::commands::mutate_project_configuration(
             &resolved.project_path,
