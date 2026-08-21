@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.12](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.11...v0.1.0-beta.12) (2026-08-21)
+
+
+### Bug Fixes
+
+* **cli:** request the code-index reconcile init reports ([2e066ad](https://github.com/ScriptedAlchemy/tracedecay/commit/2e066ad0f92f934cf14e5ce294158c1a453ad2fe))
+* **daemon:** defer slow repository discovery instead of failing open ([39bbac1](https://github.com/ScriptedAlchemy/tracedecay/commit/39bbac1180d5152f30f48f0e9d67ec08117724e3))
+* **daemon:** harden first-index recovery ([a4e47ba](https://github.com/ScriptedAlchemy/tracedecay/commit/a4e47ba0964ed4326d17f3a08a7b8dfc6ad85cd3))
+* **daemon:** keep the unix socket endpoint within SUN_LEN ([a64e7d6](https://github.com/ScriptedAlchemy/tracedecay/commit/a64e7d6a142d51d88b2582143538a27db0e11b0b))
+* **daemon:** stable first-index on empty profiles (discovery deferral, real init reconcile, accept/SUN_LEN hardening) ([5259f5b](https://github.com/ScriptedAlchemy/tracedecay/commit/5259f5b03f24b73c1d27587291ee2f9399adb185))
+* **daemon:** survive transient accept errors instead of exiting ([ea0eda9](https://github.com/ScriptedAlchemy/tracedecay/commit/ea0eda9ec7b5795ab8517d0fc5814fe710f285f5))
+
+
+### Performance Improvements
+
+* **code-index:** cap default indexing workers ([5366a2c](https://github.com/ScriptedAlchemy/tracedecay/commit/5366a2c63b91871f29e1c2e0384c28765094b019))
+
 ## [0.1.0-beta.11](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.10...v0.1.0-beta.11) (2026-08-20)
 
 

@@ -1,10 +1,10 @@
-//! Embedding width: race the batch job to idle behind the serving reservation.
+//! Embedding width: bounded race to idle behind the serving reservation.
 //!
 //! Embedding a published code generation is batch work with a finish line, so
 //! it gets the same treatment as extraction (`docs/SERVING-PATH-PERFORMANCE.md`
-//! Principle 2): run at machine width, finish, and get out of the way. The
-//! serving reservation — not a throttled embedder — is what keeps interactive
-//! reads fast, so the width here is derived from
+//! Principle 2): use the same bounded, barrier-free pool as extraction, finish,
+//! and get out of the way. The serving reservation and parser-memory ceiling
+//! keep interactive reads available, so the width here is derived from
 //! [`tracedecay_code_index::parallelism::indexing_worker_target`] and the work
 //! is dispatched onto that same reserved pool.
 //!
@@ -133,10 +133,10 @@ mod tests {
 
     #[test]
     fn session_width_stays_inside_the_indexing_reservation() {
-        // 96 cores => indexing width 90; 4 intra threads => 22, capped at 16.
-        assert_eq!(embedding_session_width_for(96, 4, 64), 16);
-        // 16 cores => indexing width 14; 4 intra threads => 3.
-        assert_eq!(embedding_session_width_for(16, 4, 64), 3);
+        // Wide hosts retain the eight-worker parser-memory ceiling; four
+        // intra-op threads therefore permit two independent sessions.
+        assert_eq!(embedding_session_width_for(96, 4, 64), 2);
+        assert_eq!(embedding_session_width_for(16, 4, 64), 2);
         // A narrow host still embeds, just without concurrency.
         assert_eq!(embedding_session_width_for(4, 4, 64), 1);
         assert_eq!(embedding_session_width_for(1, 4, 64), 1);
@@ -150,8 +150,8 @@ mod tests {
 
     #[test]
     fn wider_intra_threads_narrow_the_session_width() {
-        assert_eq!(embedding_session_width_for(96, 1, 64), 16);
-        assert_eq!(embedding_session_width_for(96, 32, 64), 2);
+        assert_eq!(embedding_session_width_for(96, 1, 64), 8);
+        assert_eq!(embedding_session_width_for(96, 32, 64), 1);
         assert_eq!(embedding_session_width_for(96, 128, 64), 1);
     }
 

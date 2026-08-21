@@ -1,14 +1,16 @@
-//! Indexing parallelism: race to idle, reserve a slice for serving.
+//! Indexing parallelism: bounded race to idle with serving capacity reserved.
 //!
-//! Indexing is a batch job with a finish line. The cheapest way to keep the
-//! interference window short is to run it at full machine width and finish,
-//! not to pace it down and stay in the way for longer. See
-//! `docs/SERVING-PATH-PERFORMANCE.md` Principle 2.
+//! Indexing is a batch job with a finish line, but each concurrent parser and
+//! artifact builder retains substantially more than its source bytes. Running
+//! at every non-serving core multiplied that transient state to 90 workers on
+//! a 96-core host and forced the daemon into swap. The shared pool therefore
+//! races to idle within a memory-safe default ceiling while preserving the
+//! barrier-free pipeline. See `docs/SERVING-PATH-PERFORMANCE.md` Principle 2.
 //!
 //! Interactive latency is protected by a *reservation*, not by throttling:
-//! the indexing pool is sized to `total_cores - reserve`, so the daemon's
-//! request runtime always has runnable CPU even while a full reindex is
-//! saturating everything else. The reserve is deliberately small
+//! the indexing pool is sized to `min(total_cores - reserve, 8)`, so the
+//! daemon's request runtime always has runnable CPU and parser memory cannot
+//! scale with a large host's full logical-core count. The reserve is deliberately small
 //! (`max(2, cores/16)`) because serving work is latency-bound, not
 //! throughput-bound — a handful of cores answers reads at full speed.
 //!
@@ -26,6 +28,11 @@ const MIN_SERVING_RESERVED_CORES: usize = 2;
 
 /// Fraction of a large host handed to serving: `cores / 16` (6 of 96).
 const SERVING_RESERVE_DIVISOR: usize = 16;
+
+/// Default ceiling for concurrent parse/artifact workers. Each worker can hold
+/// source, syntax trees, extraction rows, chunks, and graph edges at once, so
+/// machine-width fan-out is a memory multiplier rather than a free speedup.
+const DEFAULT_MAX_INDEXING_WORKERS: usize = 8;
 
 /// Operator override for the indexing width, for hosts where memory rather
 /// than CPU is the binding constraint (each worker holds a tree-sitter
@@ -45,7 +52,9 @@ pub fn serving_reserved_cores(total_cores: usize) -> usize {
 #[must_use]
 pub fn indexing_worker_target(total_cores: usize) -> usize {
     let total = total_cores.max(1);
-    total.saturating_sub(serving_reserved_cores(total)).max(1)
+    total
+        .saturating_sub(serving_reserved_cores(total))
+        .clamp(1, DEFAULT_MAX_INDEXING_WORKERS)
 }
 
 fn detected_cores() -> usize {
@@ -146,13 +155,13 @@ mod tests {
     }
 
     #[test]
-    fn indexing_races_to_idle_on_wide_hosts() {
+    fn indexing_stays_within_the_default_memory_safe_width() {
         assert_eq!(indexing_worker_target(1), 1);
         assert_eq!(indexing_worker_target(2), 1);
         assert_eq!(indexing_worker_target(4), 2);
-        assert_eq!(indexing_worker_target(16), 14);
-        assert_eq!(indexing_worker_target(96), 90);
-        assert_eq!(indexing_worker_target(128), 120);
+        assert_eq!(indexing_worker_target(16), 8);
+        assert_eq!(indexing_worker_target(96), 8);
+        assert_eq!(indexing_worker_target(128), 8);
     }
 
     #[test]
@@ -161,6 +170,10 @@ mod tests {
             let workers = indexing_worker_target(cores);
             assert!(workers >= 1, "cores={cores} left no indexing worker");
             assert!(workers <= cores, "cores={cores} oversubscribed");
+            assert!(
+                workers <= DEFAULT_MAX_INDEXING_WORKERS,
+                "cores={cores} exceeded the default memory-safe width"
+            );
             if cores > 1 {
                 assert!(
                     serving_reserved_cores(cores) >= 1,
