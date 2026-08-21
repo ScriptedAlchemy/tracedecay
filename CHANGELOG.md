@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.16](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.15...v0.1.0-beta.16) (2026-08-21)
+
+
+### Bug Fixes
+
+* **daemon:** release session graph leases at shutdown ([c3907ff](https://github.com/ScriptedAlchemy/tracedecay/commit/c3907ffbe0f99818842966e4e0ea411c965b915d))
+* **daemon:** release session sync stores at shutdown ([3a1b00a](https://github.com/ScriptedAlchemy/tracedecay/commit/3a1b00af3cfd73430366975fba8792bc446b080e))
+
 ## [0.1.0-beta.15](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.14...v0.1.0-beta.15) (2026-08-21)
 
 
