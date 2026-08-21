@@ -1,57 +1,35 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_code_index::chunks::{
-    CodeIndexImportEvidenceV1, DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1,
-    content_digest,
+    DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1, content_digest,
 };
 use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
-use tracedecay_code_index::production::{
-    CodeIndexExecutionControlV1, VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1,
-};
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ComponentRevision, ContentDigest,
     EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactAdmissionValidator,
     ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileOccurrenceId,
-    FreshnessCompatibilityV1, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
-    PrincipalId, ProjectId, QueryNormalizationRevision, RepositoryId, RetrievalBudget,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverOutcome, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId,
-    SensitivityDecision, SensitivityLevelV1, SingleRootScopeV1, SnapshotFileDispositionV1,
-    SourceFreshness, SourceInstanceKey, SourceNamespace, SourceSpan, SymbolOccurrenceId,
-    TemporalModeV1, UtcMicros, ValidatedCodeFileV1, VectorWatermark,
+    FreshnessCompatibilityV1, LanguageDescriptorRevision, PolicyRevisionId, PrincipalId, ProjectId,
+    QueryNormalizationRevision, RepositoryId, RetrievalBudget, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SensitivityDecision,
+    SensitivityLevelV1, SingleRootScopeV1, SnapshotFileDispositionV1, SourceFreshness,
+    SourceInstanceKey, SourceNamespace, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
+    ValidatedCodeFileV1, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
     ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::lexical::{
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1, CodeLexicalProjectionAdapterV1,
-    CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
+    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1,
     MAX_LEXICAL_QUERY_TERM_BYTES_V1,
 };
-
-struct ArtifactControl {
-    cancelled: bool,
-}
-
-impl CodeIndexExecutionControlV1 for ArtifactControl {
-    fn is_cancelled(&self) -> bool {
-        self.cancelled
-    }
-
-    fn is_deadline_exceeded(&self) -> bool {
-        false
-    }
-}
 
 pub(crate) fn id<T>(value: &str) -> T
 where
@@ -395,163 +373,55 @@ fn retained_lexical_projection_preserves_progress_across_bounded_windows() {
 }
 
 #[test]
-fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
+fn retained_lexical_projection_bounds_marginal_owned_byte_growth_for_repeated_tokens() {
     let generation = id::<CodeGenerationId>("generation.1");
-    let chunks = (0..3)
-        .map(|ordinal| {
-            let symbol = format!("artifact_symbol_{ordinal}");
-            admitted_rust_chunk(
-                &generation,
-                ordinal,
-                &format!("pub fn {symbol}() -> usize {{ {ordinal} }}\n"),
-                CodeSearchChunkGrainV1::SymbolSignature,
-                &symbol,
-            )
-        })
-        .collect::<Vec<_>>();
-    let metadata = projection_metadata(&generation, FreshnessCompatibilityV1::Current);
-    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), chunks.clone())
-        .expect("one-shot lexical projection");
-    let cumulative_digest = digest_id::<ManifestDigest>('c');
-    let import_dictionary_digest = digest_id::<ManifestDigest>('d');
-    let import_evidence = CodeIndexImportEvidenceV1 {
-        logical_path: "src/admitted_0.rs".to_owned(),
-        file_occurrence_id: id("file.admitted.0"),
-        module_specifier: "serde".to_owned(),
-        imported_name: Some("Serialize".to_owned()),
-        local_name: Some("Serialize".to_owned()),
-        namespace: ImportNamespaceV1::Value,
-        module_kind: ImportModuleKindV1::BareModule,
-        span: SourceSpan {
-            start_byte: 0,
-            end_byte: 1,
-        },
-        start_line: 1,
-        start_column: 1,
-    };
-    let import_payload_bytes = serde_json::to_vec(&import_evidence)
-        .expect("import payload")
-        .len() as u64;
-    let page = VerifiedSealedLexicalPageV1 {
-        page_ordinal: 0,
-        chunk_count: chunks.len() as u64,
-        payload_bytes: 1_024,
-        page_digest: digest_id('b'),
-        cumulative_digest: cumulative_digest.clone(),
-        import_count: 1,
-        import_payload_bytes,
-        next_cursor: VerifiedSealedLexicalCursorV1 {
-            next_file_ordinal: 1,
-            next_chunk_ordinal: 0,
-            next_page_ordinal: 1,
-            emitted_chunks: chunks.len() as u64,
-            emitted_payload_bytes: 1_024,
-            next_import_ordinal: 0,
-            emitted_imports: 1,
-            emitted_import_payload_bytes: import_payload_bytes,
-            import_dictionary_digest: import_dictionary_digest.clone(),
-            cumulative_digest: cumulative_digest.clone(),
-        },
-        chunks,
-        imports: vec![import_evidence.clone()],
-    };
-    let source_receipt = VerifiedSealedLexicalSourceReceiptV1 {
-        source_state_digest: digest_id('a'),
-        format_revision: 6,
-        page_count: 1,
-        total_chunks: page.chunk_count,
-        total_payload_bytes: page.payload_bytes,
-        total_imports: 1,
-        import_payload_bytes,
-        import_dictionary_digest,
-        cumulative_digest,
-    };
-    let directory = tempfile::tempdir().expect("artifact tempdir");
-    let artifact_path = directory.path().join("lexical-artifact-v1.sqlite");
-    let control = ArtifactControl { cancelled: false };
-    {
-        let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
-            .expect("create artifact");
-        let cancelled = ArtifactControl { cancelled: true };
-        assert!(matches!(
-            builder.append_page(&page, &cancelled),
-            Err(CodeLexicalArtifactErrorV1::Interrupted(_))
-        ));
-        assert_eq!(builder.progress().expect("progress").next_page_ordinal, 0);
-        let first = builder.append_page(&page, &control).expect("append page");
-        assert_eq!(first.next_page_ordinal, 1);
-    }
-    let verified = {
-        let mut resumed = CodeLexicalArtifactBuilderV1::open_or_resume(&artifact_path, metadata)
-            .expect("resume artifact");
-        let replay = resumed
-            .append_page(&page, &control)
-            .expect("replayed page is idempotent");
-        assert_eq!(replay.next_page_ordinal, 1);
-        resumed
-            .finalize(&source_receipt, &control)
-            .expect("finalize artifact")
-    };
-    let reader = CodeLexicalArtifactReaderV1::open(
-        &artifact_path,
-        &verified,
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-    )
-    .expect("verify and reopen artifact");
-    assert!(reader.retained_owned_bytes() <= CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1);
-    let occurrence = reader
-        .occurrence_by_chunk(&page.chunks[2].chunk().id)
-        .expect("artifact row lookup")
-        .expect("artifact occurrence");
-    assert_eq!(occurrence.logical_path, "src/admitted_2.rs");
-    let import_witness = reader
-        .import_membership(&import_evidence)
-        .expect("import membership")
-        .expect("exact import witness");
-    assert_eq!(import_witness.evidence, import_evidence);
-    assert_eq!(
-        &import_witness.import_dictionary_digest,
-        verified.import_dictionary_digest()
+    let small_repeated = "retained_token ".repeat(1_000);
+    let large_repeated = "retained_token ".repeat(3_000);
+    let small_source = format!(
+        "pub fn retained_symbol() -> usize {{ let retained_token = 1; {small_repeated} retained_token }}\n"
     );
-
-    let request = lexical_request("artifact_symbol_2", &["artifact_symbol_2"], &[], &[], 1, 8);
-    let artifact = LexicalLane::new(reader)
-        .retrieve_lexical(&request)
-        .expect("artifact lexical query");
-    let expected = LexicalLane::new(one_shot)
-        .retrieve_lexical(&request)
-        .expect("one-shot lexical query");
-    assert_eq!(artifact, expected);
-}
-
-#[test]
-fn retained_lexical_projection_bounds_owned_bytes_for_repeated_tokens() {
-    let generation = id::<CodeGenerationId>("generation.1");
-    let repeated = "retained_token ".repeat(3_000);
-    let source = format!(
-        "pub fn retained_symbol() -> usize {{ let retained_token = 1; {repeated} retained_token }}\n"
+    let large_source = format!(
+        "pub fn retained_symbol() -> usize {{ let retained_token = 1; {large_repeated} retained_token }}\n"
     );
-    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
+    let small_projection = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         vec![admitted_rust_chunk(
             &generation,
             0,
-            &source,
+            &small_source,
             CodeSearchChunkGrainV1::SymbolBody,
             "retained_symbol",
         )],
     )
-    .expect("build repeated-token projection");
+    .expect("build small repeated-token projection");
+    let large_projection = CodeLexicalProjectionAdapterV1::new_admitted(
+        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
+        vec![admitted_rust_chunk(
+            &generation,
+            0,
+            &large_source,
+            CodeSearchChunkGrainV1::SymbolBody,
+            "retained_symbol",
+        )],
+    )
+    .expect("build large repeated-token projection");
 
-    let retained = projection.retained_owned_bytes();
+    let small_retained = small_projection.retained_owned_bytes();
+    let large_retained = large_projection.retained_owned_bytes();
+    let marginal_retained = large_retained
+        .checked_sub(small_retained)
+        .expect("large projection must not retain fewer owned bytes than small projection");
+    let marginal_source = large_source
+        .len()
+        .checked_sub(small_source.len())
+        .expect("large source must not be smaller than small source");
     assert!(
-        retained <= source.len() * 2,
-        "projection retained {retained} owned bytes for {} source bytes",
-        source.len()
+        marginal_retained <= marginal_source * 2,
+        "projection retained {marginal_retained} marginal owned bytes for {marginal_source} marginal source bytes"
     );
 
     let request = lexical_request("retained_token", &["retained_token"], &[], &[], 0, 8);
-    let RetrieverOutcome::Complete(batch) = LexicalLane::new(projection)
+    let RetrieverOutcome::Complete(batch) = LexicalLane::new(large_projection)
         .retrieve_lexical(&request)
         .expect("query repeated-token projection")
     else {

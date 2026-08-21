@@ -26,15 +26,9 @@ use super::ports::{
 mod projection;
 
 pub use self::projection::{
-    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
-    CodeExactProjectionAdapterV1, CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactErrorV1, CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactSectionDigestV1, CodeLexicalImportMembershipWitnessV1,
-    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
-    CodeLexicalProjectionMetadataV1, LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1,
-    VerifiedCodeLexicalArtifactV1, lexical_projection_build_deadline_micros,
+    CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1,
+    CodeLexicalProjectionBuildV1, CodeLexicalProjectionMetadataV1,
+    LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1, lexical_projection_build_deadline_micros,
 };
 
 /// Wording the lexical lane uses when a port-emitted batch fails the shared
