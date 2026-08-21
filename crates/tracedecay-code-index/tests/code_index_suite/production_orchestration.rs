@@ -9,7 +9,7 @@ use std::{
 
 use tracedecay_code_extraction::incremental::ParseLimits;
 use tracedecay_code_index::{
-    chunks::content_digest,
+    chunks::{CodeIndexImportEvidenceV1, ExtractionAdmittedCodeSearchChunkV1, content_digest},
     graph_projection::{
         CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError,
         build_published_code_graph_manifest_checked, code_graph_projection_identity,
@@ -1079,6 +1079,172 @@ fn verified_sealed_lexical_source_refuses_a_foreign_state_digest() {
 }
 
 #[test]
+fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let mut request = request_with_source(
+        "file.lexical-imports",
+        1_265_000,
+        "commit.lexical-imports",
+        "tree.lexical-imports",
+        "import type { Widget } from \"widget-kit\";\nexport function render(value: Widget) { return value; }\n",
+    );
+    request.snapshot.files[0].logical_path = "src/imports.ts".to_owned();
+    request.snapshot.files[0].language = Some(id::<LanguageId>("typescript"));
+    request.changed_files.clear();
+    request.changed_files.insert("src/imports.ts".to_owned());
+    request
+        .snapshot
+        .validate()
+        .expect("TypeScript import snapshot is canonical");
+    let generation = owner
+        .build_and_publish(request, &ActiveControl)
+        .expect("generation publishes");
+    assert!(
+        !generation.imports().is_empty(),
+        "the fixture must contain parser-backed import evidence"
+    );
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+    let expected_state_digest = id::<ManifestDigest>(
+        envelope["state_digest"]
+            .as_str()
+            .expect("state digest string"),
+    );
+
+    let read = |maximum_page_chunks| {
+        let mut source = VerifiedSealedLexicalPageSourceV1::open(
+            Cursor::new(sealed.clone()),
+            u64::try_from(sealed.len()).expect("sealed length"),
+            expected_state_digest.clone(),
+            maximum_page_chunks,
+            1024 * 1024,
+            &ActiveControl,
+        )
+        .expect("verified import page source opens");
+        let mut imports = Vec::new();
+        let receipt = loop {
+            match source
+                .next_page(&ActiveControl)
+                .expect("verified import page")
+            {
+                VerifiedSealedLexicalPageReadV1::Page(page) => {
+                    assert_eq!(page.import_count, page.imports.len() as u64);
+                    assert!(
+                        page.payload_bytes + page.import_payload_bytes <= 1024 * 1024,
+                        "chunks and imports share one page byte bound"
+                    );
+                    if page.import_count > 0 {
+                        assert!(page.import_payload_bytes > 0);
+                    }
+                    imports.extend(page.imports);
+                }
+                VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+            }
+        };
+        (imports, receipt)
+    };
+
+    let (split_imports, split_receipt) = read(1);
+    let (wide_imports, wide_receipt) = read(64);
+    assert_eq!(split_imports, generation.imports());
+    assert_eq!(wide_imports, generation.imports());
+    assert_eq!(
+        split_receipt.total_imports,
+        generation.imports().len() as u64
+    );
+    assert!(split_receipt.import_payload_bytes > 0);
+    assert_eq!(
+        split_receipt.import_dictionary_digest, wide_receipt.import_dictionary_digest,
+        "the exact import dictionary cannot depend on page boundaries"
+    );
+    assert_eq!(
+        split_receipt.import_payload_bytes,
+        wide_receipt.import_payload_bytes
+    );
+}
+
+#[test]
+fn verified_sealed_lexical_page_retained_bytes_track_owned_capacity_growth() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let mut request = request_with_source(
+        "file.lexical-import-capacity",
+        1_267_000,
+        "commit.lexical-import-capacity",
+        "tree.lexical-import-capacity",
+        "import type { Widget } from \"widget-kit\";\nexport function render(value: Widget) { return value; }\n",
+    );
+    request.snapshot.files[0].logical_path = "src/imports.ts".to_owned();
+    request.snapshot.files[0].language = Some(id::<LanguageId>("typescript"));
+    request.changed_files.clear();
+    request.changed_files.insert("src/imports.ts".to_owned());
+    request
+        .snapshot
+        .validate()
+        .expect("TypeScript import snapshot is canonical");
+    let generation = owner
+        .build_and_publish(request, &ActiveControl)
+        .expect("generation publishes");
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+    let state_digest = id::<ManifestDigest>(
+        envelope["state_digest"]
+            .as_str()
+            .expect("state digest string"),
+    );
+    let mut source = VerifiedSealedLexicalPageSourceV1::open(
+        Cursor::new(sealed.clone()),
+        u64::try_from(sealed.len()).expect("sealed length"),
+        state_digest,
+        usize::MAX,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect("verified page source opens");
+    let mut page = match source.next_page(&ActiveControl).expect("verified page") {
+        VerifiedSealedLexicalPageReadV1::Page(page) => page,
+        VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must emit a page"),
+    };
+    assert!(!page.chunks.is_empty());
+    assert!(!page.imports.is_empty());
+
+    let before = page.retained_owned_bytes();
+    let chunk_capacity = page.chunks.capacity();
+    let import_capacity = page.imports.capacity();
+    let module_capacity = page.imports[0].module_specifier.capacity();
+    page.chunks.reserve(32);
+    page.imports.reserve(32);
+    page.imports[0].module_specifier.reserve(4_096);
+    let expected_growth = page
+        .chunks
+        .capacity()
+        .saturating_sub(chunk_capacity)
+        .saturating_mul(std::mem::size_of::<ExtractionAdmittedCodeSearchChunkV1>())
+        .saturating_add(
+            page.imports
+                .capacity()
+                .saturating_sub(import_capacity)
+                .saturating_mul(std::mem::size_of::<CodeIndexImportEvidenceV1>()),
+        )
+        .saturating_add(
+            page.imports[0]
+                .module_specifier
+                .capacity()
+                .saturating_sub(module_capacity),
+        );
+    assert!(expected_growth > 0, "the fixture must grow owned capacity");
+    assert_eq!(
+        page.retained_owned_bytes(),
+        before.saturating_add(expected_growth)
+    );
+}
+
+#[test]
 fn verified_sealed_lexical_source_reads_the_legacy_v5_payload_without_full_restore() {
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
@@ -1106,7 +1272,9 @@ fn verified_sealed_lexical_source_reads_the_legacy_v5_payload_without_full_resto
 
     let receipt = loop {
         match source.next_page(&ActiveControl).expect("legacy page read") {
-            VerifiedSealedLexicalPageReadV1::Page(page) => assert!(!page.chunks.is_empty()),
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                assert!(!page.chunks.is_empty() || !page.imports.is_empty())
+            }
             VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
         }
     };

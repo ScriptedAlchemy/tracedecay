@@ -2,6 +2,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::ExactTechnicalTermV1;
 
 use super::sealed_codec::{
     LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION, PersistedFileGenerationArtifactsV1,
@@ -10,15 +11,21 @@ use super::*;
 
 const PAGE_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-page.v1\0";
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-source.v1\0";
+const IMPORT_DICTIONARY_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-import-dictionary.v1\0";
+const IMPORT_RECORD_DOMAIN: &[u8] = b"import\0";
 
 /// Resume position after one fully admitted lexical page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedSealedLexicalCursorV1 {
     pub next_file_ordinal: u64,
     pub next_chunk_ordinal: u64,
+    pub next_import_ordinal: u64,
     pub next_page_ordinal: u64,
     pub emitted_chunks: u64,
     pub emitted_payload_bytes: u64,
+    pub emitted_imports: u64,
+    pub emitted_import_payload_bytes: u64,
+    pub import_dictionary_digest: ManifestDigest,
     pub cumulative_digest: ManifestDigest,
 }
 
@@ -28,10 +35,106 @@ pub struct VerifiedSealedLexicalPageV1 {
     pub page_ordinal: u64,
     pub chunk_count: u64,
     pub payload_bytes: u64,
+    pub import_count: u64,
+    pub import_payload_bytes: u64,
     pub page_digest: ManifestDigest,
     pub cumulative_digest: ManifestDigest,
     pub next_cursor: VerifiedSealedLexicalCursorV1,
     pub chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
+    pub imports: Vec<CodeIndexImportEvidenceV1>,
+}
+
+impl VerifiedSealedLexicalPageV1 {
+    /// Heap bytes retained by this page's chunk and import vectors.
+    ///
+    /// Vector and `String` storage uses actual capacities. Immutable typed-ID,
+    /// exact-term, and sanitized-text payloads expose lengths rather than
+    /// capacities, so their byte-exact payload size is counted once alongside
+    /// the owning vector slots. Allocator metadata and fixed inline fields are
+    /// deliberately excluded.
+    pub fn retained_owned_bytes(&self) -> usize {
+        let chunk_bytes = self.chunks.iter().fold(
+            self.chunks
+                .capacity()
+                .saturating_mul(std::mem::size_of::<ExtractionAdmittedCodeSearchChunkV1>()),
+            |bytes, admitted| {
+                let chunk = admitted.chunk();
+                let exact_term_bytes = chunk.exact_terms.iter().fold(
+                    chunk
+                        .exact_terms
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<ExactTechnicalTermV1>()),
+                    |bytes, term| {
+                        bytes
+                            .saturating_add(term.original_bytes().len())
+                            .saturating_add(term.canonical_bytes().len())
+                            .saturating_add(
+                                term.symbol_occurrence_id()
+                                    .map_or(0, |occurrence| occurrence.as_str().len()),
+                            )
+                    },
+                );
+                let subtoken_bytes = chunk.subtokens.iter().fold(
+                    chunk
+                        .subtokens
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<String>()),
+                    |bytes, subtoken| bytes.saturating_add(subtoken.capacity()),
+                );
+                bytes
+                    .saturating_add(chunk.id.as_str().len())
+                    .saturating_add(chunk.anchor.generation_id.as_str().len())
+                    .saturating_add(chunk.anchor.file_occurrence_id.as_str().len())
+                    .saturating_add(
+                        chunk
+                            .anchor
+                            .symbol_occurrence_id
+                            .as_ref()
+                            .map_or(0, |occurrence| occurrence.as_str().len()),
+                    )
+                    .saturating_add(
+                        chunk
+                            .anchor
+                            .parent_chunk_id
+                            .as_ref()
+                            .map_or(0, |parent| parent.as_str().len()),
+                    )
+                    .saturating_add(chunk.content_digest.as_str().len())
+                    .saturating_add(chunk.language_descriptor_revision.as_str().len())
+                    .saturating_add(chunk.chunker_revision.as_str().len())
+                    .saturating_add(chunk.sanitizer_revision.as_str().len())
+                    .saturating_add(chunk.sensitivity.policy_revision.as_str().len())
+                    .saturating_add(exact_term_bytes)
+                    .saturating_add(subtoken_bytes)
+                    .saturating_add(chunk.sanitized_text.as_str().len())
+            },
+        );
+        self.imports.iter().fold(
+            chunk_bytes.saturating_add(
+                self.imports
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<CodeIndexImportEvidenceV1>()),
+            ),
+            |bytes, evidence| {
+                bytes
+                    .saturating_add(evidence.logical_path.capacity())
+                    .saturating_add(evidence.file_occurrence_id.as_str().len())
+                    .saturating_add(evidence.module_specifier.capacity())
+                    .saturating_add(
+                        evidence
+                            .imported_name
+                            .as_ref()
+                            .map_or(0, String::capacity),
+                    )
+                    .saturating_add(
+                        evidence
+                            .local_name
+                            .as_ref()
+                            .map_or(0, String::capacity),
+                    )
+            },
+        )
+    }
 }
 
 /// Final proof that all file ranges in one verified seal were exhausted.
@@ -42,6 +145,9 @@ pub struct VerifiedSealedLexicalSourceReceiptV1 {
     pub page_count: u64,
     pub total_chunks: u64,
     pub total_payload_bytes: u64,
+    pub total_imports: u64,
+    pub import_payload_bytes: u64,
+    pub import_dictionary_digest: ManifestDigest,
     pub cumulative_digest: ManifestDigest,
 }
 
@@ -67,6 +173,7 @@ pub struct VerifiedSealedLexicalPageSourceV1<R> {
     maximum_page_bytes: usize,
     cursor: VerifiedSealedLexicalCursorV1,
     cumulative_hasher: Sha256,
+    import_dictionary_hasher: Sha256,
 }
 
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
@@ -90,12 +197,17 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             ));
         }
         let cumulative_hasher = source_hasher();
+        let import_dictionary_hasher = import_dictionary_hasher();
         let cursor = VerifiedSealedLexicalCursorV1 {
             next_file_ordinal: 0,
             next_chunk_ordinal: 0,
+            next_import_ordinal: 0,
             next_page_ordinal: 0,
             emitted_chunks: 0,
             emitted_payload_bytes: 0,
+            emitted_imports: 0,
+            emitted_import_payload_bytes: 0,
+            import_dictionary_digest: digest_hasher(import_dictionary_hasher.clone())?,
             cumulative_digest: digest_hasher(cumulative_hasher.clone())?,
         };
         Ok(Self {
@@ -107,6 +219,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             maximum_page_bytes,
             cursor,
             cumulative_hasher,
+            import_dictionary_hasher,
         })
     }
 
@@ -121,11 +234,14 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         checkpoint(control)?;
         let mut cursor = self.cursor.clone();
         let mut cumulative_hasher = self.cumulative_hasher.clone();
+        let mut import_dictionary_hasher = self.import_dictionary_hasher.clone();
         let mut page_hasher = Sha256::new();
         page_hasher.update(PAGE_DIGEST_DOMAIN);
         page_hasher.update(cursor.next_page_ordinal.to_le_bytes());
         let mut chunks = Vec::new();
         let mut page_bytes = 0usize;
+        let mut imports = Vec::new();
+        let mut import_bytes = 0usize;
 
         while usize::try_from(cursor.next_file_ordinal)
             .ok()
@@ -143,15 +259,15 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     "sealed lexical chunk cursor exceeds the platform limit".to_owned(),
                 )
             })?;
-            if chunk_ordinal > admitted.len() {
+            if chunk_ordinal > admitted.chunks.len() {
                 return Err(CodeIndexProductionErrorV1::Contract(
                     "sealed lexical cursor exceeds its file chunk count".to_owned(),
                 ));
             }
-            while chunk_ordinal < admitted.len() {
+            while chunk_ordinal < admitted.chunks.len() {
                 checkpoint(control)?;
-                let serialized =
-                    serde_json::to_vec(admitted[chunk_ordinal].chunk()).map_err(|error| {
+                let serialized = serde_json::to_vec(admitted.chunks[chunk_ordinal].chunk())
+                    .map_err(|error| {
                         CodeIndexProductionErrorV1::Contract(format!(
                             "sealed lexical chunk serialization failed: {error}"
                         ))
@@ -161,16 +277,22 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         "one admitted lexical chunk exceeds the page byte bound".to_owned(),
                     ));
                 }
-                if !chunks.is_empty()
+                if (!chunks.is_empty() || !imports.is_empty())
                     && (chunks.len() == self.maximum_page_chunks
-                        || page_bytes.saturating_add(serialized.len()) > self.maximum_page_bytes)
+                        || page_bytes
+                            .saturating_add(import_bytes)
+                            .saturating_add(serialized.len())
+                            > self.maximum_page_bytes)
                 {
                     return self.commit_page(
                         chunks,
                         page_bytes,
+                        imports,
+                        import_bytes,
                         cursor,
                         page_hasher,
                         cumulative_hasher,
+                        import_dictionary_hasher,
                     );
                 }
                 hash_record(&mut page_hasher, &serialized)?;
@@ -180,7 +302,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         "sealed lexical page byte count overflowed".to_owned(),
                     )
                 })?;
-                chunks.push(admitted[chunk_ordinal].clone());
+                chunks.push(admitted.chunks[chunk_ordinal].clone());
                 chunk_ordinal += 1;
                 cursor.next_chunk_ordinal = u64::try_from(chunk_ordinal).map_err(|_| {
                     CodeIndexProductionErrorV1::Contract(
@@ -191,11 +313,70 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     return self.commit_page(
                         chunks,
                         page_bytes,
+                        imports,
+                        import_bytes,
                         cursor,
                         page_hasher,
                         cumulative_hasher,
+                        import_dictionary_hasher,
                     );
                 }
+            }
+            let mut import_ordinal = usize::try_from(cursor.next_import_ordinal).map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical import cursor exceeds the platform limit".to_owned(),
+                )
+            })?;
+            if import_ordinal > admitted.imports.len() {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical cursor exceeds its file import count".to_owned(),
+                ));
+            }
+            while import_ordinal < admitted.imports.len() {
+                checkpoint(control)?;
+                let evidence = &admitted.imports[import_ordinal];
+                let serialized = serde_json::to_vec(evidence).map_err(|error| {
+                    CodeIndexProductionErrorV1::Contract(format!(
+                        "sealed lexical import serialization failed: {error}"
+                    ))
+                })?;
+                if serialized.len() > self.maximum_page_bytes {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "one admitted lexical import exceeds the page byte bound".to_owned(),
+                    ));
+                }
+                if (!chunks.is_empty() || !imports.is_empty())
+                    && page_bytes
+                        .saturating_add(import_bytes)
+                        .saturating_add(serialized.len())
+                        > self.maximum_page_bytes
+                {
+                    return self.commit_page(
+                        chunks,
+                        page_bytes,
+                        imports,
+                        import_bytes,
+                        cursor,
+                        page_hasher,
+                        cumulative_hasher,
+                        import_dictionary_hasher,
+                    );
+                }
+                hash_import_record(&mut page_hasher, &serialized)?;
+                hash_import_record(&mut cumulative_hasher, &serialized)?;
+                hash_record(&mut import_dictionary_hasher, &serialized)?;
+                import_bytes = import_bytes.checked_add(serialized.len()).ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical import page byte count overflowed".to_owned(),
+                    )
+                })?;
+                imports.push(evidence.clone());
+                import_ordinal += 1;
+                cursor.next_import_ordinal = u64::try_from(import_ordinal).map_err(|_| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical import ordinal exceeds u64".to_owned(),
+                    )
+                })?;
             }
             cursor.next_file_ordinal =
                 cursor.next_file_ordinal.checked_add(1).ok_or_else(|| {
@@ -204,10 +385,20 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     )
                 })?;
             cursor.next_chunk_ordinal = 0;
+            cursor.next_import_ordinal = 0;
         }
 
-        if !chunks.is_empty() {
-            return self.commit_page(chunks, page_bytes, cursor, page_hasher, cumulative_hasher);
+        if !chunks.is_empty() || !imports.is_empty() {
+            return self.commit_page(
+                chunks,
+                page_bytes,
+                imports,
+                import_bytes,
+                cursor,
+                page_hasher,
+                cumulative_hasher,
+                import_dictionary_hasher,
+            );
         }
         Ok(VerifiedSealedLexicalPageReadV1::Complete(
             VerifiedSealedLexicalSourceReceiptV1 {
@@ -216,6 +407,9 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 page_count: self.cursor.next_page_ordinal,
                 total_chunks: self.cursor.emitted_chunks,
                 total_payload_bytes: self.cursor.emitted_payload_bytes,
+                total_imports: self.cursor.emitted_imports,
+                import_payload_bytes: self.cursor.emitted_import_payload_bytes,
+                import_dictionary_digest: self.cursor.import_dictionary_digest.clone(),
                 cumulative_digest: self.cursor.cumulative_digest.clone(),
             },
         ))
@@ -224,7 +418,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     fn read_admitted_file(
         &mut self,
         file_ordinal: usize,
-    ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, CodeIndexProductionErrorV1> {
+    ) -> Result<AdmittedSealedLexicalFileV1, CodeIndexProductionErrorV1> {
         let range = self.file_ranges.get(file_ordinal).ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed lexical file cursor is outside the admitted source".to_owned(),
@@ -288,18 +482,23 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         }
         let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
             .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        exact_authority
+        let imports = file.artifacts.imports;
+        let chunks = exact_authority
             .admit_all(file.artifacts.chunks.chunks)
-            .map_err(CodeIndexProductionErrorV1::Chunk)
+            .map_err(CodeIndexProductionErrorV1::Chunk)?;
+        Ok(AdmittedSealedLexicalFileV1 { chunks, imports })
     }
 
     fn commit_page(
         &mut self,
         chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
         page_bytes: usize,
+        imports: Vec<CodeIndexImportEvidenceV1>,
+        import_bytes: usize,
         mut cursor: VerifiedSealedLexicalCursorV1,
         page_hasher: Sha256,
         cumulative_hasher: Sha256,
+        import_dictionary_hasher: Sha256,
     ) -> Result<VerifiedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
         let page_ordinal = cursor.next_page_ordinal;
         let chunk_count = u64::try_from(chunks.len()).map_err(|_| {
@@ -310,6 +509,16 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let payload_bytes = u64::try_from(page_bytes).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed lexical page byte count exceeds u64".to_owned(),
+            )
+        })?;
+        let import_count = u64::try_from(imports.len()).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed lexical page import count exceeds u64".to_owned(),
+            )
+        })?;
+        let import_payload_bytes = u64::try_from(import_bytes).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed lexical page import byte count exceeds u64".to_owned(),
             )
         })?;
         cursor.next_page_ordinal = cursor.next_page_ordinal.checked_add(1).ok_or_else(|| {
@@ -334,20 +543,46 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     "sealed lexical source byte count overflowed".to_owned(),
                 )
             })?;
+        cursor.emitted_imports = cursor
+            .emitted_imports
+            .checked_add(import_count)
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical source import count overflowed".to_owned(),
+                )
+            })?;
+        cursor.emitted_import_payload_bytes = cursor
+            .emitted_import_payload_bytes
+            .checked_add(import_payload_bytes)
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical source import byte count overflowed".to_owned(),
+                )
+            })?;
+        cursor.import_dictionary_digest = digest_hasher(import_dictionary_hasher.clone())?;
         cursor.cumulative_digest = digest_hasher(cumulative_hasher.clone())?;
         let page = VerifiedSealedLexicalPageV1 {
             page_ordinal,
             chunk_count,
             payload_bytes,
+            import_count,
+            import_payload_bytes,
             page_digest: digest_hasher(page_hasher)?,
             cumulative_digest: cursor.cumulative_digest.clone(),
             next_cursor: cursor.clone(),
             chunks,
+            imports,
         };
         self.cursor = cursor;
         self.cumulative_hasher = cumulative_hasher;
+        self.import_dictionary_hasher = import_dictionary_hasher;
         Ok(VerifiedSealedLexicalPageReadV1::Page(page))
     }
+}
+
+struct AdmittedSealedLexicalFileV1 {
+    chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
+    imports: Vec<CodeIndexImportEvidenceV1>,
 }
 
 struct SealedLexicalLayoutV1 {
@@ -642,6 +877,17 @@ fn source_hasher() -> Sha256 {
     let mut hasher = Sha256::new();
     hasher.update(SOURCE_DIGEST_DOMAIN);
     hasher
+}
+
+fn import_dictionary_hasher() -> Sha256 {
+    let mut hasher = Sha256::new();
+    hasher.update(IMPORT_DICTIONARY_DIGEST_DOMAIN);
+    hasher
+}
+
+fn hash_import_record(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeIndexProductionErrorV1> {
+    hasher.update(IMPORT_RECORD_DOMAIN);
+    hash_record(hasher, bytes)
 }
 
 fn hash_record(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeIndexProductionErrorV1> {
