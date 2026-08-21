@@ -16,42 +16,53 @@ pub(super) struct ByteNgramPostings {
 }
 
 impl ByteNgramPostings {
+    pub(super) fn insert_document(
+        &mut self,
+        document: u32,
+        bytes: &[u8],
+        budget: &mut ByteNgramBudget,
+    ) -> Result<(), String> {
+        for width in 1..=bytes.len().min(3) {
+            let unique = bytes
+                .windows(width)
+                .map(pack_byte_ngram)
+                .collect::<BTreeSet<_>>();
+            for ngram in unique {
+                match self.postings.entry(ngram) {
+                    Entry::Vacant(entry) => {
+                        budget.charge(NGRAM_KEY_ESTIMATED_BYTES)?;
+                        budget.charge(NGRAM_DOCUMENT_POSTING_ESTIMATED_BYTES)?;
+                        let mut posting = RoaringBitmap::new();
+                        posting.insert(document);
+                        entry.insert(posting);
+                    }
+                    Entry::Occupied(mut entry) => {
+                        if entry.get_mut().insert(document) {
+                            budget.charge(NGRAM_DOCUMENT_POSTING_ESTIMATED_BYTES)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(super) fn from_documents<'a>(
         documents: impl IntoIterator<Item = &'a [u8]>,
         budget: &mut ByteNgramBudget,
         deadline: Option<Instant>,
     ) -> Result<Self, String> {
-        let mut postings = BTreeMap::<u32, RoaringBitmap>::new();
+        let mut postings = Self::default();
         for (document, bytes) in documents.into_iter().enumerate() {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED.to_owned());
             }
             let document = u32::try_from(document)
                 .map_err(|_| "posting document id exceeds u32".to_owned())?;
-            for width in 1..=bytes.len().min(3) {
-                let unique = bytes
-                    .windows(width)
-                    .map(pack_byte_ngram)
-                    .collect::<BTreeSet<_>>();
-                for ngram in unique {
-                    match postings.entry(ngram) {
-                        Entry::Vacant(entry) => {
-                            budget.charge(NGRAM_KEY_ESTIMATED_BYTES)?;
-                            budget.charge(NGRAM_DOCUMENT_POSTING_ESTIMATED_BYTES)?;
-                            let mut posting = RoaringBitmap::new();
-                            posting.insert(document);
-                            entry.insert(posting);
-                        }
-                        Entry::Occupied(mut entry) => {
-                            if entry.get_mut().insert(document) {
-                                budget.charge(NGRAM_DOCUMENT_POSTING_ESTIMATED_BYTES)?;
-                            }
-                        }
-                    }
-                }
-            }
+            postings.insert_document(document, bytes, budget)?;
         }
-        Ok(Self { postings })
+        Ok(postings)
     }
 
     pub(super) fn candidate_documents(&self, needle: &[u8]) -> RoaringBitmap {

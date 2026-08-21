@@ -25,9 +25,10 @@ use tracedecay_query::retrieval::exact::{
     ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::lexical::{
-    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1,
-    LexicalFieldV1, LexicalLane, LexicalLaneRequest, LexicalLaneRetriever,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
+    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
+    CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
+    LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1,
+    MAX_LEXICAL_QUERY_TERM_BYTES_V1,
 };
 
 pub(crate) fn id<T>(value: &str) -> T
@@ -304,6 +305,71 @@ fn admitted_rust_chunk(
         })
         .expect("requested parser-minted symbol chunk");
     authority.admit(chunk).expect("exact extraction admission")
+}
+
+#[test]
+fn retained_lexical_projection_preserves_progress_across_bounded_windows() {
+    let generation = id::<CodeGenerationId>("generation.1");
+    let chunks = (0..3)
+        .map(|ordinal| {
+            let symbol = format!("retained_symbol_{ordinal}");
+            admitted_rust_chunk(
+                &generation,
+                ordinal,
+                &format!("pub fn {symbol}() -> usize {{ {ordinal} }}\n"),
+                CodeSearchChunkGrainV1::SymbolSignature,
+                &symbol,
+            )
+        })
+        .collect::<Vec<_>>();
+    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
+        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
+        chunks.clone(),
+    )
+    .expect("one-shot retained lexical projection");
+    let mut build = CodeLexicalProjectionBuildV1::new_admitted(
+        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
+        chunks,
+    )
+    .expect("start retained lexical projection");
+
+    assert!(matches!(
+        build.advance(1).expect("first bounded window"),
+        CodeLexicalProjectionBuildStepV1::Pending {
+            completed_documents: 1,
+            total_documents: 3,
+        }
+    ));
+    assert!(matches!(
+        build.advance(1).expect("second bounded window"),
+        CodeLexicalProjectionBuildStepV1::Pending {
+            completed_documents: 2,
+            total_documents: 3,
+        }
+    ));
+    let projection = loop {
+        match build.advance(1).expect("finish bounded projection") {
+            CodeLexicalProjectionBuildStepV1::Pending { .. } => {}
+            CodeLexicalProjectionBuildStepV1::Ready(projection) => break projection,
+        }
+    };
+    let request = lexical_request("retained_symbol_2", &["retained_symbol_2"], &[], &[], 0, 8);
+    let outcome = LexicalLane::new(projection)
+        .retrieve_lexical(&request)
+        .expect("query completed retained projection");
+    let one_shot_outcome = LexicalLane::new(one_shot)
+        .retrieve_lexical(&request)
+        .expect("query completed one-shot projection");
+    assert_eq!(outcome, one_shot_outcome);
+    let RetrieverOutcome::Complete(batch) = outcome else {
+        panic!("completed retained projection must serve lexical query");
+    };
+    assert!(
+        batch
+            .candidates
+            .iter()
+            .any(|candidate| candidate.file_occurrence_id.as_ref() == Some(&id("file.admitted.2")))
+    );
 }
 
 pub(crate) fn lexical_request(

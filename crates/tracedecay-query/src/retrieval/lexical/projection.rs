@@ -206,102 +206,358 @@ struct LexicalGenerationPostingsV1 {
     average_field_lengths: BTreeMap<LexicalFieldV1, usize>,
 }
 
-impl LexicalGenerationPostingsV1 {
-    fn from_rows(rows: &[ProjectedChunkV1], deadline: Instant) -> Result<Self, RetrievalPortError> {
-        check_projection_build_deadline(deadline)?;
-        let mut vocabulary = BTreeSet::new();
-        let mut term_documents = BTreeMap::<LexicalFieldV1, BTreeMap<String, RoaringBitmap>>::new();
-        let mut exact_documents = BTreeMap::<ExactFieldV1, BTreeMap<Vec<u8>, RoaringBitmap>>::new();
-        let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
-        let mut field_lengths = BTreeMap::<LexicalFieldV1, usize>::new();
-        for (document, row) in rows.iter().enumerate() {
-            check_projection_build_deadline(deadline)?;
-            let document = document as u32;
-            for (field, terms) in &row.fields {
-                *field_lengths.entry(*field).or_default() += terms.len();
-                let mut unique = BTreeSet::new();
-                for term in terms {
-                    if *field != LexicalFieldV1::Subtoken {
-                        vocabulary.insert(term.clone());
-                    }
-                    term_documents
-                        .entry(*field)
-                        .or_default()
-                        .entry(term.clone())
-                        .or_default()
-                        .insert(document);
-                    unique.insert(term);
+#[derive(Debug)]
+struct LexicalGenerationPostingsBuildV1 {
+    term_documents: BTreeMap<LexicalFieldV1, BTreeMap<String, RoaringBitmap>>,
+    exact_documents: BTreeMap<ExactFieldV1, BTreeMap<Vec<u8>, RoaringBitmap>>,
+    normalized_text: ByteNgramPostings,
+    raw_text: ByteNgramPostings,
+    vocabulary: BTreeSet<String>,
+    document_frequencies: BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>,
+    field_lengths: BTreeMap<LexicalFieldV1, usize>,
+    ngram_budget: ByteNgramBudget,
+}
+
+impl Default for LexicalGenerationPostingsBuildV1 {
+    fn default() -> Self {
+        Self {
+            term_documents: BTreeMap::new(),
+            exact_documents: BTreeMap::new(),
+            normalized_text: ByteNgramPostings::default(),
+            raw_text: ByteNgramPostings::default(),
+            vocabulary: BTreeSet::new(),
+            document_frequencies: BTreeMap::new(),
+            field_lengths: BTreeMap::new(),
+            ngram_budget: ByteNgramBudget::new(BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1),
+        }
+    }
+}
+
+impl LexicalGenerationPostingsBuildV1 {
+    fn insert_row(
+        &mut self,
+        document: u32,
+        row: &ProjectedChunkV1,
+    ) -> Result<(), RetrievalPortError> {
+        for (field, terms) in &row.fields {
+            *self.field_lengths.entry(*field).or_default() += terms.len();
+            let mut unique = BTreeSet::new();
+            for term in terms {
+                if *field != LexicalFieldV1::Subtoken {
+                    self.vocabulary.insert(term.clone());
                 }
-                for term in unique {
-                    *document_frequencies
-                        .entry(*field)
-                        .or_default()
-                        .entry(term.clone())
-                        .or_default() += 1;
-                }
-            }
-            exact_documents
-                .entry(ExactFieldV1::Path)
-                .or_default()
-                .entry(row.logical_path.as_bytes().to_vec())
-                .or_default()
-                .insert(document);
-            for term in &row.chunk.exact_terms {
-                let canonical = canonical_projected_exact_term(term);
-                exact_documents
-                    .entry(exact_field_for_kind(term.kind()))
+                self.term_documents
+                    .entry(*field)
                     .or_default()
-                    .entry(canonical.into_owned())
+                    .entry(term.clone())
                     .or_default()
                     .insert(document);
+                unique.insert(term);
+            }
+            for term in unique {
+                *self
+                    .document_frequencies
+                    .entry(*field)
+                    .or_default()
+                    .entry(term.clone())
+                    .or_default() += 1;
             }
         }
-        let divisor = rows.len().max(1);
-        let average_field_lengths = field_lengths
+        self.exact_documents
+            .entry(ExactFieldV1::Path)
+            .or_default()
+            .entry(row.logical_path.as_bytes().to_vec())
+            .or_default()
+            .insert(document);
+        for term in &row.chunk.exact_terms {
+            let canonical = canonical_projected_exact_term(term);
+            self.exact_documents
+                .entry(exact_field_for_kind(term.kind()))
+                .or_default()
+                .entry(canonical.into_owned())
+                .or_default()
+                .insert(document);
+        }
+        self.normalized_text
+            .insert_document(
+                document,
+                row.normalized_text.as_bytes(),
+                &mut self.ngram_budget,
+            )
+            .map_err(map_postings_build_error)
+    }
+
+    fn insert_raw_text(
+        &mut self,
+        document: u32,
+        row: &ProjectedChunkV1,
+    ) -> Result<(), RetrievalPortError> {
+        self.raw_text
+            .insert_document(
+                document,
+                row.chunk.sanitized_text.as_str().as_bytes(),
+                &mut self.ngram_budget,
+            )
+            .map_err(map_postings_build_error)
+    }
+
+    fn finish(
+        self,
+        document_count: usize,
+        raw_matches_normalized: bool,
+        deadline: Option<Instant>,
+    ) -> Result<LexicalGenerationPostingsV1, RetrievalPortError> {
+        let divisor = document_count.max(1);
+        let average_field_lengths = self
+            .field_lengths
             .into_iter()
             .map(|(field, total)| (field, total.div_ceil(divisor).max(1)))
             .collect();
-        check_projection_build_deadline(deadline)?;
-        let mut ngram_budget = ByteNgramBudget::new(BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1);
-        let normalized_text = Arc::new(
-            ByteNgramPostings::from_documents(
-                rows.iter().map(|row| row.normalized_text.as_bytes()),
-                &mut ngram_budget,
-                Some(deadline),
-            )
-            .map_err(map_postings_build_error)?,
-        );
-        let raw_matches_normalized = rows.iter().all(|row| {
-            row.chunk.sanitized_text.as_str().as_bytes() == row.normalized_text.as_bytes()
-        });
-        check_projection_build_deadline(deadline)?;
+        let normalized_text = Arc::new(self.normalized_text);
         let raw_text = if raw_matches_normalized {
             Arc::clone(&normalized_text)
         } else {
-            Arc::new(
-                ByteNgramPostings::from_documents(
-                    rows.iter()
-                        .map(|row| row.chunk.sanitized_text.as_str().as_bytes()),
-                    &mut ngram_budget,
-                    Some(deadline),
-                )
-                .map_err(map_postings_build_error)?,
-            )
+            Arc::new(self.raw_text)
         };
-        let fuzzy_terms = FuzzyTermIndex::from_terms(vocabulary, Some(deadline))
+        let fuzzy_terms = FuzzyTermIndex::from_terms(self.vocabulary, deadline)
             .map_err(map_postings_build_error)?;
-        check_projection_build_deadline(deadline)?;
-        Ok(Self {
-            term_documents,
-            exact_documents,
+        Ok(LexicalGenerationPostingsV1 {
+            term_documents: self.term_documents,
+            exact_documents: self.exact_documents,
             normalized_text,
             raw_text,
             fuzzy_terms,
-            document_frequencies,
+            document_frequencies: self.document_frequencies,
             average_field_lengths,
         })
     }
+}
 
+#[derive(Clone, Debug)]
+pub enum CodeLexicalProjectionBuildStepV1 {
+    Pending {
+        completed_documents: usize,
+        total_documents: usize,
+    },
+    Ready(CodeLexicalProjectionAdapterV1),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodeLexicalProjectionBuildPhaseV1 {
+    Rows,
+    RawText { next_document: usize },
+    Complete,
+}
+
+/// Generation-owned, in-memory lexical projection work that advances by a
+/// caller-selected number of document operations and preserves partial state
+/// between bounded scheduler windows.
+#[derive(Debug)]
+pub struct CodeLexicalProjectionBuildV1 {
+    metadata: CodeLexicalProjectionMetadataV1,
+    chunks: Vec<Option<CodeSearchChunkV1>>,
+    rows: Vec<ProjectedChunkV1>,
+    postings: Option<LexicalGenerationPostingsBuildV1>,
+    next_document: usize,
+    raw_matches_normalized: bool,
+    extraction_admitted: bool,
+    phase: CodeLexicalProjectionBuildPhaseV1,
+}
+
+impl CodeLexicalProjectionBuildV1 {
+    pub fn new_admitted<C>(
+        metadata: CodeLexicalProjectionMetadataV1,
+        chunks: Vec<C>,
+    ) -> Result<Self, RetrievalPortError>
+    where
+        C: ExtractionAdmittedChunkV1,
+    {
+        Self::new_inner(
+            metadata,
+            chunks
+                .into_iter()
+                .map(ExtractionAdmittedChunkV1::into_admitted_chunk)
+                .collect(),
+            true,
+        )
+    }
+
+    fn new_inner(
+        metadata: CodeLexicalProjectionMetadataV1,
+        mut chunks: Vec<CodeSearchChunkV1>,
+        extraction_admitted: bool,
+    ) -> Result<Self, RetrievalPortError> {
+        metadata.validate()?;
+        if chunks.len() > u32::MAX as usize {
+            return Err(RetrievalPortError::Contract(
+                "lexical projection exceeds the posting document-id range".to_owned(),
+            ));
+        }
+        chunks.sort_by(|left, right| left.id.cmp(&right.id));
+        if chunks.windows(2).any(|pair| pair[0].id == pair[1].id) {
+            return Err(RetrievalPortError::Contract(
+                "lexical projection chunk identities must be unique".to_owned(),
+            ));
+        }
+        let row_capacity = chunks.len();
+        Ok(Self {
+            metadata,
+            chunks: chunks.into_iter().map(Some).collect(),
+            rows: Vec::with_capacity(row_capacity),
+            postings: Some(LexicalGenerationPostingsBuildV1::default()),
+            next_document: 0,
+            raw_matches_normalized: true,
+            extraction_admitted,
+            phase: CodeLexicalProjectionBuildPhaseV1::Rows,
+        })
+    }
+
+    pub fn advance(
+        &mut self,
+        maximum_documents: usize,
+    ) -> Result<CodeLexicalProjectionBuildStepV1, RetrievalPortError> {
+        self.advance_inner(maximum_documents, None)
+    }
+
+    fn advance_inner(
+        &mut self,
+        maximum_documents: usize,
+        deadline: Option<Instant>,
+    ) -> Result<CodeLexicalProjectionBuildStepV1, RetrievalPortError> {
+        if maximum_documents == 0 {
+            return Err(RetrievalPortError::Contract(
+                "lexical projection build window must admit at least one document".to_owned(),
+            ));
+        }
+        if self.phase == CodeLexicalProjectionBuildPhaseV1::Complete {
+            return Err(RetrievalPortError::Contract(
+                "lexical projection build is already complete".to_owned(),
+            ));
+        }
+        let mut remaining = maximum_documents;
+        while remaining > 0 {
+            if let Some(deadline) = deadline {
+                check_projection_build_deadline(deadline)?;
+            }
+            match self.phase {
+                CodeLexicalProjectionBuildPhaseV1::Rows => {
+                    if self.next_document == self.chunks.len() {
+                        self.phase = if self.raw_matches_normalized {
+                            CodeLexicalProjectionBuildPhaseV1::Complete
+                        } else {
+                            CodeLexicalProjectionBuildPhaseV1::RawText { next_document: 0 }
+                        };
+                        continue;
+                    }
+                    let document = self.next_document;
+                    let chunk = self.chunks[document].take().ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "lexical projection row was advanced more than once".to_owned(),
+                        )
+                    })?;
+                    chunk.validate().map_err(contract_error)?;
+                    if !self.extraction_admitted
+                        && chunk
+                            .exact_terms
+                            .iter()
+                            .any(ExactTechnicalTermV1::requires_extraction_authority)
+                    {
+                        return Err(RetrievalPortError::Contract(
+                            "raw exact terms require parser-backed extraction admission".to_owned(),
+                        ));
+                    }
+                    if chunk.anchor.generation_id != self.metadata.generation {
+                        return Err(RetrievalPortError::GenerationMismatch);
+                    }
+                    let logical_path = self
+                        .metadata
+                        .logical_paths
+                        .get(&chunk.anchor.file_occurrence_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            RetrievalPortError::Contract(format!(
+                                "lexical projection is missing the logical path for {}",
+                                chunk.anchor.file_occurrence_id
+                            ))
+                        })?;
+                    let row = ProjectedChunkV1::new(chunk, logical_path);
+                    self.raw_matches_normalized &= row.chunk.sanitized_text.as_str().as_bytes()
+                        == row.normalized_text.as_bytes();
+                    self.postings
+                        .as_mut()
+                        .ok_or_else(|| {
+                            RetrievalPortError::Contract(
+                                "lexical projection build state is missing".to_owned(),
+                            )
+                        })?
+                        .insert_row(document as u32, &row)?;
+                    self.rows.push(row);
+                    self.next_document += 1;
+                    remaining -= 1;
+                }
+                CodeLexicalProjectionBuildPhaseV1::RawText { next_document } => {
+                    if next_document == self.rows.len() {
+                        self.phase = CodeLexicalProjectionBuildPhaseV1::Complete;
+                        continue;
+                    }
+                    self.postings
+                        .as_mut()
+                        .ok_or_else(|| {
+                            RetrievalPortError::Contract(
+                                "lexical projection build state is missing".to_owned(),
+                            )
+                        })?
+                        .insert_raw_text(next_document as u32, &self.rows[next_document])?;
+                    self.phase = CodeLexicalProjectionBuildPhaseV1::RawText {
+                        next_document: next_document + 1,
+                    };
+                    remaining -= 1;
+                }
+                CodeLexicalProjectionBuildPhaseV1::Complete => break,
+            }
+        }
+        if matches!(
+            self.phase,
+            CodeLexicalProjectionBuildPhaseV1::Rows
+                if self.next_document == self.chunks.len()
+        ) {
+            self.phase = if self.raw_matches_normalized {
+                CodeLexicalProjectionBuildPhaseV1::Complete
+            } else {
+                CodeLexicalProjectionBuildPhaseV1::RawText { next_document: 0 }
+            };
+        }
+        if matches!(
+            self.phase,
+            CodeLexicalProjectionBuildPhaseV1::RawText { next_document }
+                if next_document == self.rows.len()
+        ) {
+            self.phase = CodeLexicalProjectionBuildPhaseV1::Complete;
+        }
+        if self.phase != CodeLexicalProjectionBuildPhaseV1::Complete {
+            return Ok(CodeLexicalProjectionBuildStepV1::Pending {
+                completed_documents: self.next_document,
+                total_documents: self.chunks.len(),
+            });
+        }
+        let postings = self
+            .postings
+            .take()
+            .ok_or_else(|| {
+                RetrievalPortError::Contract("lexical projection build state is missing".to_owned())
+            })?
+            .finish(self.rows.len(), self.raw_matches_normalized, deadline)?;
+        Ok(CodeLexicalProjectionBuildStepV1::Ready(
+            CodeLexicalProjectionAdapterV1 {
+                metadata: self.metadata.clone(),
+                rows: Arc::new(std::mem::take(&mut self.rows)),
+                postings: Arc::new(postings),
+            },
+        ))
+    }
+}
+
+impl LexicalGenerationPostingsV1 {
     fn document_frequency(&self, field: LexicalFieldV1, term: &str) -> usize {
         self.document_frequencies
             .get(&field)
@@ -465,57 +721,14 @@ impl CodeLexicalProjectionAdapterV1 {
         let deadline = Instant::now()
             + Duration::from_micros(lexical_projection_build_deadline_micros(deadline_micros));
         check_projection_build_deadline(deadline)?;
-        metadata.validate()?;
-        check_projection_build_deadline(deadline)?;
-        if chunks.len() > u32::MAX as usize {
-            return Err(RetrievalPortError::Contract(
-                "lexical projection exceeds the posting document-id range".to_owned(),
-            ));
+        let mut build =
+            CodeLexicalProjectionBuildV1::new_inner(metadata, chunks, extraction_admitted)?;
+        match build.advance_inner(usize::MAX, Some(deadline))? {
+            CodeLexicalProjectionBuildStepV1::Ready(projection) => Ok(projection),
+            CodeLexicalProjectionBuildStepV1::Pending { .. } => Err(RetrievalPortError::Contract(
+                "unbounded lexical projection build did not complete".to_owned(),
+            )),
         }
-        let mut seen = BTreeSet::new();
-        let mut rows = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            check_projection_build_deadline(deadline)?;
-            chunk.validate().map_err(contract_error)?;
-            if !extraction_admitted
-                && chunk
-                    .exact_terms
-                    .iter()
-                    .any(ExactTechnicalTermV1::requires_extraction_authority)
-            {
-                return Err(RetrievalPortError::Contract(
-                    "raw exact terms require parser-backed extraction admission".to_owned(),
-                ));
-            }
-            if chunk.anchor.generation_id != metadata.generation {
-                return Err(RetrievalPortError::GenerationMismatch);
-            }
-            if !seen.insert(chunk.id.clone()) {
-                return Err(RetrievalPortError::Contract(
-                    "lexical projection chunk identities must be unique".to_owned(),
-                ));
-            }
-            let logical_path = metadata
-                .logical_paths
-                .get(&chunk.anchor.file_occurrence_id)
-                .cloned()
-                .ok_or_else(|| {
-                    RetrievalPortError::Contract(format!(
-                        "lexical projection is missing the logical path for {}",
-                        chunk.anchor.file_occurrence_id
-                    ))
-                })?;
-            rows.push(ProjectedChunkV1::new(chunk, logical_path));
-            check_projection_build_deadline(deadline)?;
-        }
-        rows.sort_by(|left, right| left.chunk.id.cmp(&right.chunk.id));
-        check_projection_build_deadline(deadline)?;
-        let postings = Arc::new(LexicalGenerationPostingsV1::from_rows(&rows, deadline)?);
-        Ok(Self {
-            metadata,
-            rows: Arc::new(rows),
-            postings,
-        })
     }
 
     pub fn exact_adapter<A>(&self, authority: A) -> CodeExactProjectionAdapterV1<A>
