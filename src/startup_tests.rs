@@ -2,10 +2,9 @@ use super::{
     AnalyticsAction, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
     DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, GitAction, GitProjectArgs, HostBundleCliOptions,
     HostBundleComponentArg, MAX_ASYNC_WORKER_THREADS, MAX_BLOCKING_THREADS, PackageHookAction,
-    ProfileStorageAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, SilentReinstallAction,
-    StderrTracingDefault, async_worker_threads, daemon_cpu_threads_from, is_daemon_run,
-    is_local_install_command, should_skip_agent_install_maintenance,
-    should_skip_startup_maintenance, silent_reinstall_action, stderr_tracing_default,
+    ProfileStorageAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, StderrTracingDefault,
+    async_worker_threads, daemon_cpu_threads_from, is_daemon_run, is_local_install_command,
+    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
     validate_host_bundle_options,
 };
 use clap::Parser;
@@ -362,7 +361,7 @@ fn tool_fallback_skips_network_and_agent_startup_maintenance() {
         args: Vec::new(),
     };
     assert!(should_skip_startup_maintenance(&command));
-    assert!(should_skip_agent_install_maintenance(&command));
+    assert!(should_skip_agent_install_check(&command));
 }
 
 #[test]
@@ -379,97 +378,84 @@ fn first_class_git_reads_skip_network_and_agent_startup_maintenance() {
     };
 
     assert!(should_skip_startup_maintenance(&command));
-    assert!(should_skip_agent_install_maintenance(&command));
+    assert!(should_skip_agent_install_check(&command));
 }
 
 #[test]
-fn agent_install_maintenance_is_selective() {
-    // Skip the implicit reinstall scan on the hot path (`serve`), on the
-    // explicit install commands (they already install), and on per-call
-    // tool invocations.
-    assert!(should_skip_agent_install_maintenance(&Commands::Serve {
+fn agent_install_health_check_is_selective() {
+    // The ordinary-command check is read-only. Explicit lifecycle commands
+    // manage their own host writes, and hot paths skip even the check.
+    assert!(should_skip_agent_install_check(&Commands::Serve {
         path: None,
         timings: false,
     }));
-    assert!(should_skip_agent_install_maintenance(&Commands::Install {
+    assert!(should_skip_agent_install_check(&Commands::Install {
         agent: Some("cursor".to_string()),
         local: false,
         no_dashboard: false,
         automation: false,
     }));
-    assert!(should_skip_agent_install_maintenance(
-        &Commands::Reinstall {
-            local: false,
-            agent: None,
-        }
-    ));
-    // `update-plugin` promises byte-identical configs; the implicit
-    // silent-reinstall prelude would rewrite them.
-    assert!(should_skip_agent_install_maintenance(
-        &Commands::UpdatePlugin {
-            local: false,
-            agent: None,
-        }
-    ));
-    assert!(should_skip_agent_install_maintenance(&Commands::Upgrade {
+    assert!(should_skip_agent_install_check(&Commands::Reinstall {
+        local: false,
+        agent: None,
+    }));
+    assert!(should_skip_agent_install_check(&Commands::UpdatePlugin {
+        local: false,
+        agent: None,
+    }));
+    assert!(should_skip_agent_install_check(&Commands::Upgrade {
         no_reinstall: false
     }));
-    assert!(should_skip_agent_install_maintenance(&Commands::Update {
+    assert!(should_skip_agent_install_check(&Commands::Update {
         no_reinstall: false
     }));
-    assert!(should_skip_agent_install_maintenance(
-        &Commands::PostUpdate {
-            no_reinstall: false,
-            lifecycle_lease_token: None,
-        }
-    ));
-    // Also skip for uninstall (about to remove configs) and doctor (a
-    // read-only diagnostic) — restoring the original #84 intent.
-    assert!(should_skip_agent_install_maintenance(
-        &Commands::Uninstall {
-            agent: Some("cursor".to_string()),
-            local: false,
-        }
-    ));
-    assert!(should_skip_agent_install_maintenance(&Commands::Doctor));
-
-    // Run maintenance for normal everyday command invocations so a binary
-    // upgrade re-syncs agent config.
-    assert!(!should_skip_agent_install_maintenance(&Commands::Init {
-        path: None,
-        skip_folders: Vec::new(),
-        include_folders: Vec::new(),
-        adopt_project: None,
-        fresh: false,
+    assert!(should_skip_agent_install_check(&Commands::PostUpdate {
+        no_reinstall: false,
+        lifecycle_lease_token: None,
     }));
-    assert!(!should_skip_agent_install_maintenance(&Commands::Status {
-        path: None,
-        project_id: None,
-        project_path: None,
-        json: false,
-        short: false,
-        runtime: false,
+    assert!(should_skip_agent_install_check(&Commands::Uninstall {
+        agent: Some("cursor".to_string()),
+        local: false,
     }));
-}
+    assert!(should_skip_agent_install_check(&Commands::Doctor));
 
-#[test]
-fn silent_reinstall_runs_after_minor_bump_without_post_update() {
-    // An upgraded binary whose `post-update` never ran (or predates the
-    // marker advancement) still triggers the reinstall pass.
-    let config = UserConfig {
-        installed_agents: vec!["cursor".to_string()],
-        previous_version: "6.0.0".to_string(),
-        ..UserConfig::default()
-    };
+    for (label, args) in [
+        ("init", &["tracedecay", "init", "."][..]),
+        ("status", &["tracedecay", "status", "--json"][..]),
+        (
+            "automation config get",
+            &["tracedecay", "automation", "config", "get", "--json"][..],
+        ),
+        ("wipe", &["tracedecay", "wipe", "--all", "--yes"][..]),
+    ] {
+        let cli = Cli::try_parse_from(args)
+            .unwrap_or_else(|error| panic!("{label} entrypoint must parse: {error}"));
+        let command = cli.command.expect("entrypoint command");
+        assert!(
+            !should_skip_agent_install_check(&command),
+            "{label} should retain the read-only install health check"
+        );
+    }
 
-    assert_eq!(
-        silent_reinstall_action(&config, "6.1.0"),
-        SilentReinstallAction::Reinstall
+    let storage_reset = Cli::try_parse_from([
+        "tracedecay",
+        "storage",
+        "reset-project-store",
+        "--project-root",
+        "/tmp/some-project",
+        "--yes",
+    ])
+    .expect("storage reset entrypoint must parse")
+    .command
+    .expect("storage reset command");
+    assert!(
+        should_skip_agent_install_check(&storage_reset),
+        "storage reset must bypass the startup preamble entirely"
     );
 }
 
 #[test]
-fn post_update_full_reinstall_marker_advancement_suppresses_startup_reinstall() {
+fn post_update_full_reinstall_advances_both_version_markers() {
     // `post-update` ran the full tracked-agent install pass (see
     // `update_cmd::run_post_update_tasks`) and recorded it by advancing both
     // markers; the next ordinary command must not repeat that work via the
@@ -486,41 +472,15 @@ fn post_update_full_reinstall_marker_advancement_suppresses_startup_reinstall() 
     assert!(config.mark_version_installed(running));
     assert_eq!(config.previous_version, running);
     assert_eq!(config.last_installed_version, running);
-    assert_eq!(
-        silent_reinstall_action(&config, running),
-        SilentReinstallAction::Nothing
-    );
     // Idempotent: a second post-update run has nothing left to record.
     assert!(!config.mark_version_installed(running));
 }
 
 #[test]
-fn partial_reinstall_failure_leaves_startup_reinstall_pending() {
-    // A partial failure in the post-update / silent reinstall pass must NOT
-    // advance the version markers, so `silent_reinstall_action` still returns
-    // `Reinstall` on the next startup — the self-healing retry path.
-    let running = "6.1.0";
-    let config = UserConfig {
-        installed_agents: vec!["cursor".to_string()],
-        previous_version: "6.0.0".to_string(),
-        // markers deliberately left unadvanced (simulating a partial failure)
-        ..UserConfig::default()
-    };
-
-    assert_eq!(
-        silent_reinstall_action(&config, running),
-        SilentReinstallAction::Reinstall
-    );
-}
-
-#[test]
-fn no_reinstall_marker_advancement_suppresses_startup_reinstall() {
-    // `--no-reinstall` must be a durable opt-out for the running version, not a
-    // one-command deferral: `run_post_update_tasks` advances both markers on the
-    // skip path (without running the reinstall). This proves the effect — after
-    // the markers advance, the next ordinary command's startup silent reinstall
-    // returns `Nothing`, so it does NOT immediately undo the skip and reinstall
-    // every agent anyway.
+fn no_reinstall_records_the_explicit_lifecycle_decision() {
+    // `--no-reinstall` is a durable explicit lifecycle decision for the
+    // running version, so the skip path records both markers without running
+    // the reinstall.
     let running = "6.1.0";
     let mut config = UserConfig {
         installed_agents: vec!["cursor".to_string()],
@@ -528,78 +488,8 @@ fn no_reinstall_marker_advancement_suppresses_startup_reinstall() {
         ..UserConfig::default()
     };
 
-    // Pre-condition: without advancing markers the startup path WOULD reinstall.
-    assert_eq!(
-        silent_reinstall_action(&config, running),
-        SilentReinstallAction::Reinstall
-    );
-
-    // The `--no-reinstall` path advances the markers instead of reinstalling.
+    // The `--no-reinstall` path records the explicit lifecycle decision.
     assert!(config.mark_version_installed(running));
-
-    assert_eq!(
-        silent_reinstall_action(&config, running),
-        SilentReinstallAction::Nothing,
-        "after --no-reinstall advances the markers, startup must not re-fire the reinstall"
-    );
-}
-
-#[test]
-fn patch_bump_only_advances_the_marker() {
-    let config = UserConfig {
-        installed_agents: vec!["cursor".to_string()],
-        previous_version: "6.1.0".to_string(),
-        last_installed_version: "6.1.0".to_string(),
-        ..UserConfig::default()
-    };
-
-    assert_eq!(
-        silent_reinstall_action(&config, "6.1.1"),
-        SilentReinstallAction::AdvanceMarker
-    );
-}
-
-#[test]
-fn numeric_beta_prerelease_bump_only_advances_the_marker() {
-    // beta.2 → beta.10 is newer, but same minor — no agent reinstall.
-    let config = UserConfig {
-        installed_agents: vec!["cursor".to_string()],
-        previous_version: "0.0.18-beta.2".to_string(),
-        last_installed_version: "0.0.18-beta.2".to_string(),
-        ..UserConfig::default()
-    };
-
-    assert_eq!(
-        silent_reinstall_action(&config, "0.0.18-beta.10"),
-        SilentReinstallAction::AdvanceMarker
-    );
-}
-
-#[test]
-fn beta_minor_bump_triggers_reinstall_and_cross_channel_stays_quiet() {
-    // 1.2.x → 1.3.x is a SemVer minor bump on the same beta channel.
-    let beta_minor = UserConfig {
-        installed_agents: vec!["cursor".to_string()],
-        previous_version: "1.2.3-beta.2".to_string(),
-        last_installed_version: "1.2.3-beta.2".to_string(),
-        ..UserConfig::default()
-    };
-    assert_eq!(
-        silent_reinstall_action(&beta_minor, "1.3.0-beta.1"),
-        SilentReinstallAction::Reinstall
-    );
-
-    // Stable ↔ beta never counts as a minor transition for silent reinstall.
-    let cross_channel = UserConfig {
-        installed_agents: vec!["cursor".to_string()],
-        previous_version: "1.2.3".to_string(),
-        last_installed_version: "1.2.3".to_string(),
-        ..UserConfig::default()
-    };
-    assert_eq!(
-        silent_reinstall_action(&cross_channel, "1.3.0-beta.1"),
-        SilentReinstallAction::AdvanceMarker
-    );
 }
 
 #[test]
