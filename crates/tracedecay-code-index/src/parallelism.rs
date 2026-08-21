@@ -17,6 +17,7 @@
 //! Everything here is sizing policy only. It never changes what is computed,
 //! so generation bytes and digests are identical at any width.
 
+use std::fmt;
 use std::sync::{
     OnceLock,
     atomic::{AtomicUsize, Ordering},
@@ -43,6 +44,31 @@ const INDEXING_WORKERS_ENV: &str = "TRACEDECAY_INDEX_WORKERS";
 /// Daemon-owned upper bound for this dedicated pool. Zero means the process is
 /// a one-shot caller and has not installed a daemon CPU budget.
 static DAEMON_WORKER_CEILING: AtomicUsize = AtomicUsize::new(0);
+static CONFIGURED_INDEXING_WORKERS: OnceLock<usize> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DaemonWorkerCeilingInstallError {
+    PoolAlreadyInitialized { workers: usize },
+    ConflictingCeiling { existing: usize, requested: usize },
+}
+
+impl fmt::Display for DaemonWorkerCeilingInstallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PoolAlreadyInitialized { workers } => write!(
+                formatter,
+                "indexing pool width was already initialized at {workers} workers"
+            ),
+            Self::ConflictingCeiling {
+                existing,
+                requested,
+            } => write!(
+                formatter,
+                "daemon worker ceiling is already {existing}, not requested {requested}"
+            ),
+        }
+    }
+}
 
 /// Cores held back from indexing so interactive requests never wait for a
 /// free CPU. Never reserves the whole machine.
@@ -73,21 +99,28 @@ fn honor_daemon_worker_ceiling(requested: usize, daemon_ceiling: Option<usize>) 
 /// Installs the daemon's canonical CPU-thread ceiling before the indexing pool
 /// is first used. Repeating the same value is idempotent; a conflicting second
 /// owner is refused.
-pub fn install_daemon_worker_ceiling(threads: usize) -> Result<(), usize> {
+pub fn install_daemon_worker_ceiling(
+    threads: usize,
+) -> Result<(), DaemonWorkerCeilingInstallError> {
     let threads = threads.max(1);
+    if let Some(&workers) = CONFIGURED_INDEXING_WORKERS.get() {
+        return Err(DaemonWorkerCeilingInstallError::PoolAlreadyInitialized { workers });
+    }
     match DAEMON_WORKER_CEILING.compare_exchange(0, threads, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => Ok(()),
         Err(existing) if existing == threads => Ok(()),
-        Err(existing) => Err(existing),
+        Err(existing) => Err(DaemonWorkerCeilingInstallError::ConflictingCeiling {
+            existing,
+            requested: threads,
+        }),
     }
 }
 
 /// Host width: the operator override if set, otherwise the reservation
-/// target. Fixed for the life of the process; this is what the pool is
-/// built at.
+/// target, then clamped to the daemon's canonical ceiling when installed.
+/// Fixed for the life of the process; this is what the pool is built at.
 fn configured_indexing_workers() -> usize {
-    static CONFIGURED: OnceLock<usize> = OnceLock::new();
-    *CONFIGURED.get_or_init(|| {
+    *CONFIGURED_INDEXING_WORKERS.get_or_init(|| {
         let requested = std::env::var(INDEXING_WORKERS_ENV)
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
@@ -191,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_ceiling_clamps_operator_override_without_lowering_default() {
+    fn daemon_ceiling_clamps_requested_width() {
         assert_eq!(honor_daemon_worker_ceiling(8, None), 8);
         assert_eq!(honor_daemon_worker_ceiling(90, Some(16)), 16);
         assert_eq!(honor_daemon_worker_ceiling(8, Some(16)), 8);
