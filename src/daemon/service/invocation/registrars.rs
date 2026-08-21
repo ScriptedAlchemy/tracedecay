@@ -612,6 +612,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
         &self,
         project_root: &Path,
         registration: Arc<dyn Any + Send + Sync>,
+        hook_orchestrator: Arc<BoundedHookOrchestratorV1>,
         advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
         feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
     ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
@@ -619,7 +620,10 @@ impl DaemonAdvisoryRuntimeRegistrar {
             .project_runtimes
             .publish_advisory_atomically(
                 project_root,
-                super::super::project_runtime::RegisteredAdvisoryRuntimeV1::new(registration),
+                super::super::project_runtime::RegisteredAdvisoryRuntimeV1::new(
+                    registration,
+                    hook_orchestrator,
+                ),
                 advisory_cycle,
                 feedback_input,
             )

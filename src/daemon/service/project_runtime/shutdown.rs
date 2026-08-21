@@ -76,7 +76,8 @@ impl ProjectRuntimeRegistryV1 {
             .await;
         match retired {
             Ok(mut runtimes) => {
-                let clean = shut_down_observability(&mut runtimes).await;
+                let mut clean = shut_down_advisory(&runtimes).await;
+                clean &= shut_down_observability(&mut runtimes).await;
                 shut_down_runtimes(runtimes);
                 clean
             }
@@ -214,7 +215,7 @@ impl ProjectRuntimeRegistryV1 {
     ) -> bool {
         let deadline =
             tokio::time::Instant::now() + crate::daemon::core_lifecycle::DAEMON_SHUTDOWN_DEADLINE;
-        let mut clean = true;
+        let mut clean = shut_down_advisory(&runtimes).await;
         for runtime in runtimes.values_mut() {
             if let Some(reconciler) = runtime.semantic_activation_reconciler.take() {
                 reconciler.cancel_and_join().await;
@@ -238,6 +239,16 @@ impl ProjectRuntimeRegistryV1 {
         shut_down_runtimes(runtimes);
         clean
     }
+}
+
+async fn shut_down_advisory(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> bool {
+    let mut clean = true;
+    for runtime in runtimes.values() {
+        if let Some(advisory) = runtime.advisory.as_ref() {
+            clean &= advisory.shutdown().await;
+        }
+    }
+    clean
 }
 
 pub(crate) struct ProjectRuntimeRootQuiescenceV1 {
