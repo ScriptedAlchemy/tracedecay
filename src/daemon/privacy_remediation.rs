@@ -100,6 +100,7 @@ fn remediation_write_control() -> FactWriteControl {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     use serde_json::{Value, json};
     use tempfile::TempDir;
@@ -109,9 +110,9 @@ mod tests {
         SanitizerDispositionV1, SensitivityV1,
     };
     use tracedecay_store::{
-        ProjectMemoryFactAddMaterialV1, ProjectMemoryFactIdV1, ProjectMemoryFactListQueryV1,
-        ProjectMemoryFactProjectionV1, ProjectMemoryFactStore, ProjectMemoryFactUpdateCommandV1,
-        ProjectMemoryFactUpdatePatchV1,
+        FactWriteControl, ProjectMemoryFactAddMaterialV1, ProjectMemoryFactIdV1,
+        ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
+        ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdatePatchV1,
     };
     use tracedecay_usecases::memory::{MemoryApplication, PrivacyRemediationTriggerV1};
 
@@ -498,6 +499,113 @@ mod tests {
         assert_eq!(second.clean_facts, 1);
         assert_eq!(second.quarantined_facts, 0);
         assert!(second.curation_receipts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn at_rest_rescan_commit_denial_fails_closed_without_mutation() {
+        let temp = TempDir::new().expect("privacy remediation denial fixture root");
+        let profile_root = temp.path().join("profile");
+        let project_id = ProjectId::new("project.privacy-remediation.denial").expect("project id");
+        let project_root = enrolled_root(temp.path(), &project_id);
+        let _database_scope = crate::db::enter_daemon_database_scope(
+            &profile_root,
+            44,
+            "privacy remediation denial test",
+        )
+        .expect("daemon database scope");
+        let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("daemon registry");
+        let database = registry
+            .project_memory(project_id.clone(), [project_root])
+            .await
+            .expect("project memory authority");
+        let owner = FactOwnerV1::Project { project_id };
+
+        seed_legacy_fact(
+            &database,
+            &owner,
+            "content-hit",
+            &format!("deploys authenticate with the token {}", secret()),
+            None,
+            json!({"fixture": "content-hit"}),
+        )
+        .await;
+        seed_legacy_fact(
+            &database,
+            &owner,
+            "metadata-hit",
+            "the staging credentials map is keyed by raw token",
+            None,
+            json!({secret(): "staging"}),
+        )
+        .await;
+
+        let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database))
+            .expect("owner-bound memory application");
+        let before = served_contents(&memory, &owner).await;
+        assert_eq!(before.len(), 2, "the denial fixture must serve both facts");
+        assert_eq!(
+            persisted_payload_rows_containing(&database, &secret()).await,
+            2,
+            "the denial fixture must persist two detector-hit payload rows"
+        );
+
+        let denied = FactWriteControl::new(Arc::new(|| false), Arc::new(|| false));
+        let refusal = memory
+            .privacy_remediation_rescan(
+                PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
+                &remediation_read_control(),
+                &denied,
+            )
+            .await;
+        assert!(
+            refusal.is_err(),
+            "a denied commit gate must fail the rescan closed, not settle silently"
+        );
+
+        assert_eq!(
+            served_contents(&memory, &owner).await,
+            before,
+            "the refused curation batch must not change served facts"
+        );
+        assert_eq!(
+            persisted_payload_rows_containing(&database, &secret()).await,
+            2,
+            "the refused curation batch must not partially erase payload rows"
+        );
+        assert_eq!(
+            assertion_payload_purge_receipts(&database).await,
+            0,
+            "a refused curation batch must not mint purge receipts"
+        );
+
+        let receipt = memory
+            .privacy_remediation_rescan(
+                PrivacyRemediationTriggerV1::DetectorRevisionAdoption,
+                &remediation_read_control(),
+                &remediation_write_control(),
+            )
+            .await
+            .expect("admitted retry after commit refusal");
+        assert_eq!(receipt.scanned_facts, 2);
+        assert_eq!(receipt.clean_facts, 0);
+        assert_eq!(receipt.quarantined_facts, 2);
+        assert_eq!(
+            receipt
+                .curation_receipts
+                .iter()
+                .map(tracedecay_store::ProjectMemoryFactCurationReceiptV1::facts_removed)
+                .sum::<u64>(),
+            2
+        );
+        assert!(served_contents(&memory, &owner).await.is_empty());
+        assert_eq!(
+            persisted_payload_rows_containing(&database, &secret()).await,
+            0,
+            "the admitted retry must erase every detector-hit payload"
+        );
     }
 
     #[tokio::test]

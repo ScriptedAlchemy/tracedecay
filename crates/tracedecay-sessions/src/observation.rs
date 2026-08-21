@@ -163,12 +163,19 @@ impl ReplayObservationsRequest {
     }
 }
 
+/// What the authoritative point read established about projection work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObservationProjectionReadback {
+    Authoritative(ObservationProjectionStatus),
+    Unavailable,
+}
+
 /// Result of mandatory sanitization and, when permitted, authoritative persistence.
 #[derive(Debug)]
 pub enum CaptureObservationOutcome {
     Persisted {
         outcome: Box<ObservationPersistOutcome>,
-        projection_status: ObservationProjectionStatus,
+        projection_status: ObservationProjectionReadback,
         sanitized_record: Box<SanitizedObservationRecordV1>,
         findings: Vec<SanitizationFindingV1>,
     },
@@ -177,7 +184,7 @@ pub enum CaptureObservationOutcome {
         projection_state: ExternalSourceProjectionStateV1,
         retry_handle: ExternalSourceProjectionRetryHandleV1,
         outcome: Box<ObservationPersistOutcome>,
-        projection_status: ObservationProjectionStatus,
+        projection_status: ObservationProjectionReadback,
         sanitized_record: Box<SanitizedObservationRecordV1>,
         findings: Vec<SanitizationFindingV1>,
     },
@@ -297,8 +304,6 @@ pub enum ObservationApplicationError {
     Privacy(#[from] PrivacySanitizerError),
     #[error("observation store operation failed")]
     Store(#[from] ObservationStoreError),
-    #[error("persisted observation is not readable from the authoritative store")]
-    PersistedObservationUnavailable,
     #[error("observation operation was cancelled")]
     Cancelled,
 }
@@ -438,20 +443,24 @@ where
                     if cancellation.is_cancelled() {
                         return Err(ObservationApplicationError::Cancelled);
                     }
-                    // A newly committed row is queued by this persist even
-                    // when an immediate reader snapshot trails the write. An
-                    // exact or covered duplicate wrote no projection state,
-                    // so a read-back miss cannot truthfully invent one.
-                    let projection_status = match stored {
-                        Some(stored) => stored.projection_status(),
-                        None if matches!(&outcome, ObservationPersistOutcome::Committed(_)) => {
-                            ObservationProjectionStatus::Queued
+                    // Preserve authoritative projection state when visible. A
+                    // new commit establishes queued state. Duplicate receipts
+                    // prove durability but carry no projection status, so a
+                    // trailing reader snapshot remains explicitly unavailable.
+                    let projection_status = match (stored, &outcome) {
+                        (Some(stored), _) => {
+                            ObservationProjectionReadback::Authoritative(stored.projection_status())
                         }
-                        None => {
-                            return Err(
-                                ObservationApplicationError::PersistedObservationUnavailable,
-                            );
+                        (None, ObservationPersistOutcome::Committed(_)) => {
+                            ObservationProjectionReadback::Authoritative(
+                                ObservationProjectionStatus::Queued,
+                            )
                         }
+                        (
+                            None,
+                            ObservationPersistOutcome::ExactDuplicate(_)
+                            | ObservationPersistOutcome::CoveredDuplicate(_),
+                        ) => ObservationProjectionReadback::Unavailable,
                     };
                     Ok(CaptureObservationOutcome::Persisted {
                         outcome: Box::new(outcome),
