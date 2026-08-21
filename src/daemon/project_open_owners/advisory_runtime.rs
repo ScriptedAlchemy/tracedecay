@@ -1354,6 +1354,7 @@ async fn register_production_advisory_owner(
         .publish(
             project_root,
             published_registration,
+            orchestrator,
             invocation_owner,
             advisory_cycle as Arc<dyn FeedbackCycleRuntimePort>,
         )

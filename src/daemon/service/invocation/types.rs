@@ -1,6 +1,7 @@
 //! Shared retained-state shapes and small daemon-private types used across the invocation split.
 
 use super::*;
+use futures_util::FutureExt;
 use tracedecay_application::RegisteredRootLocatorV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -100,6 +101,37 @@ struct HookOrchestrationInFlightV1 {
     events: BTreeMap<HookOrchestrationEventKeyV1, Arc<HookOrchestrationInFlightEntryV1>>,
 }
 
+struct HookOrchestrationTaskOwnerV1 {
+    accepting: bool,
+    failed: bool,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Default for HookOrchestrationTaskOwnerV1 {
+    fn default() -> Self {
+        Self {
+            accepting: true,
+            failed: false,
+            tasks: Vec::new(),
+        }
+    }
+}
+
+impl HookOrchestrationTaskOwnerV1 {
+    fn reap_finished(&mut self) {
+        let tasks = std::mem::take(&mut self.tasks);
+        for task in tasks {
+            if task.is_finished() {
+                if !matches!(task.now_or_never(), Some(Ok(()))) {
+                    self.failed = true;
+                }
+            } else {
+                self.tasks.push(task);
+            }
+        }
+    }
+}
+
 /// Upper bound on admissions that may join one in-flight cycle. Beyond it the
 /// caller is backpressured instead of queued, so a hook storm can never grow
 /// unbounded retained state behind a single bounded operation.
@@ -114,6 +146,7 @@ pub(crate) struct BoundedHookOrchestratorV1 {
     work: Arc<HookOrchestrationWorkV1>,
     in_flight: Arc<StdMutex<HookOrchestrationInFlightV1>>,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+    task_owner: StdMutex<HookOrchestrationTaskOwnerV1>,
 }
 
 impl BoundedHookOrchestratorV1 {
@@ -139,6 +172,7 @@ impl BoundedHookOrchestratorV1 {
                 work,
                 in_flight: Arc::new(StdMutex::new(HookOrchestrationInFlightV1::default())),
                 cancellation: tracedecay_runtime_core::cancellation::CancellationToken::new(),
+                task_owner: StdMutex::new(HookOrchestrationTaskOwnerV1::default()),
             })
         })
     }
@@ -200,7 +234,7 @@ impl BoundedHookOrchestratorV1 {
         &self,
         mut request: HookOrchestrationRequestV1,
     ) -> HookOrchestrationAdmissionV1 {
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        let Ok(runtime_handle) = tokio::runtime::Handle::try_current() else {
             return HookOrchestrationAdmissionV1::Unavailable;
         };
         let envelope = request.hook.envelope();
@@ -208,6 +242,13 @@ impl BoundedHookOrchestratorV1 {
         let Some(address) = Self::stable_address(&request) else {
             return HookOrchestrationAdmissionV1::Unavailable;
         };
+        let Ok(mut task_owner) = self.task_owner.lock() else {
+            return HookOrchestrationAdmissionV1::Unavailable;
+        };
+        task_owner.reap_finished();
+        if !task_owner.accepting || task_owner.failed {
+            return HookOrchestrationAdmissionV1::Unavailable;
+        }
         let completion = request.completion.take();
         let (permit, operation) = {
             let Ok(mut in_flight) = self.in_flight.lock() else {
@@ -259,7 +300,7 @@ impl BoundedHookOrchestratorV1 {
         let in_flight = Arc::clone(&self.in_flight);
         let cancellation = self.cancellation.clone();
         let permits = Arc::clone(&self.permits);
-        handle.spawn(async move {
+        let task = runtime_handle.spawn(async move {
             let work_cancellation = operation.cancellation.clone();
             let permit = match permit {
                 Some(permit) => Some(permit),
@@ -312,7 +353,49 @@ impl BoundedHookOrchestratorV1 {
             Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
             drop(permit);
         });
+        task_owner.tasks.push(task);
         HookOrchestrationAdmissionV1::Enqueued
+    }
+
+    pub(crate) async fn shutdown(&self) -> bool {
+        let (tasks, mut clean) = {
+            let mut task_owner = self
+                .task_owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            task_owner.accepting = false;
+            task_owner.reap_finished();
+            (std::mem::take(&mut task_owner.tasks), !task_owner.failed)
+        };
+        self.cancellation.cancel();
+        if let Ok(in_flight) = self.in_flight.lock() {
+            for entry in in_flight.events.values() {
+                entry.cancellation.cancel();
+            }
+        }
+        let deadline = tokio::time::Instant::now() + crate::daemon::DAEMON_TASK_ABORT_DEADLINE;
+        for mut task in tasks {
+            match tokio::time::timeout_at(deadline, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => clean = false,
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    clean = false;
+                }
+            }
+        }
+        clean
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_tasks(&self) -> usize {
+        let mut task_owner = self
+            .task_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        task_owner.reap_finished();
+        task_owner.tasks.len()
     }
 }
 
@@ -325,6 +408,14 @@ impl Drop for BoundedHookOrchestratorV1 {
             for entry in in_flight.events.values() {
                 entry.cancellation.cancel();
             }
+        }
+        let task_owner = self
+            .task_owner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        task_owner.accepting = false;
+        for task in &task_owner.tasks {
+            task.abort();
         }
     }
 }

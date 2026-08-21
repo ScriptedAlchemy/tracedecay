@@ -14,9 +14,9 @@ use tracedecay_usecases::feedback::FeedbackCycleRuntime;
 use tracedecay_usecases::primitives::PrimitiveProjectRuntime;
 
 use super::invocation::{
-    DaemonAdvisoryCycleInvocationOwner, DaemonLspInvocationOwner, RegisteredCallableCodeRuntime,
-    RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredRetainedRuntime,
-    RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
+    BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationOwner, DaemonLspInvocationOwner,
+    RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
+    RegisteredRetainedRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
 };
 
 mod observability;
@@ -410,11 +410,22 @@ pub(crate) struct ProjectRuntimeAlreadyRegistered;
 #[derive(Clone)]
 pub(crate) struct RegisteredAdvisoryRuntimeV1 {
     _owner: Arc<dyn Any + Send + Sync>,
+    hook_orchestrator: Arc<BoundedHookOrchestratorV1>,
 }
 
 impl RegisteredAdvisoryRuntimeV1 {
-    pub(crate) fn new(owner: Arc<dyn Any + Send + Sync>) -> Self {
-        Self { _owner: owner }
+    pub(crate) fn new(
+        owner: Arc<dyn Any + Send + Sync>,
+        hook_orchestrator: Arc<BoundedHookOrchestratorV1>,
+    ) -> Self {
+        Self {
+            _owner: owner,
+            hook_orchestrator,
+        }
+    }
+
+    async fn shutdown(&self) -> bool {
+        self.hook_orchestrator.shutdown().await
     }
 }
 

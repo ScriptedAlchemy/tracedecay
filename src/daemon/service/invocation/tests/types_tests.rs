@@ -789,6 +789,97 @@ async fn dropping_hook_orchestrator_cancels_daemon_owned_work_without_false_comp
     );
 }
 
+#[tokio::test]
+async fn hook_orchestrator_shutdown_fences_and_joins_pending_work() {
+    struct PendingWork {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl std::future::Future for PendingWork {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl Drop for PendingWork {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let work_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_work_drop = Arc::clone(&work_dropped);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| PendingWork {
+        dropped: Arc::clone(&observed_work_drop),
+    })
+    .unwrap();
+    let request = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        runtime.admit(request.clone()),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    tokio::task::yield_now().await;
+
+    assert!(
+        runtime.shutdown().await,
+        "pending work must cancel and join"
+    );
+    assert!(work_dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(runtime.active_tasks(), 0);
+    assert_eq!(
+        runtime.admit(request),
+        HookOrchestrationAdmissionV1::Unavailable,
+        "shutdown must fence later hook-cycle admission"
+    );
+}
+
+#[tokio::test]
+async fn hook_orchestrator_shutdown_reports_a_failed_worker() {
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| async move {
+        panic!("hook worker failure probe");
+    })
+    .unwrap();
+    let request = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        runtime.admit(request),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    while runtime.active_tasks() != 0 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        !runtime.shutdown().await,
+        "a panicked worker must remain a typed unclean shutdown"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     #[derive(Clone, Copy, Debug)]
