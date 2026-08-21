@@ -74,6 +74,12 @@ mod generation_attribution;
 pub use generation_attribution::PublishedGenerationTestAttributionAuthorityV1;
 mod generation_statistics;
 pub use generation_statistics::CodeIndexGenerationStatisticsV1;
+mod lexical_page_source;
+pub use lexical_page_source::{
+    VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageReadV1,
+    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
+    VerifiedSealedLexicalSourceReceiptV1,
+};
 mod sealed_codec;
 pub use sealed_codec::{
     MAX_SEALED_CODE_GENERATION_BYTES_V1, SEALED_GENERATION_FORMAT_REVISION_V1,

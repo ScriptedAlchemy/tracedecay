@@ -12,7 +12,7 @@ use super::*;
 ///
 /// Every reader that gates on the sealed format — the publication store, the
 /// worker probe, and code-generation retention — must gate on this one value.
-const LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION: u32 = 5;
+pub(super) const LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION: u32 = 5;
 pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 6;
 /// One bound, enforced on both sides of the sealed store: encoding refuses to
 /// publish a generation larger than this, and decoding refuses to admit one.
@@ -57,10 +57,10 @@ pub fn sealed_generation_payload_digest<T: Serialize>(
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PersistedFileGenerationArtifactsV1 {
-    authority: ReceiptBoundCodeFileAuthorityV1,
-    extraction: ExtractionBatchV1,
-    artifacts: CodeFileIndexArtifactsV1,
+pub(super) struct PersistedFileGenerationArtifactsV1 {
+    pub(super) authority: ReceiptBoundCodeFileAuthorityV1,
+    pub(super) extraction: ExtractionBatchV1,
+    pub(super) artifacts: CodeFileIndexArtifactsV1,
 }
 
 #[derive(Serialize)]

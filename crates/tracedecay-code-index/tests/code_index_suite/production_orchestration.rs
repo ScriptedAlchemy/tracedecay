@@ -1,6 +1,8 @@
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet},
+    io::Cursor,
+    sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -18,6 +20,7 @@ use tracedecay_code_index::{
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
         CodeIndexRepositoryParseIdentityV1, SEALED_GENERATION_FORMAT_REVISION_V1,
+        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
         sealed_generation_payload_digest,
     },
     projection::{
@@ -242,6 +245,31 @@ impl CodeIndexExecutionControlV1 for ExpiredControl {
 
     fn is_deadline_exceeded(&self) -> bool {
         true
+    }
+}
+
+#[derive(Default)]
+struct MutableCancellationControl {
+    cancelled: AtomicBool,
+}
+
+impl MutableCancellationControl {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn resume(&self) {
+        self.cancelled.store(false, Ordering::Release);
+    }
+}
+
+impl CodeIndexExecutionControlV1 for MutableCancellationControl {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
     }
 }
 
@@ -924,6 +952,166 @@ fn sealed_generation_validation_is_memoized_but_decode_stays_fail_closed() {
             .contains("file authority project does not match the generation manifest"),
         "unexpected project mismatch error: {error}"
     );
+}
+
+#[test]
+fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellation() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request_with_source(
+                "file.lexical-pages",
+                1_250_000,
+                "commit.lexical-pages",
+                "tree.lexical-pages",
+                "fn alpha() -> u32 { 1 }\nfn beta() -> u32 { alpha() + 1 }\nfn gamma() -> u32 { beta() + 1 }\n",
+            ),
+            &ActiveControl,
+        )
+        .expect("generation publishes");
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+    let expected_state_digest = id::<ManifestDigest>(
+        envelope["state_digest"]
+            .as_str()
+            .expect("state digest string"),
+    );
+    let control = MutableCancellationControl::default();
+    let mut source = VerifiedSealedLexicalPageSourceV1::open(
+        Cursor::new(sealed.clone()),
+        u64::try_from(sealed.len()).expect("sealed length"),
+        expected_state_digest.clone(),
+        1,
+        1024 * 1024,
+        &control,
+    )
+    .expect("verified page source opens");
+
+    let first = match source.next_page(&control).expect("first page") {
+        VerifiedSealedLexicalPageReadV1::Page(page) => page,
+        VerifiedSealedLexicalPageReadV1::Complete(_) => {
+            panic!("fixture must emit at least one lexical page")
+        }
+    };
+    assert_eq!(first.page_ordinal, 0);
+    assert_eq!(first.chunk_count, 1);
+    assert_eq!(first.chunks.len(), 1);
+    assert!(first.payload_bytes > 0);
+    assert!(first.payload_bytes <= 1024 * 1024);
+
+    control.cancel();
+    let cursor_before_cancel = source.cursor().clone();
+    let error = source
+        .next_page(&control)
+        .expect_err("cancellation must interrupt before another page is admitted");
+    assert!(matches!(
+        error,
+        CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+    ));
+    assert_eq!(source.cursor(), &cursor_before_cancel);
+    control.resume();
+
+    let mut observed = first
+        .chunks
+        .into_iter()
+        .map(|chunk| chunk.into_chunk())
+        .collect::<Vec<_>>();
+    let mut final_page_digest = first.cumulative_digest;
+    let receipt = loop {
+        match source.next_page(&control).expect("resumed page read") {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                assert_eq!(page.chunk_count, 1);
+                assert_eq!(page.chunks.len(), 1);
+                assert!(page.payload_bytes <= 1024 * 1024);
+                final_page_digest = page.cumulative_digest.clone();
+                observed.extend(page.chunks.into_iter().map(|chunk| chunk.into_chunk()));
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+        }
+    };
+
+    let mut expected = generation
+        .admitted_chunks()
+        .expect("published exact chunks")
+        .iter()
+        .map(|chunk| chunk.chunk().clone())
+        .collect::<Vec<_>>();
+    observed.sort_by(|left, right| left.id.cmp(&right.id));
+    expected.sort_by(|left, right| left.id.cmp(&right.id));
+    assert_eq!(observed, expected);
+    assert_eq!(receipt.total_chunks, expected.len() as u64);
+    assert_eq!(receipt.page_count, expected.len() as u64);
+    assert_eq!(receipt.cumulative_digest, final_page_digest);
+    assert_eq!(receipt.source_state_digest, expected_state_digest);
+    assert_eq!(
+        receipt.format_revision,
+        SEALED_GENERATION_FORMAT_REVISION_V1
+    );
+}
+
+#[test]
+fn verified_sealed_lexical_source_refuses_a_foreign_state_digest() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(request("file.lexical-digest", 1_260_000), &ActiveControl)
+        .expect("generation publishes");
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let error = VerifiedSealedLexicalPageSourceV1::open(
+        Cursor::new(sealed.clone()),
+        u64::try_from(sealed.len()).expect("sealed length"),
+        id::<ManifestDigest>(&format!("sha256:{}", "0".repeat(64))),
+        16,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect_err("a foreign durable state digest must not authorize lexical bytes");
+    assert!(
+        error
+            .to_string()
+            .contains("state digest does not match the admitted source"),
+        "unexpected digest error: {error}"
+    );
+}
+
+#[test]
+fn verified_sealed_lexical_source_reads_the_legacy_v5_payload_without_full_restore() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(request("file.lexical-v5", 1_270_000), &ActiveControl)
+        .expect("generation publishes");
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+    envelope["generation"]["format_revision"] = serde_json::Value::from(5);
+    let state_digest = sealed_generation_payload_digest(5, &envelope["generation"])
+        .expect("legacy payload digest");
+    envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
+    let legacy = serde_json::to_vec(&envelope).expect("legacy sealed generation JSON");
+    let mut source = VerifiedSealedLexicalPageSourceV1::open(
+        Cursor::new(legacy.clone()),
+        u64::try_from(legacy.len()).expect("legacy sealed length"),
+        state_digest,
+        64,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect("legacy verified page source opens");
+
+    let receipt = loop {
+        match source.next_page(&ActiveControl).expect("legacy page read") {
+            VerifiedSealedLexicalPageReadV1::Page(page) => assert!(!page.chunks.is_empty()),
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+        }
+    };
+    assert_eq!(receipt.format_revision, 5);
+    assert!(receipt.total_chunks > 0);
 }
 
 /// The published-generation integrity gate is an amortized load-time check.
