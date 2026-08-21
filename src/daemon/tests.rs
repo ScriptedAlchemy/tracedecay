@@ -565,7 +565,7 @@ async fn apply_project_automation_patch_via_surface(
                         key,
                         value: Box::new(
                             tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(
-                                desired,
+                                Box::new(desired),
                             ),
                         ),
                     },

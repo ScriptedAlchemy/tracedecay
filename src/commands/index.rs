@@ -353,10 +353,8 @@ mod init_bootstrap_tests {
     async fn brokered_init_requests_a_real_code_index_reconciliation() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-        static SOCKET_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _serialize = SOCKET_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        static SOCKET_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _serialize = SOCKET_ENV_TEST_LOCK.lock().await;
         let temp = tempfile::TempDir::new().unwrap();
         let project = temp.path().join("project");
         let profile = temp.path().join("profile");

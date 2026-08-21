@@ -6,11 +6,11 @@ use thiserror::Error;
 use tracedecay_domain::DomainError;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,
-    AnalyzerSettingsV1, AutomationSettingsV1, CONFIGURATION_SETTING_KEYS_V1,
-    CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationValueKindV1, ConfigurationValueV1,
-    ContextScoutSettingsV1, DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1,
-    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
-    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    AnalyzerSettingsV1, CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
+    ConfigurationValueKindV1, ConfigurationValueV1, ContextScoutSettingsV1,
+    DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1, INDEX_EXCLUDE_SETTING_KEY,
+    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
     PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SEMANTIC_RUNTIME_SETTING_KEY,
     SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
@@ -161,9 +161,7 @@ impl ConfigurationRegistry {
             key: setting_key(AUTOMATION_SETTINGS_SETTING_KEY)?,
             schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
             value_kind: ConfigurationValueKindV1::AutomationSettings,
-            default_value: ConfigurationValueV1::AutomationSettings(
-                AutomationSettingsV1::default(),
-            ),
+            default_value: ConfigurationValueV1::AutomationSettings(Box::default()),
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::None,
