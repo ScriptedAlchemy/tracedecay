@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.25](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.24...v0.1.0-beta.25) (2026-08-21)
+
+
+### Performance Improvements
+
+* **domain:** share sanitized chunk text clones ([ac94b6b](https://github.com/ScriptedAlchemy/tracedecay/commit/ac94b6b150bce939abc8290daa3b988da09b93d0))
+* **query:** compact retained lexical scoring state ([09629c0](https://github.com/ScriptedAlchemy/tracedecay/commit/09629c07e8d29f0ae1b1ff26afcbd617c3bb3c4f))
+
 ## [0.1.0-beta.24](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.23...v0.1.0-beta.24) (2026-08-21)
 
 
