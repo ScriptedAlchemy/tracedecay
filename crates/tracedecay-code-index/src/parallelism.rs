@@ -19,7 +19,7 @@
 
 use std::fmt;
 use std::sync::{
-    OnceLock,
+    Mutex, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -44,7 +44,11 @@ const INDEXING_WORKERS_ENV: &str = "TRACEDECAY_INDEX_WORKERS";
 /// Daemon-owned upper bound for this dedicated pool. Zero means the process is
 /// a one-shot caller and has not installed a daemon CPU budget.
 static DAEMON_WORKER_CEILING: AtomicUsize = AtomicUsize::new(0);
-static CONFIGURED_INDEXING_WORKERS: OnceLock<usize> = OnceLock::new();
+/// Serializes the one-time ceiling/width decision. Reads after initialization
+/// use the atomic fast path and never take this lock.
+static PARALLELISM_CONFIGURATION_GATE: Mutex<()> = Mutex::new(());
+/// Zero means the process has not fixed its indexing width yet.
+static CONFIGURED_INDEXING_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DaemonWorkerCeilingInstallError {
@@ -97,13 +101,17 @@ fn honor_daemon_worker_ceiling(requested: usize, daemon_ceiling: Option<usize>) 
 }
 
 /// Installs the daemon's canonical CPU-thread ceiling before the indexing pool
-/// is first used. Repeating the same value is idempotent; a conflicting second
-/// owner is refused.
+/// is first used. Repeating the same value before width initialization is
+/// idempotent; a conflicting second owner or late installation is refused.
 pub fn install_daemon_worker_ceiling(
     threads: usize,
 ) -> Result<(), DaemonWorkerCeilingInstallError> {
+    let _configuration = PARALLELISM_CONFIGURATION_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let threads = threads.max(1);
-    if let Some(&workers) = CONFIGURED_INDEXING_WORKERS.get() {
+    let workers = CONFIGURED_INDEXING_WORKERS.load(Ordering::Acquire);
+    if workers != 0 {
         return Err(DaemonWorkerCeilingInstallError::PoolAlreadyInitialized { workers });
     }
     match DAEMON_WORKER_CEILING.compare_exchange(0, threads, Ordering::AcqRel, Ordering::Acquire) {
@@ -120,18 +128,29 @@ pub fn install_daemon_worker_ceiling(
 /// target, then clamped to the daemon's canonical ceiling when installed.
 /// Fixed for the life of the process; this is what the pool is built at.
 fn configured_indexing_workers() -> usize {
-    *CONFIGURED_INDEXING_WORKERS.get_or_init(|| {
-        let requested = std::env::var(INDEXING_WORKERS_ENV)
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|workers| *workers >= 1)
-            .unwrap_or_else(|| indexing_worker_target(detected_cores()));
-        let daemon_ceiling = match DAEMON_WORKER_CEILING.load(Ordering::Acquire) {
-            0 => None,
-            ceiling => Some(ceiling),
-        };
-        honor_daemon_worker_ceiling(requested, daemon_ceiling)
-    })
+    let configured = CONFIGURED_INDEXING_WORKERS.load(Ordering::Acquire);
+    if configured != 0 {
+        return configured;
+    }
+    let _configuration = PARALLELISM_CONFIGURATION_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let configured = CONFIGURED_INDEXING_WORKERS.load(Ordering::Acquire);
+    if configured != 0 {
+        return configured;
+    }
+    let requested = std::env::var(INDEXING_WORKERS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|workers| *workers >= 1)
+        .unwrap_or_else(|| indexing_worker_target(detected_cores()));
+    let daemon_ceiling = match DAEMON_WORKER_CEILING.load(Ordering::Acquire) {
+        0 => None,
+        ceiling => Some(ceiling),
+    };
+    let configured = honor_daemon_worker_ceiling(requested, daemon_ceiling);
+    CONFIGURED_INDEXING_WORKERS.store(configured, Ordering::Release);
+    configured
 }
 
 /// 0 means "use the configured host width".
