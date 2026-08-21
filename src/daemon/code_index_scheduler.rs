@@ -1371,7 +1371,7 @@ impl LatestCompleteCodeIndexV1 {
     /// closed on — the exact same checks.
     #[cfg(test)]
     pub(in crate::daemon) fn warm_serving_caches(&self) {
-        self.warm_text_serving_caches();
+        let _ = self.activate_text_serving();
         let generation_id = self.generation.manifest().generation_id.clone();
         let Ok(freshness) = self.source_freshness() else {
             return;
@@ -1386,10 +1386,6 @@ impl LatestCompleteCodeIndexV1 {
             return;
         };
         let _ = self.install_graph_serving(reader, None, CodeGraphServingAuthorityV1::Memory);
-    }
-
-    fn warm_text_serving_caches(&self) {
-        let _ = self.activate_text_serving();
     }
 
     fn activate_text_serving(&self) -> Result<(), RetrievalPortError> {
