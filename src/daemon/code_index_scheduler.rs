@@ -1644,6 +1644,7 @@ impl LatestCompleteCodeIndexV1 {
         let CodeLexicalProjectionBuildStepV1::Ready(lexical_projection) = step else {
             return Ok(false);
         };
+        let lexical_projection = *lexical_projection;
         let authority = CentralExactAdmissionAuthorityV1::new(
             ExactAdmissionRuleRevision::new(
                 tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,

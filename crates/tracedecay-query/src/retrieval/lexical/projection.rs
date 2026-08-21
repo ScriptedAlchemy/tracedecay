@@ -375,7 +375,7 @@ pub enum CodeLexicalProjectionBuildStepV1 {
         completed_documents: usize,
         total_documents: usize,
     },
-    Ready(CodeLexicalProjectionAdapterV1),
+    Ready(Box<CodeLexicalProjectionAdapterV1>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -583,13 +583,13 @@ impl CodeLexicalProjectionBuildV1 {
                 RetrievalPortError::Contract("lexical projection build state is missing".to_owned())
             })?
             .finish(self.rows.len(), self.raw_matches_normalized, deadline)?;
-        Ok(CodeLexicalProjectionBuildStepV1::Ready(
+        Ok(CodeLexicalProjectionBuildStepV1::Ready(Box::new(
             CodeLexicalProjectionAdapterV1 {
                 metadata: self.metadata.clone(),
                 rows: Arc::new(std::mem::take(&mut self.rows)),
                 postings: Arc::new(postings),
             },
-        ))
+        )))
     }
 }
 
@@ -624,14 +624,15 @@ impl LexicalGenerationPostingsV1 {
                     )
                 })
             });
+        let raw_text_bytes = if Arc::ptr_eq(&self.normalized_text, &self.raw_text) {
+            0
+        } else {
+            self.raw_text.retained_owned_bytes()
+        };
         term_bytes
             .saturating_add(exact_bytes)
             .saturating_add(self.normalized_text.retained_owned_bytes())
-            .saturating_add(
-                (!Arc::ptr_eq(&self.normalized_text, &self.raw_text))
-                    .then(|| self.raw_text.retained_owned_bytes())
-                    .unwrap_or_default(),
-            )
+            .saturating_add(raw_text_bytes)
             .saturating_add(self.fuzzy_terms.retained_owned_bytes())
             .saturating_add(
                 self.average_field_lengths
@@ -860,7 +861,7 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut build =
             CodeLexicalProjectionBuildV1::new_inner(metadata, chunks, extraction_admitted)?;
         match build.advance_inner(usize::MAX, Some(deadline))? {
-            CodeLexicalProjectionBuildStepV1::Ready(projection) => Ok(projection),
+            CodeLexicalProjectionBuildStepV1::Ready(projection) => Ok(*projection),
             CodeLexicalProjectionBuildStepV1::Pending { .. } => Err(RetrievalPortError::Contract(
                 "unbounded lexical projection build did not complete".to_owned(),
             )),

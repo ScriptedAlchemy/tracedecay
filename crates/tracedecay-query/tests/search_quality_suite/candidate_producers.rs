@@ -350,7 +350,7 @@ fn retained_lexical_projection_preserves_progress_across_bounded_windows() {
     let projection = loop {
         match build.advance(1).expect("finish bounded projection") {
             CodeLexicalProjectionBuildStepV1::Pending { .. } => {}
-            CodeLexicalProjectionBuildStepV1::Ready(projection) => break projection,
+            CodeLexicalProjectionBuildStepV1::Ready(projection) => break *projection,
         }
     };
     let request = lexical_request("retained_symbol_2", &["retained_symbol_2"], &[], &[], 0, 8);

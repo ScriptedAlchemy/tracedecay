@@ -851,9 +851,7 @@ impl DaemonEngine {
                     .find(|candidate| same_scheduler_owner(candidate, key))
                     .cloned()?
             };
-            let Some(handle) = schedulers.get_mut(&owner) else {
-                return None;
-            };
+            let handle = schedulers.get_mut(&owner)?;
             let reservation = self
                 .store_administration
                 .reserve_retirement_reaper(&owner)?;
