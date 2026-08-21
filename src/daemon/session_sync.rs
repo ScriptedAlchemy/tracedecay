@@ -805,6 +805,10 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
             if joined.is_err() {
                 tracing::warn!("session sync shutdown exceeded its total join deadline");
             }
+            self.contexts
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
         })
     }
 }

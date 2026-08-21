@@ -74,6 +74,31 @@ async fn register(
     (runtime, project_sessions, profile_id)
 }
 
+#[tokio::test]
+async fn shutdown_releases_registered_project_database_contexts() {
+    let service = DaemonSessionSyncService::default();
+    let root = tempfile::tempdir().unwrap();
+    let project_id = ProjectId::new("project.session-sync.shutdown-context").unwrap();
+    let (_runtime, _project_sessions, _profile_id) = register(&service, &root, project_id).await;
+
+    assert_eq!(
+        service
+            .contexts
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len(),
+        1
+    );
+    service.shutdown().await;
+    assert!(
+        service
+            .contexts
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
     let service = DaemonSessionSyncService::default();
