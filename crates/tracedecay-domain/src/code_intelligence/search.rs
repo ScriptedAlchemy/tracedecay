@@ -12,6 +12,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -59,9 +60,8 @@ fn validate_revision(value: &str, field: &'static str) -> Result<(), DomainError
 /// Bounded sanitized chunk text. Sanitization proof binds at the snapshot
 /// level (`SanitizedCodeSnapshotV1` receipts), not per chunk; this newtype
 /// enforces the size bound only.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
-pub struct BoundedSanitizedText(String);
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BoundedSanitizedText(Arc<str>);
 
 impl BoundedSanitizedText {
     pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
@@ -71,11 +71,20 @@ impl BoundedSanitizedText {
                 field: "bounded sanitized chunk text",
             });
         }
-        Ok(Self(value))
+        Ok(Self(Arc::from(value)))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl Serialize for BoundedSanitizedText {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -1555,6 +1564,22 @@ mod tests {
     fn bounded_sanitized_text_enforces_the_chunk_bound() {
         assert!(BoundedSanitizedText::new("x".repeat(MAX_CHUNK_TEXT_BYTES)).is_ok());
         assert!(BoundedSanitizedText::new("x".repeat(MAX_CHUNK_TEXT_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn bounded_sanitized_text_clones_share_backing_and_preserve_wire_shape() {
+        let text = BoundedSanitizedText::new("pub fn retained() {}\n").expect("bounded text");
+        let cloned = text.clone();
+        assert_eq!(
+            text.as_str().as_ptr(),
+            cloned.as_str().as_ptr(),
+            "chunk clones must share the retained source allocation"
+        );
+        let wire = serde_json::to_string(&text).expect("serialize bounded text");
+        assert_eq!(wire, r#""pub fn retained() {}\n""#);
+        let decoded: BoundedSanitizedText =
+            serde_json::from_str(&wire).expect("deserialize bounded text");
+        assert_eq!(decoded, text);
     }
 
     #[test]
