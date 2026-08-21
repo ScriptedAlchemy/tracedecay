@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.32](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.31...v0.1.0-beta.32) (2026-08-21)
+
+
+### Features
+
+* **query:** add bounded lexical artifacts ([781657e](https://github.com/ScriptedAlchemy/tracedecay/commit/781657e2a5d3d994a0b53e6e200f354509225d02))
+
 ## [0.1.0-beta.31](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.30...v0.1.0-beta.31) (2026-08-21)
 
 
