@@ -245,6 +245,11 @@ async fn try_admit_codex_jsonl_observations(
     )?;
     let scope = admission_scope.scope();
     let scope_matcher = admission_scope.scope_matcher();
+    let source_location_path = admission_scope.projection_project_path(Some(meta.cwd.as_path()));
+    let source_location = CodexObservationLocation {
+        project_path: source_location_path,
+        location_path: source_location_path,
+    };
     let request = JsonlObservationAdmissionRequest::new(
         PROVIDER,
         path,
@@ -290,14 +295,7 @@ async fn try_admit_codex_jsonl_observations(
                         native_thread_id.as_deref(),
                         record_id.clone(),
                         range,
-                        CodexObservationLocation {
-                            project_path: admission_scope
-                                .projection_project_path(context_state.cwd.as_deref()),
-                            location_path: context_state.cwd.as_deref(),
-                            transcript_path: path,
-                            turn_id: context_state.turn_id.as_deref(),
-                            model: context_state.model.as_deref(),
-                        },
+                        source_location,
                     )?;
                     stable_record_id = Some(record_id);
                     Ok(envelope)

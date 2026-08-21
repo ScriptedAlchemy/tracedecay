@@ -48,12 +48,10 @@ pub fn normalize_codex_observation(
     )
 }
 
+#[derive(Clone, Copy)]
 pub struct CodexObservationLocation<'a> {
     pub project_path: Option<&'a Path>,
     pub location_path: Option<&'a Path>,
-    pub transcript_path: &'a Path,
-    pub turn_id: Option<&'a str>,
-    pub model: Option<&'a str>,
 }
 
 pub fn normalize_codex_observation_with_location(
@@ -98,12 +96,7 @@ fn normalize_codex_observation_inner(
     if let Some(thread_id) = native_thread_id.and_then(observation_id_from_native) {
         relations = relations.with_thread_id(thread_id);
     }
-    if let Some(turn_id) = codex_native_turn_id(payload).or_else(|| {
-        location
-            .as_ref()
-            .and_then(|location| location.turn_id)
-            .and_then(observation_id_from_native)
-    }) {
+    if let Some(turn_id) = codex_native_turn_id(payload) {
         relations = relations.with_turn_id(turn_id);
     }
     if matches!(
@@ -117,7 +110,6 @@ fn normalize_codex_observation_inner(
     }
 
     let mut facts = Vec::new();
-    let context_model = location.as_ref().and_then(|location| location.model);
     if let Some(location) = location {
         facts.push(CanonicalObservationFactV1::Session {
             project_path: location
@@ -126,7 +118,7 @@ fn normalize_codex_observation_inner(
             location_path: location
                 .location_path
                 .map(|path| path.to_string_lossy().into_owned()),
-            transcript_path: Some(location.transcript_path.to_string_lossy().into_owned()),
+            transcript_path: None,
             title: None,
             started_at: None,
             ended_at: None,
@@ -156,7 +148,7 @@ fn normalize_codex_observation_inner(
             native_kind: "turn_context".to_string(),
             state: CanonicalUnknownStateV1::Unsupported,
         }),
-        "event_msg" => append_codex_event_facts(payload, timestamp, context_model, &mut facts),
+        "event_msg" => append_codex_event_facts(payload, timestamp, &mut facts),
         "response_item" => {
             append_codex_response_item_facts(payload, timestamp, &stable_record_id, &mut facts);
         }
@@ -251,7 +243,6 @@ fn append_codex_session_meta_agent_relations(
 fn append_codex_event_facts(
     payload: &Value,
     timestamp: Option<i64>,
-    context_model: Option<&str>,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
     match payload.get("type").and_then(Value::as_str) {
@@ -289,12 +280,12 @@ fn append_codex_event_facts(
                 ),
             ] {
                 if let Some(usage) = usage {
-                    append_codex_usage_fact(payload, usage, context_model, semantics, field, facts);
+                    append_codex_usage_fact(payload, usage, semantics, field, facts);
                     emitted = true;
                 }
             }
             if !emitted {
-                append_uncorrelated_codex_usage_fact(payload, info, context_model, facts);
+                append_uncorrelated_codex_usage_fact(payload, info, facts);
             }
         }
         Some("thread_goal_updated") => {
@@ -322,7 +313,6 @@ fn append_codex_event_facts(
 fn append_uncorrelated_codex_usage_fact(
     payload: &Value,
     usage: &Value,
-    context_model: Option<&str>,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
     let input_tokens = canonical_u64(usage.get("input_tokens"));
@@ -348,10 +338,7 @@ fn append_uncorrelated_codex_usage_fact(
         ProviderUsageContractDimensionV1::CounterSemantics,
         ProviderUsageContractDimensionV1::Correlation,
     ]);
-    if context_model
-        .or_else(|| payload.get("model").and_then(Value::as_str))
-        .is_none()
-    {
+    if payload.get("model").and_then(Value::as_str).is_none() {
         missing_dimensions.insert(ProviderUsageContractDimensionV1::Model);
     }
     facts.push(CanonicalObservationFactV1::UncorrelatedUsage {
@@ -370,7 +357,6 @@ fn append_uncorrelated_codex_usage_fact(
 fn append_codex_usage_fact(
     payload: &Value,
     usage: &Value,
-    context_model: Option<&str>,
     counter_semantics: ProviderUsageCounterSemanticsV1,
     native_field: &str,
     facts: &mut Vec<CanonicalObservationFactV1>,
@@ -418,16 +404,14 @@ fn append_codex_usage_fact(
         }
     };
     facts.push(CanonicalObservationFactV1::ProviderUsage {
-        model: context_model
-            .or_else(|| payload.get("model").and_then(Value::as_str))
-            .map_or(
-                ProviderUsageModelV1::Unknown {
-                    reason: CanonicalUnknownStateV1::Absent,
-                },
-                |model| ProviderUsageModelV1::Known {
-                    model: model.to_owned(),
-                },
-            ),
+        model: payload.get("model").and_then(Value::as_str).map_or(
+            ProviderUsageModelV1::Unknown {
+                reason: CanonicalUnknownStateV1::Absent,
+            },
+            |model| ProviderUsageModelV1::Known {
+                model: model.to_owned(),
+            },
+        ),
         native_scope: match counter_semantics {
             ProviderUsageCounterSemanticsV1::Delta => ProviderUsageScopeV1::Request,
             ProviderUsageCounterSemanticsV1::Cumulative => ProviderUsageScopeV1::Session,
@@ -793,11 +777,46 @@ mod provider_usage_tests {
     use super::{CodexObservationLocation, normalize_codex_observation_with_location};
 
     #[test]
-    fn cumulative_token_count_preserves_native_semantics_and_turn_context() {
+    fn canonical_payload_uses_only_bound_source_location() {
         let native = json!({
             "type": "event_msg",
             "payload": {
                 "type": "token_count",
+                "info": {
+                    "total_token_usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 20,
+                        "total_tokens": 120
+                    }
+                }
+            }
+        });
+        let canonical = normalize_codex_observation_with_location(
+            &native,
+            "session.fixture",
+            Some("thread.fixture"),
+            ObservationId::new("record.fixture").unwrap(),
+            ObservationSourceRangeV1::new(10, 20).unwrap(),
+            CodexObservationLocation {
+                project_path: Some(Path::new("/redacted/project")),
+                location_path: Some(Path::new("/redacted/project")),
+            },
+        )
+        .unwrap();
+
+        let encoded = serde_json::to_value(canonical).unwrap();
+        assert!(encoded["facts"][0].get("transcript_path").is_none());
+        assert!(encoded["relations"].get("turn_id").is_none());
+        assert_eq!(encoded["facts"][1]["model"]["state"], "unknown");
+    }
+
+    #[test]
+    fn cumulative_token_count_preserves_native_semantics_and_model() {
+        let native = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "model": "gpt-5.6-codex",
                 "info": {
                     "last_token_usage": {
                         "input_tokens": 10,
@@ -825,17 +844,11 @@ mod provider_usage_tests {
             CodexObservationLocation {
                 project_path: None,
                 location_path: None,
-                transcript_path: Path::new("/tmp/rollout.jsonl"),
-                turn_id: Some("turn.fixture"),
-                model: Some("gpt-5.6-codex"),
             },
         )
         .unwrap();
 
-        assert_eq!(
-            envelope.relations().turn_id().map(|id| id.as_str()),
-            Some("turn.fixture")
-        );
+        assert!(envelope.relations().turn_id().is_none());
         assert!(envelope.facts().iter().any(|fact| matches!(
             fact,
             CanonicalObservationFactV1::ProviderUsage {
@@ -893,9 +906,6 @@ mod provider_usage_tests {
             CodexObservationLocation {
                 project_path: None,
                 location_path: None,
-                transcript_path: Path::new("/tmp/rollout.jsonl"),
-                turn_id: Some("turn.fixture"),
-                model: Some("gpt-5.6-codex"),
             },
         )
         .unwrap();
@@ -922,6 +932,7 @@ mod provider_usage_tests {
                     ProviderUsageContractDimensionV1::Scope,
                     ProviderUsageContractDimensionV1::CounterSemantics,
                     ProviderUsageContractDimensionV1::Correlation,
+                    ProviderUsageContractDimensionV1::Model,
                 ])
         )));
     }
