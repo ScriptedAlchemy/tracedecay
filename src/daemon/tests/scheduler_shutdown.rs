@@ -162,6 +162,58 @@ async fn retirement_reaper_shutdown_observes_a_reservation_release_after_snapsho
 }
 
 #[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automation_retirement_reserves_only_after_scheduler_lock_admission() {
+    let engine = DaemonEngine::default();
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profiles/retirement-lock-admission"),
+            global_db_path: PathBuf::from("/profiles/retirement-lock-admission/global.db"),
+            project_id: Some("retirement-lock-admission".to_owned()),
+            store_root: PathBuf::from("/stores/retirement-lock-admission"),
+            graph_db_path: PathBuf::from("/stores/retirement-lock-admission/graph.db"),
+        },
+        project_root: PathBuf::from("/projects/retirement-lock-admission"),
+        scope_prefix: None,
+    };
+    let task = tokio::spawn(std::future::pending::<()>());
+    engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await
+        .insert(key.clone(), test_automation_scheduler_handle(task));
+    let schedulers = engine.store_administration.automation_schedulers().clone();
+    let lock = schedulers.lock().await;
+    let mut retirement = Box::pin(engine.retire_automation_scheduler_locked(&key));
+
+    assert!(
+        matches!(
+            futures_util::poll!(&mut retirement),
+            std::task::Poll::Pending
+        ),
+        "retirement must wait behind the scheduler mutex"
+    );
+    assert_eq!(
+        engine.store_administration.retirement_reaper_counts(),
+        (0, 0),
+        "mutex contention must not publish a pending retirement handoff"
+    );
+
+    drop(lock);
+    let retirement = retirement.await.expect("retirement owner");
+    tokio::time::timeout(std::time::Duration::from_secs(1), retirement.wait())
+        .await
+        .expect("retirement reaper completion");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        engine.store_administration.shutdown_retirement_reapers(),
+    )
+    .await
+    .expect("terminal reaper shutdown");
+}
+
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
     use crate::dashboard::AutomationSchedulerReconcileOutcome;

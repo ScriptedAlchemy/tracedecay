@@ -837,8 +837,7 @@ impl DaemonEngine {
         &self,
         key: &ProjectServerKey,
     ) -> Option<AutomationSchedulerRetirement> {
-        let reservation = self.store_administration.reserve_retirement_reaper(key)?;
-        let (task, completion, termination) = {
+        let (task, completion, termination, reservation) = {
             let mut schedulers = self
                 .store_administration
                 .automation_schedulers()
@@ -852,7 +851,12 @@ impl DaemonEngine {
                     .find(|candidate| same_scheduler_owner(candidate, key))
                     .cloned()?
             };
-            let handle = schedulers.get_mut(&owner)?;
+            let Some(handle) = schedulers.get_mut(&owner) else {
+                return None;
+            };
+            let reservation = self
+                .store_administration
+                .reserve_retirement_reaper(&owner)?;
             handle.stop_requested.request();
             handle.lifecycle = AutomationSchedulerLifecycle::Retiring;
             handle
@@ -863,6 +867,7 @@ impl DaemonEngine {
                 task,
                 Arc::clone(&handle.completion),
                 Arc::clone(&handle.termination),
+                reservation,
             )
         };
         #[cfg(test)]
