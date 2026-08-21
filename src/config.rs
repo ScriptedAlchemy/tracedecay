@@ -1108,6 +1108,28 @@ async fn open_runtime_configuration_from_store(
         ))
     })?;
     let mut current = store.current().await.map_err(map_configuration_error)?;
+    let native_graph_activation_key = SettingKey::new(INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY)
+        .map_err(|error| {
+            config_error(format!(
+                "invalid native graph activation setting key: {error}"
+            ))
+        })?;
+    if !current
+        .snapshot
+        .effective_values
+        .contains_key(&native_graph_activation_key)
+    {
+        current = match store
+            .converge_native_graph_activation_default(&current.revision_id, current_utc_micros())
+            .await
+        {
+            Ok(state) => state,
+            Err(tracedecay_usecases::configuration::ConfigurationError::RevisionConflict) => {
+                store.current().await.map_err(map_configuration_error)?
+            }
+            Err(error) => return Err(map_configuration_error(error)),
+        };
+    }
     let source_bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
         .map_err(|error| config_error(format!("invalid source bindings setting key: {error}")))?;
     enum SourceBindingCheck {

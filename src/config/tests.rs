@@ -1077,8 +1077,9 @@ mod runtime_configuration_cutover {
         ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationMutationEffectV1,
         ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
         ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1,
-        DIAGNOSTICS_PREWARM_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
-        ScopeSourceBinding, SettingKey, SourceBindingId,
+        DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+        SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, ScopeSourceBinding, SettingKey,
+        SourceBindingId,
     };
     use tracedecay_domain::{AccessPolicyDigest, ActorId, ProjectId, UtcMicros};
 
@@ -1371,6 +1372,116 @@ mod runtime_configuration_cutover {
             runtime_configuration_for_layout(root.path(), &layout).is_ok(),
             "after ensure, fail-closed lookup must see the published pin"
         );
+    }
+
+    #[tokio::test]
+    async fn existing_snapshot_converges_new_native_graph_default_before_materialization() {
+        use tracedecay_runtime_core::db::engine::params;
+
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let root = TempDir::new().expect("temporary project root");
+        let project_id = project_id("proj_configuration_native_graph_default_upgrade");
+        crate::storage::pin_fixture_repository_identity(root.path(), project_id.as_str())
+            .expect("write enrollment marker");
+        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
+            .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().unwrap(),
+            root.path(),
+            project_id,
+        )
+        .await
+        .expect("open retained project runtime");
+        let initial = runtime
+            .ensure_runtime_configuration_for_test(root.path(), &layout)
+            .await
+            .expect("seed canonical configuration");
+        let database = runtime
+            .registered_database_arc(
+                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
+            )
+            .expect("bind registered project database");
+        let setting = SettingKey::new(INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY)
+            .expect("native graph setting key");
+        let mut values = initial.snapshot.effective_values.clone();
+        let mut provenance = initial.snapshot.provenance.clone();
+        values.remove(&setting);
+        provenance.remove(&setting);
+        let pre_key_snapshot =
+            tracedecay_domain::configuration::ConfigurationSnapshotV1::new(values, provenance)
+                .expect("pre-key snapshot remains internally canonical");
+
+        let transaction = database
+            .begin_write_transaction()
+            .await
+            .expect("open fixture transaction");
+        transaction
+            .execute("DROP TRIGGER configuration_entries_immutable_delete", ())
+            .await
+            .expect("open immutable entry fixture seam");
+        transaction
+            .execute("DROP TRIGGER configuration_revisions_immutable_update", ())
+            .await
+            .expect("open immutable revision fixture seam");
+        transaction
+            .execute(
+                "DELETE FROM configuration_entries WHERE revision_id = ?1 AND key = ?2",
+                params![initial.revision_id.as_str(), setting.as_str()],
+            )
+            .await
+            .expect("remove post-snapshot setting from fixture");
+        transaction
+            .execute(
+                "UPDATE configuration_revisions
+                 SET snapshot_id = ?2,
+                     effective_behavior_digest = ?3,
+                     resolution_provenance_digest = ?4
+                 WHERE revision_id = ?1",
+                params![
+                    initial.revision_id.as_str(),
+                    pre_key_snapshot.snapshot_id.as_str(),
+                    pre_key_snapshot.effective_behavior_digest.as_str(),
+                    pre_key_snapshot.resolution_provenance_digest.as_str(),
+                ],
+            )
+            .await
+            .expect("bind fixture revision to pre-key snapshot identity");
+        transaction
+            .execute(
+                "CREATE TRIGGER configuration_entries_immutable_delete
+                 BEFORE DELETE ON configuration_entries
+                 BEGIN SELECT RAISE(ABORT, 'configuration entries are immutable'); END",
+                (),
+            )
+            .await
+            .expect("restore immutable entry trigger");
+        transaction
+            .execute(
+                "CREATE TRIGGER configuration_revisions_immutable_update
+                 BEFORE UPDATE ON configuration_revisions
+                 BEGIN SELECT RAISE(ABORT, 'configuration revisions are immutable'); END",
+                (),
+            )
+            .await
+            .expect("restore immutable revision trigger");
+        transaction.commit().await.expect("commit pre-key fixture");
+
+        let converged = runtime
+            .ensure_runtime_configuration_for_test(root.path(), &layout)
+            .await
+            .expect("registered default must converge before runtime materialization");
+        assert_ne!(converged.revision_id, initial.revision_id);
+        assert!(converged.config.native_graph_activation);
+        assert_eq!(
+            converged.snapshot.effective_values.get(&setting),
+            Some(&ConfigurationValueV1::Boolean(true))
+        );
+        let reopened = runtime
+            .ensure_runtime_configuration_for_test(root.path(), &layout)
+            .await
+            .expect("converged revision reopens without another migration");
+        assert_eq!(reopened.revision_id, converged.revision_id);
     }
 
     #[tokio::test]

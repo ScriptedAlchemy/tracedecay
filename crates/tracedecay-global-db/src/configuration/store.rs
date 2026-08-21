@@ -20,10 +20,11 @@ use tracedecay_domain::configuration::{
     ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationAuditEventKindV1,
     ConfigurationCandidateV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
     ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
-    CredentialKindV1, CredentialReferenceId, CredentialReferenceMetadataV1, ProtectedChange,
-    ProtectedChangePlan, ProtectedChangeSnapshotError, RedactedConfigurationChangeV1,
-    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1,
-    ScopeSourceBinding, SettingKey, SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    CredentialKindV1, CredentialReferenceId, CredentialReferenceMetadataV1,
+    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, ProtectedChange, ProtectedChangePlan,
+    ProtectedChangeSnapshotError, RedactedConfigurationChangeV1, RollbackModeV1, RuleEffect,
+    SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1, ScopeSourceBinding, SettingKey,
+    SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
@@ -509,6 +510,122 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 snapshot,
                 actor_id,
                 operation_kind: "daemon_source_binding_rebind".to_owned(),
+                created_at: occurred_at,
+            };
+            insert_revision(&transaction, &revision)
+                .await
+                .map_err(map_store_error)?;
+            advance_component_desired_state(&transaction, &next_revision_id, occurred_at)
+                .await
+                .map_err(map_store_error)?;
+            Ok(ConfigurationCurrentStateV1 {
+                revision_id: revision.revision_id,
+                snapshot: revision.snapshot,
+            })
+        }
+        .await;
+        match outcome {
+            Ok(state) => {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| ConfigurationError::Unavailable)?;
+                Ok(state)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Publish the registry-added native-graph activation default into a
+    /// snapshot created before that setting existed.
+    ///
+    /// This is an exact schema convergence, not a runtime fallback: only the
+    /// one known missing key is accepted, the registered typed default and
+    /// default provenance are written into an immutable child revision, and
+    /// the expected parent is checked under the store's write transaction.
+    pub async fn converge_native_graph_activation_default(
+        &self,
+        expected_revision_id: &ConfigurationRevisionId,
+        occurred_at: UtcMicros,
+    ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
+        expected_revision_id
+            .validate()
+            .map_err(ConfigurationError::validation)?;
+        let transaction = self
+            .db
+            .begin_write_transaction()
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?;
+        let outcome = async {
+            let current = current_state_from_transaction(&transaction).await?;
+            if &current.revision_id != expected_revision_id {
+                return Err(ConfigurationError::RevisionConflict);
+            }
+            let registry = ConfigurationRegistry::core().map_err(ConfigurationError::validation)?;
+            let key = SettingKey::new(INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY)
+                .map_err(ConfigurationError::validation)?;
+            if current.snapshot.effective_values.contains_key(&key) {
+                validate_snapshot_registry_completeness(&current.snapshot).map_err(map_store_error)?;
+                return Ok(current);
+            }
+            let expected_keys = registry
+                .definitions()
+                .map(|definition| definition.key.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let actual_keys = current
+                .snapshot
+                .effective_values
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            let missing_keys = expected_keys
+                .difference(&actual_keys)
+                .cloned()
+                .collect::<Vec<_>>();
+            if missing_keys.as_slice() != [key.clone()] || !actual_keys.is_subset(&expected_keys) {
+                return Err(ConfigurationError::ResetRequired {
+                    reason: "configuration snapshot registry drift is not the native-graph default upgrade"
+                        .to_owned(),
+                });
+            }
+            let definition = registry
+                .definition(&key)
+                .map_err(ConfigurationError::validation)?;
+            let operation_digest = canonical_sha256(&(
+                "tracedecay.configuration.native-graph-default-convergence.v1",
+                expected_revision_id,
+                &definition.default_value,
+            ))
+            .map_err(ConfigurationError::validation)?;
+            let next_revision_id: ConfigurationRevisionId = derived_identifier(
+                "configuration.revision.v1",
+                &canonical_sha256(&(
+                    "tracedecay.configuration.result-revision.v1",
+                    expected_revision_id,
+                    &operation_digest,
+                ))
+                .map_err(ConfigurationError::validation)?,
+                "configuration native graph default revision id",
+            )?;
+            let mut effective_values = current.snapshot.effective_values.clone();
+            let mut provenance = current.snapshot.provenance.clone();
+            effective_values.insert(key.clone(), definition.default_value.clone());
+            provenance.insert(
+                key,
+                vec![registry_default_candidate().map_err(ConfigurationError::validation)?],
+            );
+            let snapshot = ConfigurationSnapshotV1::new(effective_values, provenance)
+                .map_err(ConfigurationError::validation)?;
+            validate_snapshot_registry_completeness(&snapshot).map_err(map_store_error)?;
+            let revision = ConfigurationRevisionRecordV1 {
+                revision_id: next_revision_id.clone(),
+                parent_revision_id: Some(expected_revision_id.clone()),
+                snapshot,
+                actor_id: ActorId::new(
+                    "actor.tracedecay-daemon.native-graph-default-convergence".to_owned(),
+                )
+                .map_err(ConfigurationError::validation)?,
+                operation_kind: "native_graph_activation_default_convergence".to_owned(),
                 created_at: occurred_at,
             };
             insert_revision(&transaction, &revision)
