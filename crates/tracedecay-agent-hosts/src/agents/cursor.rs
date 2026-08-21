@@ -474,6 +474,56 @@ fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
 }
 
+/// Sweep retired artifacts only after the current plugin manifest proves the
+/// directory is TraceDecay-owned. Receiptless upgrades call this after their
+/// component-set receipt commits, so a failed cleanup is safely retryable by
+/// the next install, update, or repair.
+pub fn sweep_retired_cursor_plugin_artifacts(home: &Path) -> Result<()> {
+    let install_dir = cursor_plugin_install_dir(home);
+    if !cursor_plugin_dir_is_tracedecay(&install_dir) {
+        return Ok(());
+    }
+
+    sweep_retired_bundle_skill_dirs(&install_dir)?;
+    for relative in [
+        "rules/tracedecay-memory.mdc",
+        "rules/tracedecay-memory-digest.mdc",
+    ] {
+        let path = install_dir.join(relative);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "failed to inspect retired Cursor plugin artifact {}: {error}",
+                        path.display()
+                    ),
+                });
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to read retired Cursor plugin artifact {}: {error}",
+                path.display()
+            ),
+        })?;
+        if contents.contains(RETIRED_CURSOR_MEMORY_RULE_MARKER) {
+            std::fs::remove_file(&path).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to remove retired Cursor plugin artifact {}: {error}",
+                    path.display()
+                ),
+            })?;
+        }
+    }
+    remove_retired_global_cursor_memory_rule(home)?;
+    Ok(())
+}
+
 /// Remove every `skills/<dir>` under the tracedecay plugin dir that the current
 /// bundle does not ship. The keep-set is derived from the live embedded bundle,
 /// so any retired skill (dispatcher, workflow, or merged-away memory skill) is
