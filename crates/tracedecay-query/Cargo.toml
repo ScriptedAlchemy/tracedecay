@@ -13,6 +13,7 @@ fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"]
 hex = "0.4"
 hmac = "0.13.0"
 roaring = { version = "=0.11.4", default-features = false }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -31,6 +32,7 @@ test-helpers = ["tracedecay-temporal-query/test-helpers"]
 
 [dev-dependencies]
 static_assertions = "1.1.0"
+tempfile = "3"
 # Test-only: the relocated search-quality suites build lexical/exact fixtures
 # through the code-index intake and the extracted language registry, which
 # needs the bundled lite grammar tier (Rust).

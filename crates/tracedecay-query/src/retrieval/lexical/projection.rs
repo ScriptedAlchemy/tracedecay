@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use roaring::RoaringBitmap;
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
     CodeSearchChunkId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
@@ -23,7 +24,18 @@ use crate::retrieval::ports::{
     RetrievalPortError, contract_error,
 };
 
+mod artifact;
 mod postings;
+
+pub use artifact::{
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
+    CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+    CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
+    CodeLexicalArtifactSectionDigestV1, CodeLexicalImportMembershipWitnessV1,
+    VerifiedCodeLexicalArtifactV1,
+};
 
 use postings::{ByteNgramBudget, ByteNgramPostings, FuzzyTermIndex};
 
@@ -65,7 +77,8 @@ fn check_projection_build_deadline(deadline: Instant) -> Result<(), RetrievalPor
 }
 
 /// Generation and source metadata bound to one immutable lexical projection.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CodeLexicalProjectionMetadataV1 {
     pub generation: CodeGenerationId,
     pub repository_id: Option<RepositoryId>,
