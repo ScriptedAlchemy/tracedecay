@@ -42,6 +42,40 @@ struct ActiveSessionImport {
     journal_key: String,
 }
 
+/// Owns the handles while shutdown awaits them. If the daemon-wide deadline
+/// cancels that wait, unfinished handles return to the service so a retry can
+/// join them instead of detaching lease-owning tasks.
+struct SessionSyncTaskShutdownV1 {
+    registry: Arc<Mutex<Vec<SessionSyncTaskV1>>>,
+    tasks: Vec<SessionSyncTaskV1>,
+}
+
+impl SessionSyncTaskShutdownV1 {
+    fn take(registry: &Arc<Mutex<Vec<SessionSyncTaskV1>>>) -> Self {
+        let tasks = {
+            let mut tasks = registry.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::take(&mut *tasks)
+        };
+        Self {
+            registry: Arc::clone(registry),
+            tasks,
+        }
+    }
+}
+
+impl Drop for SessionSyncTaskShutdownV1 {
+    fn drop(&mut self) {
+        self.tasks.retain(|task| !task.task.is_finished());
+        if self.tasks.is_empty() {
+            return;
+        }
+        self.registry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(std::mem::take(&mut self.tasks));
+    }
+}
+
 pub(crate) struct DaemonSessionSyncConfig {
     pub brain_id: BrainId,
     pub profile_id: UserProfileId,
@@ -774,36 +808,31 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
     fn shutdown(&self) -> SessionSyncShutdownFuture<'_> {
         Box::pin(async move {
             self.shutdown.cancel();
-            let mut tasks = {
-                let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
-                std::mem::take(&mut *tasks)
-            };
-            let joined = tokio::time::timeout(SESSION_SYNC_SHUTDOWN_DEADLINE, async {
-                let grace_deadline =
-                    tokio::time::Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
-                tokio::select! {
-                    results = futures_util::future::join_all(
-                        tasks.iter_mut().map(|task| &mut task.task)
-                    ) => {
-                        for result in results {
-                            work::log_session_sync_join(result);
-                        }
-                        return;
+            let mut tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
+            let grace_deadline = tokio::time::Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
+            tokio::select! {
+                results = futures_util::future::join_all(
+                    tasks.tasks.iter_mut().map(|task| &mut task.task)
+                ) => {
+                    for result in results {
+                        work::log_session_sync_join(result);
                     }
-                    () = tokio::time::sleep_until(grace_deadline) => {}
+                    self.contexts
+                        .write()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clear();
+                    return;
                 }
-                for task in &tasks {
-                    task.task.abort();
-                }
-                for result in
-                    futures_util::future::join_all(tasks.into_iter().map(|task| task.task)).await
-                {
-                    work::log_session_sync_join(result);
-                }
-            })
-            .await;
-            if joined.is_err() {
-                tracing::warn!("session sync shutdown exceeded its total join deadline");
+                () = tokio::time::sleep_until(grace_deadline) => {}
+            }
+            for task in &tasks.tasks {
+                task.task.abort();
+            }
+            for result in
+                futures_util::future::join_all(tasks.tasks.iter_mut().map(|task| &mut task.task))
+                    .await
+            {
+                work::log_session_sync_join(result);
             }
             self.contexts
                 .write()

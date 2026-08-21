@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
@@ -97,6 +98,137 @@ async fn shutdown_releases_registered_project_database_contexts() {
             .unwrap_or_else(PoisonError::into_inner)
             .is_empty()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_keeps_blocked_lease_task_owned_until_it_exits() {
+    struct RetainedSessionLease {
+        _databases: [crate::global_db::RegisteredGlobalDbLeaseV1; 2],
+        released: Arc<AtomicBool>,
+    }
+
+    impl Drop for RetainedSessionLease {
+        fn drop(&mut self) {
+            self.released.store(true, Ordering::Release);
+        }
+    }
+
+    fn release_task(release: &Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>) {
+        let (released, changed) = &**release;
+        *released.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        changed.notify_all();
+    }
+
+    let service = DaemonSessionSyncService::default();
+    let root = tempfile::tempdir().unwrap();
+    let project_id = ProjectId::new("project.session-sync.shutdown-task-owner").unwrap();
+    let (runtime, project_sessions, profile_id) =
+        register(&service, &root, project_id.clone()).await;
+    let profile_sessions = runtime
+        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
+        .unwrap();
+    let session_registry = runtime.session_registry_for_test();
+    let cancellation = CancellationSignal::active("session-sync.shutdown-task-owner").unwrap();
+    let released = Arc::new(AtomicBool::new(false));
+    let task_released = Arc::clone(&released);
+    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let task_release = Arc::clone(&release);
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::task::spawn_blocking(move || {
+        let _lease = RetainedSessionLease {
+            _databases: [project_sessions, profile_sessions],
+            released: task_released,
+        };
+        let _ = entered_tx.send(());
+        let (released, changed) = &*task_release;
+        let mut released = released.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*released {
+            released = changed
+                .wait(released)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    });
+    service
+        .tasks
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(SessionSyncTaskV1 {
+            scope: SessionSyncScopeV1::new(project_id, profile_id),
+            key: "session-sync.shutdown-task-owner".to_owned(),
+            cancellation,
+            task,
+        });
+    entered_rx.await.unwrap();
+
+    let shutdown_service = service.clone();
+    let mut shutdown = tokio::spawn(async move {
+        SessionSyncServicePort::shutdown(&shutdown_service).await;
+    });
+    let returned_while_task_owned =
+        tokio::time::timeout(Duration::from_millis(2_250), &mut shutdown)
+            .await
+            .is_ok();
+    if returned_while_task_owned {
+        release_task(&release);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !released.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        panic!("session sync shutdown detached a task that still owned a registered session lease");
+    }
+
+    assert!(!released.load(Ordering::Acquire));
+    shutdown.abort();
+    assert!(shutdown.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        service
+            .tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len(),
+        1,
+        "cancelling the shutdown waiter must return unfinished task ownership to the service"
+    );
+    assert_eq!(
+        service
+            .contexts
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len(),
+        1,
+        "session contexts must remain mounted until every lease-owning task joins"
+    );
+
+    let retry_service = service.clone();
+    let retry = tokio::spawn(async move {
+        SessionSyncServicePort::shutdown(&retry_service).await;
+    });
+    tokio::task::yield_now().await;
+    assert!(!retry.is_finished());
+    release_task(&release);
+    retry.await.unwrap();
+    assert!(released.load(Ordering::Acquire));
+    assert!(
+        service
+            .contexts
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
+    );
+    drop(service);
+    drop(runtime);
+    session_registry.cancel_memory_graph_reconciliation_tasks();
+    session_registry
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .unwrap();
+    session_registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .expect("joined session sync tasks release graph leases before terminal close");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -307,6 +307,11 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[cfg(test)]
+    pub(crate) fn session_registry_for_test(&self) -> Arc<DaemonSessionRuntimeRegistryV1> {
+        Arc::clone(&self.session_registry)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn read_snapshot(
         &self,
         scope: HostAdmissionScope,
