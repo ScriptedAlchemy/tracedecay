@@ -352,6 +352,9 @@ impl DaemonInvocationService {
                 "daemon LSP lease task failed while shutdown joined it"
             );
         }
+        if !work_attempts_clean {
+            tracing::error!("active Work attempt process failed while shutdown joined it");
+        }
         project_runtimes_clean && lease_shutdown_clean && work_attempts_clean
     }
 
