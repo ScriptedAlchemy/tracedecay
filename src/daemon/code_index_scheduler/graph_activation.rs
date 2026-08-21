@@ -130,7 +130,9 @@ impl CodeGraphActivationAuthorityV1 {
             })?
             .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
         let policy = match self {
-            Self::Persistent { policy, .. } | Self::Memory { policy } => *policy,
+            Self::Persistent { policy, .. } => *policy,
+            #[cfg(test)]
+            Self::Memory { policy } => *policy,
         };
         if policy == CodeGraphActivationPolicyV1::RefusedByConfiguration {
             let reason = "code graph activation was refused by project configuration";
