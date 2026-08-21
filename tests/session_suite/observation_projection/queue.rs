@@ -1,6 +1,72 @@
 use super::*;
 
 #[tokio::test]
+async fn claude_updates_with_one_native_message_id_drain_without_collisions() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let first = canonical_claude_update(
+        "row.first",
+        0,
+        10,
+        "shared update first",
+        "/workspace/first",
+    );
+    let second = canonical_claude_update(
+        "row.second",
+        10,
+        20,
+        "shared update second",
+        "/workspace/second",
+    );
+    let first_outcome = store
+        .persist_observation(canonical_write(first))
+        .await
+        .unwrap();
+    let first_cursor = first_outcome.receipt().committed_cursor().clone();
+    store
+        .persist_observation(canonical_write_with_cursor(second, Some(first_cursor)))
+        .await
+        .unwrap();
+
+    drain_projection_queue(&store).await;
+
+    let mut hits = search_session_messages(&tmp, "shared update", 10)
+        .await
+        .into_iter()
+        .map(|hit| hit.message.message_id)
+        .collect::<Vec<_>>();
+    hits.sort();
+    assert_eq!(hits, ["row.first", "row.second"]);
+    assert_eq!(table_count(&tmp, "sessions").await, 1);
+    assert_eq!(table_count(&tmp, "session_messages").await, 2);
+    assert_eq!(
+        table_count(&tmp, "observation_projection_dispositions").await,
+        0
+    );
+    drop(runtime);
+
+    let connection = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let session = connection
+        .query_row(
+            "SELECT project_key, project_path, metadata_json
+             FROM sessions WHERE provider = 'claude'",
+            (),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(session, ("user".to_owned(), "user".to_owned(), None));
+}
+
+#[tokio::test]
 async fn v3_projection_persists_stable_multi_output_ordinals() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
@@ -100,7 +166,7 @@ async fn v3_projection_persists_stable_multi_output_ordinals() {
         .unwrap();
     let actual = statement
         .query_map(
-            rusqlite::params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
+            rusqlite::params![SESSION_MESSAGE_PROJECTOR_VERSION],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )
         .unwrap()

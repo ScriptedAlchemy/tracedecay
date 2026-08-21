@@ -19,7 +19,7 @@ use tracedecay_store::{
     AnchoredObservationWrite, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
     ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V4, build_observation_resolution_authorization_v1,
+    SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
 use tracedecay_usecases::host_admission::HostAdmissionScope;
@@ -158,6 +158,69 @@ fn canonical_observation_at(
             &format!("receipt.projection-{provider}.{ordinal}"),
             &payload,
         ),
+        RetentionClass::new("retention.projection-test").unwrap(),
+        payload,
+    )
+    .unwrap()
+}
+
+fn canonical_claude_update(
+    row_id: &str,
+    start: u64,
+    end: u64,
+    text: &str,
+    cwd: &str,
+) -> DurableObservationV1 {
+    let provider = ProviderId::new("claude").unwrap();
+    let session_id = SessionId::new("session.projection-claude-updates").unwrap();
+    let source =
+        ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
+    let generation = ObservationSourceGenerationV1::new(1).unwrap();
+    let range = ObservationSourceRangeV1::new(start, end).unwrap();
+    let record_id = ObservationId::new(row_id).unwrap();
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        provider,
+        "assistant",
+        record_id.clone(),
+        CanonicalObservationRelationsV1::new(session_id)
+            .with_message_id(ObservationId::new("msg.shared").unwrap()),
+        vec![
+            CanonicalObservationFactV1::Session {
+                project_path: Some(cwd.to_owned()),
+                location_path: Some(cwd.to_owned()),
+                transcript_path: None,
+                title: None,
+                started_at: None,
+                ended_at: None,
+                source: Some("claude_transcript".to_owned()),
+                native_source: None,
+                profile: None,
+                location_provenance: Some("transcript_record".to_owned()),
+            },
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!(text),
+                model: Some("claude.fixture".to_owned()),
+                timestamp: Some(42),
+            },
+        ],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
+    )
+    .unwrap();
+    let payload = serde_json::to_value(envelope).unwrap();
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        source,
+        ObservationScopeV1::Profile,
+        generation,
+        range,
+        ObservationOrderingDomainV1::FileBytes,
+        record_id,
+    )
+    .unwrap();
+
+    DurableObservationV1::new(
+        identity,
+        receipt(&format!("receipt.{row_id}"), &payload),
         RetentionClass::new("retention.projection-test").unwrap(),
         payload,
     )

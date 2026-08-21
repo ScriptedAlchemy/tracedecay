@@ -39,7 +39,11 @@ pub fn derive_canonical_projection(
     }
 
     let mut projected = canonical_message_fields(&envelope)?;
-    let session_fields = canonical_session_fields(&envelope);
+    let session_fields = if envelope.provider().as_str() == "claude" {
+        None
+    } else {
+        canonical_session_fields(&envelope)
+    };
     let (primary_message_id, derived_messages) =
         canonical_compatibility_message_fields(&envelope, session_fields.as_ref(), &mut projected)?;
     let workflow_facts = canonical_workflow_facts(&envelope)?;
@@ -107,14 +111,18 @@ pub fn derive_canonical_projection(
         ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
     })?;
     let metadata_json = canonical_message_metadata(&envelope, session_metadata_json.as_deref())?;
-    let base_message_id = primary_message_id.unwrap_or_else(|| {
-        envelope
-            .relations()
-            .message_id()
-            .unwrap_or_else(|| envelope.stable_record_id())
-            .as_str()
-            .to_owned()
-    });
+    let base_message_id = if provider == "claude" {
+        envelope.stable_record_id().as_str().to_owned()
+    } else {
+        primary_message_id.unwrap_or_else(|| {
+            envelope
+                .relations()
+                .message_id()
+                .unwrap_or_else(|| envelope.stable_record_id())
+                .as_str()
+                .to_owned()
+        })
+    };
     let source_offset = i64::try_from(envelope.evidence().range().start()).ok();
     let mut messages =
         Vec::with_capacity(usize::from(projected.is_some()) + derived_messages.len());
@@ -964,6 +972,67 @@ mod tests {
             native_source: Some("cursor".to_owned()),
             profile: None,
             location_provenance: Some("hook_event".to_owned()),
+        }
+    }
+
+    fn claude_update_envelope(
+        row_id: &str,
+        text: &str,
+        cwd: &str,
+    ) -> CanonicalObservationEnvelopeV1 {
+        CanonicalObservationEnvelopeV1::new(
+            ProviderId::new("claude").unwrap(),
+            "assistant",
+            ObservationId::new(row_id).unwrap(),
+            CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap())
+                .with_message_id(ObservationId::new("msg.shared").unwrap()),
+            vec![
+                CanonicalObservationFactV1::Session {
+                    project_path: Some(cwd.to_owned()),
+                    location_path: Some(cwd.to_owned()),
+                    transcript_path: None,
+                    title: None,
+                    started_at: None,
+                    ended_at: None,
+                    source: Some("claude_transcript".to_owned()),
+                    native_source: None,
+                    profile: None,
+                    location_provenance: Some("transcript_record".to_owned()),
+                },
+                CanonicalObservationFactV1::Message {
+                    role: CanonicalMessageRoleV1::Assistant,
+                    content: json!(text),
+                    model: Some("claude.fixture".to_owned()),
+                    timestamp: Some(42),
+                },
+            ],
+            CanonicalObservationEvidenceV1::new(
+                ObservationOrderingDomainV1::FileBytes,
+                ObservationSourceRangeV1::new(1, 2).unwrap(),
+            ),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn claude_row_uuid_owns_projection_while_native_message_relation_survives() {
+        for (row_id, text, cwd) in [
+            ("row.first", "first", "/workspace/first"),
+            ("row.second", "second", "/workspace/second"),
+        ] {
+            let envelope = claude_update_envelope(row_id, text, cwd);
+            assert_eq!(
+                envelope.relations().message_id().map(ObservationId::as_str),
+                Some("msg.shared")
+            );
+            let observation = observation_without_native_record_id(&envelope);
+            let projection = derive_canonical_projection(&observation).unwrap();
+            let output = projection.messages().next().unwrap();
+
+            assert_eq!(output.message().message_id, row_id);
+            assert_eq!(output.session().project_key, "user");
+            assert_eq!(output.session().project_path, "user");
+            assert!(output.session().metadata_json.is_none());
         }
     }
 
