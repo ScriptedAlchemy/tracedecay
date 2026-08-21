@@ -36,8 +36,13 @@ const DEFAULT_MAX_INDEXING_WORKERS: usize = 8;
 
 /// Operator override for the indexing width, for hosts where memory rather
 /// than CPU is the binding constraint (each worker holds a tree-sitter
-/// parser). Values below 1 are ignored.
+/// parser). Values below 1 are ignored; the daemon's canonical CPU-thread
+/// ceiling remains an upper bound.
 const INDEXING_WORKERS_ENV: &str = "TRACEDECAY_INDEX_WORKERS";
+
+/// Daemon-owned upper bound for this dedicated pool. Zero means the process is
+/// a one-shot caller and has not installed a daemon CPU budget.
+static DAEMON_WORKER_CEILING: AtomicUsize = AtomicUsize::new(0);
 
 /// Cores held back from indexing so interactive requests never wait for a
 /// free CPU. Never reserves the whole machine.
@@ -61,17 +66,38 @@ fn detected_cores() -> usize {
     std::thread::available_parallelism().map_or(1, usize::from)
 }
 
+fn honor_daemon_worker_ceiling(requested: usize, daemon_ceiling: Option<usize>) -> usize {
+    daemon_ceiling.map_or(requested, |ceiling| requested.min(ceiling.max(1)))
+}
+
+/// Installs the daemon's canonical CPU-thread ceiling before the indexing pool
+/// is first used. Repeating the same value is idempotent; a conflicting second
+/// owner is refused.
+pub fn install_daemon_worker_ceiling(threads: usize) -> Result<(), usize> {
+    let threads = threads.max(1);
+    match DAEMON_WORKER_CEILING.compare_exchange(0, threads, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => Ok(()),
+        Err(existing) if existing == threads => Ok(()),
+        Err(existing) => Err(existing),
+    }
+}
+
 /// Host width: the operator override if set, otherwise the reservation
 /// target. Fixed for the life of the process; this is what the pool is
 /// built at.
 fn configured_indexing_workers() -> usize {
     static CONFIGURED: OnceLock<usize> = OnceLock::new();
     *CONFIGURED.get_or_init(|| {
-        std::env::var(INDEXING_WORKERS_ENV)
+        let requested = std::env::var(INDEXING_WORKERS_ENV)
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .filter(|workers| *workers >= 1)
-            .unwrap_or_else(|| indexing_worker_target(detected_cores()))
+            .unwrap_or_else(|| indexing_worker_target(detected_cores()));
+        let daemon_ceiling = match DAEMON_WORKER_CEILING.load(Ordering::Acquire) {
+            0 => None,
+            ceiling => Some(ceiling),
+        };
+        honor_daemon_worker_ceiling(requested, daemon_ceiling)
     })
 }
 
@@ -162,6 +188,14 @@ mod tests {
         assert_eq!(indexing_worker_target(16), 8);
         assert_eq!(indexing_worker_target(96), 8);
         assert_eq!(indexing_worker_target(128), 8);
+    }
+
+    #[test]
+    fn daemon_ceiling_clamps_operator_override_without_lowering_default() {
+        assert_eq!(honor_daemon_worker_ceiling(8, None), 8);
+        assert_eq!(honor_daemon_worker_ceiling(90, Some(16)), 16);
+        assert_eq!(honor_daemon_worker_ceiling(8, Some(16)), 8);
+        assert_eq!(honor_daemon_worker_ceiling(8, Some(4)), 4);
     }
 
     #[test]

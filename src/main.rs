@@ -205,6 +205,13 @@ fn install_daemon_cpu_pool(command: Option<&Commands>) -> tracedecay::errors::Re
             .map(|(source, value)| (*source, value.as_str())),
     )
     .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
+    tracedecay_code_index::parallelism::install_daemon_worker_ceiling(threads).map_err(
+        |existing| tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "daemon indexing worker ceiling was already installed at {existing} threads"
+            ),
+        },
+    )?;
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|index| format!("tracedecay-cpu-{index}"))
