@@ -536,6 +536,19 @@ fn validate_properties(
             MAX_GRAPH_PROPERTIES,
         ));
     }
+    let bytes = graph_properties_live_bytes(properties)?;
+    if bytes > MAX_GRAPH_PROPERTY_AGGREGATE_BYTES {
+        return Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Capacity,
+            MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn graph_properties_live_bytes(
+    properties: &BTreeMap<GraphPropertyName, GraphProperty>,
+) -> Result<usize, GraphDbError> {
     let mut bytes = 0usize;
     for (name, property) in properties {
         property.validate()?;
@@ -548,14 +561,8 @@ fn validate_properties(
                     MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
                 )
             })?;
-        if bytes > MAX_GRAPH_PROPERTY_AGGREGATE_BYTES {
-            return Err(GraphDbError::budget_exhausted_count(
-                GraphBudgetKind::Capacity,
-                MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
-            ));
-        }
     }
-    Ok(())
+    Ok(bytes)
 }
 
 fn property_payload_bytes(property: &GraphProperty) -> Option<usize> {
