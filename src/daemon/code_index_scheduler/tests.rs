@@ -63,6 +63,7 @@ use tracedecay_query::retrieval::rerank::{
     LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
 };
 
+mod noop_reconcile_tests;
 mod semantic_schedule_order_tests;
 
 struct GitFixture {

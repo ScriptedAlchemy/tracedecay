@@ -2301,7 +2301,27 @@ impl CodeIndexSchedulerRegistryV1 {
                     (result, latest, replay_binding)
                 })
                 .await;
-                if let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result {
+                let install_generation = match &result {
+                    Ok((Ok(CodeIndexReconcileOutcomeV1::Noop(_)), Some(latest), Some(_))) => {
+                        let serving = worker_serving_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        serving.as_ref().is_none_or(|serving| {
+                            serving.generation().manifest().generation_id
+                                != latest.generation().manifest().generation_id
+                        })
+                    }
+                    Ok((Ok(_), Some(_), Some(_))) => true,
+                    _ => false,
+                };
+                // An unchanged reconcile over the exact serving generation has
+                // no graph effect to install. Replaying activation here opened
+                // the persistent graph again, so daemon shutdown cancelled the
+                // duplicate projection and then conflicted while closing the
+                // still-running graph reconciliation owner.
+                if install_generation
+                    && let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result
+                {
                     let activation = worker_graph_activation
                         .activate(
                             &worker_project_id,
@@ -2331,7 +2351,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         result = Ok((Err(error), None, None));
                     }
                 }
-                if let Ok((Ok(_), Some(latest), _)) = &result {
+                if install_generation && let Ok((Ok(_), Some(latest), _)) = &result {
                     let scheduler = Arc::clone(&worker_scheduler);
                     let serving_generation = Arc::clone(&worker_serving_generation);
                     let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
