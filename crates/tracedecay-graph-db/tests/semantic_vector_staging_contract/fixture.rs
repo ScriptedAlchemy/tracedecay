@@ -733,7 +733,7 @@ impl ContractFixture {
                     &mut authority,
                     context,
                     &key,
-                    Some(manifest),
+                    Some(Arc::new(manifest)),
                 )
                 .unwrap();
         });

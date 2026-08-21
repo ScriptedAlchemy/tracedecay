@@ -402,7 +402,7 @@ impl GraphDbRegistry {
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
-        supplied_manifest: Option<GraphGenerationManifest>,
+        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         let operation = self.registered_operation(registration)?;
         self.publish_verified_inner(
@@ -448,7 +448,7 @@ impl GraphDbRegistry {
         authority: &mut dyn GraphPublicationStoreV1,
         context: &GraphPublicationOperationContextV1<'_>,
         publication_key: &GraphPublicationKeyV1,
-        supplied_manifest: Option<GraphGenerationManifest>,
+        supplied_manifest: Option<Arc<GraphGenerationManifest>>,
         reopen_metadata: bool,
     ) -> Result<VerifiedGraphCommit, GraphDbError> {
         operation.check(self, context)?;
@@ -476,12 +476,12 @@ impl GraphDbRegistry {
                 manifest
             }
             None => match metadata_manifest {
-                Some(manifest) => manifest,
-                None => GraphGenerationManifest::from_replay(
+                Some(manifest) => Arc::new(manifest),
+                None => Arc::new(GraphGenerationManifest::from_replay(
                     &replay.publication,
                     self.inner.manifest_provider.as_ref(),
                     &check,
-                )?,
+                )?),
             },
         };
         let apply_native = !metadata_only;

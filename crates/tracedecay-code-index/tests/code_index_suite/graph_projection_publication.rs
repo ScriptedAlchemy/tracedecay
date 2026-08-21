@@ -96,16 +96,18 @@ fn projection_manifest(
     generation: &CodeIndexPublishedGenerationV1,
     revision: &GraphProjectorRevision,
 ) -> GraphGenerationManifest {
-    build_published_code_graph_manifest_checked(
-        code_graph_projection_identity(
-            GraphNamespace::new("code-graph-import-publication").expect("graph namespace"),
+    Arc::unwrap_or_clone(
+        build_published_code_graph_manifest_checked(
+            code_graph_projection_identity(
+                GraphNamespace::new("code-graph-import-publication").expect("graph namespace"),
+            )
+            .expect("projection identity"),
+            generation,
+            revision,
+            &|| Ok(()),
         )
-        .expect("projection identity"),
-        generation,
-        revision,
-        &|| Ok(()),
+        .expect("published generation projects"),
     )
-    .expect("published generation projects")
 }
 
 fn current_projector_revision() -> GraphProjectorRevision {

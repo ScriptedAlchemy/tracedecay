@@ -442,7 +442,13 @@ impl IsolatedSemanticEvaluationGraphV1 {
             "source-publish",
             |registration, context| {
                 self.registry
-                    .publish_verified(registration, &mut *authority, context, &key, Some(manifest))
+                    .publish_verified(
+                        registration,
+                        &mut *authority,
+                        context,
+                        &key,
+                        Some(Arc::new(manifest)),
+                    )
                     .map(|published| published.snapshot)
             },
         )?;

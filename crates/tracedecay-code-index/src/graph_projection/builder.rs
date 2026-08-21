@@ -44,7 +44,7 @@ pub fn build_published_code_graph_manifest_checked(
     generation: &CodeIndexPublishedGenerationV1,
     projector_revision: &GraphProjectorRevision,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<GraphGenerationManifest, CodeGraphProjectionError> {
+) -> Result<Arc<GraphGenerationManifest>, CodeGraphProjectionError> {
     check()?;
     generation
         .validate()
@@ -62,9 +62,9 @@ pub fn build_published_code_graph_manifest_checked(
     // and the `check` above refuses a cancelled or expired request before a
     // memo hit can be served.
     if let Some(manifest) = generation.memoized_graph_manifest(&projection, projector_revision) {
-        return Ok((*manifest).clone());
+        return Ok(manifest);
     }
-    let manifest = build_code_graph_manifest_inputs_checked(
+    let manifest = Arc::new(build_code_graph_manifest_inputs_checked(
         projection.clone(),
         generation_id,
         generation.edges(),
@@ -76,11 +76,11 @@ pub fn build_published_code_graph_manifest_checked(
         }),
         projector_revision,
         check,
-    )?;
+    )?);
     generation.memoize_graph_manifest(
         projection,
         projector_revision.clone(),
-        Arc::new(manifest.clone()),
+        Arc::clone(&manifest),
     );
     Ok(manifest)
 }

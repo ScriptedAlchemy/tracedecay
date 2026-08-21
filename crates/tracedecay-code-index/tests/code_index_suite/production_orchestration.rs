@@ -766,6 +766,24 @@ fn repeated_graph_manifest_builds_reuse_the_memo_without_reexamining_the_generat
     .expect("memoized build");
     assert_eq!(first, second, "the memo returns the identical manifest");
     assert!(
+        !first.entities.is_empty(),
+        "fixture must publish graph entities"
+    );
+    assert!(
+        !first.relations.is_empty(),
+        "fixture must publish graph relations"
+    );
+    assert_eq!(
+        first.entities.as_ptr(),
+        second.entities.as_ptr(),
+        "a memo hit must share the immutable entity buffer instead of deep-cloning it"
+    );
+    assert_eq!(
+        first.relations.as_ptr(),
+        second.relations.as_ptr(),
+        "a memo hit must share the immutable relation buffer instead of deep-cloning it"
+    );
+    assert!(
         first_checks.get() > 3,
         "the interrupted build must not have been memoized (first build saw {} checks)",
         first_checks.get()

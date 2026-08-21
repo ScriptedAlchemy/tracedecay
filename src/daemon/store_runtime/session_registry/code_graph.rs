@@ -782,7 +782,7 @@ impl RetainedCodeGraphRuntimeV1 {
         );
         let publish = |storage: &mut dyn GraphPublicationStoreV1,
                        key: &GraphPublicationKeyV1,
-                       manifest: Option<GraphGenerationManifest>|
+                       manifest: Option<Arc<GraphGenerationManifest>>|
          -> std::result::Result<_, GraphDbError> {
             let deadline_at = Instant::now() + projection_deadline;
             let cancellation_identity = RuntimeCancellationIdentityV1 {
