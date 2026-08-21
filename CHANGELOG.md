@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.15](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.14...v0.1.0-beta.15) (2026-08-21)
+
+
+### Bug Fixes
+
+* **cli:** classify read-only startup policy ([bcd937a](https://github.com/ScriptedAlchemy/tracedecay/commit/bcd937a5943cfd72f0b4d0c55127a97eff4c727f))
+* **daemon:** preserve exact branch ref identity ([6724e6b](https://github.com/ScriptedAlchemy/tracedecay/commit/6724e6bc2644e230154642f74b4585cd2d58359a))
+* **graph-db:** bound generation retirement pages ([11c6fe4](https://github.com/ScriptedAlchemy/tracedecay/commit/11c6fe48555d0fe1362d5dffa8c25f58b72c5f76))
+* **graph-db:** index vectors introduced by later pages ([6869898](https://github.com/ScriptedAlchemy/tracedecay/commit/68698986cee6e56d3a0250b108a30b2d140be795))
+* **observation:** accept semantic anchor replay ([9d6586c](https://github.com/ScriptedAlchemy/tracedecay/commit/9d6586c13feb1233c5ae1a38a50680f8ff14ae72))
+
 ## [0.1.0-beta.14](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.13...v0.1.0-beta.14) (2026-08-21)
 
 
