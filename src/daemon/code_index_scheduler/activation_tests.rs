@@ -178,11 +178,12 @@ async fn cold_mount_defers_sealed_decode_and_truth_verification_to_the_retained_
     registry.shutdown().await;
 }
 
-/// Activation pays the sealed decode and every per-generation derivation. The
-/// first query that follows must find all of it already built — no second
-/// decode, no lazily deferred O(store) sweep charged to the request.
+/// Activation pays the sealed decode and every retained serving derivation.
+/// The parser-admitted staging corpus is released after the lexical/exact
+/// owners consume it, while the first query still finds those owners warm and
+/// performs no second decode or lazily deferred O(store) build.
 #[test]
-fn activation_warms_the_generation_so_the_first_query_never_redecodes() {
+fn activation_releases_exact_staging_without_cooling_query_owners() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
     {
@@ -199,16 +200,19 @@ fn activation_warms_the_generation_so_the_first_query_never_redecodes() {
         "activation must decode the active generation exactly once"
     );
 
-    // Every per-generation derivation an unpinned query would otherwise build
-    // lazily must already exist before the first request is served.
+    // Every retained per-generation derivation an unpinned query would
+    // otherwise build lazily must already exist before the first request is
+    // served. Exact admission itself is staging: the installed exact and
+    // lexical owners have already consumed it, so retaining that full second
+    // chunk corpus would only inflate the idle daemon.
     let latest = scheduler.latest_complete().expect("restored generation");
     assert!(
         latest.generation().is_validated(),
         "activation must run the canonical validation sweep"
     );
     assert!(
-        latest.generation().is_exact_admission_warm(),
-        "activation must run the exact-admission sweep, not the first query"
+        !latest.generation().is_exact_admission_warm(),
+        "activation must release exact-admission staging after the serving owners consume it"
     );
     assert!(
         latest.record_index_is_warm(),
@@ -219,18 +223,31 @@ fn activation_warms_the_generation_so_the_first_query_never_redecodes() {
         "activation must build the exact/lexical/graph lane owners"
     );
 
-    // Everything the serving path touches for an unpinned query.
-    assert!(!latest.exact().expect("exact admission").is_empty());
+    // Everything the serving path touches for an unpinned query. Owner reads
+    // must reuse the retained authority without reconstructing staging.
     let _ = latest.record_index();
-    latest
+    let first_owners = latest
         .production_query_owners()
         .expect("production lane owners");
+    let repeat_owners = latest
+        .production_query_owners()
+        .expect("repeat production lane owners");
+    assert!(
+        Arc::ptr_eq(&first_owners, &repeat_owners),
+        "serving must retain one warm query-owner allocation"
+    );
+    assert!(
+        !latest.generation().is_exact_admission_warm(),
+        "reading warm query owners must not reconstruct exact-admission staging"
+    );
     latest
         .test_attribution_authority()
         .expect("test attribution authority");
     // A second request repeats the whole sequence.
     let repeat = scheduler.latest_complete().expect("repeat generation read");
-    assert!(!repeat.exact().expect("repeat exact admission").is_empty());
+    repeat
+        .production_query_owners()
+        .expect("repeat generation production lane owners");
 
     assert_eq!(
         scheduler.sealed_decode_count(),
