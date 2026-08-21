@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.17](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.16...v0.1.0-beta.17) (2026-08-21)
+
+
+### Bug Fixes
+
+* **daemon:** join session runtime terminal tasks ([4ba8be4](https://github.com/ScriptedAlchemy/tracedecay/commit/4ba8be4fbf2e76bcd58a3ed6b02690555d8786af))
+* **daemon:** release telemetry clients at shutdown ([725e30b](https://github.com/ScriptedAlchemy/tracedecay/commit/725e30b59920a783fe79179fc64455768833f986))
+
 ## [0.1.0-beta.16](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.15...v0.1.0-beta.16) (2026-08-21)
 
 
