@@ -474,6 +474,30 @@ fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
 }
 
+/// Recognize a receiptless Cursor deployment as a prior first-party install.
+///
+/// Pre-receipt releases deployed the plugin bundle without host-bundle v2
+/// receipts, so receipt evidence alone cannot tell those files from an
+/// operator's own. The recognizable provenance is the bundle's own durable
+/// anchor, exactly the evidence the legacy installer trusts before its clean
+/// replace: the plugin directory's `.cursor-plugin/plugin.json` naming
+/// `tracedecay` (plugin components), or the versioned native-extension
+/// directory carrying tracedecay's own `package.json` (the Agent component).
+/// Arbitrary bytes parked at a cataloged deploy path carry neither anchor and
+/// stay refused without the operator's explicit `--yes --adopt`.
+pub(crate) fn receiptless_component_provenance(
+    home: &Path,
+    component: HostBundleComponentV1,
+) -> bool {
+    if component == HostBundleComponentV1::Agent {
+        return matches!(
+            cursor_native_extension_registration(home),
+            HostBundleRegistrationStateV1::Current | HostBundleRegistrationStateV1::Repairable
+        );
+    }
+    cursor_plugin_dir_is_tracedecay(&cursor_plugin_install_dir(home))
+}
+
 /// Sweep retired artifacts only after the current plugin manifest proves the
 /// directory is TraceDecay-owned. Receiptless upgrades call this after their
 /// component-set receipt commits, so a failed cleanup is safely retryable by
@@ -1399,9 +1423,20 @@ mod tests {
                 ),
                 explicit_confirmation,
                 hermes_profile_bindings: 0,
+                explicit_adoption: false,
             },
             operation_id,
         }
+    }
+
+    /// [`cursor_component_request`] carrying the operator's `--yes --adopt`.
+    fn adopting_cursor_component_request(
+        operation: HostBundleLifecycleOpV1,
+        operation_id: [u8; 16],
+    ) -> HostComponentSetExecutionRequestV1 {
+        let mut request = cursor_component_request(operation, operation_id, true);
+        request.lifecycle.explicit_adoption = true;
+        request
     }
 
     #[test]
@@ -1677,6 +1712,184 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A cataloged deploy path proves nothing about ownership: bytes an
+    /// operator parked at the plugin manifest path carry no recognizable
+    /// legacy provenance, so Install and Update refuse them untouched unless
+    /// the operator explicitly adopts. Explicit adoption then takes them
+    /// over, backing the previous bytes up first.
+    #[test]
+    fn cursor_transaction_refuses_unrecognized_receiptless_bytes_without_adoption() {
+        for operation in [
+            HostBundleLifecycleOpV1::Install,
+            HostBundleLifecycleOpV1::Update,
+        ] {
+            let home = TempDir::new().unwrap();
+            let lifecycle = TempDir::new().unwrap();
+            let manifest_path = cursor_plugin_manifest_path(home.path());
+            std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+            let operator_bytes = b"my own plugin experiment, not a tracedecay bundle";
+            std::fs::write(&manifest_path, operator_bytes).unwrap();
+
+            let current_bin =
+                super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+            let current = cursor_component_set(&current_bin);
+            let mut writer =
+                HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path())
+                    .unwrap();
+
+            let request = cursor_component_request(operation, [71; 16], true);
+            let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+                "cursor",
+                home.path(),
+                lifecycle.path(),
+                operation,
+                current_bin.clone(),
+            )
+            .unwrap();
+            let error = HostComponentSetTransactionV1::new(&mut writer)
+                .execute(
+                    &current.component_set,
+                    &request,
+                    &current,
+                    &mut registration,
+                )
+                .expect_err("unrecognized receiptless bytes must refuse without adoption");
+            assert!(
+                matches!(error, HostBundleError::OwnershipConflict(_)),
+                "{operation:?}: {error}"
+            );
+            assert!(
+                error.to_string().contains("--yes --adopt"),
+                "the refusal must name the explicit adoption remedy: {error}"
+            );
+            assert_eq!(
+                std::fs::read(&manifest_path).unwrap(),
+                operator_bytes,
+                "{operation:?} must leave the refused file byte-for-byte untouched"
+            );
+
+            let adopt = adopting_cursor_component_request(operation, [72; 16]);
+            let mut adopting_registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+                "cursor",
+                home.path(),
+                lifecycle.path(),
+                operation,
+                current_bin.clone(),
+            )
+            .unwrap();
+            HostComponentSetTransactionV1::new(&mut writer)
+                .execute(
+                    &current.component_set,
+                    &adopt,
+                    &current,
+                    &mut adopting_registration,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("explicit adoption must take the file over: {error}")
+                });
+            let manifest: Value =
+                serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+            assert_eq!(manifest["name"], "tracedecay");
+        }
+    }
+
+    /// The provenance recognizer trusts exactly the durable first-party
+    /// anchors: the plugin directory's own manifest naming tracedecay, and
+    /// tracedecay's versioned native-extension `package.json`. Arbitrary
+    /// bytes at those paths recognize nothing.
+    #[test]
+    fn receiptless_provenance_requires_a_first_party_anchor() {
+        let home = TempDir::new().unwrap();
+        for component in [
+            HostBundleComponentV1::Core,
+            HostBundleComponentV1::ContextMcp,
+            HostBundleComponentV1::Agent,
+        ] {
+            assert!(
+                !receiptless_component_provenance(home.path(), component),
+                "an empty home recognizes no {component:?} provenance"
+            );
+        }
+
+        let manifest_path = cursor_plugin_manifest_path(home.path());
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(&manifest_path, b"not a tracedecay manifest").unwrap();
+        assert!(!receiptless_component_provenance(
+            home.path(),
+            HostBundleComponentV1::Core
+        ));
+
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&json!({ "name": "tracedecay", "version": "0.1.0-beta.4" }))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(receiptless_component_provenance(
+            home.path(),
+            HostBundleComponentV1::Core
+        ));
+        assert!(receiptless_component_provenance(
+            home.path(),
+            HostBundleComponentV1::ContextMcp
+        ));
+        // The plugin anchor says nothing about the native extension.
+        assert!(!receiptless_component_provenance(
+            home.path(),
+            HostBundleComponentV1::Agent
+        ));
+
+        let extension_dir = home.path().join(cursor_native_extension_relative_dir());
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::write(
+            extension_dir.join("package.json"),
+            br#"{"name":"cursor-native","publisher":"tracedecay","main":"./dist/extension.js"}"#,
+        )
+        .unwrap();
+        assert!(receiptless_component_provenance(
+            home.path(),
+            HostBundleComponentV1::Agent
+        ));
+    }
+
+    /// The bounded legacy-inventory sweep removes retired first-party
+    /// artifacts after adoption validated the bundle, and nothing else: a
+    /// user's own files survive, and a directory without the tracedecay
+    /// manifest anchor is never touched.
+    #[test]
+    fn retired_artifact_sweep_is_bounded_and_ownership_gated() {
+        let home = TempDir::new().unwrap();
+        let install_dir = cursor_plugin_install_dir(home.path());
+        write_embedded_plugin(&install_dir, "tracedecay").expect("bundle should deploy");
+        let retired = install_dir.join("rules/tracedecay-memory.mdc");
+        std::fs::write(&retired, RETIRED_CURSOR_MEMORY_RULE_FIXTURE).unwrap();
+        let user_rule = install_dir.join("rules/my-own-notes.mdc");
+        std::fs::write(&user_rule, b"operator notes").unwrap();
+
+        sweep_retired_cursor_plugin_artifacts(home.path()).expect("sweep should succeed");
+        assert!(
+            !retired.exists(),
+            "the retired memory rule must be swept from an owned bundle"
+        );
+        assert!(user_rule.exists(), "user files must survive the sweep");
+
+        // A same-name rule without the tracedecay marker is a user file too.
+        std::fs::write(&retired, b"my own memory rule").unwrap();
+        sweep_retired_cursor_plugin_artifacts(home.path()).expect("sweep should succeed");
+        assert_eq!(std::fs::read(&retired).unwrap(), b"my own memory rule");
+        std::fs::remove_file(&retired).unwrap();
+
+        // Without the manifest anchor the sweep never touches the directory.
+        std::fs::write(
+            install_dir.join(".cursor-plugin/plugin.json"),
+            b"not tracedecay",
+        )
+        .unwrap();
+        std::fs::write(&retired, RETIRED_CURSOR_MEMORY_RULE_FIXTURE).unwrap();
+        sweep_retired_cursor_plugin_artifacts(home.path()).expect("sweep should succeed");
+        assert!(retired.exists(), "an unowned directory must never be swept");
     }
 
     #[test]

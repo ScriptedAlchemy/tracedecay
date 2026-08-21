@@ -11,18 +11,15 @@ use tempfile::TempDir;
 
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::daemon::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
-use crate::daemon::maintenance::{
-    SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry,
-};
+use crate::daemon::maintenance::{SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry};
 use crate::retention::code_index_generations::{
     DurableGenerationIndexEntryV1, DurablePublicationPointerV1, durable_generation_index_digest,
 };
 use crate::tracedecay::TraceDecay;
 
 use super::{
-    VectorRetentionInventoryV1, apply_code_generation_retention,
-    classify_vector_readable_sources, code_index_store_root,
-    resolve_vector_retention_inventory, run_code_generation_retention,
+    VectorRetentionInventoryV1, apply_code_generation_retention, classify_vector_readable_sources,
+    code_index_store_root, resolve_vector_retention_inventory, run_code_generation_retention,
     run_semantic_vector_generation_retention,
 };
 
@@ -98,8 +95,10 @@ fn seed_sealed_generation_store(store_root: &Path, count: usize) {
         std::fs::write(generations_root.join(&file), bytes).expect("write sealed generation");
         sealed.push((generation_id, file, state_digest, size_bytes, sealed_at));
     }
-    let (generation_id, file, state_digest, size_bytes, sealed_at) =
-        sealed.last().expect("at least one sealed generation").clone();
+    let (generation_id, file, state_digest, size_bytes, sealed_at) = sealed
+        .last()
+        .expect("at least one sealed generation")
+        .clone();
     let generation_index = vec![DurableGenerationIndexEntryV1 {
         generation_id: generation_id.clone(),
         snapshot_content_identity: "snapshot.retention-fixture".to_owned(),
@@ -161,8 +160,7 @@ fn fixture_census_shard() -> (
     (
         tracedecay_store::StoreShardIdV1::project(
             tracedecay_domain::BrainId::new("brain.retention-fixture").expect("brain id"),
-            tracedecay_domain::UserProfileId::new("profile.retention-fixture")
-                .expect("profile id"),
+            tracedecay_domain::UserProfileId::new("profile.retention-fixture").expect("profile id"),
             tracedecay_domain::ProjectId::new("project.retention-fixture").expect("project id"),
         ),
         tracedecay_store::SemanticVectorStageCensusRevision::new(1).expect("census revision"),
@@ -409,8 +407,7 @@ async fn unknown_census_still_degrades_to_the_offline_inventory() {
 async fn reset_corrupt_and_denied_vector_authorities_refuse_the_sweep() {
     let fixture = open_unseated_graph_fixture().await;
     let global_db =
-        crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("vector-refusals")
-            .await;
+        crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("vector-refusals").await;
     let scope = tracedecay_application::ResolvedScope::new(
         tracedecay_domain::ProjectId::new("project.retention-fixture").expect("project id"),
         tracedecay_domain::RepositoryId::new("repository.retention-fixture")

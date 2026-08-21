@@ -92,6 +92,7 @@ fn embedded_component_backup_restore_runs_through_the_real_lifecycle_writer() {
                     expected_component: HostBundleComponentV1::Core,
                     explicit_confirmation: true,
                     hermes_profile_bindings: 0,
+                    adopt_receiptless: false,
                 },
                 operation_id: [81; 16],
             },
@@ -323,6 +324,7 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
             expected_components: default_components(HostKindV1::OpenCode),
             explicit_confirmation: true,
             hermes_profile_bindings: 0,
+            explicit_adoption: false,
         },
         operation_id: [31; 16],
     };
@@ -619,6 +621,7 @@ fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
             expected_components: default_components(HostKindV1::OpenCode),
             explicit_confirmation: true,
             hermes_profile_bindings: 0,
+            explicit_adoption: false,
         },
         operation_id: [43; 16],
     };
@@ -744,6 +747,7 @@ fn unreadable_host_registration_refuses_instead_of_reporting_no_conflict() {
             expected_components: default_components(HostKindV1::OpenCode),
             explicit_confirmation: true,
             hermes_profile_bindings: 0,
+            explicit_adoption: false,
         },
         operation_id: [44; 16],
     };
@@ -878,6 +882,7 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
                 // Hermes binds exactly one user TraceDecay profile; other hosts
                 // must pass zero (not an ambient profile-discovery mechanism).
                 hermes_profile_bindings: u8::from(host == HostKindV1::Hermes),
+                explicit_adoption: false,
             },
             operation_id: [operation_id; 16],
         };
@@ -1098,6 +1103,7 @@ fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
             expected_components: vec![HostBundleComponentV1::Core],
             explicit_confirmation: true,
             hermes_profile_bindings: 0,
+            explicit_adoption: false,
         },
         operation_id: [operation_id; 16],
     };

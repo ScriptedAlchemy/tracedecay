@@ -1341,6 +1341,21 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         self.competing_opencode_analyzer_claims(component_set)
     }
 
+    /// Cursor is the one host whose pre-receipt bundles carry a durable
+    /// first-party anchor the adapter can verify; every other integration
+    /// stays fail-closed on the trait default, so receiptless adoption there
+    /// requires the operator's explicit `--yes --adopt`.
+    fn receiptless_component_provenance(
+        &self,
+        component: crate::agents::host_bundle_v2::HostBundleComponentV1,
+    ) -> bool {
+        self.integration.id() == "cursor"
+            && crate::agents::cursor::receiptless_component_provenance(
+                &self.context.home,
+                component,
+            )
+    }
+
     fn confirm_preview(
         &mut self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
@@ -1956,6 +1971,7 @@ mod tests {
                     .collect(),
                 explicit_confirmation: true,
                 hermes_profile_bindings: 0,
+                explicit_adoption: false,
             },
             operation_id: [7; 16],
         };
