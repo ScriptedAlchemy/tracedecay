@@ -1332,7 +1332,16 @@ impl CommandStartupPolicy {
             | Commands::Serve { .. } => Self::SkipAll,
             // Inspection-only commands retain ordinary startup maintenance but
             // do not need the unrelated agent-install health check.
-            Commands::Memory { .. }
+            Commands::Status { .. }
+            | Commands::CurrentCounter { .. }
+            | Commands::Cost { .. }
+            | Commands::Bench { .. }
+            | Commands::Gain { .. }
+            | Commands::Monitor
+            | Commands::List { .. }
+            | Commands::Memory {
+                action: MemoryAction::Status { .. },
+            }
             | Commands::Sessions {
                 action:
                     SessionsAction::Search(_)
@@ -1348,7 +1357,30 @@ impl CommandStartupPolicy {
                     },
             }
             | Commands::Channel { channel: None }
-            | Commands::Gitignore { action: None, .. } => Self::SkipAgentInstallCheck,
+            | Commands::Gitignore { action: None, .. }
+            | Commands::Automation {
+                action:
+                    AutomationAction::Config {
+                        action:
+                            AutomationConfigAction::Get { .. } | AutomationConfigAction::Explain { .. },
+                    }
+                    | AutomationAction::Runs {
+                        action:
+                            AutomationRunsAction::List { .. }
+                            | AutomationRunsAction::View { .. }
+                            | AutomationRunsAction::Artifact { .. },
+                    }
+                    | AutomationAction::Skills {
+                        action:
+                            AutomationSkillsAction::List { .. } | AutomationSkillsAction::View { .. },
+                    }
+                    | AutomationAction::Facts {
+                        action:
+                            AutomationFactsAction::List { .. } | AutomationFactsAction::View { .. },
+                    },
+            } => Self::SkipAgentInstallCheck,
+            // Unknown and mutating actions conservatively retain the full
+            // preamble. Read-only actions must opt in above by exact variant.
             _ => Self::Full,
         }
     }
