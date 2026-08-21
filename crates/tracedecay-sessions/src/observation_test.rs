@@ -545,23 +545,45 @@ async fn exact_duplicate_reports_authoritative_projection_status() {
     assert_eq!(application.store.observations.lock().unwrap().len(), 1);
 }
 
-#[tokio::test]
-async fn exact_duplicate_with_missed_read_back_stays_persisted_as_not_queued() {
+#[derive(Clone, Copy, Debug)]
+enum DuplicatePersistKind {
+    Exact,
+    Covered,
+}
+
+async fn assert_duplicate_read_miss_is_not_queued(
+    duplicate_kind: DuplicatePersistKind,
+    seeded_projection_status: ObservationProjectionStatus,
+) {
     let application = application();
     let record = json!({
         "type": "user",
-        "message": { "role": "user", "content": "duplicate read miss" }
+        "message": {
+            "role": "user",
+            "content": format!("{duplicate_kind:?} duplicate read miss")
+        }
     });
     application
         .capture_claude_observation(request(&record))
         .await
         .expect("first capture persists");
+    match seeded_projection_status {
+        ObservationProjectionStatus::Queued => {}
+        ObservationProjectionStatus::NotQueued => {
+            mark_first_observation_not_queued(&application.store);
+        }
+    }
+    if matches!(duplicate_kind, DuplicatePersistKind::Covered) {
+        *application.store.covered_duplicate.lock().unwrap() = true;
+    }
+    let row_count_before = application.store.observations.lock().unwrap().len();
+    assert_eq!(row_count_before, 1);
     *application.store.read_none_once.lock().unwrap() = true;
 
     let outcome = application
         .capture_claude_observation(request(&record))
         .await
-        .expect("an exact duplicate receipt proves the row is durable");
+        .expect("a duplicate receipt proves the row is durable despite a read miss");
 
     match outcome {
         CaptureObservationOutcome::Persisted {
@@ -569,124 +591,64 @@ async fn exact_duplicate_with_missed_read_back_stays_persisted_as_not_queued() {
             projection_status,
             ..
         } => {
-            assert!(matches!(
-                *outcome,
-                ObservationPersistOutcome::ExactDuplicate(_)
-            ));
+            assert!(
+                matches!(
+                    (duplicate_kind, outcome.as_ref()),
+                    (
+                        DuplicatePersistKind::Exact,
+                        ObservationPersistOutcome::ExactDuplicate(_)
+                    ) | (
+                        DuplicatePersistKind::Covered,
+                        ObservationPersistOutcome::CoveredDuplicate(_)
+                    )
+                ),
+                "persist outcome must match {duplicate_kind:?}, got {outcome:?}"
+            );
             assert_eq!(projection_status, ObservationProjectionStatus::NotQueued);
         }
-        other => panic!("exact duplicate must stay persisted, got {other:?}"),
+        other => panic!("duplicate must stay persisted, got {other:?}"),
     }
-    assert_eq!(application.store.observations.lock().unwrap().len(), 1);
+    assert_eq!(
+        application.store.observations.lock().unwrap().len(),
+        row_count_before,
+        "a duplicate receipt must not write another row"
+    );
+}
+
+#[tokio::test]
+async fn exact_duplicate_with_missed_read_back_stays_persisted_as_not_queued() {
+    assert_duplicate_read_miss_is_not_queued(
+        DuplicatePersistKind::Exact,
+        ObservationProjectionStatus::Queued,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn not_queued_exact_duplicate_with_missed_read_back_stays_not_queued() {
-    let application = application();
-    let record = json!({
-        "type": "user",
-        "message": { "role": "user", "content": "drained duplicate read miss" }
-    });
-    application
-        .capture_claude_observation(request(&record))
-        .await
-        .expect("first capture persists");
-    mark_first_observation_not_queued(&application.store);
-    *application.store.read_none_once.lock().unwrap() = true;
-
-    let outcome = application
-        .capture_claude_observation(request(&record))
-        .await
-        .expect("an exact duplicate read miss remains a no-op receipt");
-
-    match outcome {
-        CaptureObservationOutcome::Persisted {
-            outcome,
-            projection_status,
-            ..
-        } => {
-            assert!(matches!(
-                *outcome,
-                ObservationPersistOutcome::ExactDuplicate(_)
-            ));
-            assert_eq!(projection_status, ObservationProjectionStatus::NotQueued);
-        }
-        other => panic!("exact duplicate must stay persisted, got {other:?}"),
-    }
-    assert_eq!(application.store.observations.lock().unwrap().len(), 1);
+    assert_duplicate_read_miss_is_not_queued(
+        DuplicatePersistKind::Exact,
+        ObservationProjectionStatus::NotQueued,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn covered_duplicate_with_missed_read_back_stays_persisted_as_not_queued() {
-    let application = application();
-    let record = json!({
-        "type": "user",
-        "message": { "role": "user", "content": "covered duplicate read miss" }
-    });
-    application
-        .capture_claude_observation(request(&record))
-        .await
-        .expect("first capture persists");
-    *application.store.covered_duplicate.lock().unwrap() = true;
-    *application.store.read_none_once.lock().unwrap() = true;
-
-    let outcome = application
-        .capture_claude_observation(request(&record))
-        .await
-        .expect("a covered duplicate receipt proves the row is durable");
-
-    match outcome {
-        CaptureObservationOutcome::Persisted {
-            outcome,
-            projection_status,
-            ..
-        } => {
-            assert!(matches!(
-                *outcome,
-                ObservationPersistOutcome::CoveredDuplicate(_)
-            ));
-            assert_eq!(projection_status, ObservationProjectionStatus::NotQueued);
-        }
-        other => panic!("covered duplicate must stay persisted, got {other:?}"),
-    }
-    assert_eq!(application.store.observations.lock().unwrap().len(), 1);
+    assert_duplicate_read_miss_is_not_queued(
+        DuplicatePersistKind::Covered,
+        ObservationProjectionStatus::Queued,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn not_queued_covered_duplicate_with_missed_read_back_stays_not_queued() {
-    let application = application();
-    let record = json!({
-        "type": "user",
-        "message": { "role": "user", "content": "drained covered duplicate read miss" }
-    });
-    application
-        .capture_claude_observation(request(&record))
-        .await
-        .expect("first capture persists");
-    mark_first_observation_not_queued(&application.store);
-    *application.store.covered_duplicate.lock().unwrap() = true;
-    *application.store.read_none_once.lock().unwrap() = true;
-
-    let outcome = application
-        .capture_claude_observation(request(&record))
-        .await
-        .expect("a covered duplicate read miss remains a no-op receipt");
-
-    match outcome {
-        CaptureObservationOutcome::Persisted {
-            outcome,
-            projection_status,
-            ..
-        } => {
-            assert!(matches!(
-                *outcome,
-                ObservationPersistOutcome::CoveredDuplicate(_)
-            ));
-            assert_eq!(projection_status, ObservationProjectionStatus::NotQueued);
-        }
-        other => panic!("covered duplicate must stay persisted, got {other:?}"),
-    }
-    assert_eq!(application.store.observations.lock().unwrap().len(), 1);
+    assert_duplicate_read_miss_is_not_queued(
+        DuplicatePersistKind::Covered,
+        ObservationProjectionStatus::NotQueued,
+    )
+    .await;
 }
 
 #[tokio::test]
