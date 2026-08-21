@@ -334,21 +334,23 @@ impl DaemonInvocationService {
         Some((scope, ApplicationOutcome::Evidence(packet)))
     }
 
-    pub(crate) async fn expire_all(&self) {
+    pub(crate) async fn expire_all(&self) -> bool {
         self.begin_shutdown().await;
         let lease_shutdown = self.lsp_lease_tasks.shutdown().await;
         self.lsp_sessions.lock().await.clear();
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
-        self.project_runtimes.shut_down_all().await;
+        let project_runtimes_clean = self.project_runtimes.shut_down_all().await;
         self.session_holder_databases.lock().await.clear();
         self.operation_events.expire_all().await;
+        let lease_shutdown_clean = lease_shutdown.is_ok();
         if let Err(problem) = lease_shutdown {
             tracing::error!(
                 ?problem,
                 "daemon LSP lease task failed while shutdown joined it"
             );
         }
+        project_runtimes_clean && lease_shutdown_clean
     }
 
     #[cfg(test)]

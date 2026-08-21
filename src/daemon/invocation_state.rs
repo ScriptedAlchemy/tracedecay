@@ -830,12 +830,12 @@ impl DaemonInvocationState {
         }
     }
 
-    pub(super) async fn shutdown(&self) {
+    pub(super) async fn shutdown(&self) -> bool {
         self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();
         self.code_index_schedulers.shutdown().await;
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
-        self.service.expire_all().await;
+        self.service.expire_all().await
     }
 }
 

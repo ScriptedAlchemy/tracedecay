@@ -280,9 +280,13 @@ async fn run_daemon_shutdown(
             ShutdownTaskReceipt::timed_out("project_server_shutdown")
         }
     };
-    let terminal = prepare_shutdown_owner_phases(plan.terminal_owner_phases)
-        .join(shutdown_deadline)
-        .await;
+    let terminal = if project_servers.timed_out_count() == 0 {
+        prepare_shutdown_owner_phases(plan.terminal_owner_phases)
+            .join(shutdown_deadline)
+            .await
+    } else {
+        ShutdownReceipt::timed_out(shutdown_deadline, "memory_graph_reconciliation")
+    };
     background.extend(terminal);
     DaemonShutdownReceipt {
         in_flight,
@@ -354,6 +358,34 @@ mod tests {
         let receipt = shutdown.await.expect("terminal shutdown receipt");
         assert!(terminal_cancelled.load(Ordering::Acquire));
         assert!(receipt.background.unfinished().is_empty());
+    }
+
+    #[tokio::test]
+    async fn terminal_owner_waits_for_timed_out_project_server_lease_release() {
+        let lifecycle = DaemonLifecycle::default();
+        let terminal_started = Arc::new(AtomicBool::new(false));
+        let terminal_started_by_owner = Arc::clone(&terminal_started);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let receipt = coordinate_daemon_shutdown(&lifecycle, deadline, async move {
+            DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), async {
+                ShutdownTaskReceipt::timed_out("project_server[0]")
+            })
+            .with_terminal_owner_phases(vec![vec![ShutdownOwner::new(
+                "memory_graph_reconciliation",
+                move || terminal_started_by_owner.store(true, Ordering::Release),
+                async {},
+            )]])
+        })
+        .await;
+
+        assert!(!terminal_started.load(Ordering::Acquire));
+        assert!(matches!(
+            receipt.background.owners.as_slice(),
+            [owner]
+                if owner.name == "memory_graph_reconciliation"
+                    && owner.status == ShutdownStatus::TimedOut
+        ));
+        assert_eq!(receipt.project_servers.timed_out_count(), 1);
     }
 
     #[tokio::test]

@@ -102,7 +102,7 @@ impl ProjectRuntimeRegistryV1 {
     ///
     /// Routers become unavailable before feedback owners drop, Work providers
     /// are joined, and process-wide semantic handles are unregistered.
-    pub(crate) async fn shut_down_all(&self) {
+    pub(crate) async fn shut_down_all(&self) -> bool {
         self.begin_shutdown();
         let mut shutdown_complete = self.shutdown_complete.subscribe();
         let mut shutdown_task = self.shutdown_task.lock().await;
@@ -141,17 +141,27 @@ impl ProjectRuntimeRegistryV1 {
             match state {
                 ShutdownState::Complete | ShutdownState::Failed => {
                     self.join_shutdown_task().await;
-                    return;
+                    if state == ShutdownState::Complete {
+                        return true;
+                    }
+                    self.force_drop_failed_shutdown_runtimes();
+                    return false;
                 }
                 ShutdownState::Pending => {
                     if shutdown_complete.changed().await.is_err() {
                         self.shutdown_complete.send_replace(ShutdownState::Failed);
                         self.join_shutdown_task().await;
-                        return;
+                        self.force_drop_failed_shutdown_runtimes();
+                        return false;
                     }
                 }
             }
         }
+    }
+
+    fn force_drop_failed_shutdown_runtimes(&self) {
+        let runtimes = std::mem::take(&mut *self.lock_runtimes());
+        shut_down_runtimes(runtimes);
     }
 
     async fn join_shutdown_task(&self) {

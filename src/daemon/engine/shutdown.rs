@@ -47,9 +47,19 @@ impl DaemonEngine {
         let pr_join = Arc::clone(&self.pr_autotrack_task);
 
         vec![
-            vec![ShutdownOwner::new("invocation", || {}, async move {
-                invocation_join.shutdown().await;
-            })],
+            vec![ShutdownOwner::with_deadline_status(
+                "invocation",
+                || {},
+                move |_| async move {
+                    if invocation_join.shutdown().await {
+                        ShutdownStatus::Clean
+                    } else {
+                        ShutdownStatus::Failed(
+                            "invocation runtime shutdown was incomplete".to_owned(),
+                        )
+                    }
+                },
+            )],
             vec![
                 ShutdownOwner::with_deadline_status(
                     "project_open",
