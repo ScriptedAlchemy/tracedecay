@@ -121,7 +121,15 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
     let graph_weak = Arc::downgrade(&graph);
     drop(graph);
     drop(server);
-    engine.shutdown_all().await;
+    let shutdown = engine.shutdown_all().await;
+    assert!(
+        shutdown.project_servers.is_clean(),
+        "project servers must release every production database owner: {shutdown:?}"
+    );
+    assert!(
+        shutdown.background.unfinished().is_empty(),
+        "terminal graph shutdown must close every production holder: {shutdown:?}"
+    );
     assert!(
         graph_weak.upgrade().is_none(),
         "daemon shutdown must release the project graph retained by Hook V2 replay"
