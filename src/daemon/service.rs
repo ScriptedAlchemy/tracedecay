@@ -379,6 +379,9 @@ impl DaemonServiceSpec {
                <key>RunAtLoad</key>\n\
                <true/>\n\
              \n\
+               <key>ProcessType</key>\n\
+               <string>Interactive</string>\n\
+             \n\
                <key>KeepAlive</key>\n\
                <dict>\n\
                  <key>SuccessfulExit</key>\n\

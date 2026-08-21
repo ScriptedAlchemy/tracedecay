@@ -486,6 +486,8 @@ fn render_launchd_plist_includes_program_arguments_socket_logs_and_label() {
     assert!(plist.contains("<key>TRACEDECAY_DATA_DIR</key>"));
     assert!(plist.contains("<key>RunAtLoad</key>"));
     assert!(plist.contains("<key>KeepAlive</key>"));
+    assert!(plist.contains("<key>ProcessType</key>"));
+    assert!(plist.contains("<string>Interactive</string>"));
     assert!(plist.contains("<key>SoftResourceLimits</key>"));
     assert!(plist.contains("<key>NumberOfFiles</key>"));
     assert!(plist.contains("<integer>8192</integer>"));
