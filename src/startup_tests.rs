@@ -8,8 +8,16 @@ use super::{
     validate_host_bundle_options,
 };
 use clap::Parser;
+use std::iter;
 use std::path::PathBuf;
 use tracedecay::user_config::UserConfig;
+
+fn parse_command(args: &[&str]) -> Commands {
+    Cli::try_parse_from(iter::once("tracedecay").chain(args.iter().copied()))
+        .expect("command must parse")
+        .command
+        .expect("subcommand must be present")
+}
 
 /// `wipe` destroys deployed state, so it takes the same `--yes` acceptance as
 /// the lifecycle mutations. Without it a scripted wipe had to feed `go!`
@@ -379,6 +387,54 @@ fn first_class_git_reads_skip_network_and_agent_startup_maintenance() {
 
     assert!(should_skip_startup_maintenance(&command));
     assert!(should_skip_agent_install_check(&command));
+}
+
+#[test]
+fn nested_inspection_commands_skip_agent_install_check() {
+    let commands = [
+        &["memory", "status"][..],
+        &["sessions", "search", "needle"][..],
+        &[
+            "sessions",
+            "refresh",
+            "status",
+            "--project-id",
+            "project-123",
+            "--session-id",
+            "session-123",
+            "--provider",
+            "claude",
+            "--source",
+            "1",
+            "--target",
+            "2",
+            "--handle",
+            "refresh-123",
+        ][..],
+        &["branch", "list"][..],
+        &["branch", "autotrack", "status"][..],
+        &["channel"][..],
+        &["gitignore"][..],
+    ];
+
+    for args in commands {
+        let command = parse_command(args);
+        assert!(
+            should_skip_agent_install_check(&command),
+            "{args:?} must not run the unrelated agent-install check"
+        );
+    }
+}
+
+#[test]
+fn nested_mutating_commands_keep_agent_install_check() {
+    for args in [&["channel", "beta"][..], &["gitignore", "on"][..]] {
+        let command = parse_command(args);
+        assert!(
+            !should_skip_agent_install_check(&command),
+            "{args:?} must retain the agent-install check"
+        );
+    }
 }
 
 #[test]
