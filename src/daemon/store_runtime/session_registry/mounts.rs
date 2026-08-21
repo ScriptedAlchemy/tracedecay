@@ -699,7 +699,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// reconciliation workers first; a graph client lease still held by a
     /// live consumer surfaces as a typed Conflict, not a hang.
     pub(crate) async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
-        let identities = self.drain_retained_graph_owners_for_shutdown();
+        let identities = self.drain_retained_graph_owners_for_shutdown()?;
         let mut first_error = None;
         for (binding, locator) in identities {
             if let Err(error) = super::code_graph::graph_attachment::close_retained_for_shutdown(
@@ -722,22 +722,59 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// Takes every retained graph-owning runtime out of the registry maps and
     /// returns the exact store identity of each graph runtime to close. The
     /// owners drop here, releasing their `GraphDbOwnerAttachmentV1` map
-    /// attachments and owner-bound graph client leases; non-`Ready` project
-    /// states are retained untouched for typed recovery inspection.
+    /// attachments and owner-bound graph client leases. Terminal diagnostic
+    /// states retain their phase/fault evidence while releasing graph-owning
+    /// resources; an in-flight transition fails before any owner is drained.
     fn drain_retained_graph_owners_for_shutdown(
         &self,
-    ) -> Vec<(
-        tracedecay_store::StoreRuntimeBindingV1,
-        tracedecay_store::VerifiedStoreLocatorV1,
-    )> {
+    ) -> Result<
+        Vec<(
+            tracedecay_store::StoreRuntimeBindingV1,
+            tracedecay_store::VerifiedStoreLocatorV1,
+        )>,
+    > {
+        {
+            let projects = self
+                .project_owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((project_id, state)) = projects.iter().find_map(|(project_id, state)| {
+                let state = match state {
+                    ProjectRuntimeOwnerStateV1::Opening => "opening",
+                    ProjectRuntimeOwnerStateV1::ReplacingSessions => "replacing_sessions",
+                    ProjectRuntimeOwnerStateV1::Recovering => "recovering",
+                    ProjectRuntimeOwnerStateV1::Retiring => "retiring",
+                    ProjectRuntimeOwnerStateV1::Ready(_)
+                    | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
+                    | ProjectRuntimeOwnerStateV1::Faulted(_) => return None,
+                };
+                Some((project_id, state))
+            }) {
+                return Err(session_registry_error(
+                    "drain graph owners for shutdown",
+                    format!(
+                        "project runtime owner transition is unfinished for '{}': {state}",
+                        project_id.as_str()
+                    ),
+                ));
+            }
+        }
         let mut identities = Vec::new();
+        let mut retain_identity = |identity: (
+            tracedecay_store::StoreRuntimeBindingV1,
+            tracedecay_store::VerifiedStoreLocatorV1,
+        )| {
+            if !identities.iter().any(|current| current == &identity) {
+                identities.push(identity);
+            }
+        };
         if let Some(owner) = self
             .profile_memory
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
-            identities.push(owner.graph_runtime.graph_store_identity());
+            retain_identity(owner.graph_runtime.graph_store_identity());
         }
         if let Some(owner) = self
             .profile_sessions
@@ -745,7 +782,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
-            identities.push((
+            retain_identity((
                 owner.relation_graph.graph.binding().clone(),
                 owner.relation_graph.graph.verified_locator().clone(),
             ));
@@ -755,21 +792,66 @@ impl DaemonSessionRuntimeRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for state in projects.values_mut() {
-            let ProjectRuntimeOwnerStateV1::Ready(owners) = state else {
-                continue;
-            };
-            if let Some(memory) = owners.memory.take() {
-                identities.push(memory.graph_runtime.graph_store_identity());
-            }
-            if let Some(sessions) = owners.sessions.take() {
-                identities.push((
-                    sessions.relation_graph.graph.binding().clone(),
-                    sessions.relation_graph.graph.verified_locator().clone(),
-                ));
+            match state {
+                ProjectRuntimeOwnerStateV1::Ready(owners) => {
+                    if let Some(memory) = owners.memory.take() {
+                        retain_identity(memory.graph_runtime.graph_store_identity());
+                    }
+                    if let Some(sessions) = owners.sessions.take() {
+                        retain_identity((
+                            sessions.relation_graph.graph.binding().clone(),
+                            sessions.relation_graph.graph.verified_locator().clone(),
+                        ));
+                    }
+                }
+                ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery) => {
+                    if let Some(memory) = recovery.memory.take() {
+                        retain_identity(memory.graph_runtime.graph_store_identity());
+                    }
+                    if let Some(sessions) = recovery.sessions.take() {
+                        retain_identity((
+                            sessions.graph.binding().clone(),
+                            sessions.graph.verified_locator().clone(),
+                        ));
+                    }
+                    if let Some(sessions) = recovery.candidate_sessions.take() {
+                        retain_identity((
+                            sessions.relation_graph.graph.binding().clone(),
+                            sessions.relation_graph.graph.verified_locator().clone(),
+                        ));
+                    }
+                }
+                ProjectRuntimeOwnerStateV1::Faulted(faulted) => {
+                    if let Some(memory) = faulted.retained.memory.take() {
+                        retain_identity(memory.graph_runtime.graph_store_identity());
+                    }
+                    if let Some(sessions) = faulted.retained.sessions.take() {
+                        retain_identity((
+                            sessions.relation_graph.graph.binding().clone(),
+                            sessions.relation_graph.graph.verified_locator().clone(),
+                        ));
+                    }
+                    if let Some(sessions) = faulted.sessions.take() {
+                        retain_identity((
+                            sessions.graph.binding().clone(),
+                            sessions.graph.verified_locator().clone(),
+                        ));
+                    }
+                }
+                ProjectRuntimeOwnerStateV1::Opening
+                | ProjectRuntimeOwnerStateV1::ReplacingSessions
+                | ProjectRuntimeOwnerStateV1::Recovering
+                | ProjectRuntimeOwnerStateV1::Retiring => {
+                    return Err(session_registry_error(
+                        "drain graph owners for shutdown",
+                        "project runtime owner transition changed after terminal preflight"
+                            .to_owned(),
+                    ));
+                }
             }
         }
         drop(projects);
-        identities
+        Ok(identities)
     }
 
     pub(crate) async fn mounted_project_sessions(
