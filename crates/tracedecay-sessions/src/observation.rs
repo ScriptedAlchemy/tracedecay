@@ -438,20 +438,22 @@ where
                     if cancellation.is_cancelled() {
                         return Err(ObservationApplicationError::Cancelled);
                     }
-                    // Every persist outcome carries a receipt for a durable
-                    // row. Preserve an authoritative status when visible; a
-                    // trailing reader snapshot otherwise cannot distinguish
-                    // that row from the queued state established at commit.
+                    // Preserve authoritative projection state when visible.
+                    // A new commit establishes queued state; duplicate
+                    // receipts perform no projection write, so a trailing
+                    // reader snapshot must not fabricate queued work.
                     let projection_status = match stored {
                         Some(stored) => stored.projection_status(),
+                        None if matches!(&outcome, ObservationPersistOutcome::Committed(_)) => {
+                            ObservationProjectionStatus::Queued
+                        }
                         None if matches!(
                             &outcome,
-                            ObservationPersistOutcome::Committed(_)
-                                | ObservationPersistOutcome::ExactDuplicate(_)
+                            ObservationPersistOutcome::ExactDuplicate(_)
                                 | ObservationPersistOutcome::CoveredDuplicate(_)
                         ) =>
                         {
-                            ObservationProjectionStatus::Queued
+                            ObservationProjectionStatus::NotQueued
                         }
                         None => {
                             return Err(

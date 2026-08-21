@@ -219,6 +219,20 @@ fn application() -> ObservationApplication<FakeStore> {
     )
 }
 
+fn mark_first_observation_not_queued(store: &FakeStore) {
+    let mut observations = store.observations.lock().unwrap();
+    let stored = observations[0].clone();
+    observations[0] = StoredObservation::new(
+        stored.sequence(),
+        stored.observation().clone(),
+        stored.committed_cursor().clone(),
+        stored.retrieval_anchor().clone(),
+        stored.projection_generation().clone(),
+        ObservationProjectionStatus::NotQueued,
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn non_durable_cursor_advance_stays_inside_application_boundary() {
     let application = application();
@@ -506,19 +520,7 @@ async fn exact_duplicate_reports_authoritative_projection_status() {
         } => sanitized_record,
         other => panic!("first capture must persist, got {other:?}"),
     };
-    {
-        let mut observations = application.store.observations.lock().unwrap();
-        let stored = observations[0].clone();
-        observations[0] = StoredObservation::new(
-            stored.sequence(),
-            stored.observation().clone(),
-            stored.committed_cursor().clone(),
-            stored.retrieval_anchor().clone(),
-            stored.projection_generation().clone(),
-            ObservationProjectionStatus::NotQueued,
-        )
-        .unwrap();
-    }
+    mark_first_observation_not_queued(&application.store);
 
     let duplicate = application
         .capture_claude_observation(request(&record))
@@ -544,7 +546,7 @@ async fn exact_duplicate_reports_authoritative_projection_status() {
 }
 
 #[tokio::test]
-async fn exact_duplicate_with_missed_read_back_stays_persisted_as_queued() {
+async fn exact_duplicate_with_missed_read_back_stays_persisted_as_not_queued() {
     let application = application();
     let record = json!({
         "type": "user",
@@ -571,7 +573,7 @@ async fn exact_duplicate_with_missed_read_back_stays_persisted_as_queued() {
                 *outcome,
                 ObservationPersistOutcome::ExactDuplicate(_)
             ));
-            assert_eq!(projection_status, ObservationProjectionStatus::Queued);
+            assert_eq!(projection_status, ObservationProjectionStatus::NotQueued);
         }
         other => panic!("exact duplicate must stay persisted, got {other:?}"),
     }
@@ -579,7 +581,43 @@ async fn exact_duplicate_with_missed_read_back_stays_persisted_as_queued() {
 }
 
 #[tokio::test]
-async fn covered_duplicate_with_missed_read_back_stays_persisted_as_queued() {
+async fn not_queued_exact_duplicate_with_missed_read_back_stays_not_queued() {
+    let application = application();
+    let record = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "drained duplicate read miss" }
+    });
+    application
+        .capture_claude_observation(request(&record))
+        .await
+        .expect("first capture persists");
+    mark_first_observation_not_queued(&application.store);
+    *application.store.read_none_once.lock().unwrap() = true;
+
+    let outcome = application
+        .capture_claude_observation(request(&record))
+        .await
+        .expect("an exact duplicate read miss remains a no-op receipt");
+
+    match outcome {
+        CaptureObservationOutcome::Persisted {
+            outcome,
+            projection_status,
+            ..
+        } => {
+            assert!(matches!(
+                *outcome,
+                ObservationPersistOutcome::ExactDuplicate(_)
+            ));
+            assert_eq!(projection_status, ObservationProjectionStatus::NotQueued);
+        }
+        other => panic!("exact duplicate must stay persisted, got {other:?}"),
+    }
+    assert_eq!(application.store.observations.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn covered_duplicate_with_missed_read_back_stays_persisted_as_not_queued() {
     let application = application();
     let record = json!({
         "type": "user",
@@ -607,7 +645,44 @@ async fn covered_duplicate_with_missed_read_back_stays_persisted_as_queued() {
                 *outcome,
                 ObservationPersistOutcome::CoveredDuplicate(_)
             ));
-            assert_eq!(projection_status, ObservationProjectionStatus::Queued);
+            assert_eq!(projection_status, ObservationProjectionStatus::NotQueued);
+        }
+        other => panic!("covered duplicate must stay persisted, got {other:?}"),
+    }
+    assert_eq!(application.store.observations.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn not_queued_covered_duplicate_with_missed_read_back_stays_not_queued() {
+    let application = application();
+    let record = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "drained covered duplicate read miss" }
+    });
+    application
+        .capture_claude_observation(request(&record))
+        .await
+        .expect("first capture persists");
+    mark_first_observation_not_queued(&application.store);
+    *application.store.covered_duplicate.lock().unwrap() = true;
+    *application.store.read_none_once.lock().unwrap() = true;
+
+    let outcome = application
+        .capture_claude_observation(request(&record))
+        .await
+        .expect("a covered duplicate read miss remains a no-op receipt");
+
+    match outcome {
+        CaptureObservationOutcome::Persisted {
+            outcome,
+            projection_status,
+            ..
+        } => {
+            assert!(matches!(
+                *outcome,
+                ObservationPersistOutcome::CoveredDuplicate(_)
+            ));
+            assert_eq!(projection_status, ObservationProjectionStatus::NotQueued);
         }
         other => panic!("covered duplicate must stay persisted, got {other:?}"),
     }
