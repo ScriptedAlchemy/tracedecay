@@ -156,6 +156,7 @@ impl DaemonEngine {
 
     pub(in crate::daemon) fn memory_graph_reconciliation_shutdown_owner(&self) -> ShutdownOwner {
         let administration = self.store_administration.clone();
+        let store_telemetry_sampling = self.store_administration.store_telemetry_sampling();
         ShutdownOwner::with_deadline_result(
             "memory_graph_reconciliation",
             || {},
@@ -174,6 +175,7 @@ impl DaemonEngine {
                     .map_err(|error| error.to_string())?;
                 owner.cancel();
                 owner.shutdown().await?;
+                store_telemetry_sampling.release_retained_handles_for_shutdown();
                 administration
                     .close_retained_graph_runtimes_for_shutdown()
                     .await
