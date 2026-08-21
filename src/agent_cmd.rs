@@ -846,6 +846,7 @@ fn apply_default_canonical_component_set(
     operation: HostBundleCliOperation,
     home: &Path,
     dashboard: bool,
+    adopt: bool,
 ) -> tracedecay::errors::Result<()> {
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -871,7 +872,7 @@ fn apply_default_canonical_component_set(
             component: None,
             dry_run: false,
             yes: true,
-            adopt: false,
+            adopt,
         },
         home,
         &lifecycle_root,
@@ -2658,6 +2659,7 @@ pub(crate) async fn handle_install_command(
     local: bool,
     no_dashboard: bool,
     automation: Option<CodexAutomationInstall>,
+    adopt: bool,
 ) -> tracedecay::errors::Result<()> {
     validate_codex_automation_flags(agent.as_deref(), automation)?;
     if local {
@@ -2699,6 +2701,7 @@ pub(crate) async fn handle_install_command(
             HostBundleCliOperation::Install,
             &home,
             !no_dashboard,
+            adopt,
         )?;
         refreshed_ids.insert(id.clone());
         if let Some(options) = automation.filter(|_| id == "codex") {
@@ -2728,6 +2731,7 @@ pub(crate) async fn handle_install_command(
                 HostBundleCliOperation::Uninstall,
                 &home,
                 true,
+                false,
             )?;
             removed_names.push(ag.name().to_string());
             user_cfg.installed_agents.retain(|a| a != id);
@@ -2748,6 +2752,7 @@ pub(crate) async fn handle_install_command(
                 HostBundleCliOperation::Install,
                 &home,
                 !no_dashboard,
+                adopt,
             )?;
             refreshed_ids.insert(id.clone());
             installed_names.push(ag.name().to_string());
@@ -2800,7 +2805,7 @@ pub(crate) async fn handle_install_command(
     Ok(())
 }
 
-pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()> {
+pub(crate) async fn handle_reinstall_command(adopt: bool) -> tracedecay::errors::Result<()> {
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
@@ -2835,7 +2840,14 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
             agents.len(),
             agents.join(", ")
         );
-        let results = reinstall_agent_integrations(&agents, &home, &tracedecay_bin).await;
+        let results = reinstall_agent_integrations_with_dashboard_policies(
+            &agents,
+            &home,
+            &tracedecay_bin,
+            &user_cfg.agent_dashboard_enabled,
+            adopt,
+        )
+        .await;
         // Reporting lives in `partition_reinstall_results`, which every
         // reinstall pass shares. Keep the reason with the name — a bare id list
         // left "failed for: claude, cursor, hermes, kimi" undiagnosable.
@@ -2857,7 +2869,7 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
     Ok(())
 }
 
-pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result<()> {
+pub(crate) async fn handle_update_plugin_command(adopt: bool) -> tracedecay::errors::Result<()> {
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
@@ -2886,6 +2898,7 @@ pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result
             HostBundleCliOperation::Update,
             &home,
             dashboard,
+            adopt,
         )?;
     }
     Ok(())
@@ -3114,6 +3127,7 @@ async fn reinstall_agent_integrations_with_persisted_dashboard_policies(
         home,
         tracedecay_bin,
         &user_config.agent_dashboard_enabled,
+        false,
     )
     .await
 }
@@ -3123,6 +3137,7 @@ async fn reinstall_agent_integrations_with_dashboard_policies(
     home: &Path,
     tracedecay_bin: &str,
     dashboard_policies: &std::collections::BTreeMap<String, bool>,
+    adopt: bool,
 ) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
     let mut results = Vec::new();
     for id in agent_ids {
@@ -3153,6 +3168,7 @@ async fn reinstall_agent_integrations_with_dashboard_policies(
             HostBundleCliOperation::Repair,
             home,
             dashboard,
+            adopt,
         ) {
             Ok(()) => {
                 results.push((id.clone(), Ok(AgentReinstallOutcome::Installed)));
@@ -3178,7 +3194,13 @@ pub(crate) async fn handle_uninstall_command(
     let mut user_cfg = load_host_lifecycle_user_config()?;
 
     if let Some(id) = agent {
-        apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home, true)?;
+        apply_default_canonical_component_set(
+            &id,
+            HostBundleCliOperation::Uninstall,
+            &home,
+            true,
+            false,
+        )?;
         user_cfg.installed_agents.retain(|a| a != &id);
         user_cfg.agent_dashboard_enabled.remove(&id);
         user_cfg
@@ -3193,6 +3215,7 @@ pub(crate) async fn handle_uninstall_command(
                 HostBundleCliOperation::Uninstall,
                 &home,
                 true,
+                false,
             )?;
         }
         user_cfg.installed_agents.clear();
@@ -3300,6 +3323,10 @@ mod tests {
         assert_eq!(
             super::artifact_disposition(&Action::Noop, &owned, "plugins/tracedecay.json"),
             "unchanged"
+        );
+        assert_eq!(
+            super::artifact_disposition(&Action::Noop, &owned, "plugins/unowned.json"),
+            "adopt"
         );
     }
 
@@ -3415,6 +3442,42 @@ mod tests {
         assert!(error.contains(relative.as_str()), "{error}");
         assert!(error.contains("--adopt"), "{error}");
         assert_eq!(std::fs::read(deployed).unwrap(), b"operator-owned");
+    }
+
+    #[test]
+    fn default_component_apply_honors_explicit_adoption_authority() {
+        let _profile = pinned_host_profile();
+        let home = tempfile::tempdir().unwrap();
+        let component_set = canonical_host_component_set("cursor", None, 0)
+            .unwrap()
+            .unwrap();
+        let relative =
+            &component_set.component_set.components[0].manifest.artifacts[0].relative_path;
+        let deployed = home.path().join(relative);
+        std::fs::create_dir_all(deployed.parent().unwrap()).unwrap();
+        std::fs::write(&deployed, b"pre-receipt").unwrap();
+
+        let error = apply_default_canonical_component_set(
+            "cursor",
+            HostBundleCliOperation::Install,
+            home.path(),
+            true,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--adopt"), "{error}");
+        assert_eq!(std::fs::read(&deployed).unwrap(), b"pre-receipt");
+
+        apply_default_canonical_component_set(
+            "cursor",
+            HostBundleCliOperation::Install,
+            home.path(),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_ne!(std::fs::read(deployed).unwrap(), b"pre-receipt");
     }
 
     #[test]
@@ -5685,12 +5748,14 @@ esac
             HostBundleCliOperation::Install,
             home.path(),
             false,
+            false,
         )
         .unwrap();
         apply_default_canonical_component_set(
             "hermes",
             HostBundleCliOperation::Update,
             home.path(),
+            false,
             false,
         )
         .unwrap();
@@ -5704,6 +5769,7 @@ esac
             home.path(),
             &tracedecay_bin,
             &policies,
+            false,
         )
         .await;
         assert!(matches!(
