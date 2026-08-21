@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.21](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.20...v0.1.0-beta.21) (2026-08-21)
+
+
+### Bug Fixes
+
+* **runtime:** prefer repository identity authority ([7267953](https://github.com/ScriptedAlchemy/tracedecay/commit/7267953f67dfd979e4df257228b6e9705527fcaf))
+
 ## [0.1.0-beta.20](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.19...v0.1.0-beta.20) (2026-08-21)
 
 
