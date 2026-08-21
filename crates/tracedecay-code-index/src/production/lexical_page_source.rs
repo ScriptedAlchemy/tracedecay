@@ -538,6 +538,17 @@ pub enum VerifiedSealedLexicalPageReadV1 {
     Complete(VerifiedSealedLexicalSourceReceiptV1),
 }
 
+struct PendingSealedLexicalPageV1 {
+    chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
+    page_bytes: usize,
+    imports: Vec<CodeIndexImportEvidenceV1>,
+    import_bytes: usize,
+    cursor: VerifiedSealedLexicalCursorV1,
+    page_hasher: Sha256,
+    cumulative_hasher: Sha256,
+    import_dictionary_hasher: Sha256,
+}
+
 /// Seekable, bounded lexical projection source over a verified v5/v6 seal.
 ///
 /// Opening performs a streaming structural scan and verifies the exact raw
@@ -663,7 +674,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                             .saturating_add(serialized.len())
                             > self.maximum_page_bytes)
                 {
-                    return self.commit_page(
+                    return self.commit_page(PendingSealedLexicalPageV1 {
                         chunks,
                         page_bytes,
                         imports,
@@ -672,7 +683,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         page_hasher,
                         cumulative_hasher,
                         import_dictionary_hasher,
-                    );
+                    });
                 }
                 hash_record(&mut page_hasher, &serialized)?;
                 hash_record(&mut cumulative_hasher, &serialized)?;
@@ -689,7 +700,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     )
                 })?;
                 if chunks.len() == self.maximum_page_chunks {
-                    return self.commit_page(
+                    return self.commit_page(PendingSealedLexicalPageV1 {
                         chunks,
                         page_bytes,
                         imports,
@@ -698,7 +709,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         page_hasher,
                         cumulative_hasher,
                         import_dictionary_hasher,
-                    );
+                    });
                 }
             }
             let mut import_ordinal = usize::try_from(cursor.next_import_ordinal).map_err(|_| {
@@ -730,7 +741,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         .saturating_add(serialized.len())
                         > self.maximum_page_bytes
                 {
-                    return self.commit_page(
+                    return self.commit_page(PendingSealedLexicalPageV1 {
                         chunks,
                         page_bytes,
                         imports,
@@ -739,7 +750,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         page_hasher,
                         cumulative_hasher,
                         import_dictionary_hasher,
-                    );
+                    });
                 }
                 hash_import_record(&mut page_hasher, &serialized)?;
                 hash_import_record(&mut cumulative_hasher, &serialized)?;
@@ -765,10 +776,25 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 })?;
             cursor.next_chunk_ordinal = 0;
             cursor.next_import_ordinal = 0;
+            // The page contract serializes every chunk before every import.
+            // Commit after an importing file so a later file cannot append a
+            // chunk after bytes already hashed as import records.
+            if !imports.is_empty() {
+                return self.commit_page(PendingSealedLexicalPageV1 {
+                    chunks,
+                    page_bytes,
+                    imports,
+                    import_bytes,
+                    cursor,
+                    page_hasher,
+                    cumulative_hasher,
+                    import_dictionary_hasher,
+                });
+            }
         }
 
         if !chunks.is_empty() || !imports.is_empty() {
-            return self.commit_page(
+            return self.commit_page(PendingSealedLexicalPageV1 {
                 chunks,
                 page_bytes,
                 imports,
@@ -777,7 +803,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 page_hasher,
                 cumulative_hasher,
                 import_dictionary_hasher,
-            );
+            });
         }
         Ok(VerifiedSealedLexicalPageReadV1::Complete(
             VerifiedSealedLexicalSourceReceiptV1 {
@@ -870,15 +896,18 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
 
     fn commit_page(
         &mut self,
-        chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
-        page_bytes: usize,
-        imports: Vec<CodeIndexImportEvidenceV1>,
-        import_bytes: usize,
-        mut cursor: VerifiedSealedLexicalCursorV1,
-        mut page_hasher: Sha256,
-        cumulative_hasher: Sha256,
-        import_dictionary_hasher: Sha256,
+        pending: PendingSealedLexicalPageV1,
     ) -> Result<VerifiedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
+        let PendingSealedLexicalPageV1 {
+            chunks,
+            page_bytes,
+            imports,
+            import_bytes,
+            mut cursor,
+            mut page_hasher,
+            cumulative_hasher,
+            import_dictionary_hasher,
+        } = pending;
         let page_ordinal = cursor.next_page_ordinal;
         let chunk_count = u64::try_from(chunks.len()).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
@@ -1136,14 +1165,13 @@ impl LayoutScanner {
                 self.pending_key = None;
             }
             b'}' => {
-                if let Some(start) = self.current_file_start {
-                    if self
+                if let Some(start) = self.current_file_start
+                    && self
                         .generation_depth
                         .is_some_and(|depth| self.brace_depth == depth + 1)
-                    {
-                        self.file_ranges.push(start..offset + 1);
-                        self.current_file_start = None;
-                    }
+                {
+                    self.file_ranges.push(start..offset + 1);
+                    self.current_file_start = None;
                 }
                 if self.generation_depth == Some(self.brace_depth) {
                     let hasher = self.generation_hasher.take().ok_or_else(|| {

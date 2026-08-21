@@ -1168,6 +1168,118 @@ fn verified_sealed_lexical_imports_are_exact_once_and_page_boundary_independent(
 }
 
 #[test]
+fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files() {
+    let first_source = "import type { Beta } from \"./beta\";\nexport type Alpha = Beta;\n";
+    let second_source = "import type { Alpha } from \"./alpha\";\nexport type Beta = Alpha;\n";
+    let mut request = request_with_source(
+        "file.lexical-order.alpha",
+        1_266_000,
+        "commit.lexical-order",
+        "tree.lexical-order",
+        first_source,
+    );
+    request.snapshot.files[0].logical_path = "src/alpha.ts".to_owned();
+    request.snapshot.files[0].language = Some(id::<LanguageId>("typescript"));
+    let second_file = SanitizedCodeFileV1 {
+        file_occurrence_id: id::<FileOccurrenceId>("file.lexical-order.beta"),
+        logical_path: "src/beta.ts".to_owned(),
+        language: Some(id::<LanguageId>("typescript")),
+        content_digest: content_digest(second_source.as_bytes()),
+        disposition: SnapshotFileDispositionV1::Present,
+    };
+    request.snapshot.files.push(second_file.clone());
+    request.snapshot.content_identity =
+        content_digest(format!("{first_source}{second_source}").as_bytes());
+    request.captured_files.push(CodeIndexCapturedFileV1 {
+        file_occurrence_id: second_file.file_occurrence_id.clone(),
+        sanitized_bytes: second_source.as_bytes().to_vec(),
+        sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+    });
+    request.changed_files.clear();
+    request.changed_files.insert("src/alpha.ts".to_owned());
+    request.changed_files.insert("src/beta.ts".to_owned());
+    request
+        .snapshot
+        .validate()
+        .expect("two-file TypeScript snapshot is canonical");
+
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(request, &ActiveControl)
+        .expect("generation publishes");
+    let import_files = generation
+        .imports()
+        .iter()
+        .map(|evidence| evidence.file_occurrence_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        import_files.len(),
+        2,
+        "both files must contribute parser-backed import evidence"
+    );
+
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+    let state_digest = id::<ManifestDigest>(
+        envelope["state_digest"]
+            .as_str()
+            .expect("state digest string"),
+    );
+    let mut source = VerifiedSealedLexicalPageSourceV1::open(
+        Cursor::new(sealed.clone()),
+        u64::try_from(sealed.len()).expect("sealed length"),
+        state_digest,
+        usize::MAX,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect("verified page source opens");
+    let mut previous_cursor = None;
+    let mut observed_chunks = Vec::new();
+    let mut observed_imports = Vec::new();
+    let receipt = loop {
+        match source.next_page(&ActiveControl).expect("verified page") {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                assert!(page.payload_bytes() + page.import_payload_bytes() <= 1024 * 1024);
+                page.verify_transition(previous_cursor.as_ref())
+                    .expect("a source-minted cross-file page must verify");
+                previous_cursor = Some(page.next_cursor().clone());
+                observed_chunks.extend(page.chunks().iter().map(|chunk| chunk.chunk().clone()));
+                observed_imports.extend(page.imports().iter().cloned());
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+        }
+    };
+    receipt
+        .verify_completion(previous_cursor.as_ref())
+        .expect("all verified pages must complete the source receipt");
+
+    let chunk_files = observed_chunks
+        .iter()
+        .map(|chunk| chunk.anchor.file_occurrence_id.clone())
+        .collect::<BTreeSet<_>>();
+    let page_import_files = observed_imports
+        .iter()
+        .map(|evidence| evidence.file_occurrence_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(chunk_files.len(), 2, "pages must retain both files' chunks");
+    assert_eq!(page_import_files, import_files);
+    let mut expected_chunks = generation
+        .admitted_chunks()
+        .expect("generation admits exact chunks")
+        .iter()
+        .map(|chunk| chunk.chunk().clone())
+        .collect::<Vec<_>>();
+    observed_chunks.sort_by(|left, right| left.id.cmp(&right.id));
+    expected_chunks.sort_by(|left, right| left.id.cmp(&right.id));
+    assert_eq!(observed_chunks, expected_chunks);
+    assert_eq!(observed_imports, generation.imports());
+}
+
+#[test]
 fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
