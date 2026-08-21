@@ -706,7 +706,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     #[cfg(test)]
-    pub(super) async fn pause_next_cold_mount_before_final_commit(
+    pub(crate) async fn pause_next_cold_mount_before_final_commit(
         &self,
         project_root: PathBuf,
     ) -> (

@@ -144,6 +144,94 @@ async fn fresh_committed_project_open_mounts_feedback_before_lsp() {
 }
 
 #[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cold_project_shutdown_joins_every_production_graph_holder() {
+    let temp = TempDir::new().expect("cold shutdown fixture");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(project.join("src")).expect("cold shutdown project");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("cold shutdown source");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let initialized = Command::new("git")
+        .args(["init", "--quiet", "--initial-branch=main"])
+        .current_dir(&project)
+        .status()
+        .expect("run git init");
+    assert!(initialized.success(), "git init must succeed");
+    let added = Command::new("git")
+        .args(["add", "--all"])
+        .current_dir(&project)
+        .status()
+        .expect("run git add");
+    assert!(added.success(), "git add must succeed");
+    let committed = Command::new("git")
+        .args([
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "test: initial",
+        ])
+        .current_dir(&project)
+        .status()
+        .expect("run git commit");
+    assert!(committed.success(), "git commit must succeed");
+    let canonical_project = project.canonicalize().expect("canonical project root");
+    let handshake = DaemonHandshake {
+        project_path: Some(canonical_project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "cold-production-owner-shutdown");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let (cold_commit_entered, release_cold_commit) = engine
+        .invocation
+        .code_index_schedulers
+        .pause_next_cold_mount_before_final_commit(canonical_project)
+        .await;
+    let lifecycle = engine.lifecycle.clone();
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("cold project server");
+    let graph = server.cg().await;
+    let graph_weak = Arc::downgrade(&graph);
+    drop(graph);
+    drop(server);
+    tokio::time::timeout(std::time::Duration::from_secs(20), cold_commit_entered)
+        .await
+        .expect("cold mount must reach final commit")
+        .expect("cold mount final-commit gate sender");
+
+    let shutdown = tokio::spawn(async move { engine.shutdown_all().await });
+    lifecycle.wait_for_draining().await;
+    release_cold_commit
+        .send(())
+        .expect("release cold mount during shutdown");
+    let shutdown = tokio::time::timeout(std::time::Duration::from_secs(60), shutdown)
+        .await
+        .expect("daemon shutdown deadline")
+        .expect("daemon shutdown task");
+    assert!(
+        shutdown.project_servers.is_clean(),
+        "project servers must release every production database owner: {shutdown:?}"
+    );
+    assert!(
+        shutdown.background.unfinished().is_empty(),
+        "terminal graph shutdown must close every production holder: {shutdown:?}"
+    );
+    assert!(
+        graph_weak.upgrade().is_none(),
+        "terminal shutdown must release the cold project graph"
+    );
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn non_git_project_open_retains_lsp_and_starts_hook_replay() {
     assert_fresh_project_open_owners("non-git-project-open-owners", ProjectGitState::NonGit).await;
