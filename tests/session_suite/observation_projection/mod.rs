@@ -19,8 +19,8 @@ use tracedecay_store::{
     AnchoredObservationWrite, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
     ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
-    SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 
@@ -424,10 +424,10 @@ async fn add_other_projector_owner(tmp: &TempDir, observation_id: &CanonicalObse
     raw_conn
         .execute(
             "INSERT INTO observation_projection_provenance (
-                projector_version, observation_id, receipt_id, output_provider,
-                output_message_id, output_digest, message_created
-             ) SELECT 'test-projector-v2', observation_id, receipt_id, output_provider,
-                      output_message_id, output_digest, 0
+                projector_version, observation_id, output_ordinal, retrieval_anchor_id,
+                receipt_id, output_provider, output_message_id, output_digest, message_created
+             ) SELECT 'test-projector-v2', observation_id, output_ordinal, retrieval_anchor_id,
+                      receipt_id, output_provider, output_message_id, output_digest, 0
                FROM observation_projection_provenance
                WHERE projector_version = ?1 AND observation_id = ?2",
             rusqlite::params![
@@ -436,6 +436,53 @@ async fn add_other_projector_owner(tmp: &TempDir, observation_id: &CanonicalObse
             ],
         )
         .unwrap();
+}
+
+fn seed_v4_predecessor_with_stale_current_provenance(
+    tmp: &TempDir,
+    observation_id: &CanonicalObservationIdV1,
+) {
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO observation_projection_provenance (
+                projector_version, observation_id, output_ordinal, retrieval_anchor_id,
+                receipt_id, output_provider, output_message_id, output_digest, message_created
+             ) SELECT ?1, observation_id, output_ordinal, retrieval_anchor_id,
+                      receipt_id, output_provider, output_message_id, output_digest, 0
+               FROM observation_projection_provenance
+               WHERE projector_version = ?2 AND observation_id = ?3",
+            rusqlite::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+            ],
+        )
+        .unwrap();
+    raw_conn
+        .execute(
+            "UPDATE observation_projection_provenance
+             SET output_digest = ?1
+             WHERE projector_version = ?2 AND observation_id = ?3",
+            rusqlite::params![
+                format!("sha256:{}", "0".repeat(64)),
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+            ],
+        )
+        .unwrap();
+}
+
+fn projection_owner_count(tmp: &TempDir, projector_version: &str) -> i64 {
+    rusqlite::Connection::open(isolated_lcm_db_path(tmp))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM observation_projection_provenance
+             WHERE projector_version = ?1",
+            [projector_version],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 async fn audited_projection_fixture(session_id: &str, message_id: &str) -> TempDir {

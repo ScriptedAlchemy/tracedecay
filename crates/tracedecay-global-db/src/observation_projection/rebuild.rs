@@ -13,8 +13,9 @@ use tracedecay_sessions::retrieval_content::{
 use tracedecay_store::{
     ObservationProjection, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation,
     ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
-    ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection,
-    SessionMessageRecord, SessionRecord, WorkflowFactProjection, workflow_semantic_kind,
+    ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    SessionMessageProjection, SessionMessageRecord, SessionRecord, WorkflowFactProjection,
+    workflow_semantic_kind,
 };
 
 use super::super::session_temporal::record_canonical_observation_effect;
@@ -1326,11 +1327,14 @@ async fn ensure_staged_output_baseline(
         .query(
             "SELECT
                 COALESCE(MAX(CASE WHEN projector_version = ?1 THEN message_created ELSE 0 END), 0),
-                COALESCE(MAX(CASE WHEN projector_version <> ?1 THEN 1 ELSE 0 END), 0)
+                COALESCE(MAX(CASE
+                    WHEN projector_version <> ?1 AND projector_version <> ?2 THEN 1 ELSE 0
+                END), 0)
              FROM observation_projection_provenance
-             WHERE output_provider = ?2 AND output_message_id = ?3",
+             WHERE output_provider = ?3 AND output_message_id = ?4",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
                 message.provider.as_str(),
                 message.message_id.as_str(),
             ],
@@ -1684,6 +1688,7 @@ async fn clear_active_projection(
     generation: &str,
 ) -> ProjectionStoreResult<()> {
     ensure_projection_output_state_cache(conn).await?;
+    retire_projection_predecessor_output_ownership(conn).await?;
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS observation_projection_rebuild_retained_outputs (
             output_provider TEXT NOT NULL,
@@ -1796,6 +1801,18 @@ async fn clear_active_projection(
     .await
     .map_err(|error| storage("invalidate projection output state for rebuild", error))?;
     Ok(())
+}
+
+async fn retire_projection_predecessor_output_ownership(
+    conn: &impl Executor,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "DELETE FROM observation_projection_provenance WHERE projector_version = ?1",
+        params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("retire predecessor projection provenance", error))
 }
 
 async fn activate_rebuild_sessions(

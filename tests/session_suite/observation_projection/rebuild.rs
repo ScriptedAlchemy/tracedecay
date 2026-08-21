@@ -450,6 +450,109 @@ async fn rebuild_preserves_output_referenced_by_another_projector_version() {
 }
 
 #[tokio::test]
+async fn v5_predecessor_cutover_rebuilds_stale_provenance_and_preserves_unrelated_owner() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let predecessor = observation(
+        "session-v5-predecessor",
+        0,
+        100,
+        "receipt.v5-predecessor",
+        conversational_payload("message-v5-predecessor", "v5 predecessor canary"),
+    );
+    let unrelated = observation(
+        "session-v5-unrelated",
+        0,
+        100,
+        "receipt.v5-unrelated",
+        conversational_payload("message-v5-unrelated", "unrelated owner canary"),
+    );
+    persist(&store, predecessor.clone(), None).await;
+    persist(&store, unrelated.clone(), None).await;
+    drain_projection_queue(&store).await;
+    seed_v4_predecessor_with_stale_current_provenance(&tmp, predecessor.observation_id());
+    add_other_projector_owner(&tmp, unrelated.observation_id()).await;
+
+    let rebuilt = rebuild_projection_to_completion(&store, 2).await;
+    assert_eq!(rebuilt.projected_rows(), 2);
+    assert_eq!(rebuilt.skipped_observations(), 0);
+    assert_eq!(
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
+        0
+    );
+    assert_eq!(
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION),
+        2
+    );
+    assert_eq!(projection_owner_count(&tmp, "test-projector-v2"), 1);
+    assert_eq!(projected_message_texts(&tmp).await.len(), 2);
+
+    let provenance = projection_provenance_rows(&tmp).await;
+    let repeated = rebuild_projection_to_completion(&store, 2).await;
+    assert_eq!(repeated.projected_rows(), 2);
+    assert_eq!(projection_provenance_rows(&tmp).await, provenance);
+}
+
+#[tokio::test]
+async fn v5_predecessor_cutover_rolls_back_and_retries_after_activation_failure() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let predecessor = observation(
+        "session-v5-cutover-retry",
+        0,
+        100,
+        "receipt.v5-cutover-retry",
+        conversational_payload("message-v5-cutover-retry", "cutover retry canary"),
+    );
+    persist(&store, predecessor.clone(), None).await;
+    drain_projection_queue(&store).await;
+    seed_v4_predecessor_with_stale_current_provenance(&tmp, predecessor.observation_id());
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TRIGGER interrupt_v5_predecessor_cutover
+             BEFORE DELETE ON observation_projection_provenance
+             WHEN OLD.projector_version = 'claude-session-message-v4' BEGIN
+                SELECT RAISE(ABORT, 'injected predecessor cutover interruption');
+             END;",
+        )
+        .unwrap();
+
+    let error = store
+        .rebuild_projection(1)
+        .await
+        .expect_err("interrupted activation must roll back predecessor retirement");
+    assert!(matches!(error, ProjectionStoreError::Storage { .. }));
+    assert_eq!(
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
+        1
+    );
+    raw_conn
+        .execute_batch("DROP TRIGGER interrupt_v5_predecessor_cutover;")
+        .unwrap();
+    drop(raw_conn);
+
+    let rebuilt = rebuild_projection_to_completion(&store, 1).await;
+    assert_eq!(rebuilt.projected_rows(), 1);
+    assert_eq!(rebuilt.skipped_observations(), 0);
+    assert_eq!(
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
+        0
+    );
+    assert_eq!(
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION),
+        1
+    );
+    assert_eq!(projected_message_texts(&tmp).await.len(), 1);
+}
+
+#[tokio::test]
 async fn cross_projector_owner_blocks_incompatible_generation_rollover() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;

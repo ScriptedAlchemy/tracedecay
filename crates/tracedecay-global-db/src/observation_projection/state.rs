@@ -1,8 +1,8 @@
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
     ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, SessionMessageRecord,
-    SessionRecord,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    SessionMessageProjection, SessionMessageRecord, SessionRecord,
 };
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
@@ -609,12 +609,13 @@ pub(super) async fn has_other_projector_output_owner(
         .query(
             "SELECT 1 FROM observation_projection_provenance
              WHERE output_provider = ?1 AND output_message_id = ?2
-               AND projector_version <> ?3
+               AND projector_version <> ?3 AND projector_version <> ?4
              LIMIT 1",
             params![
                 message.provider.as_str(),
                 message.message_id.as_str(),
                 SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
             ],
         )
         .await
