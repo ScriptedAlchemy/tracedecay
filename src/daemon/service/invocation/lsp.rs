@@ -341,6 +341,7 @@ impl DaemonInvocationService {
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
         self.project_runtimes.shut_down_all().await;
+        self.session_holder_databases.lock().await.clear();
         self.operation_events.expire_all().await;
         if let Err(problem) = lease_shutdown {
             tracing::error!(
