@@ -9,7 +9,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, TryLockError, Weak,
+        Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -58,6 +58,7 @@ use crate::{
         graph::{GraphLane, production_code_index_freshness},
         lexical::{
             CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1,
+            CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
             CodeLexicalProjectionMetadataV1, LexicalLane,
         },
         ports::RetrievalPortError,
@@ -1279,7 +1280,8 @@ type GenerationServingCachesV1 = (
     CodeGenerationId,
     Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     Arc<OnceLock<queries::GenerationRecordIndexV1>>,
-    Arc<Mutex<()>>,
+    Arc<Mutex<Option<CodeLexicalProjectionBuildV1>>>,
+    Arc<AtomicBool>,
     Arc<RwLock<CodeGraphActivationStateV1>>,
 );
 
@@ -1288,11 +1290,11 @@ pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     generation: Arc<CodeIndexPublishedGenerationV1>,
     query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
-    /// Single-flight gate for the O(store) lane-owner build. Without it every
-    /// query that raced the activation warm rebuilt the full lexical/exact
-    /// projection inline — N concurrent cold queries did N store-sized builds,
-    /// each blowing its own dispatch deadline while the warm was still running.
-    query_owners_build_gate: Arc<Mutex<()>>,
+    /// Generation-owned partial lexical projection. Only the background
+    /// scheduler advances it; foreground queries observe typed warming until
+    /// the immutable owners are installed.
+    text_projection_build: Arc<Mutex<Option<CodeLexicalProjectionBuildV1>>>,
+    text_projection_failed: Arc<AtomicBool>,
     graph_activation: Arc<RwLock<CodeGraphActivationStateV1>>,
 }
 
@@ -1389,7 +1391,11 @@ impl LatestCompleteCodeIndexV1 {
     }
 
     fn activate_text_serving(&self) -> Result<(), RetrievalPortError> {
-        self.install_query_owners(&queries::maximum_retrieval_budget())?;
+        if !self.advance_text_serving(usize::MAX)? {
+            return Err(RetrievalPortError::AuthorityUnavailable(
+                "code-index text serving owners are warming".to_owned(),
+            ));
+        }
         let _ = self.record_index();
         let _ = self.generation.test_attribution_authority();
         Ok(())
@@ -1404,7 +1410,19 @@ impl LatestCompleteCodeIndexV1 {
     /// Whether the exact/lexical lane owners are already built.
     #[cfg(test)]
     fn query_owners_are_warm(&self) -> bool {
+        self.text_serving_is_ready()
+    }
+
+    fn text_serving_is_ready(&self) -> bool {
         self.query_owners.get().is_some()
+    }
+
+    fn text_serving_needs_work(&self) -> bool {
+        !self.text_serving_is_ready() && !self.text_projection_failed.load(Ordering::Acquire)
+    }
+
+    fn mark_text_serving_failed(&self) {
+        self.text_projection_failed.store(true, Ordering::Release);
     }
 
     fn semantic_evaluation_snapshot(&self) -> SemanticEvaluationCodeSnapshotV1 {
@@ -1462,17 +1480,24 @@ impl LatestCompleteCodeIndexV1 {
     pub fn production_query_owners(
         &self,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
+        self.activate_text_serving()?;
         self.production_query_owners_with_budget(&queries::maximum_retrieval_budget())
     }
 
     fn production_query_owners_with_budget(
         &self,
-        build_budget: &RetrievalBudget,
+        _build_budget: &RetrievalBudget,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
-        if let Some(owners) = self.query_owners.get() {
-            return Ok(Arc::clone(owners));
+        if self.text_projection_failed.load(Ordering::Acquire) {
+            return Err(RetrievalPortError::AuthorityUnavailable(
+                "code-index text serving projection failed".to_owned(),
+            ));
         }
-        self.install_query_owners(build_budget)
+        self.query_owners.get().map(Arc::clone).ok_or_else(|| {
+            RetrievalPortError::AuthorityUnavailable(
+                "code-index text serving owners are warming".to_owned(),
+            )
+        })
     }
 
     fn production_graph_serving(
@@ -1538,36 +1563,13 @@ impl LatestCompleteCodeIndexV1 {
         )
     }
 
-    /// `build_budget` bounds the O(store) lexical projection build. A set
-    /// `deadline_micros`, including `Some(0)`, is used as-is; `None` is unset
-    /// and keeps the crate build fallback. A caller holding both a lane and a
-    /// base budget must pass the tighter of the two (smaller deadline wins).
-    fn install_query_owners(
+    fn text_projection_metadata(
         &self,
-        build_budget: &RetrievalBudget,
-    ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
-        if let Some(owners) = self.query_owners.get() {
-            return Ok(Arc::clone(owners));
-        }
-        // Cold memo: exactly one caller builds. The build is O(store), so
-        // racing queries fail with a typed warming state instead of duplicating
-        // the work or waiting beyond their own request budget.
-        let _build = match self.query_owners_build_gate.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(TryLockError::WouldBlock) => {
-                return Err(RetrievalPortError::AuthorityUnavailable(
-                    "code-index text serving owners are warming".to_owned(),
-                ));
-            }
-        };
-        if let Some(owners) = self.query_owners.get() {
-            return Ok(Arc::clone(owners));
-        }
+    ) -> Result<CodeLexicalProjectionMetadataV1, RetrievalPortError> {
         let generation_id = self.generation.manifest().generation_id.clone();
         let freshness = self.source_freshness()?;
-        let metadata = CodeLexicalProjectionMetadataV1 {
-            generation: generation_id.clone(),
+        Ok(CodeLexicalProjectionMetadataV1 {
+            generation: generation_id,
             repository_id: Some(self.generation.snapshot().repository.clone()),
             logical_paths: self
                 .generation
@@ -1576,7 +1578,7 @@ impl LatestCompleteCodeIndexV1 {
                 .iter()
                 .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
                 .collect(),
-            freshness: freshness.clone(),
+            freshness,
             exact_retriever_revision: ComponentRevision::new(
                 tracedecay_query::retrieval::QUERY_EXACT_RETRIEVER_REVISION_V1,
             )
@@ -1589,18 +1591,58 @@ impl LatestCompleteCodeIndexV1 {
                 tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
             )
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+        })
+    }
+
+    /// Advance at most `maximum_documents` document operations on this sealed
+    /// generation's background text projection. The mutex is both the
+    /// generation-owned partial-state authority and the single-flight gate for
+    /// concurrent scheduler wakes.
+    fn advance_text_serving(&self, maximum_documents: usize) -> Result<bool, RetrievalPortError> {
+        let result = self.advance_text_serving_inner(maximum_documents);
+        if result.is_err() {
+            self.mark_text_serving_failed();
+        }
+        result
+    }
+
+    fn advance_text_serving_inner(
+        &self,
+        maximum_documents: usize,
+    ) -> Result<bool, RetrievalPortError> {
+        if let Some(owners) = self.query_owners.get() {
+            let _ = owners;
+            return Ok(true);
+        }
+        let mut build = self
+            .text_projection_build
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(owners) = self.query_owners.get() {
+            let _ = owners;
+            return Ok(true);
+        }
+        if build.is_none() {
+            let admitted = self
+                .generation
+                .admitted_chunks()
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            *build = Some(CodeLexicalProjectionBuildV1::new_admitted(
+                self.text_projection_metadata()?,
+                admitted.as_ref().clone(),
+            )?);
+        }
+        let step = build
+            .as_mut()
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "code-index text projection state is missing".to_owned(),
+                )
+            })?
+            .advance(maximum_documents)?;
+        let CodeLexicalProjectionBuildStepV1::Ready(lexical_projection) = step else {
+            return Ok(false);
         };
-        let admitted = self
-            .generation
-            .admitted_chunks()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-        // One materializing copy per generation build; every query thereafter
-        // shares the Arc'd owners without touching the chunk set again.
-        let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted_with_budget(
-            metadata,
-            admitted.as_ref().clone(),
-            build_budget,
-        )?;
         let authority = CentralExactAdmissionAuthorityV1::new(
             ExactAdmissionRuleRevision::new(
                 tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
@@ -1614,7 +1656,10 @@ impl LatestCompleteCodeIndexV1 {
         let lexical = LexicalLane::new(lexical_projection);
         let owners = Arc::new(ProductionCodeIndexQueryOwnersV1 { exact, lexical });
         let _ = self.query_owners.set(Arc::clone(&owners));
-        Ok(self.query_owners.get().map(Arc::clone).unwrap_or(owners))
+        *build = None;
+        let _ = self.record_index();
+        let _ = self.generation.test_attribution_authority();
+        Ok(true)
     }
 
     fn install_graph_serving(
@@ -2561,35 +2606,47 @@ impl CodeIndexWorktreeSchedulerV1 {
             .query_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (query_owners, record_index, query_owners_build_gate, graph_activation) = match cached
-            .as_ref()
-        {
-            Some((cached_id, owners, index, gate, interactive)) if cached_id == &generation_id => (
-                Arc::clone(owners),
-                Arc::clone(index),
-                Arc::clone(gate),
-                Arc::clone(interactive),
-            ),
+        let (
+            query_owners,
+            record_index,
+            text_projection_build,
+            text_projection_failed,
+            graph_activation,
+        ) = match cached.as_ref() {
+            Some((cached_id, owners, index, build, failed, interactive))
+                if cached_id == &generation_id =>
+            {
+                (
+                    Arc::clone(owners),
+                    Arc::clone(index),
+                    Arc::clone(build),
+                    Arc::clone(failed),
+                    Arc::clone(interactive),
+                )
+            }
             _ => {
                 let owners = Arc::new(OnceLock::new());
                 let index = Arc::new(OnceLock::new());
-                let gate = Arc::new(Mutex::new(()));
+                let build = Arc::new(Mutex::new(None));
+                let failed = Arc::new(AtomicBool::new(false));
                 let graph_activation = Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending));
                 *cached = Some((
                     generation_id,
                     Arc::clone(&owners),
                     Arc::clone(&index),
-                    Arc::clone(&gate),
+                    Arc::clone(&build),
+                    Arc::clone(&failed),
                     Arc::clone(&graph_activation),
                 ));
-                (owners, index, gate, graph_activation)
+                (owners, index, build, failed, graph_activation)
             }
         };
         LatestCompleteCodeIndexV1 {
             generation,
             query_owners,
             record_index,
-            query_owners_build_gate,
+            text_projection_build,
+            text_projection_failed,
             graph_activation,
         }
     }
@@ -2640,7 +2697,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                         generation,
                         query_owners: Arc::new(OnceLock::new()),
                         record_index: Arc::new(OnceLock::new()),
-                        query_owners_build_gate: Arc::new(Mutex::new(())),
+                        text_projection_build: Arc::new(Mutex::new(None)),
+                        text_projection_failed: Arc::new(AtomicBool::new(false)),
                         graph_activation: Arc::new(RwLock::new(
                             CodeGraphActivationStateV1::Pending,
                         )),

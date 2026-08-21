@@ -47,6 +47,7 @@ use self::ignored_dependencies::exact_activated_serving_generation;
 pub(super) use scope_identity::latest_matches_scope_identity;
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
+const TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1: usize = 64;
 
 /// Bounded exponential backoff between activation retries of the same sealed
 /// generation. Activation of a large artifact is minutes of real work, so the
@@ -2064,7 +2065,8 @@ impl CodeIndexSchedulerRegistryV1 {
         // Cold mount publishes only the exact route. The worker may seat a
         // complete identity-valid generation as stale serving before refresh
         // claims freshness; missing Git authority still leaves this empty.
-        let serving_generation = Arc::new(RwLock::new(None));
+        let serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>> =
+            Arc::new(RwLock::new(None));
         let serving_generation_epoch = Arc::new(AtomicU64::new(0));
         let serving_generation_installation = Arc::new(Mutex::new(None));
         let hints = Arc::clone(&opened.hints);
@@ -2187,6 +2189,41 @@ impl CodeIndexSchedulerRegistryV1 {
                 // never misreads in-flight owner work as plain unavailability.
                 let _reconcile_pass =
                     super::ReconcilePassGuard::enter(&worker_reconcile_in_progress);
+                let text_generation = serving_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let Some(latest) = text_generation
+                    && latest.text_serving_needs_work()
+                {
+                    let failed_latest = latest.clone();
+                    let build = tokio::task::spawn_blocking(move || {
+                        latest.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
+                    })
+                    .await;
+                    match build {
+                        Ok(Ok(true)) => {}
+                        Ok(Ok(false)) => {
+                            worker_wake.notify_one();
+                            continue;
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                event = "code_index_text_projection_failed",
+                                error = %error,
+                                "code-index background text projection failed"
+                            );
+                        }
+                        Err(error) => {
+                            failed_latest.mark_text_serving_failed();
+                            tracing::warn!(
+                                event = "code_index_text_projection_task_failed",
+                                error = %error,
+                                "code-index background text projection task failed"
+                            );
+                        }
+                    }
+                }
                 // Admission is held: queue wait ends and service time begins.
                 let started_micros = now_micros().0;
                 let (arrival, trigger) = Self::take_pending_arrival(
@@ -2244,7 +2281,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     let swap_scheduler = Arc::clone(&scheduler);
                                     let swap_serving = Arc::clone(&serving_generation);
                                     let swap_serving_epoch = Arc::clone(&serving_generation_epoch);
-                                    let _ = tokio::task::spawn_blocking(move || {
+                                    let seated = tokio::task::spawn_blocking(move || {
                                         let scheduler = swap_scheduler
                                             .lock()
                                             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2261,9 +2298,16 @@ impl CodeIndexSchedulerRegistryV1 {
                                             let _ = scheduler.schedule_semantic_generation(
                                                 retained.generation(),
                                             );
+                                            true
+                                        } else {
+                                            false
                                         }
                                     })
-                                    .await;
+                                    .await
+                                    .unwrap_or(false);
+                                    if seated {
+                                        worker_wake.notify_one();
+                                    }
                                 }
                                 Err(error) => {
                                     let retryable = error.is_retryable_activation();
@@ -2298,7 +2342,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     let swap_scheduler = Arc::clone(&scheduler);
                                     let swap_serving = Arc::clone(&serving_generation);
                                     let swap_serving_epoch = Arc::clone(&serving_generation_epoch);
-                                    let _ = tokio::task::spawn_blocking(move || {
+                                    let seated = tokio::task::spawn_blocking(move || {
                                         let scheduler = swap_scheduler
                                             .lock()
                                             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2315,9 +2359,16 @@ impl CodeIndexSchedulerRegistryV1 {
                                             let _ = scheduler.schedule_semantic_generation(
                                                 retained.generation(),
                                             );
+                                            true
+                                        } else {
+                                            false
                                         }
                                     })
-                                    .await;
+                                    .await
+                                    .unwrap_or(false);
+                                    if seated {
+                                        worker_wake.notify_one();
+                                    }
                                 }
                             }
                         }
@@ -2423,6 +2474,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     let scheduler = Arc::clone(&worker_scheduler);
                     let serving_generation = Arc::clone(&worker_serving_generation);
                     let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
+                    let text_latest = latest.clone();
                     let latest = latest.clone();
                     let serving_swap = tokio::task::spawn_blocking(move || {
                         let scheduler = scheduler
@@ -2450,7 +2502,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     })
                     .await;
                     match serving_swap {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(())) => {
+                            if text_latest.text_serving_needs_work() {
+                                worker_wake.notify_one();
+                            }
+                        }
                         Ok(Err(error)) => result = Ok((Err(error), None, None)),
                         Err(error) => {
                             result = Ok((

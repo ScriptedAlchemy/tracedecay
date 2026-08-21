@@ -2187,13 +2187,11 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
     );
 }
 
-/// The lexical projection build inside `install_query_owners` honors the
-/// caller's `RetrievalBudget` verbatim: `Some(0)` is a set deadline that
-/// expires immediately as a typed `BudgetExceeded` refusal with nothing
-/// memoized, while `None` is unset and keeps the crate build fallback so the
-/// same generation still builds and memoizes its owners.
+/// Foreground query admission never performs the O(store) text projection.
+/// Only the scheduler-owned builder may advance it, one bounded document
+/// window at a time, until the immutable owners become visible atomically.
 #[test]
-fn query_owner_build_honors_set_budget_and_keeps_crate_fallback_when_unset() {
+fn foreground_query_owner_read_stays_warming_until_background_projection_finishes() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
         "pub fn caller() { callee(); }\npub fn callee() {}\n",
@@ -2203,39 +2201,177 @@ fn query_owner_build_honors_set_budget_and_keeps_crate_fallback_when_unset() {
     let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
     published(scheduler.reconcile_now().expect("publish"));
     let latest = scheduler.latest_complete().expect("latest generation");
-    let expired = RetrievalBudget {
+    let budget = RetrievalBudget {
         max_candidates_per_lane: 1,
         max_fused_candidates: 1,
         max_hydrated_results: 1,
         max_hydration_bytes: 1,
-        deadline_micros: Some(0),
+        deadline_micros: None,
     };
-    let refusal = latest.install_query_owners(&expired);
+    let refusal = latest.production_query_owners_with_budget(&budget);
     match refusal {
-        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded) => {}
+        Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_)) => {}
         Err(error) => {
-            panic!("an already-expired build budget is a typed budget refusal: {error:?}")
+            panic!("a cold foreground read must report typed warming: {error:?}")
         }
-        Ok(_) => panic!("Some(0) is a set deadline and must expire immediately"),
+        Ok(_) => panic!("a cold foreground read must not build serving owners"),
     }
     assert!(
-        latest.query_owners.get().is_none(),
-        "a refused build must not be memoized as serving owners"
+        latest
+            .text_projection_build
+            .lock()
+            .expect("text projection state")
+            .is_none(),
+        "foreground observation must not initialize the background builder"
     );
-
-    let unset = RetrievalBudget {
-        deadline_micros: None,
-        ..expired
-    };
-    let owners = latest
-        .install_query_owners(&unset)
-        .expect("an unset deadline keeps the crate build fallback");
-    let repeat = latest
-        .production_query_owners()
-        .expect("built owners are memoized for serving");
+    while !latest
+        .advance_text_serving(1)
+        .expect("bounded background text projection")
+    {}
+    assert!(latest.query_owners_are_warm());
     assert!(
-        Arc::ptr_eq(&owners, &repeat),
-        "every reader must share the one built owner set"
+        latest
+            .text_projection_build
+            .lock()
+            .expect("completed text projection state")
+            .is_none(),
+        "completed projection must release its partial builder state"
+    );
+}
+
+#[test]
+fn failed_background_text_task_is_terminal_typed_unavailable() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn indexed() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+
+    latest.mark_text_serving_failed();
+
+    assert!(
+        !latest.text_serving_needs_work(),
+        "a failed task must not arm an unbounded self-wake loop"
+    );
+    match latest.production_query_owners_with_budget(&RetrievalBudget {
+        max_candidates_per_lane: 1,
+        max_fused_candidates: 1,
+        max_hydrated_results: 1,
+        max_hydration_bytes: 1,
+        deadline_micros: None,
+    }) {
+        Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(reason)) => {
+            assert!(reason.contains("projection failed"));
+        }
+        Err(error) => panic!("failed projection returned the wrong typed state: {error:?}"),
+        Ok(_) => panic!("failed projection must not fabricate serving owners"),
+    }
+}
+
+#[test]
+fn concurrent_background_wakes_share_one_generation_owned_text_builder() {
+    let sources = (0..8)
+        .map(|ordinal| {
+            (
+                format!("src/file_{ordinal}.rs"),
+                format!("pub fn symbol_{ordinal}() -> usize {{ {ordinal} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let borrowed = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&borrowed);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish"));
+    let first = scheduler.latest_complete().expect("first latest handle");
+    let second = scheduler.latest_complete().expect("second latest handle");
+    assert!(Arc::ptr_eq(
+        &first.text_projection_build,
+        &second.text_projection_build
+    ));
+
+    let first_wake = std::thread::spawn(move || first.advance_text_serving(1));
+    let second_wake = std::thread::spawn(move || second.advance_text_serving(1));
+    assert!(first_wake.join().expect("first wake joined").is_ok());
+    assert!(second_wake.join().expect("second wake joined").is_ok());
+
+    let latest = scheduler.latest_complete().expect("latest generation");
+    assert!(
+        latest
+            .text_projection_build
+            .lock()
+            .expect("shared text projection state")
+            .is_some(),
+        "bounded concurrent wakes must retain one shared partial projection"
+    );
+    while !latest
+        .advance_text_serving(1)
+        .expect("finish shared text projection")
+    {}
+    assert!(latest.query_owners_are_warm());
+}
+
+#[test]
+fn generation_replacement_drops_incomplete_text_projection_state() {
+    let fixture = GitFixture::new(&[
+        ("src/first.rs", "pub fn first() {}\n"),
+        ("src/second.rs", "pub fn second() {}\n"),
+        ("src/third.rs", "pub fn third() {}\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish first generation"));
+    let original = scheduler.latest_complete().expect("original generation");
+    assert!(
+        !original
+            .advance_text_serving(1)
+            .expect("start original text projection")
+    );
+    let original_state = Arc::downgrade(&original.text_projection_build);
+    let original_generation = original.generation().manifest().generation_id.clone();
+
+    fixture.edit("src/first.rs", "pub fn first_replaced() {}\n");
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish replacement generation"),
+    );
+    let replacement = scheduler.latest_complete().expect("replacement generation");
+    assert_ne!(
+        replacement.generation().manifest().generation_id,
+        original_generation
+    );
+    assert!(!Arc::ptr_eq(
+        &original.text_projection_build,
+        &replacement.text_projection_build
+    ));
+    drop(original);
+    assert!(
+        original_state.upgrade().is_none(),
+        "generation replacement must drop the abandoned partial projection"
+    );
+    assert!(
+        replacement
+            .text_projection_build
+            .lock()
+            .expect("replacement projection state")
+            .is_none(),
+        "a replacement generation starts with independent empty projection state"
     );
 }
 
@@ -7803,10 +7939,6 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    assert!(
-        !latest.query_owners_are_warm(),
-        "configured retained mount entered serving-owner hydration before graph refusal"
-    );
     registry
         .mount_query_authority(
             fixture.path(),
@@ -7815,6 +7947,14 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         )
         .await
         .expect("mount retained query authority");
+    let text_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !latest.query_owners_are_warm() {
+        assert!(
+            std::time::Instant::now() <= text_deadline,
+            "background text projection did not complete across bounded worker windows"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let executed = registry
         .execute_query_search(&scope, core_search_request("alpha"))
         .await
