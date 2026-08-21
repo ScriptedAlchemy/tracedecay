@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.30](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.29...v0.1.0-beta.30) (2026-08-21)
+
+
+### Features
+
+* **code-index:** stream verified lexical pages ([975caf8](https://github.com/ScriptedAlchemy/tracedecay/commit/975caf8c7533deb16d6a2540f392882989c1865b))
+
+
+### Bug Fixes
+
+* **projection:** converge predecessor before host drains ([beb69da](https://github.com/ScriptedAlchemy/tracedecay/commit/beb69dabb6ab743af4476fef65e7f339ee399f6e))
+
+
+### Performance Improvements
+
+* **query:** bound ngram posting storage ([fe23b94](https://github.com/ScriptedAlchemy/tracedecay/commit/fe23b943a05054faba9becad8236d0f97496e754))
+
 ## [0.1.0-beta.29](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.28...v0.1.0-beta.29) (2026-08-21)
 
 
