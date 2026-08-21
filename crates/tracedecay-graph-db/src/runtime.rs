@@ -41,6 +41,7 @@ pub(crate) struct PreparedGraphBatch {
     pub(crate) batch: GraphWriteBatch,
     pub(crate) metadata: mutation::CommitMetadata,
     pub(crate) endpoint_namespaces: mutation::RelationEndpointNamespaces,
+    pub(crate) ensure_page_vector_indexes: bool,
 }
 
 /// Outcome of deriving a gated batch: apply it, or adopt an already-stored
@@ -284,6 +285,7 @@ impl GraphDb {
                         batch,
                         metadata: mutation::CommitMetadata::for_digest(digest),
                         endpoint_namespaces: mutation::RelationEndpointNamespaces::new(),
+                        ensure_page_vector_indexes: false,
                     },
                     (),
                 ))
@@ -622,6 +624,9 @@ impl GraphDb {
                     let guard = self.write_guard()?;
                     let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
                     let mut state = self.state_write_guard()?;
+                    if prepared.ensure_page_vector_indexes {
+                        ensure_vector_indexes_for_batch(database, &prepared.batch)?;
+                    }
                     self.apply_locked(
                         database,
                         &mut state,
@@ -854,6 +859,13 @@ fn ensure_initial_vector_indexes(
     if latest_projection(database, &batch.namespace, &batch.projection)?.is_some() {
         return Ok(());
     }
+    ensure_vector_indexes_for_batch(database, batch)
+}
+
+fn ensure_vector_indexes_for_batch(
+    database: &GrafeoDB,
+    batch: &GraphWriteBatch,
+) -> Result<(), GraphDbError> {
     let store = database.graph_store();
     let label = vector::native_vector_label(&batch.namespace, &batch.projection);
     for entity in batch
