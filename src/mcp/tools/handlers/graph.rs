@@ -9,13 +9,14 @@ use std::future::Future;
 use serde_json::{Value, json};
 use tracedecay_application::retrieval::{
     CalleeV1, CalleesSurfaceRequestV1, ContextCodeBlockV1, ContextModeV1, ContextResultV1,
-    ContextSurfaceRequestV1, ImpactNodeV1, ImpactResultV1, ImpactSurfaceRequestV1, NodeDetailsV1,
-    NodeExpansionCostV1, NodeSurfaceRequestV1, RenamePreviewNodeV1,
-    RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
-    RenamePreviewTextOnlyMatchV1, SimilarSurfaceRequestV1, SimilarSymbolV1,
+    ContextSearchMatchV1, ContextSurfaceRequestV1, ImpactNodeV1, ImpactResultV1,
+    ImpactSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1, NodeSurfaceRequestV1,
+    RenamePreviewNodeV1, RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1,
+    RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1, SimilarSurfaceRequestV1,
+    SimilarSymbolV1,
 };
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
-use tracedecay_domain::RelationEdgeKindV1;
+use tracedecay_domain::{ExactClass, RelationEdgeKindV1};
 
 use crate::context::CONTEXT_SEEN_NODE_IDS_LABEL;
 use crate::errors::{Result, TraceDecayError};
@@ -498,70 +499,56 @@ fn render_search_md(value: &Value) -> String {
     md.render()
 }
 
-/// Handles `tracedecay_context` tool calls.
-pub(super) async fn handle_context(
+#[derive(Default)]
+struct ContextGraphProjection {
+    selected: Vec<CodeGraphSymbolSummaryV1>,
+    related: Vec<CodeGraphSymbolSummaryV1>,
+    code_blocks: Vec<ContextCodeBlockV1>,
+    touched_files: Vec<String>,
+}
+
+fn context_search_matches(
+    complete: &crate::mcp::server::CodeIndexSearchCompletedV1,
+    scope_prefix: Option<&str>,
+) -> Vec<ContextSearchMatchV1> {
+    complete
+        .ordered_candidates
+        .iter()
+        .filter_map(|ranked| {
+            let display = complete
+                .display_by_anchor
+                .get(&ranked.candidate.anchor_id)?;
+            if scope_prefix.is_some_and(|prefix| !display.path.starts_with(prefix)) {
+                return None;
+            }
+            let exact_class = match ranked.candidate.exact_class {
+                ExactClass::ExactMessage => "exact_message",
+                ExactClass::ExactLiteralPhrase => "exact_literal_phrase",
+                ExactClass::Approximate => "approximate",
+            };
+            Some(ContextSearchMatchV1 {
+                anchor_id: ranked.candidate.anchor_id.as_str().to_owned(),
+                name: display.name.clone(),
+                qualified_name: display.qualified_name.clone(),
+                kind: display.kind.clone(),
+                file: display.path.clone(),
+                exact_class: exact_class.to_owned(),
+                rank: ranked.final_ordinal.saturating_add(1),
+                utility_micros: ranked.candidate.utility_micros,
+            })
+        })
+        .collect()
+}
+
+fn context_graph_projection(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    args: Value,
+    complete: &crate::mcp::server::CodeIndexSearchCompletedV1,
     scope_prefix: Option<&str>,
-    search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
-    search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
-) -> Result<ToolResult> {
-    let request: ContextSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_context")?;
-    let task = request.task.as_str();
-    let mode = request.mode.unwrap_or(ContextModeV1::Explore);
-    let max_nodes = request
-        .max_nodes
-        .map_or(20, |value| value.clamp(1, 200) as usize);
-    let include_code = request.include_code.unwrap_or(false);
-    let max_code_blocks = request
-        .max_code_blocks
-        .map_or(5, |value| value.clamp(1, 20) as usize);
-    let semantic_mode = primitive_semantic_search_mode(request.semantic_mode);
-    let memory_options = context_memory_options(&args);
-    let memory_read_control =
-        context_memory_read_control(&memory_options, deadline.as_ref(), cancellation.as_ref())?;
-    // The two reads are independent: the code-index search depends on the task
-    // and the search authority, the memory read on the task and the memory
-    // options. Awaiting them in sequence would pay both latencies for a single
-    // response, so they are driven together the way the sibling search handler
-    // drives its two independent futures.
-    let search = execute_code_index_search(
-        search_executor,
-        crate::mcp::server::CodeIndexSearchRequestV1 {
-            project_root: cg.project_root().to_path_buf(),
-            query: task.to_owned(),
-            source_revision: None,
-            source_tree: None,
-            source_reference: None,
-            limit: max_nodes,
-            cursor: None,
-            mode: semantic_mode,
-            authority: search_authority.cloned(),
-            deadline,
-            cancellation,
-        },
-    );
-    let memory = context_memory_outcome(cg, task, &memory_options, memory_read_control.as_ref());
-    let (outcome, memory_outcome) = tokio::join!(search, memory);
-    let complete = match outcome {
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => complete,
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
-            let detail = match &unavailable.semantic {
-                crate::mcp::server::CodeIndexSemanticStatusV1::Complete => {
-                    "the exact, lexical, or graph search lane is unavailable"
-                }
-                crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable { reason } => reason,
-            };
-            return Err(TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-context-search-unavailable".to_owned(),
-                retryable: false,
-                detail: detail.to_owned(),
-            });
-        }
-    };
+    max_nodes: usize,
+    include_code: bool,
+    max_code_blocks: usize,
+) -> Result<ContextGraphProjection> {
     let mut selected = Vec::new();
     for ranked in &complete.ordered_candidates {
         let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) else {
@@ -605,15 +592,11 @@ pub(super) async fn handle_context(
         }
     }
     related.truncate(max_nodes);
-    let ContextMemoryOutcome {
-        hits: memory_matches,
-        graph_coverage: memory_graph_coverage,
-        error: memory_matches_error,
-    } = memory_outcome;
+
     let mut all_symbols = selected.clone();
     all_symbols.extend(related.iter().cloned());
     let touched_files = graph_symbol_paths(&all_symbols)?;
-    let mut code_blocks = Vec::<ContextCodeBlockV1>::new();
+    let mut code_blocks = Vec::new();
     if include_code {
         for symbol in selected.iter().take(max_code_blocks) {
             let metadata = required_graph_metadata(symbol)?;
@@ -632,11 +615,160 @@ pub(super) async fn handle_context(
             });
         }
     }
-    let symbol_values = selected
+    Ok(ContextGraphProjection {
+        selected,
+        related,
+        code_blocks,
+        touched_files,
+    })
+}
+
+fn append_context_search_matches(output: &mut String, matches: &[ContextSearchMatchV1]) {
+    if matches.is_empty() {
+        return;
+    }
+    output.push_str("\n### Available Code Search Matches\n");
+    for search_match in matches {
+        let _ = writeln!(
+            output,
+            "- **{}** ({}) — `{}` · rank {} · utility {}",
+            search_match.name,
+            search_match.kind,
+            search_match.file,
+            search_match.rank,
+            search_match.utility_micros,
+        );
+    }
+}
+
+fn append_context_semantic_pending(output: &mut String, value: &Value) {
+    let semantic = &value["coverage"]["semantic"];
+    let reason = semantic.get("reason").and_then(Value::as_str);
+    if semantic.get("status").and_then(Value::as_str) == Some("unavailable")
+        && matches!(
+            reason,
+            Some("semantic_generation_warming" | "generation_rebuilding")
+        )
+    {
+        output.push_str("\n### Semantic\nSemantic results pending while the generation warms; available fallback and memory results are shown above.\n");
+    }
+}
+
+/// Handles `tracedecay_context` tool calls.
+pub(super) async fn handle_context<F>(
+    cg: &TraceDecay,
+    graph: F,
+    args: Value,
+    scope_prefix: Option<&str>,
+    search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
+    search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<ToolResult>
+where
+    F: Future<Output = Result<crate::tracedecay::queries::graph::VerifiedGraphQuery>>,
+{
+    let request: ContextSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_context")?;
+    let task = request.task.as_str();
+    let mode = request.mode.unwrap_or(ContextModeV1::Explore);
+    let max_nodes = request
+        .max_nodes
+        .map_or(20, |value| value.clamp(1, 200) as usize);
+    let include_code = request.include_code.unwrap_or(false);
+    let max_code_blocks = request
+        .max_code_blocks
+        .map_or(5, |value| value.clamp(1, 20) as usize);
+    let semantic_mode = primitive_semantic_search_mode(request.semantic_mode);
+    let memory_options = context_memory_options(&args);
+    let memory_read_control =
+        context_memory_read_control(&memory_options, deadline.as_ref(), cancellation.as_ref())?;
+    // Search, graph enrichment, and memory are independent. Search is the
+    // primary code lane: once it answers, a still-pending graph must not hold
+    // lexical/exact results or memory hostage.
+    let search = execute_code_index_search(
+        search_executor,
+        crate::mcp::server::CodeIndexSearchRequestV1 {
+            project_root: cg.project_root().to_path_buf(),
+            query: task.to_owned(),
+            source_revision: None,
+            source_tree: None,
+            source_reference: None,
+            limit: max_nodes,
+            cursor: None,
+            mode: semantic_mode,
+            authority: search_authority.cloned(),
+            deadline,
+            cancellation,
+        },
+    );
+    let memory = context_memory_outcome(cg, task, &memory_options, memory_read_control.as_ref());
+    let search_and_graph = race_primary_search_with_graph(search, graph, false);
+    let ((outcome, graph), memory_outcome) = tokio::join!(search_and_graph, memory);
+    let strict_semantic_unavailable = semantic_mode
+        == crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic
+        && matches!(
+            &outcome,
+            crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(_)
+        );
+    let (complete, code_generation, coverage, search_matches) = match outcome {
+        crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
+            let search_matches = context_search_matches(&complete, scope_prefix);
+            let code_generation = Some(complete.code_generation.clone());
+            let coverage = primitive_search_coverage(&complete.coverage);
+            (Some(complete), code_generation, coverage, search_matches)
+        }
+        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => (
+            None,
+            unavailable.code_generation,
+            primitive_search_coverage(&unavailable.coverage),
+            Vec::new(),
+        ),
+    };
+    let graph = match complete.as_ref() {
+        Some(complete) => bind_verified_graph_to_search(graph, &complete.code_generation),
+        None => graph,
+    };
+    let (graph, projection, verified_graph_evidence) = match (graph, complete.as_ref()) {
+        (Ok(graph), Some(complete)) => match context_graph_projection(
+            cg,
+            &graph,
+            complete,
+            scope_prefix,
+            max_nodes,
+            include_code,
+            max_code_blocks,
+        ) {
+            Ok(projection) => (Some(graph), projection, None),
+            Err(error) => (
+                None,
+                ContextGraphProjection::default(),
+                Some(dependency_hints::unavailable_evidence(&error)),
+            ),
+        },
+        (Ok(graph), None) => (Some(graph), ContextGraphProjection::default(), None),
+        (Err(error), _) => (
+            None,
+            ContextGraphProjection::default(),
+            Some(dependency_hints::unavailable_evidence(&error)),
+        ),
+    };
+    let ContextMemoryOutcome {
+        hits: memory_matches,
+        graph_coverage: memory_graph_coverage,
+        error: memory_matches_error,
+    } = memory_outcome;
+    let seeds = projection
+        .selected
+        .iter()
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<Vec<_>>();
+    let symbol_values = projection
+        .selected
         .iter()
         .map(primitive_symbol_location)
         .collect::<Result<Vec<_>>>()?;
-    let related_values = related
+    let related_values = projection
+        .related
         .iter()
         .map(primitive_symbol_location)
         .collect::<Result<Vec<_>>>()?;
@@ -648,7 +780,8 @@ pub(super) async fn handle_context(
         .iter()
         .map(serde_json::to_value)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let code_render_values = code_blocks
+    let code_render_values = projection
+        .code_blocks
         .iter()
         .map(serde_json::to_value)
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -658,14 +791,18 @@ pub(super) async fn handle_context(
         &related_render_values,
         &code_render_values,
     )?;
+    if symbol_values.is_empty() {
+        append_context_search_matches(&mut output, &search_matches);
+    }
     insert_context_memory_section(
         &mut output,
         &memory_matches,
         memory_matches_error.as_deref(),
     );
-    // Plan mode: append extension points, test coverage, and dependency info
-    if mode == ContextModeV1::Plan {
-        append_verified_plan_context(graph, &selected, &mut output)?;
+    if mode == ContextModeV1::Plan
+        && let Some(graph) = graph.as_ref()
+    {
+        append_verified_plan_context(graph, &projection.selected, &mut output)?;
     }
 
     if !seeds.is_empty() {
@@ -680,14 +817,16 @@ pub(super) async fn handle_context(
     let result = ContextResultV1 {
         task: request.task,
         mode,
-        code_generation: graph.generation().as_str().to_owned(),
+        code_generation,
+        search_matches: search_matches.clone(),
         symbols: symbol_values,
         related_symbols: related_values,
-        code: code_blocks,
-        coverage: primitive_search_coverage(&complete.coverage),
+        code: projection.code_blocks,
+        coverage,
         memory_matches: memory_matches.clone(),
         memory_graph_coverage,
         memory_matches_error: memory_matches_error.clone(),
+        verified_graph_evidence,
     };
     let mut value = serde_json::to_value(result)?;
     if let Some(object) = value.as_object_mut() {
@@ -702,15 +841,30 @@ pub(super) async fn handle_context(
             }),
         );
     }
+    append_context_semantic_pending(&mut output, &value);
+    let mut degradation = Md::new();
+    append_coverage_md(&mut degradation, &value);
+    search_evidence::append_verified_graph_evidence_md(&mut degradation, &value);
+    let degradation = degradation.render();
+    if !degradation.is_empty() {
+        output.push('\n');
+        output.push_str(&degradation);
+    }
+    let touched_files = unique_file_paths(
+        projection.touched_files.iter().map(String::as_str).chain(
+            search_matches
+                .iter()
+                .map(|search_match| search_match.file.as_str()),
+        ),
+    );
     let preview = (!render::wants_json(&args)).then(|| context_markdown_lane_preview(&output));
-    Ok(rendered_context_tool_result(
-        cg,
-        &args,
-        value,
-        touched_files,
-        output,
-        preview.as_deref(),
-    ))
+    let result =
+        rendered_context_tool_result(cg, &args, value, touched_files, output, preview.as_deref());
+    if strict_semantic_unavailable {
+        Ok(result.with_semantic_error(true))
+    } else {
+        Ok(result)
+    }
 }
 
 /// Handles `tracedecay_callers` tool calls.

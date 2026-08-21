@@ -6,6 +6,9 @@ use roaring::RoaringBitmap;
 
 const NGRAM_PAGE_BACKING_BYTES: usize = 1024 * 1024;
 const NGRAM_PAGE_ENTRY_CAPACITY: usize = NGRAM_PAGE_BACKING_BYTES / std::mem::size_of::<u64>();
+const NGRAM_MINIMUM_PAGE_ENTRY_CAPACITY: usize = 1024;
+const NGRAM_MINIMUM_PAGE_BYTES: usize =
+    NGRAM_MINIMUM_PAGE_ENTRY_CAPACITY * std::mem::size_of::<u64>();
 const NGRAM_MAXIMUM_PAGE_COUNT: usize = 512;
 pub(super) const LEXICAL_PROJECTION_BUILD_DEADLINE_EXCEEDED: &str =
     "lexical projection exceeded its build deadline";
@@ -27,14 +30,13 @@ struct PackedNgramPage {
 }
 
 impl PackedNgramPage {
-    fn try_new() -> Result<Self, String> {
+    fn try_new(capacity: usize) -> Result<Self, String> {
+        debug_assert!((1..=NGRAM_PAGE_ENTRY_CAPACITY).contains(&capacity));
         let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(NGRAM_PAGE_ENTRY_CAPACITY)
-            .map_err(|error| {
-                format!("lexical projection could not allocate a bounded n-gram page: {error}")
-            })?;
-        debug_assert_eq!(entries.capacity(), NGRAM_PAGE_ENTRY_CAPACITY);
+        entries.try_reserve_exact(capacity).map_err(|error| {
+            format!("lexical projection could not allocate a bounded n-gram page: {error}")
+        })?;
+        debug_assert_eq!(entries.capacity(), capacity);
         Ok(Self {
             entries,
             sorted: false,
@@ -42,12 +44,16 @@ impl PackedNgramPage {
     }
 
     fn push(&mut self, entry: u64) {
-        debug_assert!(self.entries.len() < NGRAM_PAGE_ENTRY_CAPACITY);
+        debug_assert!(self.entries.len() < self.entries.capacity());
         self.entries.push(entry);
-        if self.entries.len() == NGRAM_PAGE_ENTRY_CAPACITY {
+        if self.entries.len() == self.entries.capacity() {
             self.entries.sort_unstable();
             self.sorted = true;
         }
+    }
+
+    fn remaining_capacity(&self) -> usize {
+        self.entries.capacity().saturating_sub(self.entries.len())
     }
 
     fn add_documents(&self, ngram: u32, documents: &mut RoaringBitmap) {
@@ -106,13 +112,38 @@ impl ByteNgramPostings {
 
         let available_entries = self
             .pages
-            .len()
-            .saturating_mul(NGRAM_PAGE_ENTRY_CAPACITY)
-            .saturating_sub(self.entry_count);
-        let required_pages = unique
-            .len()
-            .saturating_sub(available_entries)
-            .div_ceil(NGRAM_PAGE_ENTRY_CAPACITY);
+            .last()
+            .map(PackedNgramPage::remaining_capacity)
+            .unwrap_or_default();
+        let mut entries_to_allocate = unique.len().saturating_sub(available_entries);
+        let mut next_page_capacity =
+            self.pages
+                .last()
+                .map_or(NGRAM_MINIMUM_PAGE_ENTRY_CAPACITY, |page| {
+                    page.entries
+                        .capacity()
+                        .saturating_mul(2)
+                        .min(NGRAM_PAGE_ENTRY_CAPACITY)
+                });
+        let mut required_pages = 0usize;
+        let mut page_bytes = 0usize;
+        while entries_to_allocate > 0 {
+            let capacity = entries_to_allocate
+                .max(next_page_capacity)
+                .min(NGRAM_PAGE_ENTRY_CAPACITY);
+            page_bytes = page_bytes
+                .checked_add(
+                    capacity
+                        .checked_mul(std::mem::size_of::<u64>())
+                        .ok_or_else(|| budget.exceeded())?,
+                )
+                .ok_or_else(|| budget.exceeded())?;
+            required_pages = required_pages
+                .checked_add(1)
+                .ok_or_else(|| budget.exceeded())?;
+            entries_to_allocate = entries_to_allocate.saturating_sub(capacity);
+            next_page_capacity = capacity.saturating_mul(2).min(NGRAM_PAGE_ENTRY_CAPACITY);
+        }
         let descriptor_capacity = if self.pages.capacity() == 0 {
             budget.page_descriptor_capacity()
         } else {
@@ -125,9 +156,6 @@ impl ByteNgramPostings {
         }
         let descriptor_bytes = descriptor_capacity
             .checked_mul(std::mem::size_of::<PackedNgramPage>())
-            .ok_or_else(|| budget.exceeded())?;
-        let page_bytes = required_pages
-            .checked_mul(NGRAM_PAGE_BACKING_BYTES)
             .ok_or_else(|| budget.exceeded())?;
         let retained_bytes = descriptor_bytes
             .checked_add(page_bytes)
@@ -143,26 +171,53 @@ impl ByteNgramPostings {
             ));
         }
         debug_assert!(descriptor_capacity == 0 || self.pages.capacity() == descriptor_capacity);
-        for allocated in 0..required_pages {
-            match PackedNgramPage::try_new() {
+        let mut entries_to_allocate = unique.len().saturating_sub(available_entries);
+        let mut next_page_capacity =
+            self.pages
+                .last()
+                .map_or(NGRAM_MINIMUM_PAGE_ENTRY_CAPACITY, |page| {
+                    page.entries
+                        .capacity()
+                        .saturating_mul(2)
+                        .min(NGRAM_PAGE_ENTRY_CAPACITY)
+                });
+        let mut allocated_page_bytes = 0usize;
+        while entries_to_allocate > 0 {
+            let capacity = entries_to_allocate
+                .max(next_page_capacity)
+                .min(NGRAM_PAGE_ENTRY_CAPACITY);
+            let allocated_bytes = capacity.saturating_mul(std::mem::size_of::<u64>());
+            match PackedNgramPage::try_new(capacity) {
                 Ok(page) => self.pages.push(page),
                 Err(error) => {
-                    let unallocated_pages = required_pages.saturating_sub(allocated);
-                    budget.release_retained(
-                        unallocated_pages.saturating_mul(NGRAM_PAGE_BACKING_BYTES),
-                    );
+                    budget.release_retained(page_bytes.saturating_sub(allocated_page_bytes));
                     return Err(error);
                 }
             }
+            allocated_page_bytes = allocated_page_bytes.saturating_add(allocated_bytes);
+            entries_to_allocate = entries_to_allocate.saturating_sub(capacity);
+            next_page_capacity = capacity.saturating_mul(2).min(NGRAM_PAGE_ENTRY_CAPACITY);
         }
 
+        let mut page_index = self
+            .pages
+            .iter()
+            .position(|page| page.remaining_capacity() > 0)
+            .ok_or_else(|| "lexical n-gram page reservation was incomplete".to_owned())?;
         for ngram in unique {
-            let page_index = self.entry_count / NGRAM_PAGE_ENTRY_CAPACITY;
-            let page = self
-                .pages
-                .get_mut(page_index)
-                .ok_or_else(|| "lexical n-gram page reservation was incomplete".to_owned())?;
-            page.push(pack_posting(ngram, document));
+            loop {
+                let page = self
+                    .pages
+                    .get_mut(page_index)
+                    .ok_or_else(|| "lexical n-gram page reservation was incomplete".to_owned())?;
+                if page.remaining_capacity() > 0 {
+                    page.push(pack_posting(ngram, document));
+                    break;
+                }
+                page_index = page_index
+                    .checked_add(1)
+                    .ok_or_else(|| "lexical n-gram page index overflowed".to_owned())?;
+            }
             self.entry_count = self.entry_count.saturating_add(1);
         }
         Ok(())
@@ -283,7 +338,7 @@ impl ByteNgramBudget {
 
     fn page_descriptor_capacity(&self) -> usize {
         self.maximum_bytes
-            .checked_div(NGRAM_PAGE_BACKING_BYTES)
+            .checked_div(NGRAM_MINIMUM_PAGE_BYTES)
             .unwrap_or_default()
             .clamp(1, NGRAM_MAXIMUM_PAGE_COUNT)
     }

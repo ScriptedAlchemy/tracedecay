@@ -240,10 +240,9 @@ pub(super) async fn dispatch_graph_tools(
         }
         "tracedecay_retrieve" => handle_retrieve(cg, &args),
         "tracedecay_context" => {
-            let graph_query = admitted_graph_query(cg, &options, "context").await?;
             graph::handle_context(
                 cg,
-                &graph_query,
+                admitted_graph_query(cg, &options, "context"),
                 args,
                 selected_scope_prefix,
                 options.code_index_search_executor.as_ref(),
