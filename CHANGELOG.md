@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.22](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.21...v0.1.0-beta.22) (2026-08-21)
+
+
+### Bug Fixes
+
+* **claude:** separate row and message identities ([b785e63](https://github.com/ScriptedAlchemy/tracedecay/commit/b785e6327acefbfa8ccda55fbb994b699a0067ec))
+* **code-index:** reclaim graph manifest memo ([0dcdd8f](https://github.com/ScriptedAlchemy/tracedecay/commit/0dcdd8f09df6e6bc550594fe9c4e771950473d65))
+* **code-index:** serve text when graph budget is refused ([10745a1](https://github.com/ScriptedAlchemy/tracedecay/commit/10745a1e2e109f30b2226c9d24cb1e159ead0cd7))
+* **cursor:** stabilize canonical observation context ([cf4868a](https://github.com/ScriptedAlchemy/tracedecay/commit/cf4868acf9cb0f0df38c9702abdd359ec9755195))
+
+
+### Performance Improvements
+
+* **daemon:** classify launchd service as interactive ([f5c0da2](https://github.com/ScriptedAlchemy/tracedecay/commit/f5c0da27c6bc6c8858b0724d683067d2830e0e93))
+
 ## [0.1.0-beta.21](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.20...v0.1.0-beta.21) (2026-08-21)
 
 
