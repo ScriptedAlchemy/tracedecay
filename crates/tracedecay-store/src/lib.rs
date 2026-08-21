@@ -159,10 +159,11 @@ pub use projection::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeObservationProjection,
     ClaudeSessionMessageProjection, ObservationProjection, ObservationProjectionStore,
     PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation, ProjectionCheckpoint,
-    ProjectionPersistOutcome, ProjectionProvenance, ProjectionRebuildOutcome, ProjectionSkipReason,
-    ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V4, SESSION_MESSAGE_PROJECTOR_VERSION_V5,
-    SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord,
+    ProjectionPersistOutcome, ProjectionPredecessorConvergence, ProjectionProvenance,
+    ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V5, SessionMessageProjection, WorkflowFactProjection,
+    WorkflowFactRecord,
 };
 pub use provider_descriptor::{
     ToolMetadataNormalizer, synthesizes_native_record_id, tool_metadata_normalizer,

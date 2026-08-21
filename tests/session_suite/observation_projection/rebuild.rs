@@ -553,6 +553,173 @@ async fn v5_predecessor_cutover_rolls_back_and_retries_after_activation_failure(
 }
 
 #[tokio::test]
+async fn host_drain_converges_predecessor_before_ordinary_projection_and_is_idempotent() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let predecessor = observation(
+        "session-host-predecessor",
+        0,
+        100,
+        "receipt.host-predecessor",
+        conversational_payload("message-host-predecessor", "host predecessor canary"),
+    );
+    let unrelated = observation(
+        "session-host-unrelated",
+        0,
+        100,
+        "receipt.host-unrelated",
+        conversational_payload("message-host-unrelated", "host unrelated canary"),
+    );
+    persist(&store, predecessor.clone(), None).await;
+    persist(&store, unrelated.clone(), None).await;
+    drain_projection_queue(&store).await;
+    seed_v4_predecessor_with_stale_current_provenance(&tmp, predecessor.observation_id());
+    add_other_projector_owner(&tmp, unrelated.observation_id()).await;
+
+    let scope = ObservationScopeV1::Profile;
+    let cancellation = ObservationCancellation::default();
+    let drained = runtime
+        .facade()
+        .drain_projection_queue("claude", &scope, &cancellation, 16)
+        .await
+        .unwrap();
+    assert!(!drained.deferred);
+    assert_eq!(drained.projected, 0);
+    assert_eq!(
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
+        0
+    );
+    assert_eq!(
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION),
+        2
+    );
+    assert_eq!(projection_owner_count(&tmp, "test-projector-v2"), 1);
+
+    let provenance = projection_provenance_rows(&tmp).await;
+    let repeated = runtime
+        .facade()
+        .drain_projection_queue("claude", &scope, &cancellation, 16)
+        .await
+        .unwrap();
+    assert!(!repeated.deferred);
+    assert_eq!(projection_provenance_rows(&tmp).await, provenance);
+}
+
+#[tokio::test]
+async fn host_drain_resumes_predecessor_convergence_after_restart() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let mut expected_cursor = None;
+    let mut predecessor = None;
+    for index in 0..257_u64 {
+        let start = index * 100;
+        let candidate = observation(
+            "session-host-restart",
+            start,
+            start + 100,
+            &format!("receipt.host-restart-{index}"),
+            conversational_payload(
+                &format!("message-host-restart-{index}"),
+                &format!("host restart canary {index}"),
+            ),
+        );
+        if index == 0 {
+            predecessor = Some(candidate.observation_id().clone());
+        }
+        persist(&store, candidate, expected_cursor.clone()).await;
+        expected_cursor = Some(cursor("session-host-restart", start + 100));
+    }
+    drain_projection_queue(&store).await;
+    seed_v4_predecessor(&tmp, &predecessor.unwrap());
+
+    let scope = ObservationScopeV1::Profile;
+    let first = runtime
+        .facade()
+        .drain_projection_queue("claude", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+    assert!(first.deferred);
+    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
+    drop(store);
+    drop(runtime);
+    checkpoint_database(&tmp).await;
+
+    let reopened = profile_runtime(&tmp).await;
+    let resumed = reopened
+        .facade()
+        .drain_projection_queue("claude", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+    assert!(!resumed.deferred);
+    assert_eq!(
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
+        0
+    );
+    assert_eq!(
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION),
+        257
+    );
+}
+
+#[tokio::test]
+async fn cancelled_host_drain_leaves_predecessor_rebuild_resumable() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let predecessor = observation(
+        "session-host-cancelled",
+        0,
+        100,
+        "receipt.host-cancelled",
+        conversational_payload("message-host-cancelled", "host cancelled canary"),
+    );
+    persist(&store, predecessor.clone(), None).await;
+    drain_projection_queue(&store).await;
+    seed_v4_predecessor_with_stale_current_provenance(&tmp, predecessor.observation_id());
+
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+    let error = runtime
+        .facade()
+        .drain_projection_queue("claude", &ObservationScopeV1::Profile, &cancellation, 16)
+        .await
+        .unwrap_err();
+    assert_eq!(error.reason_code, Some("admission_cancelled"));
+    assert_eq!(
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
+        1
+    );
+    assert_eq!(
+        table_count(&tmp, "observation_projection_rebuilds").await,
+        0
+    );
+
+    let resumed = runtime
+        .facade()
+        .drain_projection_queue(
+            "claude",
+            &ObservationScopeV1::Profile,
+            &ObservationCancellation::default(),
+            16,
+        )
+        .await
+        .unwrap();
+    assert!(!resumed.deferred);
+    assert_eq!(
+        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
+        0
+    );
+}
+
+#[tokio::test]
 async fn cross_projector_owner_blocks_incompatible_generation_rollover() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;

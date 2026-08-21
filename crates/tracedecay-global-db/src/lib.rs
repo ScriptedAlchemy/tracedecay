@@ -52,7 +52,9 @@ pub use observability_rollup::{
     ObservabilityRollupRetentionReceiptV1, ensure_observability_rollup_schema,
 };
 pub use observation_adapter::GlobalDbObservationStore;
-pub use observation_projection::{project_observation, rebuild_projection};
+pub use observation_projection::{
+    converge_projection_predecessor, project_observation, rebuild_projection,
+};
 #[cfg(test)]
 pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
 pub use tracedecay_domain::CoverageStateV1;

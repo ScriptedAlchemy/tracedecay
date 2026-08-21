@@ -16,15 +16,15 @@ use tracedecay_store::{
     ObservationProjectionStatus, ObservationProjectionStore, ObservationReadOperationV1,
     ObservationReadResultV1, ObservationReplayRequest, ObservationStore, ObservationStoreError,
     ObservationStoreResult, OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1,
-    ProjectionCheckpoint, ProjectionPersistOutcome, ProjectionRebuildOutcome,
-    ProjectionStoreResult, RepositoryOperationEnvelopeV1, RepositoryReadOperationV1,
-    RepositoryReadResultV1, RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1,
-    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
-    RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1,
-    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
-    RuntimeSubmitRequestV1, RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StoreClientIdV1,
-    StoreIdempotencyKeyV1, StoreOperationIdV1, StoreOperationMetadataV1, StoredObservation,
-    StoredObservationRowV1,
+    ProjectionCheckpoint, ProjectionPersistOutcome, ProjectionPredecessorConvergence,
+    ProjectionRebuildOutcome, ProjectionStoreResult, RepositoryOperationEnvelopeV1,
+    RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
+    RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
+    RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
+    RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
+    StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
 };
 
 use tracedecay_runtime_core::db::{Database, DatabaseRuntimeClientV1};
@@ -39,6 +39,12 @@ impl GlobalDbObservationStore {
     pub fn new(database: Database) -> Self {
         let runtime = database.runtime_client();
         Self { database, runtime }
+    }
+
+    pub async fn converge_projection_predecessor(
+        &self,
+    ) -> ProjectionStoreResult<ProjectionPredecessorConvergence> {
+        crate::converge_projection_predecessor(&self.database).await
     }
 }
 

@@ -497,6 +497,26 @@ pub struct ProjectionRebuildOutcome {
     complete: bool,
 }
 
+/// Typed result of converging a retained predecessor projector generation.
+///
+/// `Current` means no predecessor-owned output remains. `RebuildRequired`
+/// reports the bounded rebuild attempt that is resumable across later drains
+/// and process restarts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectionPredecessorConvergence {
+    Current,
+    RebuildRequired(ProjectionRebuildOutcome),
+}
+
+impl ProjectionPredecessorConvergence {
+    pub fn rebuild(&self) -> Option<&ProjectionRebuildOutcome> {
+        match self {
+            Self::Current => None,
+            Self::RebuildRequired(rebuild) => Some(rebuild),
+        }
+    }
+}
+
 impl ProjectionRebuildOutcome {
     pub fn new(
         checkpoint: ProjectionCheckpoint,

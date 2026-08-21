@@ -12,8 +12,9 @@ use tracedecay_sessions::retrieval_content::{
 };
 use tracedecay_store::{
     ObservationProjection, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation,
-    ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
-    ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    ProjectionPersistOutcome, ProjectionPredecessorConvergence, ProjectionRebuildOutcome,
+    ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     SessionMessageProjection, SessionMessageRecord, SessionRecord, WorkflowFactProjection,
     workflow_semantic_kind,
 };
@@ -338,12 +339,38 @@ pub async fn rebuild_projection(
     rebuild_projection_until_cancelled(database, frontier_sequence, &NEVER_CANCELLED).await
 }
 
+/// Converges retained v4 output ownership before an ordinary v5 queue drain.
+///
+/// The predecessor probe and first rebuild generation are bound in one write
+/// transaction. Once a generation exists, later calls resume its frozen
+/// frontier instead of replacing it with a moving committed frontier. Each
+/// invocation performs only the ordinary bounded rebuild step budget.
+pub async fn converge_projection_predecessor(
+    database: &Database,
+) -> ProjectionStoreResult<ProjectionPredecessorConvergence> {
+    let Some(frontier_sequence) = prepare_predecessor_projection_rebuild(database).await? else {
+        return Ok(ProjectionPredecessorConvergence::Current);
+    };
+    let outcome =
+        advance_projection_rebuild_with_budget(database, frontier_sequence, &NEVER_CANCELLED)
+            .await?;
+    Ok(ProjectionPredecessorConvergence::RebuildRequired(outcome))
+}
+
 async fn rebuild_projection_until_cancelled(
     database: &Database,
     frontier_sequence: u64,
     cancelled: &AtomicBool,
 ) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
     prepare_projection_rebuild(database, frontier_sequence).await?;
+    advance_projection_rebuild_with_budget(database, frontier_sequence, cancelled).await
+}
+
+async fn advance_projection_rebuild_with_budget(
+    database: &Database,
+    frontier_sequence: u64,
+    cancelled: &AtomicBool,
+) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
     for _ in 0..REBUILD_MAX_STEPS_PER_INVOCATION {
         if cancelled.load(Ordering::Acquire) {
             break;
@@ -354,6 +381,47 @@ async fn rebuild_projection_until_cancelled(
         }
     }
     projection_rebuild_progress_on(&database.read_connection()).await
+}
+
+async fn prepare_predecessor_projection_rebuild(
+    database: &Database,
+) -> ProjectionStoreResult<Option<u64>> {
+    let transaction = database
+        .begin_write_transaction("begin predecessor projection convergence")
+        .await
+        .map_err(|error| storage("begin predecessor projection convergence", error))?;
+    let mut predecessor_rows = transaction
+        .query(
+            "SELECT 1 FROM observation_projection_provenance
+             WHERE projector_version = ?1 LIMIT 1",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
+        )
+        .await
+        .map_err(|error| storage("read predecessor projection ownership", error))?;
+    let predecessor_present = predecessor_rows
+        .next()
+        .await
+        .map_err(|error| storage("read predecessor projection ownership", error))?
+        .is_some();
+    drop(predecessor_rows);
+    if !predecessor_present {
+        transaction
+            .commit()
+            .await
+            .map_err(|error| storage("commit predecessor projection probe", error))?;
+        return Ok(None);
+    }
+
+    let frontier_sequence = match read_optional_rebuild_job(&transaction).await? {
+        Some(job) => decode_sequence(job.frontier, "read predecessor rebuild frontier")?,
+        None => read_observation_frontier(&transaction).await?,
+    };
+    start_or_resume_projection_rebuild_transaction(&transaction, frontier_sequence).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage("commit predecessor projection convergence", error))?;
+    Ok(Some(frontier_sequence))
 }
 
 async fn prepare_projection_rebuild(

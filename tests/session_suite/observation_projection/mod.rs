@@ -23,6 +23,7 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_usecases::observation::ObservationCancellation;
 
 use crate::common::isolated_lcm_db_path;
 
@@ -442,6 +443,23 @@ fn seed_v4_predecessor_with_stale_current_provenance(
     tmp: &TempDir,
     observation_id: &CanonicalObservationIdV1,
 ) {
+    seed_v4_predecessor(tmp, observation_id);
+    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    raw_conn
+        .execute(
+            "UPDATE observation_projection_provenance
+             SET output_digest = ?1
+             WHERE projector_version = ?2 AND observation_id = ?3",
+            rusqlite::params![
+                format!("sha256:{}", "0".repeat(64)),
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+            ],
+        )
+        .unwrap();
+}
+
+fn seed_v4_predecessor(tmp: &TempDir, observation_id: &CanonicalObservationIdV1) {
     let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     raw_conn
         .execute(
@@ -454,18 +472,6 @@ fn seed_v4_predecessor_with_stale_current_provenance(
                WHERE projector_version = ?2 AND observation_id = ?3",
             rusqlite::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                observation_id.as_str(),
-            ],
-        )
-        .unwrap();
-    raw_conn
-        .execute(
-            "UPDATE observation_projection_provenance
-             SET output_digest = ?1
-             WHERE projector_version = ?2 AND observation_id = ?3",
-            rusqlite::params![
-                format!("sha256:{}", "0".repeat(64)),
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 observation_id.as_str(),
             ],
