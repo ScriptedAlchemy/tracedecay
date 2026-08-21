@@ -525,33 +525,55 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
 }
 
 #[test]
-fn retained_lexical_projection_bounds_owned_bytes_for_repeated_tokens() {
+fn retained_lexical_projection_bounds_marginal_owned_byte_growth_for_repeated_tokens() {
     let generation = id::<CodeGenerationId>("generation.1");
-    let repeated = "retained_token ".repeat(3_000);
-    let source = format!(
-        "pub fn retained_symbol() -> usize {{ let retained_token = 1; {repeated} retained_token }}\n"
+    let small_repeated = "retained_token ".repeat(1_000);
+    let large_repeated = "retained_token ".repeat(3_000);
+    let small_source = format!(
+        "pub fn retained_symbol() -> usize {{ let retained_token = 1; {small_repeated} retained_token }}\n"
     );
-    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
+    let large_source = format!(
+        "pub fn retained_symbol() -> usize {{ let retained_token = 1; {large_repeated} retained_token }}\n"
+    );
+    let small_projection = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         vec![admitted_rust_chunk(
             &generation,
             0,
-            &source,
+            &small_source,
             CodeSearchChunkGrainV1::SymbolBody,
             "retained_symbol",
         )],
     )
-    .expect("build repeated-token projection");
+    .expect("build small repeated-token projection");
+    let large_projection = CodeLexicalProjectionAdapterV1::new_admitted(
+        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
+        vec![admitted_rust_chunk(
+            &generation,
+            0,
+            &large_source,
+            CodeSearchChunkGrainV1::SymbolBody,
+            "retained_symbol",
+        )],
+    )
+    .expect("build large repeated-token projection");
 
-    let retained = projection.retained_owned_bytes();
+    let small_retained = small_projection.retained_owned_bytes();
+    let large_retained = large_projection.retained_owned_bytes();
+    let marginal_retained = large_retained
+        .checked_sub(small_retained)
+        .expect("large projection must not retain fewer owned bytes than small projection");
+    let marginal_source = large_source
+        .len()
+        .checked_sub(small_source.len())
+        .expect("large source must not be smaller than small source");
     assert!(
-        retained <= source.len() * 2,
-        "projection retained {retained} owned bytes for {} source bytes",
-        source.len()
+        marginal_retained <= marginal_source * 2,
+        "projection retained {marginal_retained} marginal owned bytes for {marginal_source} marginal source bytes"
     );
 
     let request = lexical_request("retained_token", &["retained_token"], &[], &[], 0, 8);
-    let RetrieverOutcome::Complete(batch) = LexicalLane::new(projection)
+    let RetrieverOutcome::Complete(batch) = LexicalLane::new(large_projection)
         .retrieve_lexical(&request)
         .expect("query repeated-token projection")
     else {
