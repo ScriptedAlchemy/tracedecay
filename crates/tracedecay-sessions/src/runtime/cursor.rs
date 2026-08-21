@@ -66,8 +66,6 @@ struct CursorObservationContext {
     project_path: Option<String>,
     location_path: Option<String>,
     transcript_path: String,
-    model: Option<String>,
-    thread_id: Option<String>,
     location_provenance: Option<String>,
 }
 
@@ -88,13 +86,6 @@ fn cursor_observation_context(
         project_path,
         location_path,
         transcript_path: transcript_path.to_string_lossy().into_owned(),
-        model: cursor_model_string(event),
-        thread_id: event
-            .get("conversation_id")
-            .or_else(|| event.get("chat_id"))
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string),
         location_provenance,
     }
 }
@@ -158,7 +149,6 @@ impl TranscriptSource for CursorEventSource {
 const CURSOR_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 
 struct CursorJsonlAdmitState {
-    timestamps: TimestampCarry,
     generation: u64,
     namespace_replacement: bool,
 }
@@ -186,11 +176,6 @@ fn admit_cursor_jsonl_observations<'a>(
             ProviderId::new("cursor")?,
             SessionId::new(native_session_id.to_owned())?,
         )?;
-        let mut context = context.clone();
-        if let Some((_, agent_id)) = subagent.as_ref() {
-            context.model = parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
-                .or(context.model);
-        }
         let request = JsonlObservationAdmissionRequest::new(
             "cursor",
             path,
@@ -204,7 +189,6 @@ fn admit_cursor_jsonl_observations<'a>(
         let progress = admit_jsonl_observations(
             request,
             |scan| CursorJsonlAdmitState {
-                timestamps: TimestampCarry::new(i64::try_from(scan.source_mtime).ok()),
                 generation: scan.generation,
                 namespace_replacement: scan.replacement_rescan,
             },
@@ -230,8 +214,7 @@ fn admit_cursor_jsonl_observations<'a>(
                             state.generation,
                             state.namespace_replacement,
                         )?;
-                        let timestamp = state.timestamps.observe(&native);
-                        let native = cursor_native_with_context(native, &context, timestamp);
+                        let native = cursor_native_with_context(native, context);
                         let (agent_id, parent_agent_id) = match subagent.as_ref() {
                             Some((child_id, _)) => {
                                 (Some(child_id.as_str()), Some(parent_session_id))
@@ -271,11 +254,7 @@ fn admit_cursor_jsonl_observations<'a>(
     })
 }
 
-fn cursor_native_with_context(
-    mut native: Value,
-    context: &CursorObservationContext,
-    derived_timestamp: Option<i64>,
-) -> Value {
+fn cursor_native_with_context(mut native: Value, context: &CursorObservationContext) -> Value {
     let Some(object) = native.as_object_mut() else {
         return native;
     };
@@ -286,8 +265,6 @@ fn cursor_native_with_context(
             "tracedecayLocationProvenance",
             context.location_provenance.as_ref(),
         ),
-        ("tracedecayModel", context.model.as_ref()),
-        ("tracedecayThreadId", context.thread_id.as_ref()),
     ] {
         if let Some(value) = value {
             object.insert(key.to_string(), Value::String(value.clone()));
@@ -297,12 +274,6 @@ fn cursor_native_with_context(
         "tracedecayTranscriptPath".to_string(),
         Value::String(context.transcript_path.clone()),
     );
-    if let Some(timestamp) = derived_timestamp {
-        object.insert(
-            "tracedecayDerivedTimestamp".to_string(),
-            Value::from(timestamp),
-        );
-    }
     native
 }
 
@@ -1758,6 +1729,57 @@ mod tests {
             observation_native_record_id("cursor", "session-redacted", &spaced)
                 .unwrap()
                 .as_str()
+        );
+    }
+
+    #[test]
+    fn canonical_record_is_stable_across_hook_sweep_and_mtime_context() {
+        let transcript_path = Path::new("/redacted/project/session.fixture.jsonl");
+        let hook_context = cursor_observation_context(
+            &json!({
+                "cwd": "/redacted/project",
+                "conversation_id": "route-only-conversation",
+                "model": "route-only-model"
+            }),
+            transcript_path,
+            false,
+        );
+        let sweep_context = cursor_observation_context(
+            &cursor_sweep_event("session.fixture", Path::new("/redacted/project"), false),
+            transcript_path,
+            false,
+        );
+        let native = json!({
+            "role": "assistant",
+            "message": {"content": "stable transcript content"}
+        });
+        let record_id = observation_native_record_id("cursor", "session.fixture", &native).unwrap();
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(10, 90).unwrap();
+
+        let hook = normalize_cursor_observation_with_message_id(
+            &cursor_native_with_context(native.clone(), &hook_context),
+            "session.fixture",
+            record_id.clone(),
+            record_id.clone(),
+            range,
+            None,
+            None,
+        )
+        .unwrap();
+        let sweep = normalize_cursor_observation_with_message_id(
+            &cursor_native_with_context(native, &sweep_context),
+            "session.fixture",
+            record_id.clone(),
+            record_id,
+            range,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(hook).unwrap(),
+            serde_json::to_value(sweep).unwrap()
         );
     }
 

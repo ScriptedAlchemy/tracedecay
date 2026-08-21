@@ -119,7 +119,6 @@ pub(super) struct JsonlObservationScan {
     /// message ids distinct across file generations.
     pub replacement_rescan: bool,
     pub start_offset: u64,
-    pub source_mtime: u64,
     pub generation: u64,
 }
 
@@ -445,7 +444,6 @@ pub(super) async fn admit_jsonl_observations<State>(
         // ids past the batch that started at the file head.
         replacement_rescan: raw.replacement_generation,
         start_offset: raw.start_offset,
-        source_mtime: raw.new_cursor.mtime,
         generation: raw.new_cursor.file_id,
     });
     let active = ActiveAdmission {
