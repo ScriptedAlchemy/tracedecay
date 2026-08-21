@@ -3227,8 +3227,8 @@ mod tests {
         HostBundleCliOperation, apply_canonical_component_set,
         apply_default_canonical_component_set, broker_codex_daemon_automation_project,
         canonical_host_component_set, canonical_host_component_set_with_tracedecay_bin,
-        component_set_request, reinstall_agent_integrations,
-        reinstall_agent_integrations_with_dashboard_policies,
+        component_set_request, reinstall_agent_integrations_with_dashboard_policies,
+        reinstall_agent_integrations_with_persisted_dashboard_policies,
     };
     use tracedecay::agents::host_bundle_v2::{
         CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
