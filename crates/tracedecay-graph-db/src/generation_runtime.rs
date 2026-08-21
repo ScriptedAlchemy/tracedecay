@@ -22,7 +22,7 @@ use crate::runtime::{GraphBatchPlan, PreparedGraphBatch};
 use crate::schema::{NAMESPACE_PROPERTY, relation_kind_from_type, required_string};
 use crate::state::{
     latest_projection, load_entity_by_node, load_relation, load_relation_by_edge,
-    projection_entities_checked, projection_relations_checked,
+    projection_entity_deletion_page_checked, projection_relation_deletion_page_checked,
 };
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphCommit, GraphDb, GraphDbError, GraphEntityRef,
@@ -70,6 +70,12 @@ struct GenerationStageContext {
     physical_namespace: GraphNamespace,
     dependency_namespaces: BTreeMap<crate::GraphProjectionIdentity, GraphNamespace>,
     dependency_digest: tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1,
+}
+
+#[derive(Clone, Copy)]
+enum GenerationRetirementPageKind {
+    Relations,
+    Entities,
 }
 
 impl GraphDb {
@@ -638,40 +644,68 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         check()?;
+        let mut last_commit = None;
+        for kind in [
+            GenerationRetirementPageKind::Relations,
+            GenerationRetirementPageKind::Entities,
+        ] {
+            loop {
+                let (commit, applied) = self.delete_projection_page_checked(
+                    &namespace,
+                    &projection,
+                    &source_generation,
+                    &watermark,
+                    kind,
+                    check,
+                )?;
+                last_commit = Some(commit);
+                if !applied {
+                    break;
+                }
+                // A committed page stays durable. Cancellation at this exact
+                // boundary leaves the remaining rows for an idempotent retry.
+                check()?;
+            }
+        }
+        last_commit.ok_or_else(|| GraphDbError::unavailable("graph projection disappeared"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn delete_projection_page_checked(
+        &self,
+        namespace: &GraphNamespace,
+        projection: &crate::GraphProjectionId,
+        source_generation: &crate::SourceGeneration,
+        watermark: &crate::GraphWatermark,
+        kind: GenerationRetirementPageKind,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<(GraphCommit, bool), GraphDbError> {
         self.run_gated_batch(
             check,
             |database| {
-                let relation_ids =
-                    projection_relations_checked(database, &namespace, &projection, check)?
-                        .into_iter()
-                        .map(|relation| relation.relation.identity)
-                        .collect::<std::collections::BTreeSet<_>>();
-                let entity_ids =
-                    projection_entities_checked(database, &namespace, &projection, check)?
-                        .into_iter()
-                        .map(|entity| entity.entity.identity)
-                        .collect::<std::collections::BTreeSet<_>>();
-                let mut mutations = Vec::with_capacity(
-                    relation_ids
-                        .len()
-                        .checked_add(entity_ids.len())
-                        .ok_or_else(|| {
-                            GraphDbError::invalid("graph deletion mutation count overflow")
-                        })?,
-                );
-                for identity in relation_ids {
-                    check()?;
-                    mutations.push(GraphMutation::DeleteRelation(identity));
-                }
-                for identity in entity_ids {
-                    check()?;
-                    mutations.push(GraphMutation::DeleteEntity(identity));
+                let mutations = match kind {
+                    GenerationRetirementPageKind::Relations => {
+                        projection_relation_deletion_page_checked(
+                            database, namespace, projection, check,
+                        )?
+                    }
+                    GenerationRetirementPageKind::Entities => {
+                        projection_entity_deletion_page_checked(
+                            database, namespace, projection, check,
+                        )?
+                    }
+                };
+                if mutations.is_empty() {
+                    let commit = latest_projection(database, namespace, projection)?
+                        .ok_or_else(|| GraphDbError::unavailable("graph projection disappeared"))?
+                        .commit;
+                    return Ok(GraphBatchPlan::Settled(commit, false));
                 }
                 let batch = GraphWriteBatch::new_canonical_checked(
-                    namespace,
-                    projection,
-                    source_generation,
-                    watermark,
+                    namespace.clone(),
+                    projection.clone(),
+                    source_generation.clone(),
+                    watermark.clone(),
                     mutations,
                     check,
                 )?;
@@ -682,10 +716,10 @@ impl GraphDb {
                         metadata: mutation::CommitMetadata::for_digest(digest),
                         endpoint_namespaces: mutation::RelationEndpointNamespaces::new(),
                     },
-                    (),
+                    true,
                 ))
             },
-            |_database, commit, ()| Ok(commit),
+            |_database, commit, applied| Ok((commit, applied)),
         )
     }
 
@@ -1234,7 +1268,9 @@ mod tests {
         manifest_canonicalizations, recovered_generation_enumerations,
         reset_manifest_canonicalizations, reset_recovered_generation_enumerations,
     };
-    use crate::projection::{batch_canonicalizations, reset_batch_canonicalizations};
+    use crate::projection::{
+        batch_canonicalizations, max_canonical_batch_mutations, reset_batch_canonicalizations,
+    };
     use crate::{
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
         GraphEntity, GraphEntityId, GraphFormatVersion, GraphGenerationDependency,
@@ -1881,5 +1917,80 @@ mod tests {
         assert_eq!(exact.sequence, resumed.sequence);
         assert_eq!(batch_canonicalizations(), 0);
         second_owner.close().unwrap();
+    }
+
+    #[test]
+    fn near_complete_cancelled_stage_retires_in_bounded_idempotent_pages() {
+        let manifest = large_manifest("bounded-retirement");
+        let locator =
+            GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
+        let temp = TempDir::new().unwrap();
+        let (owner, database) = persistent_database(&temp);
+        let pages = generation_stage_pages(&manifest).unwrap();
+        assert_eq!(
+            pages.len(),
+            2,
+            "the fixture must stage in exactly two pages"
+        );
+        let sealed = sealed_digest(&manifest);
+        let physical_namespace = manifest.physical_namespace().unwrap();
+        let (last_page_key, _) =
+            super::generation_stage_page_receipt(&manifest, &sealed, &pages[1]).unwrap();
+        let cancel_before_finalization = || {
+            let Ok(database_guard) = database.inner.database.try_read() else {
+                return Ok(());
+            };
+            let Some(native) = database_guard.as_ref() else {
+                return Err(GraphDbError::Closed);
+            };
+            if crate::state::publication(native, &physical_namespace, &last_page_key)?.is_some() {
+                Err(GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        assert_eq!(
+            database.apply_generation_unverified_with_digest(
+                &manifest,
+                &sealed,
+                &cancel_before_finalization,
+            ),
+            Err(GraphDbError::Cancelled),
+            "all native rows may commit, but finalization must remain cancelled"
+        );
+
+        reset_batch_canonicalizations();
+        database
+            .delete_generation_contents(&locator, &|| Ok(()))
+            .unwrap();
+        assert_eq!(
+            batch_canonicalizations(),
+            2,
+            "5,000 entities must retire as 4,096 plus 904, never one full-generation batch"
+        );
+        assert!(
+            max_canonical_batch_mutations() <= MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
+            "every retirement transaction must obey the generation staging mutation bound"
+        );
+        let counts = {
+            let guard = database.read_guard().unwrap();
+            crate::state::projection_node_counts(
+                guard.as_ref().unwrap(),
+                &physical_namespace,
+                &manifest.projection.projection,
+            )
+            .unwrap()
+        };
+        assert_eq!(counts, (0, 0));
+
+        database
+            .delete_generation_contents(&locator, &|| Ok(()))
+            .unwrap();
+        assert_eq!(
+            batch_canonicalizations(),
+            2,
+            "an exact cleanup retry after every row is gone must be a no-op"
+        );
+        owner.close().unwrap();
     }
 }
