@@ -127,23 +127,25 @@ Interactive requests never queue behind background CPU. The mechanism is a
 Maintenance splits into two kinds of work, and they get opposite treatment:
 
 **Batch work with a finish line** — a full index, a worktree reconcile — runs
-at full machine width and finishes. Throttling it does not reduce
-interference; it stretches the interference window. A reindex that pins 8 of
-96 cores for ten minutes is worse for every agent on the box than one that
-pins 90 cores for one minute. So:
+through one barrier-free pool and finishes, but its default width is bounded
+by parser memory as well as CPU. Machine-width extraction multiplied source,
+syntax-tree, extraction-row, chunk, and graph-artifact state across 90 workers
+on a 96-core host, exhausted the daemon's memory budget, and stretched the
+interference window through swap. So:
 
 - One process-wide indexing pool is sized to
-  `total_cores - max(2, cores/16)` (90 of 96), and every per-file stage —
+  `min(total_cores - max(2, cores/16), 8)` (8 of 96 by default), and every per-file stage —
   read, sanitize, tree-sitter extract, chunk, digest — fans out across it
   with **no batch barrier**. Barriers are the hidden throttle: re-joining
   every N files means the slowest file in each group gates the group, and
   the pipeline never reaches its nominal width.
-- The reserved cores are what keep reads fast during a reindex. They are
-  reserved, not merely deprioritized, so an interactive request always has a
-  runnable CPU no matter how deep the indexing queue is.
+- The reserved cores keep reads runnable during a reindex; the eight-worker
+  default keeps parser and artifact memory bounded independently of host size.
+  Operators can still raise `TRACEDECAY_INDEX_WORKERS` deliberately for a host
+  whose measured memory budget supports it.
 - Width is sizing policy and never semantics. Per-file results are collected
   in input order and the lowest-index failure is the reported one, so a
-  sealed generation is byte-identical at width 1 and at width 90. That
+  sealed generation is byte-identical at width 1 and at width 8. That
   equivalence is a test, not a claim.
 - Cross-worktree admission does **not** multiply throughput, because every
   worktree shares that one pool. Admitting N worktrees only interleaves
