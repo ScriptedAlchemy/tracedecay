@@ -47,6 +47,7 @@ mod mounts;
 mod profile_memory;
 mod remote_recovery;
 mod retained_hook_tasks;
+mod terminal_tasks;
 
 use maintenance::RegisteredSchemaConvergenceMaintenance;
 use retained_hook_tasks::RetainedHookTasks;

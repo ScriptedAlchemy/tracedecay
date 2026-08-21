@@ -12,6 +12,7 @@ pub(in crate::daemon) struct SessionRuntimeMemoryGraphReconciliationShutdownV1 {
 impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
     pub(in crate::daemon) fn cancel(&self) {
         for registry in &self.registries {
+            registry.cancel_terminal_tasks();
             registry.cancel_memory_graph_reconciliation_tasks();
         }
     }
@@ -20,6 +21,9 @@ impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
         self.cancel();
         let mut failures = Vec::new();
         for registry in &self.registries {
+            if let Err(error) = registry.shutdown_terminal_tasks().await {
+                failures.push(error);
+            }
             if let Err(error) = registry.shutdown_memory_graph_reconciliation_tasks().await {
                 failures.push(error);
             }
@@ -91,8 +95,8 @@ impl StoreAdministration {
     /// Shutdown-only: drains the retained graph owners out of every session
     /// runtime registry and closes their Grafeo runtimes. Call only after
     /// [`SessionRuntimeMemoryGraphReconciliationShutdownV1::shutdown`] has
-    /// joined the reconciliation workers; the drain drops the runtimes those
-    /// workers publish through.
+    /// joined terminal hook, schema-convergence, and reconciliation workers;
+    /// the drain drops the runtimes those workers publish through.
     pub(in crate::daemon) async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
         let registries = self
             .session_runtime_registries

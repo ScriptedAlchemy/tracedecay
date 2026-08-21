@@ -655,6 +655,43 @@ async fn duplicate_project_attaches_schedule_one_historical_convergence() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_shutdown_cancels_and_joins_blocked_schema_convergence() {
+    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
+        project_sessions_pending_convergence("project.schema-terminal-shutdown").await;
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+    let _database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("registered project sessions");
+    convergence_gate.wait_until_blocked().await;
+
+    registry.cancel_terminal_tasks();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        registry.shutdown_terminal_tasks(),
+    )
+    .await
+    .expect("terminal shutdown must not wait for cancelled convergence work")
+    .expect("session runtime terminal tasks shut down cleanly");
+    convergence_gate.release();
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        registry.registered_schema_convergence_status(&shard_id),
+        Some(RegisteredSchemaConvergenceStatus::Pending),
+        "a cancelled convergence task must not publish a fabricated completion"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_convergence_commits_the_durable_authority_checkpoint() {
     let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-checkpoint").await;
