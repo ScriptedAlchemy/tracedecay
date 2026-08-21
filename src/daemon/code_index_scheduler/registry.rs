@@ -2301,7 +2301,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     (result, latest, replay_binding)
                 })
                 .await;
-                let install_generation = match &result {
+                let replace_serving_generation = match &result {
                     Ok((Ok(CodeIndexReconcileOutcomeV1::Noop(_)), Some(latest), Some(_))) => {
                         let serving = worker_serving_generation
                             .read()
@@ -2319,7 +2319,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // the persistent graph again, so daemon shutdown cancelled the
                 // duplicate projection and then conflicted while closing the
                 // still-running graph reconciliation owner.
-                if install_generation
+                if replace_serving_generation
                     && let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result
                 {
                     let activation = worker_graph_activation
@@ -2351,7 +2351,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         result = Ok((Err(error), None, None));
                     }
                 }
-                if install_generation && let Ok((Ok(_), Some(latest), _)) = &result {
+                if let Ok((Ok(_), Some(latest), _)) = &result {
                     let scheduler = Arc::clone(&worker_scheduler);
                     let serving_generation = Arc::clone(&worker_serving_generation);
                     let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
@@ -2366,12 +2366,17 @@ impl CodeIndexSchedulerRegistryV1 {
                                     .to_owned(),
                             ));
                         }
-                        let mut serving = serving_generation
-                            .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        *serving = Some(latest.clone());
-                        serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
-                        drop(serving);
+                        if replace_serving_generation {
+                            let mut serving = serving_generation
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            *serving = Some(latest.clone());
+                            serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+                        }
+                        // Semantic admission is independently retryable. A
+                        // prior attempt may have lost bounded queue capacity,
+                        // so an unchanged reconcile must offer the already-
+                        // serving generation again without reinstalling it.
                         let _ = scheduler.schedule_semantic_generation(latest.generation());
                         Ok::<_, CodeIndexSchedulerErrorV1>(())
                     })
