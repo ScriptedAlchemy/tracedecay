@@ -156,41 +156,6 @@ pub(crate) async fn handle_host_bundle_component_command(
     Ok(())
 }
 
-/// Refuse a mutation that would claim a file no receipt records unless the
-/// operator confirmed adoption specifically.
-///
-/// `--yes` confirms the plan the preview showed; taking ownership of somebody
-/// else's bytes is a separate decision, so it needs its own `--adopt`. This is
-/// a confirmation gate only: the planner's adoption boundary is unchanged, a
-/// file another owner claims is still refused with a typed ownership conflict,
-/// The caller supplies the transaction's authoritative preview so confirmation
-/// and execution cannot disagree about which paths are being adopted.
-fn require_adoption_confirmation(
-    agent_id: &str,
-    preview: &tracedecay::agents::host_bundle_v2::HostComponentSetLifecyclePreviewV1,
-    options: &crate::cli::HostBundleCliOptions,
-    lifecycle_root: &Path,
-    host: tracedecay::agents::host_bundle_v2::HostKindV1,
-) -> tracedecay::errors::Result<()> {
-    if options.adopt {
-        return Ok(());
-    }
-    let adopted = adopted_relative_paths(preview, lifecycle_root, host);
-    if adopted.is_empty() {
-        return Ok(());
-    }
-    Err(tracedecay::errors::TraceDecayError::Config {
-        message: format!(
-            "agent {agent_id:?} would take ownership of {} file(s) that no TraceDecay receipt \
-             records ({}); the previous bytes are backed up under {}/<operation-id>, but claiming \
-             them is a separate decision — review `--dry-run` and re-run with `--yes --adopt`",
-            adopted.len(),
-            adopted.join(", "),
-            tracedecay::agents::host_bundle_v2::host_bundle_backup_root(lifecycle_root).display()
-        ),
-    })
-}
-
 /// Truthful reason a host component set is unavailable, so a skipped or
 /// refused agent never reads as an empty success.
 fn unsupported_host_component_set_message(agent: &str) -> String {
@@ -430,6 +395,7 @@ fn component_set_request(
     component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
     operation: HostBundleCliOperation,
     explicit_confirmation: bool,
+    explicit_adoption: bool,
 ) -> tracedecay::errors::Result<
     tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
 > {
@@ -455,6 +421,7 @@ fn component_set_request(
                 hermes_profile_bindings: u8::from(
                     host == tracedecay::agents::host_bundle_v2::HostKindV1::Hermes,
                 ),
+                explicit_adoption,
             },
             operation_id,
         },
@@ -569,30 +536,6 @@ fn artifact_disposition(
     }
 }
 
-/// Mutations that would claim an existing file no receipt records.
-fn adopted_relative_paths(
-    preview: &tracedecay::agents::host_bundle_v2::HostComponentSetLifecyclePreviewV1,
-    lifecycle_root: &Path,
-    host: tracedecay::agents::host_bundle_v2::HostKindV1,
-) -> Vec<String> {
-    use tracedecay::agents::host_bundle_v2::HostArtifactActionV1 as Action;
-
-    let mut adopted = Vec::new();
-    for plan in &preview.component_plans {
-        let owned = receipt_owned_paths(lifecycle_root, host, plan.component);
-        for mutation in &plan.mutations {
-            if matches!(mutation.action, Action::BackupThenReplace | Action::Noop)
-                && !owned.contains(&mutation.relative_path)
-            {
-                adopted.push(mutation.relative_path.clone());
-            }
-        }
-    }
-    adopted.sort();
-    adopted.dedup();
-    adopted
-}
-
 fn preview_canonical_component_set(
     agent_id: &str,
     operation: HostBundleCliOperation,
@@ -604,7 +547,7 @@ fn preview_canonical_component_set(
 ) -> tracedecay::errors::Result<
     tracedecay::agents::host_bundle_v2::HostComponentSetLifecyclePreviewV1,
 > {
-    let request = component_set_request(component_set, operation, options.yes)?;
+    let request = component_set_request(component_set, operation, options.yes, options.adopt)?;
     let mut registration = match install_context {
         Some(install) => {
             CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin_and_dashboard(
@@ -729,6 +672,7 @@ fn apply_canonical_component_set(
         component_set,
         operation,
         options.component.is_none() || options.yes,
+        options.adopt,
     )?;
     let mut writer =
         tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
@@ -778,13 +722,12 @@ fn apply_canonical_component_set(
             &mut registration,
         )
         .map_err(|error| host_bundle_error_for_agent(agent_id, error))?;
-    require_adoption_confirmation(
-        agent_id,
-        &preview,
-        options,
-        lifecycle_root,
-        component_set.component_set.host,
-    )?;
+    // Receiptless-adoption authority is enforced inside the planner: without
+    // `--adopt`, a receiptless file at a cataloged path is adopted only when
+    // the host adapter recognizes legacy first-party provenance in it, and
+    // anything else is refused as a typed ownership conflict naming the
+    // `--yes --adopt` remedy. Reaching this point means every planned
+    // adoption was authorized, so no separate CLI gate re-litigates it.
     // A full default install is otherwise treated as confirmed. A competing
     // third-party claim is exactly the ambiguity that must not be resolved on
     // the operator's behalf, so it demands an explicit `--yes`.
@@ -1195,6 +1138,9 @@ fn feedback_request(
                 hermes_profile_bindings: u8::from(
                     manifest.host == tracedecay::agents::host_bundle_v2::HostKindV1::Hermes,
                 ),
+                // Feedback rollback only ever moves between receipt-owned
+                // Core deployments; it never claims receiptless files.
+                adopt_receiptless: false,
             },
             operation_id,
         },
@@ -3313,9 +3259,10 @@ mod tests {
         );
     }
 
-    /// An explicit component mutation that would claim an unrecorded file is
-    /// refused without `--adopt`, and the refusal names every such path plus
-    /// where the replaced bytes are preserved.
+    /// An explicit component repair that would claim an unrecorded file with
+    /// no recognizable legacy provenance is refused without `--adopt` — even
+    /// at preview time, which stays read-only — and the refusal names the
+    /// contested path plus the explicit adoption remedy.
     #[tokio::test]
     async fn explicit_component_repair_refuses_adoption_without_the_adopt_flag() {
         let _profile = pinned_host_profile();
@@ -3328,8 +3275,9 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        // A pre-receipt deployment: the cataloged path exists on disk with
-        // foreign bytes and no receipt records it.
+        // A receiptless deployment carrying no recognizable provenance: the
+        // cataloged path exists on disk with foreign bytes and no receipt
+        // records it.
         let adopted =
             &component_set.component_set.components[0].manifest.artifacts[0].relative_path;
         let deployed = home.path().join(adopted);
@@ -3342,7 +3290,7 @@ mod tests {
             adopt: false,
         };
 
-        let preview = super::preview_canonical_component_set(
+        let error = super::preview_canonical_component_set(
             "cursor",
             HostBundleCliOperation::Repair,
             &component_set,
@@ -3351,38 +3299,35 @@ mod tests {
             lifecycle.path(),
             None,
         )
-        .unwrap();
-        let error = super::require_adoption_confirmation(
-            "cursor",
-            &preview,
-            &options,
-            lifecycle.path(),
-            component_set.component_set.host,
-        )
         .unwrap_err()
         .to_string();
 
         assert!(error.contains(adopted.as_str()), "{error}");
         assert!(error.contains("--yes --adopt"), "{error}");
-        assert!(error.contains("backups"), "{error}");
-        assert_eq!(std::fs::read(&deployed).unwrap(), b"pre-receipt");
+        assert_eq!(
+            std::fs::read(&deployed).unwrap(),
+            b"pre-receipt",
+            "the refusing preview is read-only"
+        );
 
         let confirmed = crate::cli::HostBundleCliOptions {
             adopt: true,
             ..options
         };
-        super::require_adoption_confirmation(
+        super::preview_canonical_component_set(
             "cursor",
-            &preview,
+            HostBundleCliOperation::Repair,
+            &component_set,
             &confirmed,
+            home.path(),
             lifecycle.path(),
-            component_set.component_set.host,
+            None,
         )
-        .unwrap();
+        .expect("explicit adoption authority must let the same repair plan");
         assert_eq!(
             std::fs::read(&deployed).unwrap(),
             b"pre-receipt",
-            "the confirmation gate is read-only"
+            "the preview is read-only even with adoption authority"
         );
     }
 
@@ -3508,7 +3453,36 @@ mod tests {
             !retired.exists(),
             "a known retired Cursor artifact must not survive adoption"
         );
-        assert_eq!(std::fs::read(user_file).unwrap(), b"keep me");
+        assert_eq!(std::fs::read(&user_file).unwrap(), b"keep me");
+
+        // A retired rule resurfacing later (e.g. an older release ran again)
+        // is swept by the plain `update-plugin` journey too: the now-current
+        // bundle carries recognizable provenance, so no `--adopt` is needed.
+        std::fs::write(
+            &retired,
+            "<!-- generated by tracedecay from the project fact store; do not edit by hand -->",
+        )
+        .unwrap();
+        super::apply_canonical_component_set(
+            "cursor",
+            HostBundleCliOperation::Update,
+            &component_set,
+            &crate::cli::HostBundleCliOptions {
+                component: None,
+                dry_run: false,
+                yes: true,
+                adopt: false,
+            },
+            home.path(),
+            lifecycle.path(),
+            &ComponentSetApplyContext::with_tracedecay_bin(KIRO_FIXTURE_BIN),
+        )
+        .unwrap();
+        assert!(
+            !retired.exists(),
+            "update-plugin must sweep the retired rule so uninstall can see a clean bundle"
+        );
+        assert_eq!(std::fs::read(&user_file).unwrap(), b"keep me");
     }
 
     #[test]
@@ -4261,7 +4235,8 @@ esac
         // registration authority that fails `verify` after the artifacts are
         // already on disk, which is exactly the state that leaves a journal.
         let request =
-            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+            component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
+                .unwrap();
         let mut writer =
             tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
                 home.path(),
@@ -4360,7 +4335,8 @@ esac
         .expect("the packaged Kiro set must install cleanly");
 
         let request =
-            component_set_request(&component_set, HostBundleCliOperation::Update, true).unwrap();
+            component_set_request(&component_set, HostBundleCliOperation::Update, true, false)
+                .unwrap();
         let mut writer =
             tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
                 home.path(),
@@ -4425,7 +4401,8 @@ esac
             .unwrap()
             .unwrap();
         let request =
-            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+            component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
+                .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home.path(),
@@ -4502,7 +4479,7 @@ esac
             // staleness signal, and this test is about the file's content.
             std::fs::create_dir_all(registration_path.parent().unwrap()).unwrap();
             let request =
-                component_set_request(&component_set, HostBundleCliOperation::Install, true)
+                component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
                     .unwrap();
             let mut registration = CatalogHostComponentRegistrationAuthority::new(
                 "opencode",
@@ -4572,7 +4549,8 @@ esac
         .unwrap()
         .unwrap();
         let request =
-            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+            component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
+                .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home.path(),
@@ -4656,7 +4634,8 @@ esac
         .unwrap()
         .unwrap();
         let request =
-            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+            component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
+                .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home.path(),
@@ -4708,7 +4687,8 @@ esac
         .unwrap()
         .unwrap();
         let request =
-            component_set_request(&component_set, HostBundleCliOperation::Repair, true).unwrap();
+            component_set_request(&component_set, HostBundleCliOperation::Repair, true, false)
+                .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home.path(),
@@ -4765,7 +4745,8 @@ esac
         .unwrap()
         .unwrap();
         let request =
-            component_set_request(&component_set, HostBundleCliOperation::Repair, true).unwrap();
+            component_set_request(&component_set, HostBundleCliOperation::Repair, true, false)
+                .unwrap();
         let mut registration = VerifyFailureRegistration {
             inner: CatalogHostComponentRegistrationAuthority::new(
                 "codex",
@@ -5077,7 +5058,7 @@ esac
                 .unwrap()
                 .unwrap_or_else(|| panic!("{agent} must ship a canonical component set"));
             let request =
-                component_set_request(&component_set, HostBundleCliOperation::Install, true)
+                component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
                     .unwrap();
             let registration = CatalogHostComponentRegistrationAuthority::new(
                 agent,
@@ -5627,7 +5608,8 @@ esac
             .unwrap()
             .unwrap();
         let request =
-            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+            component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
+                .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "kimi",
             home.path(),
@@ -5687,7 +5669,8 @@ esac
             .unwrap()
             .unwrap();
         let request =
-            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+            component_set_request(&component_set, HostBundleCliOperation::Install, true, false)
+                .unwrap();
         let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home.path(),

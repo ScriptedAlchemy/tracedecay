@@ -231,6 +231,7 @@ fn kiro_component_request(
             ],
             explicit_confirmation: true,
             hermes_profile_bindings: 0,
+            explicit_adoption: false,
         },
         operation_id,
     }
