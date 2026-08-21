@@ -92,6 +92,16 @@ impl ByteNgramPostings {
         }
         documents
     }
+
+    pub(super) fn retained_owned_bytes(&self) -> usize {
+        self.postings.iter().fold(0, |bytes, (_, documents)| {
+            bytes
+                .saturating_add(std::mem::size_of::<u32>())
+                .saturating_add(
+                    (documents.len() as usize).saturating_mul(std::mem::size_of::<u32>()),
+                )
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -205,6 +215,10 @@ impl FuzzyTermIndex {
             #[cfg(test)]
             examined,
         })
+    }
+
+    pub(super) fn retained_owned_bytes(&self) -> usize {
+        self.terms.as_fst().size()
     }
 }
 

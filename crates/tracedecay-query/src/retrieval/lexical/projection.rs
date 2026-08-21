@@ -5,9 +5,10 @@ use std::time::{Duration, Instant};
 
 use roaring::RoaringBitmap;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate,
-    ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
-    ExtractionAdmittedChunkV1, FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1,
+    BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
+    CodeSearchChunkId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
+    ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1,
+    FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1, LanguageDescriptorRevision,
     LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
     SourceOccurrenceId,
@@ -111,14 +112,21 @@ impl CodeLexicalProjectionMetadataV1 {
 
 #[derive(Clone, Debug)]
 struct ProjectedChunkV1 {
-    chunk: CodeSearchChunkV1,
+    id: CodeSearchChunkId,
+    anchor: CodeSearchChunkAnchorV1,
+    language_descriptor_revision: LanguageDescriptorRevision,
+    exact_terms: Vec<ExactTechnicalTermV1>,
+    sanitized_text: BoundedSanitizedText,
     logical_path: String,
-    fields: BTreeMap<LexicalFieldV1, Vec<String>>,
+    field_lengths: BTreeMap<LexicalFieldV1, usize>,
     normalized_text: String,
 }
 
 impl ProjectedChunkV1 {
-    fn new(chunk: CodeSearchChunkV1, logical_path: String) -> Self {
+    fn new(
+        chunk: CodeSearchChunkV1,
+        logical_path: String,
+    ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
         let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
         let mut fields: BTreeMap<LexicalFieldV1, Vec<String>> = BTreeMap::new();
         let text_field = if chunk.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
@@ -173,12 +181,23 @@ impl ProjectedChunkV1 {
                 _ => {}
             }
         }
-        Self {
-            chunk,
-            logical_path,
+        let field_lengths = fields
+            .iter()
+            .map(|(field, terms)| (*field, terms.len()))
+            .collect();
+        (
+            Self {
+                id: chunk.id,
+                anchor: chunk.anchor,
+                language_descriptor_revision: chunk.language_descriptor_revision,
+                exact_terms: chunk.exact_terms,
+                sanitized_text: chunk.sanitized_text,
+                logical_path,
+                field_lengths,
+                normalized_text,
+            },
             fields,
-            normalized_text,
-        }
+        )
     }
 }
 
@@ -197,23 +216,42 @@ pub struct CodeLexicalProjectionAdapterV1 {
 
 #[derive(Clone, Debug)]
 struct LexicalGenerationPostingsV1 {
-    term_documents: BTreeMap<LexicalFieldV1, BTreeMap<String, RoaringBitmap>>,
+    term_documents: BTreeMap<LexicalFieldV1, BTreeMap<String, LexicalTermPostingV1>>,
     exact_documents: BTreeMap<ExactFieldV1, BTreeMap<Vec<u8>, RoaringBitmap>>,
     normalized_text: Arc<ByteNgramPostings>,
     raw_text: Arc<ByteNgramPostings>,
     fuzzy_terms: FuzzyTermIndex,
-    document_frequencies: BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>,
     average_field_lengths: BTreeMap<LexicalFieldV1, usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LexicalTermPostingV1 {
+    documents: RoaringBitmap,
+    frequencies: Vec<(u32, u32)>,
+}
+
+impl LexicalTermPostingV1 {
+    fn insert(&mut self, document: u32, frequency: u32) {
+        self.documents.insert(document);
+        self.frequencies.push((document, frequency));
+    }
+
+    fn frequency(&self, document: u32) -> usize {
+        self.frequencies
+            .binary_search_by_key(&document, |(document, _)| *document)
+            .ok()
+            .map(|index| self.frequencies[index].1 as usize)
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug)]
 struct LexicalGenerationPostingsBuildV1 {
-    term_documents: BTreeMap<LexicalFieldV1, BTreeMap<String, RoaringBitmap>>,
+    term_documents: BTreeMap<LexicalFieldV1, BTreeMap<String, LexicalTermPostingV1>>,
     exact_documents: BTreeMap<ExactFieldV1, BTreeMap<Vec<u8>, RoaringBitmap>>,
     normalized_text: ByteNgramPostings,
     raw_text: ByteNgramPostings,
     vocabulary: BTreeSet<String>,
-    document_frequencies: BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>,
     field_lengths: BTreeMap<LexicalFieldV1, usize>,
     ngram_budget: ByteNgramBudget,
 }
@@ -226,7 +264,6 @@ impl Default for LexicalGenerationPostingsBuildV1 {
             normalized_text: ByteNgramPostings::default(),
             raw_text: ByteNgramPostings::default(),
             vocabulary: BTreeSet::new(),
-            document_frequencies: BTreeMap::new(),
             field_lengths: BTreeMap::new(),
             ngram_budget: ByteNgramBudget::new(BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1),
         }
@@ -238,29 +275,27 @@ impl LexicalGenerationPostingsBuildV1 {
         &mut self,
         document: u32,
         row: &ProjectedChunkV1,
+        fields: &BTreeMap<LexicalFieldV1, Vec<String>>,
     ) -> Result<(), RetrievalPortError> {
-        for (field, terms) in &row.fields {
+        for (field, terms) in fields {
             *self.field_lengths.entry(*field).or_default() += terms.len();
-            let mut unique = BTreeSet::new();
+            let mut frequencies = BTreeMap::<&str, u32>::new();
             for term in terms {
                 if *field != LexicalFieldV1::Subtoken {
                     self.vocabulary.insert(term.clone());
                 }
+                frequencies
+                    .entry(term.as_str())
+                    .and_modify(|frequency| *frequency = frequency.saturating_add(1))
+                    .or_insert(1);
+            }
+            for (term, frequency) in frequencies {
                 self.term_documents
                     .entry(*field)
                     .or_default()
-                    .entry(term.clone())
+                    .entry(term.to_owned())
                     .or_default()
-                    .insert(document);
-                unique.insert(term);
-            }
-            for term in unique {
-                *self
-                    .document_frequencies
-                    .entry(*field)
-                    .or_default()
-                    .entry(term.clone())
-                    .or_default() += 1;
+                    .insert(document, frequency);
             }
         }
         self.exact_documents
@@ -269,7 +304,7 @@ impl LexicalGenerationPostingsBuildV1 {
             .entry(row.logical_path.as_bytes().to_vec())
             .or_default()
             .insert(document);
-        for term in &row.chunk.exact_terms {
+        for term in &row.exact_terms {
             let canonical = canonical_projected_exact_term(term);
             self.exact_documents
                 .entry(exact_field_for_kind(term.kind()))
@@ -295,7 +330,7 @@ impl LexicalGenerationPostingsBuildV1 {
         self.raw_text
             .insert_document(
                 document,
-                row.chunk.sanitized_text.as_str().as_bytes(),
+                row.sanitized_text.as_str().as_bytes(),
                 &mut self.ngram_budget,
             )
             .map_err(map_postings_build_error)
@@ -327,7 +362,6 @@ impl LexicalGenerationPostingsBuildV1 {
             normalized_text,
             raw_text,
             fuzzy_terms,
-            document_frequencies: self.document_frequencies,
             average_field_lengths,
         })
     }
@@ -480,9 +514,9 @@ impl CodeLexicalProjectionBuildV1 {
                                 chunk.anchor.file_occurrence_id
                             ))
                         })?;
-                    let row = ProjectedChunkV1::new(chunk, logical_path);
-                    self.raw_matches_normalized &= row.chunk.sanitized_text.as_str().as_bytes()
-                        == row.normalized_text.as_bytes();
+                    let (row, fields) = ProjectedChunkV1::new(chunk, logical_path);
+                    self.raw_matches_normalized &=
+                        row.sanitized_text.as_str().as_bytes() == row.normalized_text.as_bytes();
                     self.postings
                         .as_mut()
                         .ok_or_else(|| {
@@ -490,7 +524,7 @@ impl CodeLexicalProjectionBuildV1 {
                                 "lexical projection build state is missing".to_owned(),
                             )
                         })?
-                        .insert_row(document as u32, &row)?;
+                        .insert_row(document as u32, &row, &fields)?;
                     self.rows.push(row);
                     self.next_document += 1;
                     remaining -= 1;
@@ -558,11 +592,65 @@ impl CodeLexicalProjectionBuildV1 {
 }
 
 impl LexicalGenerationPostingsV1 {
+    fn retained_owned_bytes(&self) -> usize {
+        let term_bytes = self
+            .term_documents
+            .values()
+            .fold(0usize, |bytes, postings| {
+                postings.iter().fold(bytes, |bytes, (term, posting)| {
+                    bytes
+                        .saturating_add(term.capacity())
+                        .saturating_add(
+                            (posting.documents.len() as usize)
+                                .saturating_mul(std::mem::size_of::<u32>()),
+                        )
+                        .saturating_add(
+                            posting
+                                .frequencies
+                                .capacity()
+                                .saturating_mul(std::mem::size_of::<(u32, u32)>()),
+                        )
+                })
+            });
+        let exact_bytes = self
+            .exact_documents
+            .values()
+            .fold(0usize, |bytes, postings| {
+                postings.iter().fold(bytes, |bytes, (term, documents)| {
+                    bytes.saturating_add(term.capacity()).saturating_add(
+                        (documents.len() as usize).saturating_mul(std::mem::size_of::<u32>()),
+                    )
+                })
+            });
+        term_bytes
+            .saturating_add(exact_bytes)
+            .saturating_add(self.normalized_text.retained_owned_bytes())
+            .saturating_add(
+                (!Arc::ptr_eq(&self.normalized_text, &self.raw_text))
+                    .then(|| self.raw_text.retained_owned_bytes())
+                    .unwrap_or_default(),
+            )
+            .saturating_add(self.fuzzy_terms.retained_owned_bytes())
+            .saturating_add(
+                self.average_field_lengths
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(LexicalFieldV1, usize)>()),
+            )
+    }
+
     fn document_frequency(&self, field: LexicalFieldV1, term: &str) -> usize {
-        self.document_frequencies
+        self.term_documents
             .get(&field)
-            .and_then(|frequencies| frequencies.get(term))
-            .copied()
+            .and_then(|postings| postings.get(term))
+            .map(|posting| posting.documents.len() as usize)
+            .unwrap_or_default()
+    }
+
+    fn term_frequency(&self, field: LexicalFieldV1, term: &str, document: u32) -> usize {
+        self.term_documents
+            .get(&field)
+            .and_then(|postings| postings.get(term))
+            .map(|posting| posting.frequency(document))
             .unwrap_or_default()
     }
 
@@ -588,7 +676,7 @@ impl LexicalGenerationPostingsV1 {
         if let Some(postings) = self.term_documents.get(&LexicalFieldV1::Subtoken) {
             for subtoken in &request.subtokens {
                 if let Some(posting) = postings.get(&normalize_lexical(subtoken)) {
-                    documents |= posting;
+                    documents |= &posting.documents;
                 }
             }
         }
@@ -652,13 +740,59 @@ impl LexicalGenerationPostingsV1 {
                 continue;
             }
             if let Some(posting) = postings.get(term) {
-                *documents |= posting;
+                *documents |= &posting.documents;
             }
         }
     }
 }
 
 impl CodeLexicalProjectionAdapterV1 {
+    /// Count heap payload bytes owned exclusively by this immutable projection.
+    /// Shared sanitized chunk text is deliberately excluded because its Arc
+    /// backing remains owned by the sealed generation; derived normalized text,
+    /// posting keys/frequencies, n-grams, exact keys, and the fuzzy FST count.
+    pub fn retained_owned_bytes(&self) -> usize {
+        let row_bytes = self.rows.iter().fold(0usize, |bytes, row| {
+            let exact_term_bytes = row.exact_terms.iter().fold(0usize, |bytes, term| {
+                bytes
+                    .saturating_add(term.original_bytes().len())
+                    .saturating_add(term.canonical_bytes().len())
+            });
+            bytes
+                .saturating_add(std::mem::size_of::<ProjectedChunkV1>())
+                .saturating_add(row.id.as_str().len())
+                .saturating_add(row.anchor.generation_id.as_str().len())
+                .saturating_add(row.anchor.file_occurrence_id.as_str().len())
+                .saturating_add(
+                    row.anchor
+                        .symbol_occurrence_id
+                        .as_ref()
+                        .map(|symbol| symbol.as_str().len())
+                        .unwrap_or_default(),
+                )
+                .saturating_add(row.logical_path.capacity())
+                .saturating_add(row.normalized_text.capacity())
+                .saturating_add(exact_term_bytes)
+                .saturating_add(
+                    row.field_lengths
+                        .len()
+                        .saturating_mul(std::mem::size_of::<(LexicalFieldV1, usize)>()),
+                )
+        });
+        let metadata_path_bytes =
+            self.metadata
+                .logical_paths
+                .iter()
+                .fold(0usize, |bytes, (file, path)| {
+                    bytes
+                        .saturating_add(file.as_str().len())
+                        .saturating_add(path.capacity())
+                });
+        row_bytes
+            .saturating_add(metadata_path_bytes)
+            .saturating_add(self.postings.retained_owned_bytes())
+    }
+
     pub fn new(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<CodeSearchChunkV1>,
@@ -787,7 +921,8 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut excluded = self.rows.len() as u64 - documents.len();
         for document in documents {
             let row = &self.rows[document as usize];
-            let score = self.score_row(row, request, &fuzzy, &phrase_document_frequencies);
+            let score =
+                self.score_row(document, row, request, &fuzzy, &phrase_document_frequencies);
             if score.field_scores.is_empty() {
                 excluded += 1;
                 continue;
@@ -906,6 +1041,7 @@ impl CodeLexicalProjectionAdapterV1 {
 
     fn score_row(
         &self,
+        document: u32,
         row: &ProjectedChunkV1,
         request: &LexicalLaneRequest<'_>,
         fuzzy: &FuzzyExpansionsV1,
@@ -917,11 +1053,13 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut matched_phrases = BTreeSet::new();
         let mut matched_kinds = BTreeSet::new();
         let mut typo_recovery_applied = false;
-        for (field, document_terms) in &row.fields {
+        for field in row.field_lengths.keys() {
             if *field != LexicalFieldV1::Subtoken {
                 for query_term in &request.whole_terms {
                     let normalized_query = normalize_lexical(query_term);
-                    let exact_tf = term_frequency(document_terms, &normalized_query);
+                    let exact_tf =
+                        self.postings
+                            .term_frequency(*field, &normalized_query, document);
                     if exact_tf > 0 {
                         add_score(
                             &mut field_scores,
@@ -933,7 +1071,8 @@ impl CodeLexicalProjectionAdapterV1 {
                     }
                     if let Some(expansions) = fuzzy.by_query.get(query_term) {
                         for expansion in expansions {
-                            let fuzzy_tf = term_frequency(document_terms, expansion);
+                            let fuzzy_tf =
+                                self.postings.term_frequency(*field, expansion, document);
                             if fuzzy_tf == 0 {
                                 continue;
                             }
@@ -952,7 +1091,7 @@ impl CodeLexicalProjectionAdapterV1 {
             if *field == LexicalFieldV1::Subtoken {
                 for subtoken in &request.subtokens {
                     let normalized = normalize_lexical(subtoken);
-                    let tf = term_frequency(document_terms, &normalized);
+                    let tf = self.postings.term_frequency(*field, &normalized, document);
                     if tf > 0 {
                         add_score(
                             &mut field_scores,
@@ -970,7 +1109,7 @@ impl CodeLexicalProjectionAdapterV1 {
             if tf == 0 {
                 continue;
             }
-            let field = if row.chunk.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
+            let field = if row.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
                 LexicalFieldV1::PreambleText
             } else {
                 LexicalFieldV1::BodyText
@@ -1017,7 +1156,7 @@ impl CodeLexicalProjectionAdapterV1 {
         row: &ProjectedChunkV1,
     ) -> u64 {
         let document_frequency = self.postings.document_frequency(field, term);
-        let document_length = row.fields.get(&field).map_or(0, Vec::len).max(1);
+        let document_length = row.field_lengths.get(&field).copied().unwrap_or(0).max(1);
         let average_length = self.postings.average_field_length(field);
         bm25_score_micros(
             self.rows.len(),
@@ -1036,7 +1175,7 @@ impl CodeLexicalProjectionAdapterV1 {
         row: &ProjectedChunkV1,
         document_frequency: usize,
     ) -> u64 {
-        let document_length = row.fields.get(&field).map_or(0, Vec::len).max(1);
+        let document_length = row.field_lengths.get(&field).copied().unwrap_or(0).max(1);
         bm25_score_micros(
             self.rows.len(),
             document_frequency,
@@ -1056,9 +1195,9 @@ impl CodeLexicalProjectionAdapterV1 {
         exact_admission_proof: Option<tracedecay_domain::ExactAdmissionProof>,
     ) -> Result<CompactCandidate, RetrievalPortError> {
         let lane = retriever.as_str();
-        let chunk_id = row.chunk.id.as_str();
-        let generation = row.chunk.anchor.generation_id.as_str();
-        let evidence_id = row.chunk.anchor.symbol_occurrence_id.as_ref().map_or_else(
+        let chunk_id = row.id.as_str();
+        let generation = row.anchor.generation_id.as_str();
+        let evidence_id = row.anchor.symbol_occurrence_id.as_ref().map_or_else(
             || format!("code-chunk:{chunk_id}"),
             |symbol| format!("code-symbol:{}", symbol.as_str()),
         );
@@ -1069,7 +1208,7 @@ impl CodeLexicalProjectionAdapterV1 {
                 "code-chunk:{generation}:{chunk_id}"
             ))
             .map_err(contract_error)?,
-            file_occurrence_id: Some(row.chunk.anchor.file_occurrence_id.clone()),
+            file_occurrence_id: Some(row.anchor.file_occurrence_id.clone()),
             source_namespace: self.metadata.freshness.source_namespace.clone(),
             repository_id: self.metadata.repository_id.clone(),
             session_or_thread_id: None,
@@ -1096,12 +1235,12 @@ impl CodeLexicalProjectionAdapterV1 {
         CodeCandidateBindingV1 {
             candidate_anchor: candidate.anchor_id.clone(),
             occurrence: CodeOccurrenceRefV1 {
-                generation: row.chunk.anchor.generation_id.clone(),
-                file: row.chunk.anchor.file_occurrence_id.clone(),
-                symbol: row.chunk.anchor.symbol_occurrence_id.clone(),
-                chunk: Some(row.chunk.id.clone()),
+                generation: row.anchor.generation_id.clone(),
+                file: row.anchor.file_occurrence_id.clone(),
+                symbol: row.anchor.symbol_occurrence_id.clone(),
+                chunk: Some(row.id.clone()),
             },
-            language_descriptor_revision: row.chunk.language_descriptor_revision.clone(),
+            language_descriptor_revision: row.language_descriptor_revision.clone(),
             matched_term_kinds,
             source_occurrence: candidate.source_occurrence_id.clone(),
         }
@@ -1251,7 +1390,7 @@ fn exact_matches(
                 | ExactFieldV1::CompilerOrRuntimeError
         ) {
             matched = contains_bytes(
-                row.chunk.sanitized_text.as_str().as_bytes(),
+                row.sanitized_text.as_str().as_bytes(),
                 &literal.original_bytes,
             );
         }
@@ -1261,7 +1400,7 @@ fn exact_matches(
             matched = true;
             matched_kinds.insert(ExactTechnicalTermKindV1::Path);
         }
-        for term in &row.chunk.exact_terms {
+        for term in &row.exact_terms {
             if exact_field_for_kind(term.kind()) == literal.field
                 && canonical_projected_exact_term(term).as_ref()
                     == literal.canonical_bytes.as_slice()
@@ -1322,7 +1461,7 @@ fn collect_term_kinds(
     normalized_term: &str,
     kinds: &mut BTreeSet<ExactTechnicalTermKindV1>,
 ) {
-    for term in &row.chunk.exact_terms {
+    for term in &row.exact_terms {
         if std::str::from_utf8(term.canonical_bytes())
             .is_ok_and(|value| normalize_lexical(value) == normalized_term)
         {
@@ -1347,13 +1486,6 @@ fn lexical_tokens(value: &str) -> Vec<String> {
         .filter(|term| !term.is_empty())
         .map(normalize_lexical)
         .collect()
-}
-
-fn term_frequency(document_terms: &[String], term: &str) -> usize {
-    document_terms
-        .iter()
-        .filter(|value| value.as_str() == term)
-        .count()
 }
 
 fn substring_count(haystack: &str, needle: &str) -> usize {

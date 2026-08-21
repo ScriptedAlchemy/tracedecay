@@ -372,6 +372,43 @@ fn retained_lexical_projection_preserves_progress_across_bounded_windows() {
     );
 }
 
+#[test]
+fn retained_lexical_projection_bounds_owned_bytes_for_repeated_tokens() {
+    let generation = id::<CodeGenerationId>("generation.1");
+    let repeated = "retained_token ".repeat(3_000);
+    let source = format!(
+        "pub fn retained_symbol() -> usize {{ let retained_token = 1; {repeated} retained_token }}\n"
+    );
+    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
+        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
+        vec![admitted_rust_chunk(
+            &generation,
+            0,
+            &source,
+            CodeSearchChunkGrainV1::SymbolBody,
+            "retained_symbol",
+        )],
+    )
+    .expect("build repeated-token projection");
+
+    let retained = projection.retained_owned_bytes();
+    assert!(
+        retained <= source.len() * 2,
+        "projection retained {retained} owned bytes for {} source bytes",
+        source.len()
+    );
+
+    let request = lexical_request("retained_token", &["retained_token"], &[], &[], 0, 8);
+    let RetrieverOutcome::Complete(batch) = LexicalLane::new(projection)
+        .retrieve_lexical(&request)
+        .expect("query repeated-token projection")
+    else {
+        panic!("repeated-token projection must be current");
+    };
+    assert_eq!(batch.candidates.len(), 1);
+    assert!(batch.candidates[0].raw_score.micros() > 0);
+}
+
 pub(crate) fn lexical_request(
     query: &str,
     whole_terms: &[&str],
