@@ -1006,6 +1006,7 @@ async fn dispatch_agent_command(
                     local,
                     no_dashboard,
                     automation.then_some(agent_cmd::CodexAutomationInstall),
+                    host_bundle.adopt,
                 )
                 .await?;
             }
@@ -1032,7 +1033,7 @@ async fn dispatch_agent_command(
                 )
                 .await?;
             } else {
-                agent_cmd::handle_reinstall_command().await?;
+                agent_cmd::handle_reinstall_command(host_bundle.adopt).await?;
             }
         }
         Commands::UpdatePlugin { local, agent } => {
@@ -1055,7 +1056,7 @@ async fn dispatch_agent_command(
                 )
                 .await?;
             } else {
-                agent_cmd::handle_update_plugin_command().await?;
+                agent_cmd::handle_update_plugin_command(host_bundle.adopt).await?;
             }
         }
         Commands::Uninstall { agent, local } => {

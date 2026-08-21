@@ -253,7 +253,7 @@ pub struct ObservedHostArtifactV1 {
     /// the planned component's cataloged artifact list may set it; receipt- and
     /// orphan-derived observations must leave it `None`. Pre-v2 installers
     /// wrote these cataloged paths without ever writing a v2 receipt, so
-    /// `Repair` alone may adopt such an artifact.
+    /// `Install`, `Update`, and `Repair` may adopt such an artifact.
     pub cataloged_ownership_marker: Option<String>,
 }
 
@@ -452,10 +452,10 @@ fn plan_artifact_action(
         ObservedArtifactKindV1::RegularFile => {}
     }
     if state.ownership_marker.as_deref() != Some(artifact.ownership_marker.as_str()) {
-        // Receiptless artifacts are adoptable only inside the narrow boundary
-        // `adopts_pre_receipt_artifact` defines (`Repair` restoring a cataloged
-        // deployment, `Install` recording its own byte-identical staged
-        // deploy). Everything else with a foreign or absent marker conflicts.
+        // Receiptless artifacts are adoptable only inside the boundary
+        // `adopts_pre_receipt_artifact` defines (`Install`, `Update`, and
+        // `Repair` converging a receiptless cataloged deploy path). Everything
+        // else with a foreign or absent marker conflicts.
         if !adopts_pre_receipt_artifact(operation, artifact, state) {
             return Err(HostBundleError::OwnershipConflict(format!(
                 "{}: existing file is not owned by this component (observed ownership marker {}, expected {:?})",
@@ -520,25 +520,24 @@ fn plan_artifact_action(
 ///
 /// Pre-v2 installers and pre-activation staging deploy first-party artifacts
 /// without writing a v2 ownership receipt, so their files are
-/// indistinguishable from foreign files by receipt evidence alone and every
-/// lifecycle operation refuses them by default. The adoption boundary is
-/// deliberately narrow:
+/// indistinguishable from foreign files by receipt evidence alone. The
+/// adoption boundary:
 ///
-/// * `Repair`, whose contract is already "restore the cataloged deployment",
-///   may adopt any content at a cataloged path. `Install` may adopt only a
-///   byte-identical observation: the documented hand-over journey for hosts
-///   that own their own activation (Claude Code, Codex) stages the deploy,
-///   defers activation to the stock host, and has the operator re-run
-///   TraceDecay "to record the staged source" — that re-run finds exactly the
-///   bytes TraceDecay staged, so recording them is a legitimate install state,
-///   not a repair. A divergent file is still a foreign claim `Install` must
-///   refuse, `Update` must know the previously owned digest before it can tell
-///   a stale deployment from a user edit, and `Uninstall` must never delete a
-///   file whose ownership it cannot prove;
+/// * `Install`, `Update`, and `Repair` may adopt content at a receiptless
+///   cataloged deploy path. Cataloged artifacts restamp the product version
+///   and binary path on every release, so a live pre-receipt deployment is
+///   never byte-identical to the current catalog; refusing divergent bytes
+///   would wedge such an installation permanently — no lifecycle operation
+///   could ever converge it into receipt ownership. `Uninstall` stays
+///   fail-closed: it must never delete a file whose ownership it cannot
+///   prove;
 /// * the observation must carry the planned component's own cataloged
 ///   ownership marker for this exact deploy path, and it must equal the
 ///   expected artifact's marker. Observations derived from receipts or from
-///   orphan paths never set it, so they can never reach this branch;
+///   orphan paths never set it, so they can never reach this branch. Every
+///   cataloged deploy path is a tracedecay-owned artifact location — shared
+///   host config documents are registration surfaces, never catalog
+///   artifacts;
 /// * no receipt may claim the path. A receipt-backed artifact keeps the
 ///   unmodified marker equality check, which stays the security boundary.
 ///
@@ -553,11 +552,10 @@ fn adopts_pre_receipt_artifact(
         && state.owned_artifact_digest.is_none()
         && state.cataloged_ownership_marker.as_deref() == Some(artifact.ownership_marker.as_str());
     match operation {
-        HostBundleLifecycleOpV1::Repair => receiptless_cataloged_path,
-        HostBundleLifecycleOpV1::Install => {
-            receiptless_cataloged_path && state.artifact_digest == Some(artifact.artifact_digest)
-        }
-        HostBundleLifecycleOpV1::Update | HostBundleLifecycleOpV1::Uninstall => false,
+        HostBundleLifecycleOpV1::Install
+        | HostBundleLifecycleOpV1::Update
+        | HostBundleLifecycleOpV1::Repair => receiptless_cataloged_path,
+        HostBundleLifecycleOpV1::Uninstall => false,
     }
 }
 
@@ -6226,9 +6224,11 @@ mod tests {
 
         std::fs::create_dir_all(root.path().join("plugins")).unwrap();
         std::fs::write(root.path().join("plugins/core.json"), b"external").unwrap();
-        // Somebody else owns the bytes on this artifact path. That is a
-        // standing refusal, not preview staleness: retrying cannot clear it,
-        // so it must be reported as the ownership conflict it is.
+        // A file appeared at this cataloged deploy path after the preview was
+        // taken. A fresh preview would adopt it (backing the bytes up first),
+        // so this is genuine preview staleness — the confirmed plan no longer
+        // matches what is observed, and nothing may be overwritten under the
+        // stale plan.
         assert!(matches!(
             HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
                 &component_set,
@@ -6237,7 +6237,7 @@ mod tests {
                 &verifier,
                 &mut registration,
             ),
-            Err(HostBundleError::OwnershipConflict(_))
+            Err(HostBundleError::StalePreview(_))
         ));
         assert_eq!(
             std::fs::read(root.path().join("plugins/core.json")).unwrap(),
@@ -6396,61 +6396,37 @@ mod tests {
     }
 
     #[test]
-    fn repair_adopts_only_cataloged_pre_receipt_artifacts() {
-        let repair_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(repair_root.path().join("plugins")).unwrap();
-        std::fs::write(
-            repair_root.path().join("plugins/tracedecay.json"),
-            b"legacy",
-        )
-        .unwrap();
+    fn lifecycle_ops_converge_cataloged_pre_receipt_artifacts() {
         let bundle = manifest(HostKindV1::KimiCode, b"expected");
-        let mut writer = HostBundleWriterV1::open(repair_root.path()).unwrap();
-        let receipt = writer
-            .execute(
-                &bundle,
-                &execution(
-                    HostKindV1::KimiCode,
-                    HostBundleLifecycleOpV1::Repair,
-                    20,
-                    true,
-                ),
-                &content(b"expected"),
-                &verifier(&bundle),
-            )
-            .unwrap();
-        assert_eq!(
-            std::fs::read(repair_root.path().join("plugins/tracedecay.json")).unwrap(),
-            b"expected"
-        );
-        assert_eq!(receipt.artifacts.len(), 1);
-
-        let install_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(install_root.path().join("plugins")).unwrap();
-        std::fs::write(
-            install_root.path().join("plugins/tracedecay.json"),
-            b"legacy",
-        )
-        .unwrap();
-        let mut writer = HostBundleWriterV1::open(install_root.path()).unwrap();
-        assert!(matches!(
-            writer.execute(
-                &bundle,
-                &execution(
-                    HostKindV1::KimiCode,
-                    HostBundleLifecycleOpV1::Install,
-                    21,
-                    true,
-                ),
-                &content(b"expected"),
-                &verifier(&bundle),
-            ),
-            Err(HostBundleError::OwnershipConflict(_))
-        ));
-        assert_eq!(
-            std::fs::read(install_root.path().join("plugins/tracedecay.json")).unwrap(),
-            b"legacy"
-        );
+        for (operation, operation_id) in [
+            (HostBundleLifecycleOpV1::Repair, 20),
+            (HostBundleLifecycleOpV1::Install, 21),
+            (HostBundleLifecycleOpV1::Update, 24),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("plugins")).unwrap();
+            std::fs::write(root.path().join("plugins/tracedecay.json"), b"legacy").unwrap();
+            let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+            let receipt = writer
+                .execute(
+                    &bundle,
+                    &execution(HostKindV1::KimiCode, operation, operation_id, true),
+                    &content(b"expected"),
+                    &verifier(&bundle),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{operation:?} must adopt a pre-receipt cataloged deploy: {error}")
+                });
+            assert_eq!(
+                std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
+                b"expected"
+            );
+            assert_eq!(receipt.artifacts.len(), 1);
+            assert_eq!(
+                receipt.artifacts[0].ownership_marker,
+                bundle.artifacts[0].ownership_marker
+            );
+        }
     }
 
     /// The documented stock-host hand-over: TraceDecay stages the deploy, the
@@ -6577,48 +6553,53 @@ mod tests {
     }
 
     #[test]
-    fn repair_adopts_a_receiptless_artifact_carrying_the_expected_ownership_marker() {
+    fn lifecycle_ops_adopt_a_receiptless_artifact_carrying_the_expected_ownership_marker() {
         let bundle = manifest(HostKindV1::KimiCode, b"current");
         let artifact = &bundle.artifacts[0];
         let marker = Some(artifact.ownership_marker.clone());
 
-        // Stale pre-v2 bytes are adopted, but only after they are backed up.
-        assert_eq!(
-            plan_artifact_action(
-                HostBundleLifecycleOpV1::Repair,
-                artifact,
-                Some(&pre_v2_artifact(artifact, b"pre-v2", marker.clone())),
-            ),
-            Ok(HostArtifactActionV1::BackupThenReplace)
-        );
-        // Pre-v2 bytes that already match the catalog need no mutation at all.
-        assert_eq!(
-            plan_artifact_action(
-                HostBundleLifecycleOpV1::Repair,
-                artifact,
-                Some(&pre_v2_artifact(artifact, b"current", marker.clone())),
-            ),
-            Ok(HostArtifactActionV1::Noop)
-        );
-
-        // Adoption belongs to Repair alone.
+        // A live pre-receipt deployment is version-stamped, so it is never
+        // byte-identical to the current catalog. Install, Update, and Repair
+        // must all converge it — stale pre-v2 bytes are adopted, but only
+        // after they are backed up.
         for operation in [
             HostBundleLifecycleOpV1::Install,
             HostBundleLifecycleOpV1::Update,
-            HostBundleLifecycleOpV1::Uninstall,
+            HostBundleLifecycleOpV1::Repair,
         ] {
-            assert!(
-                matches!(
-                    plan_artifact_action(
-                        operation,
-                        artifact,
-                        Some(&pre_v2_artifact(artifact, b"pre-v2", marker.clone())),
-                    ),
-                    Err(HostBundleError::OwnershipConflict(_))
+            assert_eq!(
+                plan_artifact_action(
+                    operation,
+                    artifact,
+                    Some(&pre_v2_artifact(artifact, b"pre-v2", marker.clone())),
                 ),
-                "{operation:?} must not adopt an artifact no receipt records"
+                Ok(HostArtifactActionV1::BackupThenReplace),
+                "{operation:?} must adopt a receiptless cataloged deploy path"
+            );
+            // Pre-v2 bytes that already match the catalog need no mutation.
+            assert_eq!(
+                plan_artifact_action(
+                    operation,
+                    artifact,
+                    Some(&pre_v2_artifact(artifact, b"current", marker.clone())),
+                ),
+                Ok(HostArtifactActionV1::Noop)
             );
         }
+
+        // Uninstall stays fail-closed: it must never delete a file whose
+        // ownership it cannot prove.
+        assert!(
+            matches!(
+                plan_artifact_action(
+                    HostBundleLifecycleOpV1::Uninstall,
+                    artifact,
+                    Some(&pre_v2_artifact(artifact, b"pre-v2", marker.clone())),
+                ),
+                Err(HostBundleError::OwnershipConflict(_))
+            ),
+            "Uninstall must not adopt an artifact no receipt records"
+        );
     }
 
     #[test]
@@ -6730,67 +6711,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn repair_takes_ownership_of_pre_v2_artifacts_that_no_receipt_records() {
-        let root = tempfile::tempdir().unwrap();
-        let bundle = manifest(HostKindV1::KimiCode, b"current");
-        std::fs::create_dir_all(root.path().join("plugins")).unwrap();
-        std::fs::write(root.path().join("plugins/tracedecay.json"), b"pre-v2").unwrap();
-
-        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
-        let receipt = writer
-            .execute(
-                &bundle,
-                &execution(
-                    HostKindV1::KimiCode,
-                    HostBundleLifecycleOpV1::Repair,
-                    21,
-                    true,
-                ),
-                &content(b"current"),
-                &verifier(&bundle),
-            )
-            .unwrap();
-
-        assert_eq!(receipt.artifacts.len(), 1);
-        assert_eq!(
-            receipt.artifacts[0].ownership_marker,
-            bundle.artifacts[0].ownership_marker
-        );
-        assert_eq!(
-            std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
-            b"current"
-        );
-    }
-
-    #[test]
-    fn install_still_refuses_pre_v2_artifacts_that_no_receipt_records() {
-        let root = tempfile::tempdir().unwrap();
-        let bundle = manifest(HostKindV1::KimiCode, b"current");
-        std::fs::create_dir_all(root.path().join("plugins")).unwrap();
-        std::fs::write(root.path().join("plugins/tracedecay.json"), b"pre-v2").unwrap();
-
-        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
-        assert!(matches!(
-            writer.execute(
-                &bundle,
-                &execution(
-                    HostKindV1::KimiCode,
-                    HostBundleLifecycleOpV1::Install,
-                    22,
-                    true
-                ),
-                &content(b"current"),
-                &verifier(&bundle),
-            ),
-            Err(HostBundleError::OwnershipConflict(_))
-        ));
-        assert_eq!(
-            std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
-            b"pre-v2"
-        );
     }
 
     struct CurrentRegistration;
