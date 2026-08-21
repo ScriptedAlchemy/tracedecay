@@ -521,9 +521,6 @@ pub fn classify_claude_observation_failure(
             crate::observation::ObservationApplicationError::Cancelled => {
                 contended("observation_cancelled")
             }
-            crate::observation::ObservationApplicationError::PersistedObservationUnavailable => {
-                unavailable("observation_persisted_value_unavailable")
-            }
             crate::observation::ObservationApplicationError::Contract(_) => {
                 permanent("observation_contract_invalid")
             }

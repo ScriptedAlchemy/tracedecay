@@ -184,7 +184,7 @@ pub enum CaptureObservationOutcome {
         projection_state: ExternalSourceProjectionStateV1,
         retry_handle: ExternalSourceProjectionRetryHandleV1,
         outcome: Box<ObservationPersistOutcome>,
-        projection_status: ObservationProjectionStatus,
+        projection_status: ObservationProjectionReadback,
         sanitized_record: Box<SanitizedObservationRecordV1>,
         findings: Vec<SanitizationFindingV1>,
     },
@@ -304,8 +304,6 @@ pub enum ObservationApplicationError {
     Privacy(#[from] PrivacySanitizerError),
     #[error("observation store operation failed")]
     Store(#[from] ObservationStoreError),
-    #[error("persisted observation is not readable from the authoritative store")]
-    PersistedObservationUnavailable,
     #[error("observation operation was cancelled")]
     Cancelled,
 }
@@ -449,28 +447,20 @@ where
                     // new commit establishes queued state. Duplicate receipts
                     // prove durability but carry no projection status, so a
                     // trailing reader snapshot remains explicitly unavailable.
-                    let projection_status = match stored {
-                        Some(stored) => {
+                    let projection_status = match (stored, &outcome) {
+                        (Some(stored), _) => {
                             ObservationProjectionReadback::Authoritative(stored.projection_status())
                         }
-                        None if matches!(&outcome, ObservationPersistOutcome::Committed(_)) => {
+                        (None, ObservationPersistOutcome::Committed(_)) => {
                             ObservationProjectionReadback::Authoritative(
                                 ObservationProjectionStatus::Queued,
                             )
                         }
-                        None if matches!(
-                            &outcome,
+                        (
+                            None,
                             ObservationPersistOutcome::ExactDuplicate(_)
-                                | ObservationPersistOutcome::CoveredDuplicate(_)
-                        ) =>
-                        {
-                            ObservationProjectionReadback::Unavailable
-                        }
-                        None => {
-                            return Err(
-                                ObservationApplicationError::PersistedObservationUnavailable,
-                            );
-                        }
+                            | ObservationPersistOutcome::CoveredDuplicate(_),
+                        ) => ObservationProjectionReadback::Unavailable,
                     };
                     Ok(CaptureObservationOutcome::Persisted {
                         outcome: Box::new(outcome),
