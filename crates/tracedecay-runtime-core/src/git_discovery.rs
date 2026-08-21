@@ -62,6 +62,9 @@ pub async fn discover_repository_identity(
     if !repository_control_may_exist(directory) {
         return GitRepositoryIdentityOutcome::NotRepository;
     }
+    if let Some(identity) = repository_identity_from_authority(directory) {
+        return identity;
+    }
 
     let child = match async_repository_identity_command(directory).spawn() {
         Ok(child) => child,
@@ -115,6 +118,9 @@ pub fn discover_repository_identity_with_control(
     if !repository_control_may_exist(directory) {
         return GitRepositoryIdentityOutcome::NotRepository;
     }
+    if let Some(identity) = repository_identity_from_authority(directory) {
+        return identity;
+    }
 
     let mut command = repository_identity_command(directory);
     let child = match command.spawn() {
@@ -154,6 +160,27 @@ fn repository_control_may_exist(directory: &Path) -> bool {
 
 fn git_control_exists_or_unknown(candidate: &Path) -> bool {
     candidate.join(".git").try_exists().unwrap_or(true)
+}
+
+fn repository_identity_from_authority(directory: &Path) -> Option<GitRepositoryIdentityOutcome> {
+    match crate::git_repository::GitRepositoryAuthority::discover(directory) {
+        Ok(repository) => {
+            let Some(worktree_root) = repository.worktree_root() else {
+                return Some(GitRepositoryIdentityOutcome::NotRepository);
+            };
+            Some(GitRepositoryIdentityOutcome::Resolved(
+                GitRepositoryIdentity {
+                    worktree_root: worktree_root.to_path_buf(),
+                    git_dir: repository.git_dir().to_path_buf(),
+                    common_dir: repository.common_dir().to_path_buf(),
+                },
+            ))
+        }
+        Err(crate::git_repository::GitRepositoryError::NotARepository { .. }) => {
+            Some(GitRepositoryIdentityOutcome::NotRepository)
+        }
+        Err(_) => None,
+    }
 }
 
 fn repository_identity_command(directory: &Path) -> Command {
