@@ -519,7 +519,11 @@ impl GraphDbRegistry {
                 let (historical_commit, recovered_digest) =
                     match (apply_native, has_supplied_manifest) {
                         (true, _) => {
-                            let commit = database.apply_generation_unverified(&manifest, &check)?;
+                            let commit = database.apply_generation_unverified_with_digest(
+                                &manifest,
+                                sealed_digest,
+                                &check,
+                            )?;
                             let (_, recovered) = database.reopen_and_verify_existing_generation(
                                 &manifest,
                                 sealed_digest,
@@ -594,7 +598,11 @@ impl GraphDbRegistry {
             // native rows (vectors) the canonical source omits; a first
             // commit must install them natively before verification.
             (true, _) | (false, true) => {
-                let commit = database.apply_generation_unverified(&manifest, &check)?;
+                let commit = database.apply_generation_unverified_with_digest(
+                    &manifest,
+                    sealed_digest,
+                    &check,
+                )?;
                 database
                     .reopen_and_verify_existing_generation(&manifest, sealed_digest, &check)
                     .map(|(_, recovered)| (commit, recovered))

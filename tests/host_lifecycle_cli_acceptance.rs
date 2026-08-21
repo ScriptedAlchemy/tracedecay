@@ -947,10 +947,9 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
         .home
         .path()
         .join(".claude/plugins/known_marketplaces.json");
-    let active_native_state = [
-        fs::read(&settings_path).unwrap(),
-        fs::read(&marketplaces_path).unwrap(),
-    ];
+    let settings_before_install: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    let marketplaces_before_install = fs::read(&marketplaces_path).unwrap();
     assert_success(
         case.id,
         "receipt-backed install after native activation",
@@ -958,14 +957,26 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
     );
     let install_receipt = latest_receipt(&cli, case.host);
     assert_receipt_digests(&cli, &install_receipt);
+    let installed_settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    assert_eq!(installed_settings["env"], settings_before_install["env"]);
     assert_eq!(
-        [
-            fs::read(&settings_path).unwrap(),
-            fs::read(&marketplaces_path).unwrap(),
-        ],
-        active_native_state,
-        "catalog install rewrote Claude-owned activation state"
+        installed_settings["enabledPlugins"]["foreign@market"],
+        settings_before_install["enabledPlugins"]["foreign@market"]
     );
+    assert_eq!(
+        installed_settings["permissions"]["allow"],
+        serde_json::json!(["Read", "mcp__plugin_tracedecay_graph__*"]),
+        "catalog install must add the one managed permission without replacing foreign grants"
+    );
+    assert_eq!(
+        fs::read(&marketplaces_path).unwrap(),
+        marketplaces_before_install
+    );
+    let active_native_state = [
+        fs::read(&settings_path).unwrap(),
+        fs::read(&marketplaces_path).unwrap(),
+    ];
 
     let cache_manifest = cli
         .home
@@ -1013,7 +1024,7 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
             fs::read(&marketplaces_path).unwrap(),
         ],
         active_native_state,
-        "catalog maintenance rewrote Claude-owned activation state"
+        "catalog maintenance changed the converged Claude activation state"
     );
 
     let claude_invocations = install_current_claude_cli(cli.home.path(), &cli.bin_dir);

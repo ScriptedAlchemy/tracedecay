@@ -11,6 +11,10 @@ use crate::{GraphBudgetKind, GraphDbError};
 pub const MAX_VERIFIED_GENERATION_ENTITIES: usize = 8_000_000;
 pub const MAX_VERIFIED_GENERATION_RELATIONS: usize = 16_000_000;
 pub const MAX_VERIFIED_GENERATION_BATCH_MUTATIONS: usize = 4_096;
+/// Bounds variable mutation payload cloned into one native generation staging
+/// transaction (identifiers, labels, endpoint identities, and properties).
+/// The mutation-count ceiling independently bounds fixed record overhead.
+pub const MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_GRAPH_VECTOR_DIMENSION: usize = 4_096;
 pub const MAX_GRAPH_IDENTIFIER_BYTES: usize = 1_024;
 pub const MAX_GRAPH_ENTITY_LABELS: usize = 128;

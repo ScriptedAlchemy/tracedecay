@@ -22,8 +22,8 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
-    NonInteractiveInstallOutcome, UpdatePluginOutcome, expected_tool_perms, load_json_file,
-    safe_write_text_file,
+    NonInteractiveInstallOutcome, UpdatePluginOutcome, backup_config_file, expected_tool_perms,
+    load_json_file, load_json_file_strict, safe_write_json_file, safe_write_text_file,
 };
 
 /// Claude Code agent.
@@ -105,11 +105,11 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if claude_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
-            return Ok(());
+        if !claude_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
+            let claude = require_claude_cli()?;
+            claude_plugin_activate_with(&claude, &ctx.home)?;
         }
-        let claude = require_claude_cli()?;
-        claude_plugin_activate_with(&claude, &ctx.home)
+        ensure_claude_plugin_permission(&ctx.home)
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
@@ -715,6 +715,67 @@ fn plugin_wildcard_perm() -> String {
     format!("{PLUGIN_TOOL_PERM_PREFIX}*")
 }
 
+/// Add the one documented plugin-namespace allow rule without replacing any
+/// other Claude setting. The receipt-backed lifecycle snapshots settings.json
+/// before this registration effect, while this writer also leaves the normal
+/// recoverable `.bak` used by every shared-config edit.
+fn ensure_claude_plugin_permission(home: &Path) -> Result<()> {
+    let settings_path = home.join(".claude/settings.json");
+    ensure_claude_dir(
+        settings_path
+            .parent()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("{} has no parent directory", settings_path.display()),
+            })?,
+    )?;
+    let mut settings = load_json_file_strict(&settings_path)?;
+    let settings = settings
+        .as_object_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("{} must contain a JSON object", settings_path.display()),
+        })?;
+    let permissions = settings
+        .entry("permissions")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "permissions in {} must contain a JSON object",
+                settings_path.display()
+            ),
+        })?;
+    let allow = permissions
+        .entry("allow")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "permissions.allow in {} must contain a JSON array",
+                settings_path.display()
+            ),
+        })?;
+    let wildcard = plugin_wildcard_perm();
+    if allow
+        .iter()
+        .any(|entry| entry.as_str() == Some(wildcard.as_str()))
+    {
+        return Ok(());
+    }
+    allow.push(json!(wildcard));
+
+    let backup = backup_config_file(&settings_path)?;
+    safe_write_json_file(
+        &settings_path,
+        &serde_json::Value::Object(settings.clone()),
+        backup.as_deref(),
+    )?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Allowed tracedecay plugin tools in {}",
+        settings_path.display()
+    );
+    Ok(())
+}
+
 /// True when the settings allowlist covers every plugin tool without
 /// prompting: either the single wildcard rule or an explicit per-tool grant
 /// for each managed tool.
@@ -1088,9 +1149,8 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
     // The plugin-namespace entries are the ones the plugin MCP server actually
     // matches against; without coverage every call to a tool prompts
     // interactively and hard-fails headless/in subagents. Check these first —
-    // this is the real adoption gate. Claude settings.json stays host-owned
-    // (TraceDecay never writes it), so the remedy is the one-rule instruction,
-    // not an enumeration of every tool name.
+    // this is the real adoption gate. Install/update add the one managed
+    // wildcard while preserving the rest of Claude's host-owned settings.
     let wildcard = plugin_wildcard_perm();
     if installed.contains(&wildcard.as_str()) {
         dc.pass(&format!(
@@ -1166,7 +1226,8 @@ fn doctor_check_local_config(dc: &mut DoctorCounters, project_path: &Path) {
 
 /// Best-effort stale-install check run on ordinary CLI invocations.
 ///
-/// Claude's host-owned registration and config are intentionally read-only.
+/// Claude's host-owned registration stays native; TraceDecay only manages its
+/// one plugin-namespace permission entry in the shared settings document.
 pub fn check_install_stale() {
     let Some(home) = super::home_dir() else {
         return;

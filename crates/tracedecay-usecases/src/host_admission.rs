@@ -1172,6 +1172,59 @@ fn accepted_for_external_source_replay(
     })
 }
 
+fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
+    let reason_code = match error {
+        ObservationStoreError::CursorObservationMismatch => "observation_cursor_mismatch",
+        ObservationStoreError::CursorCoverageMismatch => "observation_cursor_coverage_mismatch",
+        ObservationStoreError::CursorAdvanceCollision => "observation_cursor_advance_collision",
+        ObservationStoreError::CursorSanitizationReceiptMismatch => {
+            "observation_cursor_sanitization_receipt_mismatch"
+        }
+        ObservationStoreError::ObservationCollision { .. } => "observation_identity_collision",
+        ObservationStoreError::SanitizationReceiptCollision => {
+            "observation_sanitization_receipt_collision"
+        }
+        ObservationStoreError::RetrievalAnchorObservationMismatch => {
+            "observation_retrieval_anchor_observation_mismatch"
+        }
+        ObservationStoreError::RetrievalAnchorOwnerMismatch => {
+            "observation_retrieval_anchor_owner_mismatch"
+        }
+        ObservationStoreError::RetrievalAnchorSourceGenerationMismatch => {
+            "observation_retrieval_anchor_source_generation_mismatch"
+        }
+        ObservationStoreError::RetrievalAnchorSourceLineageMismatch => {
+            "observation_retrieval_anchor_source_lineage_mismatch"
+        }
+        ObservationStoreError::RetrievalAnchorProjectionGenerationMismatch => {
+            "observation_retrieval_anchor_projection_generation_mismatch"
+        }
+        ObservationStoreError::RetrievalAnchorCollision => "observation_retrieval_anchor_collision",
+        ObservationStoreError::RetrievalAnchorContract(_) => {
+            "observation_retrieval_anchor_contract_invalid"
+        }
+        ObservationStoreError::RepositoryProvenanceAvailabilityMismatch => {
+            "observation_repository_provenance_availability_mismatch"
+        }
+        ObservationStoreError::RepositoryProvenanceBindingMismatch => {
+            "observation_repository_provenance_binding_mismatch"
+        }
+        ObservationStoreError::RepositoryProvenanceContract(_) => {
+            "observation_repository_provenance_contract_invalid"
+        }
+        ObservationStoreError::RetrievalAnchorAliasCollision { .. } => {
+            "observation_retrieval_anchor_alias_collision"
+        }
+        ObservationStoreError::InvalidReplayLimit { .. } => "observation_replay_limit_invalid",
+        ObservationStoreError::Contract(_) => "observation_store_contract_invalid",
+        ObservationStoreError::CursorConflict { .. } | ObservationStoreError::Storage { .. } => {
+            unreachable!("retryable store failures are classified before static reason mapping")
+        }
+        _ => "observation_store_failed",
+    };
+    HostAdmissionOutcome::new(HostAdmissionStatus::Degraded, false, Some(reason_code))
+}
+
 fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
     match error {
         ObservationApplicationError::Cancelled => HostAdmissionOutcome::new(
@@ -1210,11 +1263,7 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
             false,
             Some("privacy_boundary_failed"),
         ),
-        ObservationApplicationError::Store(_) => HostAdmissionOutcome::new(
-            HostAdmissionStatus::Degraded,
-            false,
-            Some("observation_commit_failed"),
-        ),
+        ObservationApplicationError::Store(error) => classify_store_error(error),
     }
 }
 
