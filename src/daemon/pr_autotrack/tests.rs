@@ -541,6 +541,22 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
         repo.path(),
         "refs/tracedecay/branch/feature-manual"
     ));
+    let synthetic_branch = crate::branch::current_branch(&activation.worktree)
+        .expect("manual worktree has an attached synthetic branch");
+    let source = crate::daemon::branch_add::capture_exact_branch_source(
+        &graph,
+        &schedulers,
+        repo.path(),
+        &activation.worktree,
+        &synthetic_branch,
+    )
+    .await
+    .expect("synthetic branch source uses exact Git ref identity");
+    assert_eq!(
+        source.reference,
+        "refs/heads/tracedecay/track/feature-manual"
+    );
+    assert_eq!(source.source_oid, activation.head_sha);
     schedulers.shutdown().await;
 }
 

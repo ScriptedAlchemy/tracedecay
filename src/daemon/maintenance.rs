@@ -408,6 +408,17 @@ impl StoreTelemetrySamplingRegistry {
         Some((cached.store.clone(), cached.port.for_scope(scope.clone())))
     }
 
+    pub(super) fn release_retained_handles_for_shutdown(&self) {
+        self.ports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.semantic_vector_retention
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
     pub(super) fn semantic_vector_retention_cursor(
         &self,
         project_root: &Path,
@@ -1491,6 +1502,57 @@ mod tests {
         // The window wraps past the end back to the front.
         let (third, _) = select_store_window(&keys, next.as_deref(), 4);
         assert_eq!(third, vec![8, 9, 0, 1]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_release_clears_retained_telemetry_handles_and_progress() {
+        let temporary = tempfile::tempdir().expect("telemetry registry fixture root");
+        let database_path = temporary.path().join("project.db");
+        crate::daemon::store_runtime::register_registered_schema_installer();
+        let authority = crate::db::DatabaseAuthority::acquire_test(
+            &database_path,
+            "maintenance telemetry shutdown fixture",
+        )
+        .expect("telemetry fixture database authority");
+        let (database, _) = crate::db::Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            crate::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("telemetry fixture database");
+        let project_id = tracedecay_domain::ProjectId::new("project.maintenance-shutdown")
+            .expect("project identity");
+        let scope = tracedecay_application::ResolvedScope::new(
+            project_id,
+            tracedecay_domain::RepositoryId::new("repository.maintenance-shutdown")
+                .expect("repository identity"),
+            tracedecay_domain::WorktreeId::new("worktree.maintenance-shutdown")
+                .expect("worktree identity"),
+            None,
+        )
+        .expect("resolved scope");
+        let registry = StoreTelemetrySamplingRegistry::default();
+        assert!(registry.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        registry.record_semantic_vector_retention_unseated(temporary.path());
+        assert!(registry.registered_port(&database_path, &scope).is_some());
+        assert_eq!(
+            registry.semantic_vector_retention_read(temporary.path()),
+            SemanticVectorRetentionReadV1::SemanticUnseated
+        );
+
+        registry.release_retained_handles_for_shutdown();
+
+        assert!(
+            registry.registered_port(&database_path, &scope).is_none(),
+            "shutdown must drop maintenance-owned database clients"
+        );
+        assert_eq!(
+            registry.semantic_vector_retention_read(temporary.path()),
+            SemanticVectorRetentionReadV1::Unknown
+        );
     }
 
     #[test]

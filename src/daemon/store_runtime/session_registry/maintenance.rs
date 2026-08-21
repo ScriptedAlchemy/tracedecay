@@ -1,15 +1,11 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tracedecay_store::StoreShardIdV1;
-
-#[cfg(test)]
-use std::sync::atomic::Ordering;
 
 use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, RegisteredGlobalDbLeaseV1,
@@ -51,6 +47,7 @@ fn lock_registered_schema_convergence_statuses(
 }
 
 pub(super) struct RegisteredSchemaConvergenceMaintenance {
+    accepting: AtomicBool,
     statuses: Arc<StdMutex<RegisteredSchemaConvergenceStatuses>>,
     tasks: StdMutex<BTreeMap<StoreShardIdV1, JoinHandle<()>>>,
     #[cfg(test)]
@@ -62,6 +59,7 @@ pub(super) struct RegisteredSchemaConvergenceMaintenance {
 impl RegisteredSchemaConvergenceMaintenance {
     pub(super) fn new() -> Self {
         Self {
+            accepting: AtomicBool::new(true),
             statuses: Arc::new(StdMutex::new(BTreeMap::new())),
             tasks: StdMutex::new(BTreeMap::new()),
             #[cfg(test)]
@@ -94,6 +92,13 @@ impl RegisteredSchemaConvergenceMaintenance {
         convergence: Option<crate::global_db::schema_stages::RegisteredSchemaConvergence>,
     ) {
         let shard_id = database.binding().shard_id.clone();
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.accepting.load(Ordering::Acquire) {
+            return;
+        }
         {
             let mut statuses = lock_registered_schema_convergence_statuses(&self.statuses);
             if statuses.contains_key(&shard_id) {
@@ -160,10 +165,48 @@ impl RegisteredSchemaConvergenceMaintenance {
             };
             lock_registered_schema_convergence_statuses(&statuses).insert(task_shard_id, status);
         });
-        self.tasks
+        tasks.insert(shard_id, task);
+    }
+
+    pub(super) fn begin_shutdown(&self) {
+        self.accepting.store(false, Ordering::Release);
+        let tasks = self
+            .tasks
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(shard_id, task);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for task in tasks.values() {
+            task.abort();
+        }
+    }
+
+    pub(super) async fn shutdown(&self) -> std::result::Result<(), String> {
+        self.accepting.store(false, Ordering::Release);
+        let tasks = {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let tasks = std::mem::take(&mut *tasks);
+            for task in tasks.values() {
+                task.abort();
+            }
+            tasks
+        };
+        let mut failures = Vec::new();
+        for (shard_id, task) in tasks {
+            if let Err(error) = task.await
+                && !error.is_cancelled()
+            {
+                failures.push(format!(
+                    "registered schema convergence task {shard_id:?} join failed: {error}"
+                ));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     #[cfg(test)]
@@ -184,6 +227,7 @@ impl RegisteredSchemaConvergenceMaintenance {
 
 impl Drop for RegisteredSchemaConvergenceMaintenance {
     fn drop(&mut self) {
+        self.accepting.store(false, Ordering::Release);
         let tasks = self
             .tasks
             .get_mut()

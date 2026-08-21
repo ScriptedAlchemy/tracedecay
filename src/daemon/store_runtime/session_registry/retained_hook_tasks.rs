@@ -15,6 +15,7 @@ struct RetainedHookTaskState {
     accepting: bool,
     next_generation: u64,
     tasks: BTreeMap<String, RetainedHookTask>,
+    retiring: Vec<RetainedHookTask>,
 }
 
 /// Daemon-owned terminal-hook work. A new terminal receipt for one provider
@@ -43,7 +44,7 @@ impl RetainedHookTasks {
             return false;
         };
         let key = format!("{provider}\0{session_id}");
-        let previous = {
+        {
             let Ok(mut state) = self.state.lock() else {
                 return false;
             };
@@ -62,19 +63,62 @@ impl RetainedHookTasks {
                 operation(task_cancellation).await;
                 finish_retained_hook_task(weak_state, &task_key, generation);
             });
-            state.tasks.insert(
+            state.retiring.retain(|task| !task.handle.is_finished());
+            let previous = state.tasks.insert(
                 key,
                 RetainedHookTask {
                     generation,
                     cancellation,
                     handle: task,
                 },
-            )
-        };
-        if let Some(previous) = previous {
-            previous.cancellation.cancel();
+            );
+            if let Some(previous) = previous {
+                previous.cancellation.cancel();
+                if !previous.handle.is_finished() {
+                    state.retiring.push(previous);
+                }
+            }
         }
         true
+    }
+
+    pub(super) fn begin_shutdown(&self) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.accepting = false;
+        for task in state.tasks.values().chain(&state.retiring) {
+            task.cancellation.cancel();
+        }
+    }
+
+    pub(super) async fn shutdown(&self) -> Result<(), String> {
+        let tasks = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "retained hook task state lock is poisoned".to_owned())?;
+            state.accepting = false;
+            let mut tasks = std::mem::take(&mut state.retiring);
+            tasks.extend(std::mem::take(&mut state.tasks).into_values());
+            for task in &tasks {
+                task.cancellation.cancel();
+            }
+            tasks
+        };
+        let mut failures = Vec::new();
+        for task in tasks {
+            if let Err(error) = task.handle.await
+                && !error.is_cancelled()
+            {
+                failures.push(format!("retained hook task join failed: {error}"));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
     }
 }
 
@@ -104,7 +148,9 @@ impl Drop for RetainedHookTasks {
             return;
         };
         state.accepting = false;
-        for task in std::mem::take(&mut state.tasks).into_values() {
+        let mut tasks = std::mem::take(&mut state.retiring);
+        tasks.extend(std::mem::take(&mut state.tasks).into_values());
+        for task in tasks {
             task.cancellation.cancel();
             task.handle.abort();
         }
@@ -115,6 +161,7 @@ impl Drop for RetainedHookTasks {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
 
     #[tokio::test]
     async fn new_terminal_receipt_cancels_the_retained_predecessor() {
@@ -132,5 +179,87 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(cancelled.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn shutdown_fences_new_tasks_and_joins_active_task() {
+        let tasks = Arc::new(RetainedHookTasks::new());
+        let started = Arc::new(Notify::new());
+        let cancelled = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        assert!(tasks.retain("codex", "session-1", {
+            let started = Arc::clone(&started);
+            let cancelled = Arc::clone(&cancelled);
+            let release = Arc::clone(&release);
+            move |cancellation| async move {
+                started.notify_one();
+                while !cancellation.is_cancelled() {
+                    tokio::task::yield_now().await;
+                }
+                cancelled.notify_one();
+                release.notified().await;
+            }
+        }));
+        started.notified().await;
+
+        let shutdown = tokio::spawn({
+            let tasks = Arc::clone(&tasks);
+            async move { tasks.shutdown().await }
+        });
+        cancelled.notified().await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must join the active task"
+        );
+        assert!(
+            !tasks.retain("codex", "session-2", |_| async {}),
+            "shutdown must fence later admission"
+        );
+
+        release.notify_one();
+        shutdown
+            .await
+            .expect("shutdown task remains joinable")
+            .expect("retained hook tasks shut down cleanly");
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_superseded_task() {
+        let tasks = Arc::new(RetainedHookTasks::new());
+        let first_started = Arc::new(Notify::new());
+        let first_cancelled = Arc::new(Notify::new());
+        let first_release = Arc::new(Notify::new());
+        assert!(tasks.retain("codex", "session-1", {
+            let started = Arc::clone(&first_started);
+            let cancelled = Arc::clone(&first_cancelled);
+            let release = Arc::clone(&first_release);
+            move |cancellation| async move {
+                started.notify_one();
+                while !cancellation.is_cancelled() {
+                    tokio::task::yield_now().await;
+                }
+                cancelled.notify_one();
+                release.notified().await;
+            }
+        }));
+        first_started.notified().await;
+        assert!(tasks.retain("codex", "session-1", |_| async {}));
+        first_cancelled.notified().await;
+
+        let shutdown = tokio::spawn({
+            let tasks = Arc::clone(&tasks);
+            async move { tasks.shutdown().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must retain and join the cancelled predecessor"
+        );
+
+        first_release.notify_one();
+        shutdown
+            .await
+            .expect("shutdown task remains joinable")
+            .expect("retained hook tasks shut down cleanly");
     }
 }

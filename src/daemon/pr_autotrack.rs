@@ -1425,7 +1425,13 @@ fn read_exact_ref(
 ) -> std::result::Result<ExactRefReadV1, ManualBranchActivationError> {
     let output = run_git_with_control(
         repo_root,
-        &["show-ref", "--verify", "--hash", reference],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            reference,
+        ],
         command_control,
     )
     .map_err(|error| {
