@@ -438,15 +438,12 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// evidence digest are a pure function of the immutable generation. Only
     /// success is cached.
     attribution: OnceLock<PublishedGenerationTestAttributionAuthorityV1>,
-    /// Amortized code-graph publication manifest. Seat retries and the
-    /// seat/reconcile duplicate publication of one sealed generation each
-    /// rebuilt every graph entity and relation — a serialize-and-hash sweep
-    /// over the whole store charged against the activation deadline. The
-    /// manifest is a pure function of the immutable generation plus the
-    /// projection identity and projector revision recorded beside it. Only a
-    /// complete successful build is cached; an interrupted or
-    /// deadline-exceeded build records nothing.
-    graph_manifest: OnceLock<CodeGraphManifestMemoV1>,
+    /// Reclaimable code-graph publication manifest. Concurrent seat retries
+    /// share a complete build while a publication caller owns it, but the
+    /// generation does not pin the full entity/relation projection after the
+    /// durable graph has consumed it. The key remains first-success-wins so a
+    /// foreign projection identity can never replace the canonical memo.
+    graph_manifest: OnceLock<Arc<Mutex<CodeGraphManifestMemoV1>>>,
 }
 
 /// One successfully built code-graph publication manifest, pinned to the
@@ -456,7 +453,7 @@ pub struct CodeIndexPublishedGenerationV1 {
 struct CodeGraphManifestMemoV1 {
     projection: GraphProjectionIdentity,
     projector_revision: GraphProjectorRevision,
-    manifest: Arc<GraphGenerationManifest>,
+    manifest: Weak<GraphGenerationManifest>,
 }
 
 impl CodeIndexPublishedGenerationV1 {
@@ -759,10 +756,14 @@ impl CodeIndexPublishedGenerationV1 {
         projection: &GraphProjectionIdentity,
         projector_revision: &GraphProjectorRevision,
     ) -> Option<Arc<GraphGenerationManifest>> {
-        self.graph_manifest.get().and_then(|memo| {
-            (memo.projection == *projection && memo.projector_revision == *projector_revision)
-                .then(|| Arc::clone(&memo.manifest))
-        })
+        let memo = self.graph_manifest.get()?;
+        let memo = match memo.lock() {
+            Ok(memo) => memo,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        (memo.projection == *projection && memo.projector_revision == *projector_revision)
+            .then(|| memo.manifest.upgrade())
+            .flatten()
     }
 
     /// Record one complete, successfully built code-graph publication
@@ -774,11 +775,20 @@ impl CodeIndexPublishedGenerationV1 {
         projector_revision: GraphProjectorRevision,
         manifest: Arc<GraphGenerationManifest>,
     ) {
-        let _ = self.graph_manifest.set(CodeGraphManifestMemoV1 {
-            projection,
-            projector_revision,
-            manifest,
+        let memo = self.graph_manifest.get_or_init(|| {
+            Arc::new(Mutex::new(CodeGraphManifestMemoV1 {
+                projection: projection.clone(),
+                projector_revision: projector_revision.clone(),
+                manifest: Weak::new(),
+            }))
         });
+        let mut memo = match memo.lock() {
+            Ok(memo) => memo,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if memo.projection == projection && memo.projector_revision == projector_revision {
+            memo.manifest = Arc::downgrade(&manifest);
+        }
     }
 
     /// Return chunks re-admitted through their parser-backed exact authority.

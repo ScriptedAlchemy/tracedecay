@@ -764,6 +764,11 @@ fn repeated_graph_manifest_builds_reuse_the_memo_without_reexamining_the_generat
         },
     )
     .expect("memoized build");
+    let first_weak = Arc::downgrade(&first);
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "a live memo hit must return the exact manifest allocation"
+    );
     assert_eq!(first, second, "the memo returns the identical manifest");
     assert!(
         !first.entities.is_empty(),
@@ -809,6 +814,46 @@ fn repeated_graph_manifest_builds_reuse_the_memo_without_reexamining_the_generat
     )
     .expect_err("an expired request is refused before the memo serves");
     assert_eq!(refused, CodeGraphProjectionError::DeadlineExceeded);
+
+    drop(first);
+    drop(second);
+    assert!(
+        first_weak.upgrade().is_none(),
+        "the generation must not pin a graph manifest after its callers release it"
+    );
+
+    let rebuilt_checks = Cell::new(0usize);
+    let rebuilt_same_key = build_published_code_graph_manifest_checked(
+        projection.clone(),
+        &generation,
+        &projector_revision,
+        &|| {
+            rebuilt_checks.set(rebuilt_checks.get() + 1);
+            Ok(())
+        },
+    )
+    .expect("an expired same-key memo rebuilds");
+    assert!(
+        rebuilt_checks.get() > 3,
+        "an expired weak memo must rebuild the manifest"
+    );
+    let refreshed_checks = Cell::new(0usize);
+    let refreshed = build_published_code_graph_manifest_checked(
+        projection.clone(),
+        &generation,
+        &projector_revision,
+        &|| {
+            refreshed_checks.set(refreshed_checks.get() + 1);
+            Ok(())
+        },
+    )
+    .expect("the rebuilt manifest refreshes the memo");
+    assert!(Arc::ptr_eq(&rebuilt_same_key, &refreshed));
+    assert_eq!(
+        refreshed_checks.get(),
+        1,
+        "a live refreshed memo performs only the admission check"
+    );
 
     // A foreign projection identity is a memo miss that rebuilds in full.
     let foreign = code_graph_projection_identity(
