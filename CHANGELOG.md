@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.13](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.12...v0.1.0-beta.13) (2026-08-21)
+
+
+### Bug Fixes
+
+* **agent-hosts:** adopt receiptless cataloged deploys on install/update ([8c82f0d](https://github.com/ScriptedAlchemy/tracedecay/commit/8c82f0dd641448f64ac65a566ac72d79cb767316))
+* **build:** satisfy Rust 1.97 Clippy policy ([4926a59](https://github.com/ScriptedAlchemy/tracedecay/commit/4926a5939390bb721fe1e6ed5a5318be654d88da))
+* **cli:** forward receiptless adoption authority ([e2b173e](https://github.com/ScriptedAlchemy/tracedecay/commit/e2b173e8487721178c94848a9cbbef37e9182a5e))
+* **cli:** prevent implicit host repairs ([a762092](https://github.com/ScriptedAlchemy/tracedecay/commit/a76209206e586391998e158ee6f227a0625db451))
+* **cli:** update explicit reinstall test imports ([6424fd0](https://github.com/ScriptedAlchemy/tracedecay/commit/6424fd02f36dfd1570f69e5173516bdce78c58b5))
+* **daemon:** preserve semantic retries on no-op ([4467464](https://github.com/ScriptedAlchemy/tracedecay/commit/4467464e28d1baca206b42f36fa24f4b4d84527b))
+* **daemon:** skip redundant graph activation ([1678492](https://github.com/ScriptedAlchemy/tracedecay/commit/167849236b4515871360c5fecd5d16b17cc981ee))
+* **daemon:** skip redundant graph activation ([214781f](https://github.com/ScriptedAlchemy/tracedecay/commit/214781f4e9195f7c1352fbd6f40afe0a020200e0))
+* **sessions:** accept duplicate receipts on read miss ([a553b08](https://github.com/ScriptedAlchemy/tracedecay/commit/a553b0858068db258e62e66c2ba737b7296ca8ff))
+* **sessions:** accept duplicate receipts on read miss ([391212c](https://github.com/ScriptedAlchemy/tracedecay/commit/391212c4ee772294fb8a596336bc8131107155a1))
+* **sessions:** avoid queued status for duplicate read miss ([2243cdb](https://github.com/ScriptedAlchemy/tracedecay/commit/2243cdbd0755007611b53b0d09d0314c2a931745))
+* **sessions:** keep duplicate projection status unknown ([451855b](https://github.com/ScriptedAlchemy/tracedecay/commit/451855b76418b05d07dca348041ad99666f65e54))
+
+
+### Performance Improvements
+
+* **code-index:** release exact admission staging ([a630505](https://github.com/ScriptedAlchemy/tracedecay/commit/a630505fef57bc35bcf29c55383101b446495390))
+* **code-index:** share graph publication manifests ([77da1d7](https://github.com/ScriptedAlchemy/tracedecay/commit/77da1d737242205080331c98679cfebcb69b6d94))
+
 ## [0.1.0-beta.12](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.11...v0.1.0-beta.12) (2026-08-21)
 
 
