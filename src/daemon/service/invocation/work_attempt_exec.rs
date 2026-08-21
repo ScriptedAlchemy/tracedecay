@@ -96,17 +96,43 @@ mod tests;
 /// forced termination.
 const CANCELLATION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Live cancellation channels for provider attempts owned by this daemon
-/// process. This is runtime plumbing only — the durable cancellation request
-/// lives in the attempt row, and restart recovery never consults this map.
-#[derive(Default)]
+/// Joined process owners for provider attempts owned by this daemon process.
+/// This is runtime plumbing only — the durable cancellation request lives in
+/// the attempt row, and restart recovery never consults this map.
 pub(super) struct WorkAttemptProcessRegistryV1 {
-    channels: ProcessMapMutex<BTreeMap<String, WorkAttemptProcessHolderV1>>,
+    state: ProcessMapMutex<WorkAttemptProcessRegistryStateV1>,
+}
+
+struct WorkAttemptProcessRegistryStateV1 {
+    accepting: bool,
+    next_generation: u64,
+    processes: BTreeMap<String, WorkAttemptProcessHolderV1>,
+}
+
+impl Default for WorkAttemptProcessRegistryStateV1 {
+    fn default() -> Self {
+        Self {
+            accepting: true,
+            next_generation: 0,
+            processes: BTreeMap::new(),
+        }
+    }
+}
+
+impl Default for WorkAttemptProcessRegistryV1 {
+    fn default() -> Self {
+        Self {
+            state: ProcessMapMutex::new(WorkAttemptProcessRegistryStateV1::default()),
+        }
+    }
 }
 
 struct WorkAttemptProcessHolderV1 {
     worktree_id: Option<WorktreeId>,
     cancellation: Arc<Notify>,
+    lifecycle: tracedecay_runtime_core::cancellation::CancellationToken,
+    generation: u64,
+    handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl WorkAttemptProcessRegistryV1 {
@@ -127,6 +153,7 @@ impl WorkAttemptProcessRegistryV1 {
         self.register_entry(identity, None)
     }
 
+    #[cfg(test)]
     fn register_for_worktree(
         &self,
         identity: &WorkAttemptIdentityV1,
@@ -135,28 +162,101 @@ impl WorkAttemptProcessRegistryV1 {
         self.register_entry(identity, Some(worktree_id))
     }
 
+    #[cfg(test)]
     fn register_entry(
         &self,
         identity: &WorkAttemptIdentityV1,
         worktree_id: Option<&WorktreeId>,
     ) -> Option<Arc<Notify>> {
-        let mut channels = self
-            .channels
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = Self::key(worktree_id, identity);
-        if channels.contains_key(&key) {
+        if !state.accepting || state.processes.contains_key(&key) {
             return None;
         }
+        let generation = state.next_generation.checked_add(1)?;
+        state.next_generation = generation;
         let notify = Arc::new(Notify::new());
-        channels.insert(
+        state.processes.insert(
             key,
             WorkAttemptProcessHolderV1 {
                 worktree_id: worktree_id.cloned(),
                 cancellation: Arc::clone(&notify),
+                lifecycle: tracedecay_runtime_core::cancellation::CancellationToken::new(),
+                generation,
+                handle: None,
             },
         );
         Some(notify)
+    }
+
+    fn spawn_for_worktree<F, Fut>(
+        self: &Arc<Self>,
+        identity: &WorkAttemptIdentityV1,
+        worktree_id: &WorktreeId,
+        task: F,
+    ) -> bool
+    where
+        F: FnOnce(Arc<Notify>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = Self::key(Some(worktree_id), identity);
+        if !state.accepting || state.processes.contains_key(&key) {
+            return false;
+        }
+        let Some(generation) = state.next_generation.checked_add(1) else {
+            return false;
+        };
+        state.next_generation = generation;
+        let cancellation = Arc::new(Notify::new());
+        let lifecycle = tracedecay_runtime_core::cancellation::CancellationToken::new();
+        let task_cancellation = Arc::clone(&cancellation);
+        let task_lifecycle = lifecycle.clone();
+        let task_registry = Arc::downgrade(self);
+        let task_key = key.clone();
+        let (start, started) = tokio::sync::oneshot::channel();
+        let future = task(Arc::clone(&cancellation));
+        let handle = tokio::spawn(async move {
+            let admitted = tokio::select! {
+                result = started => result.is_ok(),
+                () = task_lifecycle.cancelled() => false,
+            };
+            if admitted {
+                tokio::pin!(future);
+                tokio::select! {
+                    () = &mut future => {}
+                    () = task_lifecycle.cancelled() => {
+                        task_cancellation.notify_waiters();
+                        let _ = tokio::time::timeout(CANCELLATION_GRACE, &mut future).await;
+                    }
+                }
+            }
+            if let Some(registry) = task_registry.upgrade() {
+                registry.release_generation(&task_key, generation);
+            }
+        });
+        state.processes.insert(
+            key.clone(),
+            WorkAttemptProcessHolderV1 {
+                worktree_id: Some(worktree_id.clone()),
+                cancellation,
+                lifecycle,
+                generation,
+                handle: Some(handle),
+            },
+        );
+        drop(state);
+        if start.send(()).is_err() {
+            self.release_generation(&key, generation);
+            return false;
+        }
+        true
     }
 
     pub(super) fn holds_attempt(
@@ -164,17 +264,19 @@ impl WorkAttemptProcessRegistryV1 {
         worktree_id: &WorktreeId,
         identity: &WorkAttemptIdentityV1,
     ) -> bool {
-        self.channels
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .processes
             .get(&Self::key(Some(worktree_id), identity))
             .is_some_and(|holder| holder.worktree_id.as_ref() == Some(worktree_id))
     }
 
     pub(super) fn holds_worktree(&self, worktree_id: &WorktreeId) -> bool {
-        self.channels
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .processes
             .values()
             .any(|holder| holder.worktree_id.as_ref() == Some(worktree_id))
     }
@@ -184,15 +286,32 @@ impl WorkAttemptProcessRegistryV1 {
         self.release_entry(identity, None);
     }
 
+    #[cfg(test)]
     fn release_for_worktree(&self, identity: &WorkAttemptIdentityV1, worktree_id: &WorktreeId) {
         self.release_entry(identity, Some(worktree_id));
     }
 
+    #[cfg(test)]
     fn release_entry(&self, identity: &WorkAttemptIdentityV1, worktree_id: Option<&WorktreeId>) {
-        self.channels
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .processes
             .remove(&Self::key(worktree_id, identity));
+    }
+
+    fn release_generation(&self, key: &str, generation: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .processes
+            .get(key)
+            .is_some_and(|holder| holder.generation == generation)
+        {
+            state.processes.remove(key);
+        }
     }
 
     /// Signals the live task for this attempt, if this daemon owns one. The
@@ -218,12 +337,77 @@ impl WorkAttemptProcessRegistryV1 {
         worktree_id: Option<&WorktreeId>,
     ) {
         if let Some(notify) = self
-            .channels
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .processes
             .get(&Self::key(worktree_id, identity))
         {
             notify.cancellation.notify_waiters();
+        }
+    }
+
+    pub(super) fn begin_shutdown(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .accepting = false;
+    }
+
+    pub(super) async fn shutdown(&self) -> bool {
+        let processes = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.accepting = false;
+            std::mem::take(&mut state.processes)
+        };
+        for process in processes.values() {
+            process.cancellation.notify_waiters();
+            process.lifecycle.cancel();
+        }
+        let deadline = tokio::time::Instant::now() + crate::daemon::DAEMON_TASK_ABORT_DEADLINE;
+        let mut clean = true;
+        for process in processes.into_values() {
+            let Some(mut handle) = process.handle else {
+                continue;
+            };
+            match tokio::time::timeout_at(deadline, &mut handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => clean = false,
+                Err(_) => {
+                    handle.abort();
+                    let _ = handle.await;
+                    clean = false;
+                }
+            }
+        }
+        clean
+    }
+
+    #[cfg(test)]
+    fn accepting(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .accepting
+    }
+}
+
+impl Drop for WorkAttemptProcessRegistryV1 {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.accepting = false;
+        for process in state.processes.values() {
+            process.cancellation.notify_waiters();
+            process.lifecycle.cancel();
+            if let Some(handle) = &process.handle {
+                handle.abort();
+            }
         }
     }
 }
@@ -239,13 +423,12 @@ pub(super) fn spawn_attempt_execution(
     observability_producer: Option<Arc<BoundedObservabilityProducerV1>>,
 ) {
     let worktree_id = attempt.execution().worktree_id().clone();
-    let Some(cancel) = registry.register_for_worktree(attempt.identity(), &worktree_id) else {
-        return;
-    };
     let admitted_environment =
         admitted_provider_environment(attempt.execution().execution_snapshot());
     let scheduled = std::time::Instant::now();
-    tokio::spawn(async move {
+    let identity = attempt.identity().clone();
+    let task_registry = Arc::clone(&registry);
+    registry.spawn_for_worktree(&identity, &worktree_id, move |cancel| async move {
         let identity = attempt.identity().clone();
         let timing = AttemptAdmissionTimingV1 {
             scheduled,
@@ -263,12 +446,11 @@ pub(super) fn spawn_attempt_execution(
         .await;
         super::work::workflow_fan_out::reconcile_workflow_fan_out_after_attempt(
             &registered,
-            Arc::clone(&registry),
+            task_registry,
             &project_root,
             &identity,
             observability_producer,
         );
-        registry.release_for_worktree(&identity, &worktree_id);
     });
 }
 
