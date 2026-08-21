@@ -1,4 +1,7 @@
 use serde_json::{Value, json};
+use tracedecay_application::retrieval::{
+    PrimitiveUnavailableEvidenceV1, PrimitiveUnavailableStatusV1,
+};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_usecases::code_index::{
     CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionPortV1,
@@ -46,7 +49,7 @@ pub(super) async fn external_import_hint(
     })))
 }
 
-pub(super) fn unavailable_hint(error: &TraceDecayError) -> Value {
+pub(super) fn unavailable_evidence(error: &TraceDecayError) -> PrimitiveUnavailableEvidenceV1 {
     let (reason_code, retryable, detail) =
         if let Some((reason_code, retryable, detail)) = error.project_route_context() {
             (reason_code, retryable, detail.to_owned())
@@ -59,12 +62,16 @@ pub(super) fn unavailable_hint(error: &TraceDecayError) -> Value {
                 error.to_string(),
             )
         };
-    json!({
-        "status": "unavailable",
-        "reason_code": reason_code,
-        "retryable": retryable,
-        "detail": detail,
-    })
+    PrimitiveUnavailableEvidenceV1 {
+        status: PrimitiveUnavailableStatusV1::Unavailable,
+        reason_code: reason_code.to_owned(),
+        retryable,
+        detail,
+    }
+}
+
+pub(super) fn unavailable_hint(error: &TraceDecayError) -> Value {
+    json!(unavailable_evidence(error))
 }
 
 pub(super) async fn admit_verified_ignored_dependency(

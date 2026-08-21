@@ -155,6 +155,34 @@ pub struct ContextCodeBlockV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSearchMatchV1 {
+    pub anchor_id: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub kind: String,
+    pub file: String,
+    pub exact_class: String,
+    pub rank: u32,
+    pub utility_micros: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveUnavailableStatusV1 {
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimitiveUnavailableEvidenceV1 {
+    pub status: PrimitiveUnavailableStatusV1,
+    pub reason_code: String,
+    pub retryable: bool,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrimitiveLaneStateV1 {
     Stale,
@@ -203,7 +231,10 @@ pub struct PrimitiveSearchCoverageV1 {
 pub struct ContextResultV1 {
     pub task: String,
     pub mode: ContextModeV1,
-    pub code_generation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search_matches: Vec<ContextSearchMatchV1>,
     pub symbols: Vec<PrimitiveSymbolLocationV1>,
     pub related_symbols: Vec<PrimitiveSymbolLocationV1>,
     pub code: Vec<ContextCodeBlockV1>,
@@ -213,6 +244,8 @@ pub struct ContextResultV1 {
     pub memory_graph_coverage: Option<FactSearchGraphCoverageV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_matches_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_graph_evidence: Option<PrimitiveUnavailableEvidenceV1>,
 }
 
 impl ContextResultV1 {
@@ -520,7 +553,8 @@ mod tests {
         ContextResultV1 {
             task: "explain memory".to_owned(),
             mode: ContextModeV1::Explore,
-            code_generation: "generation.test".to_owned(),
+            code_generation: Some("generation.test".to_owned()),
+            search_matches: vec![],
             symbols: vec![],
             related_symbols: vec![],
             code: vec![],
@@ -534,6 +568,7 @@ mod tests {
             memory_matches: vec![],
             memory_graph_coverage: None,
             memory_matches_error: None,
+            verified_graph_evidence: None,
         }
     }
 
