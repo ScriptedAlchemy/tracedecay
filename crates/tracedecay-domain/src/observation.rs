@@ -2070,6 +2070,229 @@ pub fn classify_observation_collision(
     }
 }
 
+/// Whether `candidate` is the current canonical form of a retained Codex or
+/// Cursor record written before route-only source context was removed.
+///
+/// The compatibility is deliberately directional and field-bounded. It first
+/// binds both payloads to the same native record identity, then permits only
+/// the exact source-context fields those providers formerly synthesized. Any
+/// authored fact, role, content, native timestamp, or unrelated relation still
+/// differs after normalization and therefore remains an identity collision.
+pub fn is_canonical_payload_revision_replay(
+    existing: &DurableObservationV1,
+    candidate: &DurableObservationV1,
+) -> bool {
+    let existing_identity = existing.identity();
+    let candidate_identity = candidate.identity();
+    let Some(native_record_id) = existing_identity.native_record_id() else {
+        return false;
+    };
+    if existing.observation_id() != candidate.observation_id()
+        || existing_identity.source() != candidate_identity.source()
+        || existing_identity.scope() != candidate_identity.scope()
+        || existing_identity.ordering_domain() != candidate_identity.ordering_domain()
+        || candidate_identity.native_record_id() != Some(native_record_id)
+        || existing.retention_class() != candidate.retention_class()
+        || existing.receipt().disposition() != candidate.receipt().disposition()
+        || existing.receipt().sensitivity() != candidate.receipt().sensitivity()
+        || existing.receipt().receipt().sanitizer_version()
+            != candidate.receipt().receipt().sanitizer_version()
+    {
+        return false;
+    }
+
+    let Ok(existing_envelope) =
+        serde_json::from_value::<CanonicalObservationEnvelopeV1>(existing.payload().clone())
+    else {
+        return false;
+    };
+    let Ok(candidate_envelope) =
+        serde_json::from_value::<CanonicalObservationEnvelopeV1>(candidate.payload().clone())
+    else {
+        return false;
+    };
+    if serde_json::to_value(&existing_envelope).ok().as_ref() != Some(existing.payload())
+        || serde_json::to_value(&candidate_envelope).ok().as_ref() != Some(candidate.payload())
+        || existing_envelope.provider() != existing_identity.source().provider()
+        || candidate_envelope.provider() != candidate_identity.source().provider()
+        || existing_envelope.stable_record_id() != native_record_id
+        || candidate_envelope.stable_record_id() != native_record_id
+        || existing_envelope.provider() != candidate_envelope.provider()
+    {
+        return false;
+    }
+
+    let mut normalized = existing.payload().clone();
+    let current = candidate.payload();
+    let legacy_context_changed = match candidate_envelope.provider().as_str() {
+        "codex" => normalize_codex_payload_revision(&mut normalized, current),
+        "cursor" => normalize_cursor_payload_revision(&mut normalized, current),
+        _ => false,
+    };
+    legacy_context_changed && normalized == *current
+}
+
+fn normalize_codex_payload_revision(existing: &mut Value, current: &Value) -> bool {
+    let (Some(existing_object), Some(current_object)) =
+        (existing.as_object_mut(), current.as_object())
+    else {
+        return false;
+    };
+    let mut changed =
+        remove_legacy_relation_when_current_absent(existing_object, current_object, "turn_id");
+    let (Some(existing_facts), Some(current_facts)) = (
+        existing_object
+            .get_mut("facts")
+            .and_then(Value::as_array_mut),
+        current_object.get("facts").and_then(Value::as_array),
+    ) else {
+        return false;
+    };
+    if existing_facts.len() != current_facts.len() {
+        return false;
+    }
+    for (existing_fact, current_fact) in existing_facts.iter_mut().zip(current_facts) {
+        let (Some(existing_fact), Some(current_fact)) =
+            (existing_fact.as_object_mut(), current_fact.as_object())
+        else {
+            return false;
+        };
+        if existing_fact.get("kind") != current_fact.get("kind") {
+            return false;
+        }
+        match current_fact.get("kind").and_then(Value::as_str) {
+            Some("session") => {
+                if current_fact.contains_key("transcript_path") {
+                    return false;
+                }
+                changed |=
+                    replace_with_current_field(existing_fact, current_fact, "transcript_path");
+            }
+            Some("provider_usage") if is_unknown_absent_model(current_fact.get("model")) => {
+                changed |= replace_with_current_field(existing_fact, current_fact, "model");
+            }
+            Some("uncorrelated_usage")
+                if current_adds_only_missing_model(existing_fact, current_fact) =>
+            {
+                changed |=
+                    replace_with_current_field(existing_fact, current_fact, "missing_dimensions");
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
+fn normalize_cursor_payload_revision(existing: &mut Value, current: &Value) -> bool {
+    let (Some(existing_object), Some(current_object)) =
+        (existing.as_object_mut(), current.as_object())
+    else {
+        return false;
+    };
+    let mut changed =
+        remove_legacy_relation_when_current_absent(existing_object, current_object, "thread_id");
+    let (Some(existing_facts), Some(current_facts)) = (
+        existing_object
+            .get_mut("facts")
+            .and_then(Value::as_array_mut),
+        current_object.get("facts").and_then(Value::as_array),
+    ) else {
+        return false;
+    };
+    if existing_facts.len() != current_facts.len() {
+        return false;
+    }
+    for (existing_fact, current_fact) in existing_facts.iter_mut().zip(current_facts) {
+        let (Some(existing_fact), Some(current_fact)) =
+            (existing_fact.as_object_mut(), current_fact.as_object())
+        else {
+            return false;
+        };
+        if existing_fact.get("kind") != current_fact.get("kind") {
+            return false;
+        }
+        if current_fact.get("kind").and_then(Value::as_str) == Some("message") {
+            for key in ["model", "timestamp"] {
+                if !current_fact.contains_key(key) {
+                    changed |= existing_fact.remove(key).is_some();
+                }
+            }
+        }
+    }
+    let (Some(existing_evidence), Some(current_evidence)) = (
+        existing_object
+            .get_mut("evidence")
+            .and_then(Value::as_object_mut),
+        current_object.get("evidence").and_then(Value::as_object),
+    ) else {
+        return false;
+    };
+    if !current_evidence.contains_key("native_timestamp") {
+        changed |= existing_evidence.remove("native_timestamp").is_some();
+    }
+    changed
+}
+
+fn remove_legacy_relation_when_current_absent(
+    existing: &mut serde_json::Map<String, Value>,
+    current: &serde_json::Map<String, Value>,
+    relation: &str,
+) -> bool {
+    let Some(existing_relations) = existing.get_mut("relations").and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    let Some(current_relations) = current.get("relations").and_then(Value::as_object) else {
+        return false;
+    };
+    !current_relations.contains_key(relation) && existing_relations.remove(relation).is_some()
+}
+
+fn replace_with_current_field(
+    existing: &mut serde_json::Map<String, Value>,
+    current: &serde_json::Map<String, Value>,
+    key: &str,
+) -> bool {
+    let current_value = current.get(key).cloned();
+    if existing.get(key) == current_value.as_ref() {
+        return false;
+    }
+    match current_value {
+        Some(value) => {
+            existing.insert(key.to_owned(), value);
+        }
+        None => {
+            existing.remove(key);
+        }
+    }
+    true
+}
+
+fn is_unknown_absent_model(model: Option<&Value>) -> bool {
+    model.is_some_and(|model| {
+        model.get("state").and_then(Value::as_str) == Some("unknown")
+            && model.get("reason").and_then(Value::as_str) == Some("absent")
+    })
+}
+
+fn current_adds_only_missing_model(
+    existing: &serde_json::Map<String, Value>,
+    current: &serde_json::Map<String, Value>,
+) -> bool {
+    let (Some(existing_dimensions), Some(current_dimensions)) = (
+        existing.get("missing_dimensions").and_then(Value::as_array),
+        current.get("missing_dimensions").and_then(Value::as_array),
+    ) else {
+        return false;
+    };
+    let mut expected = existing_dimensions.clone();
+    expected.push(Value::String("model".to_owned()));
+    expected.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    let mut actual = current_dimensions.clone();
+    actual.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    expected == actual
+}
+
 fn validate_sha256(value: &str, field: &'static str) -> Result<(), ObservationContractError> {
     let valid = crate::canonical_text::is_tagged_lowercase_hex(value, "sha256:", 64);
     if valid {

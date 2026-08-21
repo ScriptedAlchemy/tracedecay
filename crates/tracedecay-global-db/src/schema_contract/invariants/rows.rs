@@ -416,8 +416,11 @@ pub(super) async fn validate_source_cursor_authority_chunk(
                     )?;
                     receipt.receipt().receipt_id().as_str() == receipt_id
                         && parsed_reason.disposition_matches(Some(receipt.disposition()))
-                        && (parsed_reason == ObservationCoverageReason::DuplicateObservation)
-                            == receipt.payload().is_some()
+                        && matches!(
+                            parsed_reason,
+                            ObservationCoverageReason::DuplicateObservation
+                                | ObservationCoverageReason::CanonicalPayloadRevision
+                        ) == receipt.payload().is_some()
                 }
                 _ => false,
             },

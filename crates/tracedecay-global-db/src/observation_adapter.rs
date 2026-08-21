@@ -5,9 +5,11 @@ use tracedecay_application::clock::now_micros;
 use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
     ObservationCollisionOutcomeV1, ObservationScopeV1, canonical_sha256,
-    classify_observation_collision,
+    classify_observation_collision, is_canonical_payload_revision_replay,
 };
-use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
+use tracedecay_store::observation::{
+    CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
+};
 use tracedecay_store::{
     AnchoredObservationWrite, CommandDigestV1, ConsistencyModeV1, DurabilityClassV1,
     IdempotencyIdentityV1, ObservationCommitReceipt, ObservationPersistOutcome,
@@ -53,7 +55,12 @@ impl ObservationStore for GlobalDbObservationStore {
         let collision = existing
             .as_ref()
             .map(|existing| classify_observation_collision(existing.observation(), &candidate));
-        if collision == Some(ObservationCollisionOutcomeV1::IdentityCollision) {
+        let canonical_payload_revision = existing.as_ref().is_some_and(|existing| {
+            is_canonical_payload_revision_replay(existing.observation(), &candidate)
+        });
+        if collision == Some(ObservationCollisionOutcomeV1::IdentityCollision)
+            && !canonical_payload_revision
+        {
             let Some(existing) = existing.as_ref() else {
                 return Err(ObservationStoreError::Storage {
                     operation: "persist_observation",
@@ -70,6 +77,53 @@ impl ObservationStore for GlobalDbObservationStore {
                 candidate_digest: Box::new(candidate.payload_reference().digest().clone()),
                 outcome: ObservationCollisionOutcomeV1::IdentityCollision,
             });
+        }
+        if canonical_payload_revision {
+            let Some(existing) = existing.as_ref() else {
+                return Err(runtime_storage_error(
+                    "persist canonical payload revision",
+                    "classified revision replay has no retained observation",
+                ));
+            };
+            let identity = candidate.identity();
+            let mut advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
+                identity.source().clone(),
+                identity.scope().clone(),
+                identity.generation(),
+                identity.ordering_domain(),
+                write.expected_cursor().cloned(),
+                identity.position(),
+                ObservationCoverageReason::CanonicalPayloadRevision,
+                candidate.receipt().clone(),
+            )?;
+            match (
+                write.next_cursor().file_identity(),
+                write.next_cursor().resume_fingerprint(),
+            ) {
+                (Some(file_identity), Some(resume_fingerprint)) => {
+                    advance = advance.with_resume_checkpoint(file_identity, resume_fingerprint);
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(runtime_storage_error(
+                        "persist canonical payload revision",
+                        "cursor resume checkpoint is incomplete",
+                    ));
+                }
+            }
+            self.advance_source_cursor(advance).await?;
+            return Ok(ObservationPersistOutcome::CoveredDuplicate(
+                ObservationCommitReceipt::new(
+                    existing.sequence(),
+                    existing.observation().clone(),
+                    candidate_cursor,
+                    existing.retrieval_anchor().clone(),
+                    existing.projection_generation().clone(),
+                )?
+                .with_repository_provenance_attachment(
+                    existing.repository_provenance_attachment().clone(),
+                )?,
+            ));
         }
         let same_identity = existing
             .as_ref()
