@@ -4,6 +4,47 @@
 use super::*;
 
 #[tokio::test]
+async fn expire_all_releases_session_holder_graph_lease_before_registry_shutdown() {
+    let temporary = tempfile::tempdir().expect("session-holder shutdown fixture");
+    let profile_root = temporary.path().join("profile");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        79,
+        "invocation session-holder shutdown",
+    )
+    .expect("daemon database scope");
+    let identity =
+        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let registry =
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity,
+        )
+        .await
+        .expect("session runtime registry");
+    let session_database = registry
+        .profile_sessions()
+        .await
+        .expect("profile session database");
+
+    let service = DaemonInvocationService::default();
+    service
+        .mount_session_holder_databases([session_database.clone()])
+        .await;
+    drop(session_database);
+    service.expire_all().await;
+
+    registry.cancel_memory_graph_reconciliation_tasks();
+    registry
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("memory graph reconciliation joins");
+    registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .expect("session-holder lease is released before graph shutdown");
+}
+
+#[tokio::test]
 async fn context_scout_registry_remounts_same_project_database_after_daemon_restart() {
     let temporary = tempfile::tempdir().unwrap();
     let database_path = temporary.path().join("graph.db");
