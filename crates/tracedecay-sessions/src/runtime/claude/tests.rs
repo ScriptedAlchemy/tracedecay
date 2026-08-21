@@ -714,7 +714,14 @@ fn claude_checked_in_assistant_fixture_crosses_the_canonical_boundary() {
     )
     .unwrap();
     assert_eq!(envelope.provider().as_str(), "claude");
-    assert_eq!(envelope.stable_record_id().as_str(), "msg_claude_1");
+    assert_eq!(envelope.stable_record_id().as_str(), "u2");
+    assert_eq!(
+        envelope
+            .relations()
+            .message_id()
+            .map(tracedecay_domain::ObservationId::as_str),
+        Some("msg_claude_1")
+    );
     assert!(envelope.facts().iter().any(|fact| matches!(
         fact,
         tracedecay_domain::CanonicalObservationFactV1::Message {

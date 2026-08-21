@@ -19,9 +19,9 @@ pub fn stable_record_id(
     offset: u64,
 ) -> Result<ObservationId, ObservationRecordParseErrorV1> {
     let candidate = native
-        .pointer("/message/id")
+        .get("uuid")
         .and_then(Value::as_str)
-        .or_else(|| native.get("uuid").and_then(Value::as_str))
+        .or_else(|| native.pointer("/message/id").and_then(Value::as_str))
         .filter(|value| !value.is_empty())
         .map_or_else(|| format!("{session_id}:{offset}"), str::to_owned);
     provider_observation_id(&candidate).ok_or(ObservationRecordParseErrorV1::NormalizationFailed)
@@ -105,7 +105,12 @@ pub fn normalize(
     let mut relations =
         CanonicalObservationRelationsV1::new(SessionId::new(session_id).map_err(|_| invalid())?);
     if matches!(record_kind, "user" | "assistant") {
-        relations = relations.with_message_id(stable_record_id.clone());
+        let message_id = native
+            .pointer("/message/id")
+            .and_then(Value::as_str)
+            .and_then(provider_observation_id)
+            .unwrap_or_else(|| stable_record_id.clone());
+        relations = relations.with_message_id(message_id);
     }
     if let Some(parent) = optional_id(native, &["parentUuid", "parent_uuid", "logicalParentUuid"]) {
         relations = relations.with_parent_message_id(parent);
@@ -590,7 +595,54 @@ mod provider_usage_tests {
         ObservationSourceRangeV1, ProviderUsageCountersV1,
     };
 
-    use super::normalize;
+    use super::{normalize, stable_record_id};
+
+    #[test]
+    fn row_uuid_keeps_repeated_native_message_updates_distinct() {
+        let first = json!({
+            "type": "assistant",
+            "uuid": "row.first",
+            "message": {
+                "id": "message.shared",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "first"}]
+            }
+        });
+        let second = json!({
+            "type": "assistant",
+            "uuid": "row.second",
+            "message": {
+                "id": "message.shared",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "second"}]
+            }
+        });
+
+        let first_id = stable_record_id(&first, "session.fixture", 10).unwrap();
+        let second_id = stable_record_id(&second, "session.fixture", 20).unwrap();
+        assert_eq!(first_id.as_str(), "row.first");
+        assert_eq!(second_id.as_str(), "row.second");
+        assert_ne!(first_id, second_id);
+
+        for (native, stable_id, range) in [
+            (
+                &first,
+                first_id,
+                ObservationSourceRangeV1::new(10, 20).unwrap(),
+            ),
+            (
+                &second,
+                second_id,
+                ObservationSourceRangeV1::new(20, 30).unwrap(),
+            ),
+        ] {
+            let envelope = normalize(native, "session.fixture", stable_id, range).unwrap();
+            assert_eq!(
+                envelope.relations().message_id().map(ObservationId::as_str),
+                Some("message.shared")
+            );
+        }
+    }
 
     #[test]
     fn malformed_required_usage_counter_is_unknown_not_zero() {
