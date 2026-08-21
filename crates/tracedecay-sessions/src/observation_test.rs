@@ -21,11 +21,14 @@ use super::*;
 struct FakeStore {
     observations: Mutex<Vec<StoredObservation>>,
     source_cursors: Mutex<Vec<ObservationSourceCursorV1>>,
+    persist_error_once: Mutex<bool>,
+    covered_duplicate: Mutex<bool>,
     cancel_on_persist: Mutex<Option<ObservationCancellation>>,
     cancel_on_get: Mutex<Option<ObservationCancellation>>,
     cancel_on_replay: Mutex<Option<ObservationCancellation>>,
     cancel_on_advance: Mutex<Option<ObservationCancellation>>,
     cursor_advances: Mutex<Vec<ObservationCursorAdvance>>,
+    point_reads: Mutex<usize>,
     /// One read-your-writes miss: the next point read reports the committed
     /// row as absent, the way a trailing reader snapshot does under load.
     read_none_once: Mutex<bool>,
@@ -36,13 +39,19 @@ impl ObservationStore for FakeStore {
         &self,
         write: AnchoredObservationWrite,
     ) -> ObservationStoreResult<ObservationPersistOutcome> {
+        if std::mem::take(&mut *self.persist_error_once.lock().unwrap()) {
+            return Err(ObservationStoreError::CursorCoverageMismatch);
+        }
         let mut observations = self.observations.lock().unwrap();
         if let Some(stored) = observations.iter().find(|stored| {
             stored.observation().observation_id() == write.observation().observation_id()
         }) {
-            return Ok(ObservationPersistOutcome::ExactDuplicate(
-                stored.commit_receipt().clone(),
-            ));
+            let receipt = stored.commit_receipt().clone();
+            return Ok(if *self.covered_duplicate.lock().unwrap() {
+                ObservationPersistOutcome::CoveredDuplicate(receipt)
+            } else {
+                ObservationPersistOutcome::ExactDuplicate(receipt)
+            });
         }
         let (write, retrieval_anchor, projection_generation, repository_provenance) =
             write.into_parts();
@@ -122,6 +131,7 @@ impl ObservationStore for FakeStore {
         &self,
         observation_id: &CanonicalObservationIdV1,
     ) -> ObservationStoreResult<Option<StoredObservation>> {
+        *self.point_reads.lock().unwrap() += 1;
         if std::mem::take(&mut *self.read_none_once.lock().unwrap()) {
             return Ok(None);
         }
@@ -534,7 +544,7 @@ async fn exact_duplicate_reports_authoritative_projection_status() {
 }
 
 #[tokio::test]
-async fn exact_duplicate_with_missed_read_back_stays_typed_unavailable() {
+async fn exact_duplicate_with_missed_read_back_stays_persisted_as_queued() {
     let application = application();
     let record = json!({
         "type": "user",
@@ -546,16 +556,83 @@ async fn exact_duplicate_with_missed_read_back_stays_typed_unavailable() {
         .expect("first capture persists");
     *application.store.read_none_once.lock().unwrap() = true;
 
-    let error = application
+    let outcome = application
         .capture_claude_observation(request(&record))
         .await
-        .expect_err("a duplicate read miss cannot fabricate projection status");
+        .expect("an exact duplicate receipt proves the row is durable");
+
+    match outcome {
+        CaptureObservationOutcome::Persisted {
+            outcome,
+            projection_status,
+            ..
+        } => {
+            assert!(matches!(
+                *outcome,
+                ObservationPersistOutcome::ExactDuplicate(_)
+            ));
+            assert_eq!(projection_status, ObservationProjectionStatus::Queued);
+        }
+        other => panic!("exact duplicate must stay persisted, got {other:?}"),
+    }
+    assert_eq!(application.store.observations.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn covered_duplicate_with_missed_read_back_stays_persisted_as_queued() {
+    let application = application();
+    let record = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "covered duplicate read miss" }
+    });
+    application
+        .capture_claude_observation(request(&record))
+        .await
+        .expect("first capture persists");
+    *application.store.covered_duplicate.lock().unwrap() = true;
+    *application.store.read_none_once.lock().unwrap() = true;
+
+    let outcome = application
+        .capture_claude_observation(request(&record))
+        .await
+        .expect("a covered duplicate receipt proves the row is durable");
+
+    match outcome {
+        CaptureObservationOutcome::Persisted {
+            outcome,
+            projection_status,
+            ..
+        } => {
+            assert!(matches!(
+                *outcome,
+                ObservationPersistOutcome::CoveredDuplicate(_)
+            ));
+            assert_eq!(projection_status, ObservationProjectionStatus::Queued);
+        }
+        other => panic!("covered duplicate must stay persisted, got {other:?}"),
+    }
+    assert_eq!(application.store.observations.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn first_write_persist_error_stays_typed_and_skips_read_back() {
+    let application = application();
+    *application.store.persist_error_once.lock().unwrap() = true;
+
+    let error = application
+        .capture_claude_observation(request(&json!({
+            "type": "user",
+            "message": { "role": "user", "content": "first write failure" }
+        })))
+        .await
+        .expect_err("a true persist failure must remain an application error");
 
     assert!(matches!(
         error,
-        ObservationApplicationError::PersistedObservationUnavailable
+        ObservationApplicationError::Store(ObservationStoreError::CursorCoverageMismatch)
     ));
-    assert_eq!(application.store.observations.lock().unwrap().len(), 1);
+    assert!(application.store.observations.lock().unwrap().is_empty());
+    assert_eq!(*application.store.point_reads.lock().unwrap(), 0);
 }
 
 #[tokio::test]
