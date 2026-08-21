@@ -20,7 +20,7 @@ use tracedecay_usecases::memory::{
     MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
 
-use super::DaemonSessionRuntimeRegistryV1;
+use super::{DaemonSessionRuntimeRegistryV1, ProjectRuntimeOwnerStateV1};
 use crate::daemon::profile_identity;
 use crate::store::DatabaseFactStore;
 
@@ -160,4 +160,34 @@ async fn healthy_shutdown_joins_workers_then_closes_every_retained_graph_without
         .close_retained_graph_runtimes_for_shutdown()
         .await
         .expect("shutdown close is idempotent after the drain");
+}
+
+#[tokio::test]
+async fn terminal_shutdown_refuses_an_in_flight_project_owner_transition() {
+    let temp = TempDir::new().expect("shutdown transition fixture root");
+    let profile_root = temp.path().join("profile");
+    let project_id = ProjectId::new("project.graph-shutdown-transition").expect("project id");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 59, "graph shutdown transition")
+            .expect("daemon database scope");
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("daemon registry");
+    registry
+        .project_owners
+        .lock()
+        .expect("project owner registry")
+        .insert(project_id, ProjectRuntimeOwnerStateV1::Opening);
+
+    let error = registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .expect_err("terminal close must not skip an in-flight owner transition");
+    assert!(
+        error
+            .to_string()
+            .contains("project runtime owner transition is unfinished"),
+        "unexpected terminal transition error: {error}"
+    );
 }

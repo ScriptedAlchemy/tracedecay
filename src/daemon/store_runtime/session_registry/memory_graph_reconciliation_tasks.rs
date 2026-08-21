@@ -21,10 +21,20 @@ impl DaemonSessionRuntimeRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for state in projects.values() {
-            let super::ProjectRuntimeOwnerStateV1::Ready(project) = state else {
-                continue;
+            let memory = match state {
+                super::ProjectRuntimeOwnerStateV1::Ready(project) => project.memory.as_ref(),
+                super::ProjectRuntimeOwnerStateV1::RecoveryRequired(recovery) => {
+                    recovery.memory.as_ref()
+                }
+                super::ProjectRuntimeOwnerStateV1::Faulted(faulted) => {
+                    faulted.retained.memory.as_ref()
+                }
+                super::ProjectRuntimeOwnerStateV1::Opening
+                | super::ProjectRuntimeOwnerStateV1::ReplacingSessions
+                | super::ProjectRuntimeOwnerStateV1::Recovering
+                | super::ProjectRuntimeOwnerStateV1::Retiring => None,
             };
-            if let Some(owner) = project.memory.as_ref() {
+            if let Some(owner) = memory {
                 owners.push(owner.reconciliation.clone());
             }
         }
