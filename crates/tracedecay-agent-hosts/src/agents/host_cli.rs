@@ -370,13 +370,19 @@ fn resolve_launch_command(program: &Path) -> Result<(PathBuf, Vec<OsString>)> {
                 program.display()
             ),
         })?;
-        let interpreter_path =
-            std::fs::canonicalize(&interpreter_path).map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "could not resolve env-shebang interpreter `{interpreter}` for `{}`: {error}",
-                    program.display()
-                ),
-            })?;
+        // Preserve the admitted executable spelling. Multicall launchers such
+        // as Volta dispatch from argv[0] (`node`); canonicalizing the final
+        // symlink to `volta-shim` invokes a private target that correctly
+        // refuses direct execution. Make relative PATH entries absolute before
+        // changing the child's working directory, but do not dereference the
+        // final executable name.
+        let interpreter_path = if interpreter_path.is_absolute() {
+            interpreter_path
+        } else {
+            std::env::current_dir()
+                .map_err(TraceDecayError::Io)?
+                .join(interpreter_path)
+        };
         let mut launch_args = interpreter_tokens[1..]
             .iter()
             .map(OsString::from)
@@ -708,7 +714,10 @@ exit 0
         );
         assert_eq!(
             std::fs::read_to_string(home.path().join("node-args")).unwrap(),
-            format!("{} mcp add", launcher.display())
+            format!(
+                "{} mcp add",
+                std::fs::canonicalize(&launcher).unwrap().display()
+            )
         );
         // As above, `<unset>` is not observable through a `#!/bin/sh` probe:
         // the shell synthesizes a default `PATH` when it inherits none. The
@@ -725,5 +734,85 @@ exit 0
             );
         }
         assert!(!home.path().join("attacker-ran").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_shebang_interpreter_preserves_multicall_symlink_name() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        struct PathGuard {
+            previous: Option<std::ffi::OsString>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+
+        impl PathGuard {
+            fn set(path: &std::ffi::OsStr) -> Self {
+                let lock = crate::config::lock_user_data_dir_test_env();
+                let previous = std::env::var_os("PATH");
+                // SAFETY: the shared profile-discovery lock serializes this
+                // process-global test environment mutation.
+                unsafe { std::env::set_var("PATH", path) };
+                Self {
+                    previous,
+                    _lock: lock,
+                }
+            }
+        }
+
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                // SAFETY: see `PathGuard::set`.
+                unsafe {
+                    match self.previous.take() {
+                        Some(previous) => std::env::set_var("PATH", previous),
+                        None => std::env::remove_var("PATH"),
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let shim = bin_dir.path().join("volta-shim");
+        std::fs::write(
+            &shim,
+            r#"#!/bin/sh
+if [ "$(basename "$0")" != node ]; then
+  echo "'volta-shim' should not be called directly" >&2
+  exit 126
+fi
+printf '%s' "$*" > "$HOME/node-args"
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&shim, permissions).unwrap();
+        symlink(&shim, bin_dir.path().join("node")).unwrap();
+
+        let launcher = home.path().join("codex");
+        std::fs::write(&launcher, "#!/usr/bin/env node\n").unwrap();
+        let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&launcher, permissions).unwrap();
+
+        let path = std::env::join_paths([bin_dir.path()]).unwrap();
+        let _path = PathGuard::set(&path);
+        let outcome = run_host_cli(&launcher, &["plugin", "add"], home.path())
+            .expect("the admitted multicall interpreter must launch");
+
+        assert!(
+            outcome.succeeded(),
+            "the interpreter must observe its admitted symlink name: {}",
+            outcome.failure_message()
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("node-args")).unwrap(),
+            format!(
+                "{} plugin add",
+                std::fs::canonicalize(&launcher).unwrap().display()
+            )
+        );
     }
 }
