@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.18](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.17...v0.1.0-beta.18) (2026-08-21)
+
+
+### Bug Fixes
+
+* **daemon:** release session graph leases at shutdown ([b6001dd](https://github.com/ScriptedAlchemy/tracedecay/commit/b6001ddf8d1b7cd10934b54360332aa7710d21cd))
+* **daemon:** release session sync stores at shutdown ([d2816ed](https://github.com/ScriptedAlchemy/tracedecay/commit/d2816ed54899a775d0be6e56ce6b1d0e59228a48))
+* **daemon:** join project-open background leases ([a8503ee](https://github.com/ScriptedAlchemy/tracedecay/commit/a8503ee761789314afae49178c052e86c35de06e))
+* **daemon:** propagate terminal runtime shutdown failures ([b7ed3eb](https://github.com/ScriptedAlchemy/tracedecay/commit/b7ed3eb4290ba2d65b81d1001f145024bb8f0bc2))
+* **daemon:** drain terminal graph owner states ([a0310e6](https://github.com/ScriptedAlchemy/tracedecay/commit/a0310e6a8b3a8eadd99a51be812d0ff51c6f748f))
+* **daemon:** join active work attempt processes ([f221dc7](https://github.com/ScriptedAlchemy/tracedecay/commit/f221dc776d04053324e1e25671baa83f0fefb327))
+* **daemon:** join bounded hook cycle workers ([1f9e429](https://github.com/ScriptedAlchemy/tracedecay/commit/1f9e429bc7ee04cee0ea3a5fdc5f42563afbb9a1))
+* **daemon:** latch retirement reaper shutdown wakes ([2567125](https://github.com/ScriptedAlchemy/tracedecay/commit/2567125af033165b3096ee35f69686f660be2ca4))
+* **daemon:** reserve scheduler retirement after admission ([41fe56b](https://github.com/ScriptedAlchemy/tracedecay/commit/41fe56b0069e761668de86fb19c500bbb0d08863))
+* **daemon:** bound shutdown coordinator receipts ([7c11144](https://github.com/ScriptedAlchemy/tracedecay/commit/7c11144364f8a248fad4f55d2a9598cddff7be8f))
+* **daemon:** retain timed-out shutdown runner ownership ([c605133](https://github.com/ScriptedAlchemy/tracedecay/commit/c6051338c4319e4078debe20b9896bcf2b3f2b9a))
+
 ## [0.1.0-beta.17](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.16...v0.1.0-beta.17) (2026-08-21)
 
 
