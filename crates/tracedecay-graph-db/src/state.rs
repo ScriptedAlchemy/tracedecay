@@ -5,7 +5,8 @@ use grafeo_core::graph::Direction;
 use grafeo_engine::GrafeoDB;
 
 use crate::limits::{
-    MAX_GRAPH_IDENTIFIER_BYTES, MAX_VERIFIED_GENERATION_ENTITIES,
+    MAX_GRAPH_IDENTIFIER_BYTES, MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
+    MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, MAX_VERIFIED_GENERATION_ENTITIES,
     MAX_VERIFIED_GENERATION_RELATIONS, require_generation_capacity,
 };
 use crate::schema::{
@@ -389,6 +390,7 @@ pub(crate) fn projection_entities(
     .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn projection_entities_checked(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
@@ -467,6 +469,7 @@ pub(crate) fn projection_relations(
     .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn projection_relations_checked(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
@@ -487,6 +490,96 @@ pub(crate) fn projection_relations_checked(
     }
     check()?;
     Ok(relations)
+}
+
+pub(crate) fn projection_entity_deletion_page_checked(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    projection: &GraphProjectionId,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Vec<GraphMutation>, GraphDbError> {
+    projection_identity_deletion_page_checked(
+        database,
+        &entity_projection_label(namespace, projection),
+        ENTITY_LABEL,
+        ENTITY_ID_PROPERTY,
+        MAX_VERIFIED_GENERATION_ENTITIES,
+        "entity",
+        check,
+    )?
+    .into_iter()
+    .map(|identity| GraphEntityId::new(identity).map(GraphMutation::DeleteEntity))
+    .collect()
+}
+
+pub(crate) fn projection_relation_deletion_page_checked(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    projection: &GraphProjectionId,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Vec<GraphMutation>, GraphDbError> {
+    projection_identity_deletion_page_checked(
+        database,
+        &relation_projection_label(namespace, projection),
+        RELATION_LABEL,
+        crate::schema::RELATION_ID_PROPERTY,
+        MAX_VERIFIED_GENERATION_RELATIONS,
+        "relation",
+        check,
+    )?
+    .into_iter()
+    .map(|identity| GraphRelationId::new(identity).map(GraphMutation::DeleteRelation))
+    .collect()
+}
+
+fn projection_identity_deletion_page_checked(
+    database: &GrafeoDB,
+    owner_label: &str,
+    record_label: &str,
+    identity_property: &str,
+    maximum_records: usize,
+    description: &str,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Vec<String>, GraphDbError> {
+    let nodes = labeled_projection_nodes_checked(
+        database,
+        owner_label,
+        record_label,
+        maximum_records,
+        check,
+    )?;
+    let store = database.graph_store();
+    let mut identities = BTreeSet::new();
+    let mut live_bytes = 0usize;
+    for node in nodes {
+        check()?;
+        let record = store.get_node(node).ok_or_else(|| GraphDbError::Corrupt {
+            message: format!("native graph {description} disappeared during retirement"),
+        })?;
+        let identity = required_arc_string(
+            record.get_property(identity_property),
+            &format!("native graph {description} identity"),
+        )?;
+        let next_live_bytes = live_bytes.checked_add(identity.len()).ok_or_else(|| {
+            GraphDbError::budget_exhausted_count(
+                crate::GraphBudgetKind::Write,
+                MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES,
+            )
+        })?;
+        if identities.len() == MAX_VERIFIED_GENERATION_BATCH_MUTATIONS
+            || next_live_bytes > MAX_VERIFIED_GENERATION_BATCH_LIVE_BYTES
+        {
+            break;
+        }
+        live_bytes = next_live_bytes;
+        if !identities.insert(identity.as_str().to_owned()) {
+            return Err(GraphDbError::Corrupt {
+                message: format!("native graph generation repeats a {description} identity"),
+            });
+        }
+    }
+    check()?;
+    Ok(identities.into_iter().collect())
 }
 
 pub(crate) fn projection_relation_nodes_sorted_checked(

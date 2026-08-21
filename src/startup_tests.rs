@@ -502,16 +502,113 @@ fn nested_inspection_commands_skip_agent_install_check() {
             should_skip_agent_install_check(&command),
             "{args:?} must not run the unrelated agent-install check"
         );
+        assert!(
+            !should_skip_startup_maintenance(&command),
+            "{args:?} must retain ordinary startup maintenance"
+        );
     }
 }
 
 #[test]
-fn nested_mutating_commands_keep_agent_install_check() {
-    for args in [&["channel", "beta"][..], &["gitignore", "on"][..]] {
+fn read_only_automation_commands_skip_agent_install_check() {
+    for args in [
+        &["automation", "config", "get", "--json"][..],
+        &["automation", "config", "explain", "--json"][..],
+        &["automation", "runs", "list", "--json"][..],
+        &["automation", "runs", "view", "run-123", "--json"][..],
+        &[
+            "automation",
+            "runs",
+            "artifact",
+            "run-123",
+            "validation_gate",
+            "--json",
+        ][..],
+        &["automation", "skills", "list", "--json"][..],
+        &["automation", "skills", "view", "skill-123", "--json"][..],
+        &["automation", "facts", "list", "--json"][..],
+        &["automation", "facts", "view", "fact-123"][..],
+    ] {
+        let command = parse_command(args);
+        assert!(
+            should_skip_agent_install_check(&command),
+            "{args:?} must not run the unrelated agent-install check"
+        );
+        assert!(
+            !should_skip_startup_maintenance(&command),
+            "{args:?} must retain ordinary startup maintenance"
+        );
+    }
+}
+
+#[test]
+fn top_level_inspection_commands_skip_agent_install_check() {
+    for args in [
+        &["status", "--json"][..],
+        &["channel"][..],
+        &["current-counter"][..],
+        &["gitignore"][..],
+        &["cost"][..],
+        &["bench", "--json"][..],
+        &["gain", "--json"][..],
+        &["monitor"][..],
+        &["list"][..],
+    ] {
+        let command = parse_command(args);
+        assert!(
+            should_skip_agent_install_check(&command),
+            "{args:?} must not run the unrelated agent-install check"
+        );
+        assert!(
+            !should_skip_startup_maintenance(&command),
+            "{args:?} must retain ordinary startup maintenance"
+        );
+    }
+}
+
+#[test]
+fn mutating_inspection_families_keep_full_startup_policy() {
+    for args in [
+        &["channel", "beta"][..],
+        &["gitignore", "on"][..],
+        &["automation", "config", "enable"][..],
+        &["automation", "config", "disable"][..],
+        &["automation", "config", "set", "--timeout-secs", "60"][..],
+        &[
+            "automation",
+            "skills",
+            "create",
+            "--id",
+            "skill-123",
+            "--title",
+            "Title",
+            "--summary",
+            "Summary",
+            "--category",
+            "testing",
+            "--body",
+            "Body",
+        ][..],
+        &[
+            "automation",
+            "skills",
+            "update",
+            "skill-123",
+            "--title",
+            "Updated",
+        ][..],
+        &["automation", "skills", "disable", "skill-123"][..],
+        &["automation", "skills", "archive", "skill-123"][..],
+        &["automation", "skills", "restore", "skill-123"][..],
+    ] {
         let command = parse_command(args);
         assert!(
             !should_skip_agent_install_check(&command),
             "{args:?} must retain the agent-install check"
+        );
+        assert!(
+            !should_skip_startup_maintenance(&command),
+            "{args:?} must retain ordinary startup maintenance"
         );
     }
 }
@@ -554,8 +651,17 @@ fn agent_install_health_check_is_selective() {
     }));
     assert!(should_skip_agent_install_check(&Commands::Doctor));
 
+    for (label, args) in [("init", &["tracedecay", "init", "."][..])] {
+        let cli = Cli::try_parse_from(args)
+            .unwrap_or_else(|error| panic!("{label} entrypoint must parse: {error}"));
+        let command = cli.command.expect("entrypoint command");
+        assert!(
+            !should_skip_agent_install_check(&command),
+            "{label} should retain the read-only install health check"
+        );
+    }
+
     for (label, args) in [
-        ("init", &["tracedecay", "init", "."][..]),
         ("status", &["tracedecay", "status", "--json"][..]),
         (
             "automation config get",
@@ -567,8 +673,8 @@ fn agent_install_health_check_is_selective() {
             .unwrap_or_else(|error| panic!("{label} entrypoint must parse: {error}"));
         let command = cli.command.expect("entrypoint command");
         assert!(
-            !should_skip_agent_install_check(&command),
-            "{label} should retain the read-only install health check"
+            should_skip_agent_install_check(&command),
+            "{label} must skip the unrelated agent-install health check"
         );
     }
 
