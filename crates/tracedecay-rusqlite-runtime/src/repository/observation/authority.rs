@@ -142,12 +142,13 @@ fn verify_retrieval_anchor(
             },
         )
         .optional()?;
-    if stored.as_ref()
-        != Some(&(
-            encode(anchor)?,
-            owner_json.clone(),
-            anchor.projection_generation().as_str().to_owned(),
-        ))
+    let Some((stored_anchor_json, stored_owner_json, stored_projection_generation)) = stored else {
+        return Err(invalid("retrieval anchor identity collision"));
+    };
+    let stored_anchor: RetrievalAnchorRecordV2 = decode(stored_anchor_json)?;
+    if !stored_anchor.is_semantic_replay_of(anchor)
+        || stored_owner_json != owner_json
+        || stored_projection_generation != anchor.projection_generation().as_str()
     {
         return Err(invalid("retrieval anchor identity collision"));
     }
