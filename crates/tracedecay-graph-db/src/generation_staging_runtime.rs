@@ -270,6 +270,7 @@ impl GraphDb {
                             )),
                         },
                         endpoint_namespaces: mutation::RelationEndpointNamespaces::new(),
+                        ensure_page_vector_indexes: false,
                     },
                     (manifest, dependency_digest),
                 ))
