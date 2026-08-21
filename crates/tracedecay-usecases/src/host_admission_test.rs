@@ -133,3 +133,38 @@ fn application_errors_map_to_bounded_static_outcomes() {
         );
     }
 }
+
+#[test]
+fn observation_store_failures_keep_privacy_safe_static_reason_codes() {
+    for (error, reason_code) in [
+        (
+            ObservationStoreError::CursorCoverageMismatch,
+            "observation_cursor_coverage_mismatch",
+        ),
+        (
+            ObservationStoreError::SanitizationReceiptCollision,
+            "observation_sanitization_receipt_collision",
+        ),
+        (
+            ObservationStoreError::RetrievalAnchorCollision,
+            "observation_retrieval_anchor_collision",
+        ),
+        (
+            ObservationStoreError::RepositoryProvenanceBindingMismatch,
+            "observation_repository_provenance_binding_mismatch",
+        ),
+        (
+            ObservationStoreError::InvalidReplayLimit { limit: 0, max: 512 },
+            "observation_replay_limit_invalid",
+        ),
+    ] {
+        let outcome = classify_error(&ObservationApplicationError::Store(error));
+        assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
+        assert!(!outcome.retryable);
+        assert_eq!(outcome.reason_code, Some(reason_code));
+
+        let serialized = serde_json::to_string(&outcome).unwrap();
+        assert_eq!(serialized.matches(reason_code).count(), 1);
+        assert!(!serialized.contains("provider-private-payload"));
+    }
+}
