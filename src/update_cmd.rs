@@ -980,18 +980,24 @@ mod tests {
 
     /// An unresolvable tracked id (renamed/removed by a later release, or a
     /// typo in `installed_agents`) must be SKIPPED, not treated as a failure —
-    /// otherwise it gates marker advancement forever and wedges the startup
-    /// silent reinstall into an infinite reinstall loop. The reinstall pass
-    /// drops it from the results entirely, so an otherwise-empty pass is AllOk
-    /// and the markers advance.
+    /// otherwise it gates marker advancement forever and wedges explicit
+    /// post-update maintenance into an infinite reinstall loop. The reinstall
+    /// pass drops it from the results entirely, so an otherwise-empty pass is
+    /// AllOk and the markers advance.
     #[tokio::test]
     async fn reinstall_agent_integrations_skips_unknown_ids()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let home = TempDir::new()?;
-        let results = crate::agent_cmd::reinstall_agent_integrations(
+        let lease_root = TempDir::new()?;
+        let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+            lease_root.path(),
+            "post-update-test",
+        )?;
+        let results = crate::agent_cmd::reinstall_agent_integrations_under_lease(
             &["unknown-agent".to_string()],
             home.path(),
             "tracedecay",
+            &lifecycle_lease,
         )
         .await;
         // Skipped, not failed: the unknown id is absent from the results.

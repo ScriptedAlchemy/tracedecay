@@ -3070,23 +3070,6 @@ fn registration_state_label(
     }
 }
 
-/// Reconciles the canonical component transaction for each tracked agent id.
-///
-/// An id that does NOT resolve to an integration (a later release renamed or
-/// removed it, or a typo landed in `installed_agents`) is SKIPPED, not failed:
-/// it is logged as a warning and left out of the returned results entirely.
-/// Gating version-marker advancement on such an id would wedge the reinstall
-/// loop forever. Only genuine component-transaction failures are reported as
-/// `Err` so they still gate markers.
-pub(crate) async fn reinstall_agent_integrations(
-    agent_ids: &[String],
-    home: &Path,
-    tracedecay_bin: &str,
-) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
-    reinstall_agent_integrations_with_persisted_dashboard_policies(agent_ids, home, tracedecay_bin)
-        .await
-}
-
 /// Reinstalls tracked integrations while reusing lifecycle authority already
 /// held by post-update maintenance.
 pub(crate) async fn reinstall_agent_integrations_under_lease(
@@ -3244,8 +3227,8 @@ mod tests {
         HostBundleCliOperation, apply_canonical_component_set,
         apply_default_canonical_component_set, broker_codex_daemon_automation_project,
         canonical_host_component_set, canonical_host_component_set_with_tracedecay_bin,
-        component_set_request, reinstall_agent_integrations,
-        reinstall_agent_integrations_with_dashboard_policies,
+        component_set_request, reinstall_agent_integrations_with_dashboard_policies,
+        reinstall_agent_integrations_with_persisted_dashboard_policies,
     };
     use tracedecay::agents::host_bundle_v2::{
         CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
@@ -5274,9 +5257,12 @@ esac
 "#;
         std::fs::write(&installed_path, original).unwrap();
 
-        let results =
-            reinstall_agent_integrations(&["kimi".to_string()], home.path(), "new-tracedecay")
-                .await;
+        let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
+            &["kimi".to_string()],
+            home.path(),
+            "new-tracedecay",
+        )
+        .await;
 
         let [(id, Err(error))] = results.as_slice() else {
             panic!("tracked Kimi reinstall should return one typed refusal");
@@ -5337,9 +5323,12 @@ esac
         )
         .unwrap();
 
-        let results =
-            reinstall_agent_integrations(&["kimi".to_string()], home.path(), "new-tracedecay")
-                .await;
+        let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
+            &["kimi".to_string()],
+            home.path(),
+            "new-tracedecay",
+        )
+        .await;
         assert!(matches!(
             results.as_slice(),
             [(id, Ok(AgentReinstallOutcome::Installed))] if id == "kimi"
@@ -5398,9 +5387,12 @@ esac
         std::fs::create_dir_all(&cache_root).unwrap();
         copy_test_bundle(&home.path().join(".codex/plugins/tracedecay"), &cache_root);
 
-        let results =
-            reinstall_agent_integrations(&["codex".to_string()], home.path(), &tracedecay_bin)
-                .await;
+        let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
+            &["codex".to_string()],
+            home.path(),
+            &tracedecay_bin,
+        )
+        .await;
         assert!(
             matches!(
                 results.as_slice(),
@@ -5424,9 +5416,12 @@ esac
             br#"{"name":"tracedecay","version":"stale"}"#,
         )
         .unwrap();
-        let stale =
-            reinstall_agent_integrations(&["codex".to_string()], home.path(), &tracedecay_bin)
-                .await;
+        let stale = reinstall_agent_integrations_with_persisted_dashboard_policies(
+            &["codex".to_string()],
+            home.path(),
+            &tracedecay_bin,
+        )
+        .await;
         assert!(
             matches!(stale.as_slice(), [(id, Err(error))] if id == "codex" && error.to_string().contains("loaded TraceDecay cache is stale")),
             "{stale:?}"
@@ -5437,9 +5432,12 @@ esac
             &cache_manifest,
         )
         .unwrap();
-        let recovered =
-            reinstall_agent_integrations(&["codex".to_string()], home.path(), &tracedecay_bin)
-                .await;
+        let recovered = reinstall_agent_integrations_with_persisted_dashboard_policies(
+            &["codex".to_string()],
+            home.path(),
+            &tracedecay_bin,
+        )
+        .await;
         assert!(
             matches!(
                 recovered.as_slice(),
