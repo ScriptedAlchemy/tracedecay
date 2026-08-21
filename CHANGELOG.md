@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.27](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.26...v0.1.0-beta.27) (2026-08-21)
+
+
+### Bug Fixes
+
+* **projection:** retire v4 output ownership atomically ([77efae8](https://github.com/ScriptedAlchemy/tracedecay/commit/77efae8819cb4509614e6b70337cfbf7e059bff6))
+
 ## [0.1.0-beta.26](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.25...v0.1.0-beta.26) (2026-08-21)
 
 
