@@ -144,7 +144,7 @@ interference window through swap. So:
   Operators can still raise `TRACEDECAY_INDEX_WORKERS` deliberately for a host
   whose measured memory budget supports it. In daemon mode that override
   remains bounded by the canonical `TRACEDECAY_DAEMON_CPU_THREADS` ceiling
-  (16 by default); one-shot callers retain the explicit indexing width.
+  (up to 16 by default); one-shot callers retain the explicit indexing width.
 - Width is sizing policy and never semantics. Per-file results are collected
   in input order and the lowest-index failure is the reported one, so a
   sealed generation is byte-identical at width 1 and at width 8. That
