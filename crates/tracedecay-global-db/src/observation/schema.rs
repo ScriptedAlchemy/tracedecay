@@ -238,6 +238,22 @@ pub(super) const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
             PRIMARY KEY(source_json, scope_json, coverage_json),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
+        CREATE TABLE IF NOT EXISTS observation_admission_refusals (
+            observation_id TEXT NOT NULL,
+            refused_payload_digest TEXT NOT NULL,
+            retained_payload_digest TEXT NOT NULL,
+            refused_at INTEGER NOT NULL,
+            PRIMARY KEY(observation_id, refused_payload_digest),
+            FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
+        );
+        CREATE TRIGGER IF NOT EXISTS observation_admission_refusals_immutable_update
+        BEFORE UPDATE ON observation_admission_refusals BEGIN
+            SELECT RAISE(ABORT, 'observation admission refusals are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS observation_admission_refusals_immutable_delete
+        BEFORE DELETE ON observation_admission_refusals BEGIN
+            SELECT RAISE(ABORT, 'observation admission refusals are immutable');
+        END;
         CREATE TABLE IF NOT EXISTS projection_queue (
             observation_id TEXT PRIMARY KEY,
             observation_sequence INTEGER NOT NULL UNIQUE,
