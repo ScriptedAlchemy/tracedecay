@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
@@ -34,6 +35,23 @@ struct RealPageFixture {
     anchor_id: RetrievalAnchorId,
 }
 
+fn test_binding_digest(label: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(label.as_bytes())))
+}
+
+#[test]
+fn real_page_fixture_rejects_legacy_binding_digests_and_accepts_test_digests() {
+    for (field, invalid) in [
+        ("root_digest", "root.page"),
+        ("request_digest", "request.page.session.page.00"),
+        ("access_digest", "access.page.session.page.00"),
+        ("configuration", "page-test"),
+    ] {
+        assert!(BindingDigest::new(field, invalid).is_err());
+        assert!(BindingDigest::new(field, test_binding_digest(invalid)).is_ok());
+    }
+}
+
 fn real_page_root(root_id: &str) -> TemporalAuthorizedRoot {
     TemporalAuthorizedRoot::profile("profile.page", "store.page", root_id)
         .expect("registered profile root")
@@ -47,9 +65,9 @@ fn real_page_snapshot(
     TemporalExecutionSnapshot::new_authorized(
         TemporalSnapshotRequest::new(
             SessionId::new(session_id).expect("session"),
-            "root.page",
-            format!("request.page.{session_id}"),
-            format!("access.page.{session_id}"),
+            test_binding_digest("root.page"),
+            test_binding_digest(&format!("request.page.{session_id}")),
+            test_binding_digest(&format!("access.page.{session_id}")),
             TemporalModeV1::Current,
             tracedecay_domain::RetrievalGrainV1::LogicalMessage,
         )
@@ -67,8 +85,11 @@ fn real_page_snapshot(
         KernelVersions {
             schema: 1,
             ranking: 1,
-            configuration_digest: BindingDigest::new("configuration", "page-test")
-                .expect("configuration"),
+            configuration_digest: BindingDigest::new(
+                "configuration",
+                test_binding_digest("page-test"),
+            )
+            .expect("configuration"),
         },
         None,
         ValidatedAuthorization::Authorized,
