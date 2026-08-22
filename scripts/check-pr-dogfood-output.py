@@ -55,6 +55,8 @@ def validate_pr_context(
 
     graph = value.get("verified_graph_evidence")
     if graph is None:
+        if value.get("status") == "partial":
+            raise ValueError("partial pr_context requires typed graph evidence")
         return
     if value.get("status") != "partial":
         raise ValueError("unavailable graph evidence requires partial pr_context status")

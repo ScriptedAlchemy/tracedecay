@@ -50,6 +50,12 @@ class PrDogfoodOutputTests(unittest.TestCase):
     def test_accepts_exact_partial_warmup_evidence(self) -> None:
         self.validate(self.payload)
 
+    def test_accepts_complete_output_without_graph_unavailability(self) -> None:
+        del self.payload["status"]
+        del self.payload["verified_graph_evidence"]
+        self.payload["analysis_coverage"] = {"complete": True}
+        self.validate(self.payload)
+
     def test_rejects_evidence_for_a_different_head(self) -> None:
         self.payload["head_oid"] = "wrong-head"
         with self.assertRaisesRegex(ValueError, "head_oid"):
@@ -67,6 +73,11 @@ class PrDogfoodOutputTests(unittest.TestCase):
     def test_rejects_complete_coverage_claim_on_partial_output(self) -> None:
         self.payload["analysis_coverage"] = {"complete": True}
         with self.assertRaisesRegex(ValueError, "incomplete"):
+            self.validate(self.payload)
+
+    def test_rejects_partial_output_without_typed_graph_evidence(self) -> None:
+        del self.payload["verified_graph_evidence"]
+        with self.assertRaisesRegex(ValueError, "graph evidence"):
             self.validate(self.payload)
 
 
