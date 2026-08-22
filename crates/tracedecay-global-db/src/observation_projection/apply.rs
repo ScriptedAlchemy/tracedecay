@@ -861,6 +861,51 @@ pub(super) async fn verify_provenance(
     }
 }
 
+/// Output identity a durable provenance row already binds for one
+/// observation/ordinal key, if any.
+async fn read_provenance_output_binding(
+    conn: &impl QueryExecutor,
+    provenance: &tracedecay_store::ProjectionProvenance,
+    output_ordinal: u32,
+) -> ProjectionStoreResult<Option<(String, String, bool)>> {
+    let mut rows = conn
+        .query(
+            "SELECT provenance.output_provider, provenance.output_message_id,
+                    EXISTS(
+                        SELECT 1 FROM session_messages AS message
+                        WHERE message.provider = provenance.output_provider
+                          AND message.message_id = provenance.output_message_id
+                    )
+             FROM observation_projection_provenance AS provenance
+             WHERE provenance.projector_version = ?1
+               AND provenance.observation_id = ?2
+               AND provenance.output_ordinal = ?3",
+            params![
+                provenance.projector_version(),
+                provenance.observation_id().as_str(),
+                output_ordinal,
+            ],
+        )
+        .await
+        .map_err(|error| storage("read projection provenance output binding", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection provenance output binding", error))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        row.get::<String>(0)
+            .map_err(|error| storage("read projection provenance output binding", error))?,
+        row.get::<String>(1)
+            .map_err(|error| storage("read projection provenance output binding", error))?,
+        row.get::<i64>(2)
+            .map_err(|error| storage("read projection provenance output binding", error))?
+            != 0,
+    )))
+}
+
 async fn apply_provenance(
     conn: &impl Executor,
     sequence: u64,
@@ -890,7 +935,34 @@ async fn apply_provenance(
         )
         .await
         .map_err(|error| storage("insert projection provenance", error))?;
-    verify_provenance(conn, projection).await?;
+    match verify_provenance(conn, projection).await {
+        Ok(()) => {}
+        // The insert was a no-op because a row already holds this
+        // observation's provenance key. Only when that row binds a DIFFERENT
+        // output identity AND that output row still exists is this the
+        // deterministic existing-output collision the drain converges into a
+        // durable skip. A ghost binding or a retained row that names
+        // the SAME output but disagrees on anchor, receipt, or digest is
+        // corrupt provenance authority — as is a row that disagrees right
+        // after this insert claimed to write it — and stays a hard error.
+        Err(ProjectionStoreError::ProvenanceCollision) if inserted == 0 => {
+            let (stored_provider, stored_message_id, output_exists) =
+                read_provenance_output_binding(conn, provenance, projection.output_ordinal())
+                    .await?
+                    .ok_or(ProjectionStoreError::ProvenanceCollision)?;
+            if output_exists
+                && (stored_provider, stored_message_id)
+                    != (message.provider.clone(), message.message_id.clone())
+            {
+                return Err(ProjectionStoreError::OutputCollision {
+                    provider: message.provider.clone(),
+                    message_id: message.message_id.clone(),
+                });
+            }
+            return Err(ProjectionStoreError::ProvenanceCollision);
+        }
+        Err(error) => return Err(error),
+    }
     if inserted == 0 {
         return Ok(());
     }
