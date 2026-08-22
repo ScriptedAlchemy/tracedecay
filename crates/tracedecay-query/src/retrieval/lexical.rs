@@ -427,7 +427,14 @@ where
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
-        let eligible = candidates.len() as u64 + truncated as u64;
+        // Preserve the port's own truncation accounting: a port that already
+        // capped its batch reported every eligible row and its surplus, so a
+        // pre-capped search must stay capped and non-exhausted here instead
+        // of being reported complete.
+        let seen = (candidates.len() + truncated) as u64 + excluded;
+        let eligible = batch.coverage.eligible.max(seen).saturating_sub(excluded);
+        let capped = batch.coverage.capped.saturating_add(truncated as u64);
+        let exhausted = truncated == 0 && batch.coverage.capped == 0;
         let checkpoint_digest = lexical_checkpoint_digest(&request.generation, &candidates)?;
         let rebuilt = RetrieverBatch {
             candidates,
@@ -436,13 +443,13 @@ where
                 examined,
                 eligible,
                 excluded: batch.coverage.excluded.saturating_add(excluded),
-                capped: truncated as u64,
+                capped,
                 unknown: batch.coverage.unknown,
             },
             continuation: Some(RetrieverContinuation {
                 lane: RetrieverKind::Lexical,
                 checkpoint_digest,
-                exhausted: truncated == 0,
+                exhausted,
             }),
         };
         rebuilt.validate().map_err(contract_error)?;
