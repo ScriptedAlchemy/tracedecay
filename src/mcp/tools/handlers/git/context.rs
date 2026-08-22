@@ -1,5 +1,6 @@
 //! `tracedecay_diff_context`, `tracedecay_changelog`, `tracedecay_commit_context`, and `tracedecay_pr_context`.
 
+use super::super::dependency_hints;
 use super::affected::collect_verified_affected_test_files;
 use super::pr_context_cursor::{
     PrContextCursorBinding, decode_pr_context_cursor, encode_pr_context_cursor,
@@ -732,15 +733,25 @@ fn pr_context_edge_bytes(
         .saturating_add("calls".len())
 }
 
+fn graph_enrichment_is_transient(error: &TraceDecayError) -> bool {
+    matches!(
+        error.project_route_context(),
+        Some(("code-graph-unavailable" | "code-graph-stale", true, _))
+    )
+}
+
 /// Handles `tracedecay_pr_context` tool calls.
-pub(crate) async fn handle_pr_context(
+pub(crate) async fn handle_pr_context<F>(
     cg: &TraceDecay,
-    graph: &VerifiedGraphQuery,
+    graph: F,
     args: Value,
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
     registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
-) -> Result<ToolResult> {
+) -> Result<ToolResult>
+where
+    F: Future<Output = Result<VerifiedGraphQuery>>,
+{
     require_object_args(&args, "tracedecay_pr_context")?;
     let controls = PrContextControls {
         deadline,
@@ -812,6 +823,88 @@ pub(crate) async fn handle_pr_context(
         }
         None => None,
     };
+
+    let stage_started = std::time::Instant::now();
+    let graph = match graph.await {
+        Ok(graph) => graph,
+        Err(error) if encoded_cursor.is_some() || !graph_enrichment_is_transient(&error) => {
+            return Err(error);
+        }
+        Err(error) => {
+            stage_timings.insert("graph".to_owned(), json!(elapsed_micros(stage_started)));
+            let test_files_changed = changes
+                .iter()
+                .filter(|change| crate::tracedecay::is_test_file(&change.path))
+                .map(|change| change.path.clone())
+                .collect::<Vec<_>>();
+            let output = json!({
+                "status": "partial",
+                "message": "Verified graph results pending while the generation warms; Git comparison results are available.",
+                "base": base,
+                "head": head,
+                "base_oid": base_oid,
+                "head_oid": head_oid,
+                "merge_base": merge_base,
+                "graph_generation": null,
+                "commits": commits,
+                "files_changed": changed_files.len(),
+                "changes": changes,
+                "symbols_added": 0,
+                "symbols_modified": 0,
+                "added": [],
+                "modified": [],
+                "next_cursor": null,
+                "symbol_page": {
+                    "limit": maximum_symbols,
+                    "returned": 0,
+                    "has_more": false,
+                    "complete": false,
+                    "selection": "unavailable",
+                    "continuation_available": false,
+                },
+                "analysis_coverage": {
+                    "seed_symbols_analyzed": 0,
+                    "symbols_returned": 0,
+                    "symbols_complete": false,
+                    "impact_nodes_admitted": 0,
+                    "impact_nodes_returned": 0,
+                    "direct_call_edges_admitted": 0,
+                    "impact_bytes_admitted": 0,
+                    "impact_partial": true,
+                    "complete": false,
+                },
+                "test_files_changed": test_files_changed,
+                "affected_tests": [],
+                "affected_tests_coverage": {
+                    "complete": false,
+                    "selection": "unavailable",
+                },
+                "impacted_modules": [],
+                "impacted_modules_coverage": {
+                    "complete": false,
+                    "selection": "unavailable",
+                },
+                "verified_graph_evidence": dependency_hints::unavailable_evidence(&error),
+            });
+            stage_timings.insert("total".to_owned(), json!(elapsed_micros(total_started)));
+            let timing_value = Value::Object(stage_timings.clone());
+            tracing::info!(
+                tool = "tracedecay_pr_context",
+                files = changed_files.len(),
+                symbols = 0,
+                timings = %timing_value,
+                "PR context returned Git evidence while graph enrichment was unavailable"
+            );
+            return Ok(
+                generic_tool_result(Some(cg.project_root()), &args, &output, changed_files)
+                    .with_internal_analytics(json!({
+                        "stage_timings_us": stage_timings,
+                        "symbol_coverage": output["symbol_page"],
+                    })),
+            );
+        }
+    };
+    stage_timings.insert("graph".to_owned(), json!(elapsed_micros(stage_started)));
 
     let graph_generation = graph.generation().as_str().to_owned();
     let project_root = cg.project_root().to_string_lossy();
@@ -920,7 +1013,7 @@ pub(crate) async fn handle_pr_context(
     // Find transitively affected test files
     let stage_started = std::time::Instant::now();
     let mut affected_tests: HashSet<String> = HashSet::new();
-    let impact = pr_context_impact_snapshot(graph, &nodes, 2, prior_impact_budget, &controls)?;
+    let impact = pr_context_impact_snapshot(&graph, &nodes, 2, prior_impact_budget, &controls)?;
     controls.checkpoint()?;
     let impact_paths: Vec<String> = impact
         .nodes
@@ -999,6 +1092,7 @@ pub(crate) async fn handle_pr_context(
         "graph_generation": graph_generation,
         "commits": commits,
         "files_changed": changed_files.len(),
+        "changes": changes,
         "symbols_added": symbols_added,
         "symbols_modified": symbols_modified,
         "added": added,
