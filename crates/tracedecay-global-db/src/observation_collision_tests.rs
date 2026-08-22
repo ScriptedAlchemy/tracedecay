@@ -745,25 +745,39 @@ async fn raw_observation_json(
         .expect("decode retained observation column")
 }
 
+/// Boundary accounting for one record a catch-up pass decoded and persisted.
+struct CatchUpRecordReceipt {
+    result: Result<ObservationPersistOutcome, ObservationStoreError>,
+    /// Identity digests spent building the candidate from its raw source
+    /// line (deserialize + identity derivation) — the trigger's own cost.
+    construction_identity_digests: u64,
+    /// Identity digests spent inside the store's persist call — terminal-row
+    /// rework the store performed on top of the trigger's construction.
+    persist_identity_digests: u64,
+    /// Adapter-probe deltas across the persist call: stored-observation
+    /// reads, collision classifications, payload-revision probes, canonical
+    /// command digests.
+    persist_probe_deltas: (u64, u64, u64, u64),
+}
+
 /// One real catch-up pass over raw persisted source input: read the durable
 /// cursor, decode only the records the cursor does not cover, and persist
-/// each decoded candidate exactly as ingest would.
+/// each decoded candidate exactly as ingest would, accounting every identity
+/// digest at the domain boundary.
 async fn run_catch_up_pass(
     store: &crate::GlobalDbObservationStore,
     session_id: &SessionId,
     generation: u64,
     raw_lines: &[((u64, u64), String)],
     pass_label: &str,
-) -> (
-    usize,
-    Vec<Result<ObservationPersistOutcome, ObservationStoreError>>,
-) {
+) -> (usize, Vec<CatchUpRecordReceipt>) {
     let provider = ProviderId::new(COLLISION_PROVIDER).unwrap();
     let source = ObservationSourceIdentityV1::for_provider(provider, session_id.clone()).unwrap();
     let scope = ObservationScopeV1::Profile;
     let scan_generation = ObservationSourceGenerationV1::new(generation).unwrap();
+    let probe = store.persist_probe();
     let mut decoded = 0;
-    let mut outcomes = Vec::new();
+    let mut receipts = Vec::new();
     for (index, (range, raw_line)) in raw_lines.iter().enumerate() {
         let cursor = store.get_source_cursor(&source, &scope).await.unwrap();
         let covered = cursor.as_ref().is_some_and(|cursor| {
@@ -775,6 +789,8 @@ async fn run_catch_up_pass(
             continue;
         }
         decoded += 1;
+        let digests_before_construction =
+            tracedecay_domain::observation::identity_digest_probe::count();
         let observation = decode_raw_source_record(
             session_id,
             raw_line,
@@ -783,9 +799,25 @@ async fn run_catch_up_pass(
             &format!("receipt.catch-up.{pass_label}.{index}"),
         );
         let write = anchored_write_for(observation, cursor);
-        outcomes.push(store.persist_observation(write).await);
+        let digests_before_persist = tracedecay_domain::observation::identity_digest_probe::count();
+        let (reads, classifications, revision_probes, command_digests) = probe.snapshot();
+        let result = store.persist_observation(write).await;
+        let digests_after_persist = tracedecay_domain::observation::identity_digest_probe::count();
+        let (reads_after, classifications_after, revision_probes_after, command_digests_after) =
+            probe.snapshot();
+        receipts.push(CatchUpRecordReceipt {
+            result,
+            construction_identity_digests: digests_before_persist - digests_before_construction,
+            persist_identity_digests: digests_after_persist - digests_before_persist,
+            persist_probe_deltas: (
+                reads_after - reads,
+                classifications_after - classifications,
+                revision_probes_after - revision_probes,
+                command_digests_after - command_digests,
+            ),
+        });
     }
-    (decoded, outcomes)
+    (decoded, receipts)
 }
 
 /// Linux P1-3, covered-replay shape: an identity collision whose range the
@@ -1241,28 +1273,28 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     ];
 
     // Pass 0: gen-1 ingest of the original file.
-    let (decoded, outcomes) =
+    let (decoded, receipts) =
         run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
     assert_eq!(decoded, 1);
     assert!(matches!(
-        outcomes[0],
+        receipts[0].result,
         Ok(ObservationPersistOutcome::Committed(_))
     ));
 
     // Pass 1: gen-2 rescan of the rewritten file. Record zero collides and is
     // terminally refused; the scan continues and commits record one.
-    let (decoded, outcomes) =
+    let (decoded, receipts) =
         run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
     assert_eq!(decoded, 2);
     assert!(matches!(
-        outcomes[0],
+        receipts[0].result,
         Err(ObservationStoreError::ObservationCollision {
             outcome: ObservationCollisionOutcomeV1::IdentityCollision,
             ..
         })
     ));
     assert!(matches!(
-        outcomes[1],
+        receipts[1].result,
         Ok(ObservationPersistOutcome::Committed(_))
     ));
     let refused = decode_raw_source_record(
@@ -1374,6 +1406,182 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     assert_eq!(admission_refusal_rows(&reopened).await.len(), 1);
     assert_eq!(
         raw_observation_json(&reopened, refused.observation_id().as_str()).await,
+        retained_row,
+        "the retained observation row must stay byte-identical"
+    );
+}
+
+/// Items 3 and 6 of the owner review, closed together: after production
+/// cursor-advance retention has reclaimed the `admission_refused` advance
+/// row, a REAL subsequent catch-up/temporal pass — a generation-3 rescan that
+/// re-reads the rewritten file from raw persisted source input and rebuilds
+/// every candidate through the ingest pipeline, NOT a preconstructed write —
+/// re-admits the refused record and must be suppressed by the retained
+/// terminal with ZERO store-side decode/canonicalize/SHA work.
+///
+/// Accounting is per record at the domain identity-digest boundary
+/// (`identity_digest_probe` inside `domain_digest`): the trigger pays its own
+/// raw-line deserialize + identity derivation (`construction_identity_digests
+/// > 0` — this cost is measured, not hidden), and the store's persist call
+/// must add exactly zero (`persist_identity_digests == 0`), with zero
+/// stored-row reads, collision classifications, revision probes, and command
+/// digests. The dispatch counts gate the engine-side work the thread-local
+/// domain counter cannot see: the only way the store decodes (and thereby
+/// re-derives and re-hashes) the retained row is the stored-observation read
+/// dispatch, so zero dispatches means zero engine-side identity digests. The
+/// retained row stays byte-identical throughout, and the pass converges so
+/// the following pass reopens zero source records.
+#[tokio::test]
+async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework() {
+    use crate::observation::retention::{ObservationRetentionConfig, RetentionMode};
+
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.terminal-refusal.rescan").unwrap();
+    let original_lines = vec![(
+        (0, 1),
+        raw_source_line(
+            &session_id,
+            "record.rescan.0",
+            (0, 1),
+            "original record zero",
+        ),
+    )];
+    let rewritten_lines = vec![
+        (
+            (0, 1),
+            raw_source_line(
+                &session_id,
+                "record.rescan.0",
+                (0, 1),
+                "rewritten record zero",
+            ),
+        ),
+        (
+            (1, 2),
+            raw_source_line(
+                &session_id,
+                "record.rescan.1",
+                (1, 2),
+                "appended record one",
+            ),
+        ),
+    ];
+
+    // Collide at N: gen-1 ingest, then the gen-2 rescan refuses the rewritten
+    // record terminally and commits the appended record, advancing the cursor
+    // strictly past the refused coverage.
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
+    assert_eq!(decoded, 1);
+    assert!(matches!(
+        receipts[0].result,
+        Ok(ObservationPersistOutcome::Committed(_))
+    ));
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
+    assert_eq!(decoded, 2);
+    assert!(matches!(
+        receipts[0].result,
+        Err(ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        })
+    ));
+    assert!(matches!(
+        receipts[1].result,
+        Ok(ObservationPersistOutcome::Committed(_))
+    ));
+    let refused = decode_raw_source_record(
+        &session_id,
+        &rewritten_lines[0].1,
+        2,
+        (0, 1),
+        "receipt.catch-up.gen2.0",
+    );
+    let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
+
+    // Run production retention: the superseded admission_refused advance row
+    // is reclaimed, the refusal terminal survives.
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    database
+        .run_observation_retention(
+            None,
+            &ObservationRetentionConfig::default(),
+            RetentionMode::Apply,
+            tracedecay_application::clock::now_micros().0,
+        )
+        .await
+        .expect("apply observation retention");
+    assert_eq!(
+        admission_refused_advance_count(&runtime, &refused).await,
+        0,
+        "retention must reclaim the superseded admission_refused advance row"
+    );
+
+    // The file changes again: a REAL gen-3 rescan re-reads BOTH raw lines and
+    // re-admits the refused record through the ingest pipeline itself.
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3").await;
+    assert_eq!(
+        decoded, 2,
+        "a rescan after a real file change re-reads the raw source"
+    );
+    let refused_readmit = &receipts[0];
+    assert!(
+        matches!(
+            refused_readmit.result,
+            Err(ObservationStoreError::ObservationCollision {
+                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+                ..
+            })
+        ),
+        "{:?}",
+        refused_readmit.result
+    );
+    assert!(
+        refused_readmit.construction_identity_digests > 0,
+        "the trigger's own raw-line decode and identity derivation are real and measured"
+    );
+    assert_eq!(
+        refused_readmit.persist_identity_digests, 0,
+        "the store must answer the post-retention raw-source re-admit without \
+         decoding, canonicalizing, or hashing the terminal row"
+    );
+    assert_eq!(
+        refused_readmit.persist_probe_deltas,
+        (0, 0, 0, 0),
+        "the store must not read the stored row, classify, probe revisions, or \
+         digest commands for the post-retention raw-source re-admit"
+    );
+    // The suppression above was answered by the retained refusal terminal:
+    // it must have survived cursor-advance retention.
+    assert_eq!(
+        admission_refusal_rows(&runtime).await.len(),
+        1,
+        "the refusal terminal must survive cursor-advance retention"
+    );
+    // The pass still converges: the appended record lands and covers the new
+    // generation, so the NEXT pass reopens zero source records.
+    assert!(receipts[1].result.is_ok(), "{:?}", receipts[1].result);
+    let digests_before = tracedecay_domain::observation::identity_digest_probe::count();
+    let (decoded, _) = run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-b").await;
+    assert_eq!(decoded, 0, "the converged rescan reopens no source records");
+    assert_eq!(
+        tracedecay_domain::observation::identity_digest_probe::count() - digests_before,
+        0
+    );
+
+    // Immutable old row: byte-identical after every pass.
+    assert_eq!(
+        raw_observation_json(&runtime, refused.observation_id().as_str()).await,
         retained_row,
         "the retained observation row must stay byte-identical"
     );
