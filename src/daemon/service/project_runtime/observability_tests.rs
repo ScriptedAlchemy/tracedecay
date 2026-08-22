@@ -75,6 +75,7 @@ async fn runtime(
     tempfile::TempDir,
     ProjectId,
     crate::global_db::RegisteredGlobalDbLeaseV1,
+    crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime,
 ) {
     let project = tempfile::tempdir().expect("project");
     let project_id = ProjectId::new(format!("project.{name}")).expect("project id");
@@ -86,13 +87,15 @@ async fn runtime(
     .await
     .expect("registered runtime");
     let database = runtime.project_database_arc().expect("project database");
-    (project, project_id, database)
+    // The fixture owns the active daemon write scope; it must outlive every
+    // store write in the test, so it is returned rather than dropped here.
+    (project, project_id, database, runtime)
 }
 
 #[tokio::test]
 async fn project_runtime_reuses_one_producer_and_shutdown_flushes_it() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let (_project, project_id, database) = runtime("observability-mount").await;
+    let (_project, project_id, database, _runtime) = runtime("observability-mount").await;
     let root = PathBuf::from("/project/observability-mount");
     let service = DaemonInvocationService::default();
     let first = service
@@ -150,7 +153,7 @@ async fn project_runtime_reuses_one_producer_and_shutdown_flushes_it() {
 #[tokio::test]
 async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let (_project, project_id, database) = runtime("observability-restart").await;
+    let (_project, project_id, database, _runtime) = runtime("observability-restart").await;
     let root = PathBuf::from("/project/observability-restart");
     let first_service = DaemonInvocationService::default();
     let first = first_service
@@ -585,7 +588,8 @@ async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
 #[tokio::test]
 async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let (_project, project_id, database) = runtime("observability-retiring-shutdown").await;
+    let (_project, project_id, database, _runtime) =
+        runtime("observability-retiring-shutdown").await;
     let root = PathBuf::from("/project/observability-retiring-shutdown");
     let linked_root = PathBuf::from("/project/observability-retiring-shutdown-linked");
     let service = DaemonInvocationService::default();
@@ -678,7 +682,7 @@ async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
 #[tokio::test]
 async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let (_project, project_id, database) = runtime("observability-retiring-drop").await;
+    let (_project, project_id, database, _runtime) = runtime("observability-retiring-drop").await;
     let registry = StoreObservabilityRegistryV1::default();
     let producer = BoundedObservabilityProducerV1::start(
         database.clone(),
@@ -775,7 +779,8 @@ async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
 #[tokio::test]
 async fn registered_shutdown_reports_a_blocked_producer_flush() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let (_project, project_id, database) = runtime("observability-shutdown-failure").await;
+    let (_project, project_id, database, _runtime) =
+        runtime("observability-shutdown-failure").await;
     let producer = BoundedObservabilityProducerV1::start_with_deadlines(
         database.clone(),
         ObservabilityProducerIdentityV1 {
