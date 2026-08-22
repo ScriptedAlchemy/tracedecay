@@ -8,14 +8,16 @@ use tracedecay_application::{
     ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
 };
 use tracedecay_domain::{
-    CoverageStateV1, ManifestDigest, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
-    ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, ProjectId, RepositoryId,
-    RetrievalQueryObservedV1, WorktreeId, canonical_sha256,
+    CoverageStateV1, DeliveryChannelIdentityV1, DeliveryEventClassV1, DeliverySettlementAttemptV1,
+    DeliverySettlementOutcomeV1, DeliverySettlementV1, DeliverySurfaceFamilyV1, ManifestDigest,
+    ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
+    ObservabilityTerminalResultV1, ProjectId, RepositoryId, RetrievalQueryObservedV1, UtcMicros,
+    WorktreeId, canonical_sha256,
 };
 use tracedecay_usecases::observability::{
-    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
-    ObservabilityProducerDeadlinesV1, ObservabilityProducerIdentityV1,
-    RegisteredObservabilityPortV1,
+    BoundedObservabilityProducerV1, DeliverySettlementRecordOutcomeV1,
+    ObservabilityEmissionOutcomeV1, ObservabilityProducerDeadlinesV1,
+    ObservabilityProducerIdentityV1, RegisteredObservabilityPortV1,
 };
 
 use crate::daemon::service::invocation::DaemonInvocationService;
@@ -319,8 +321,8 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
         .await
         .expect("reconciled linked-root producer");
     assert!(Arc::ptr_eq(&linked, &linked_reconciled));
-    // The delivery settlement recorder is store-keyed: both roots reach the
-    // exact same recorder rather than running one drain per root.
+    // Each root keeps its policy-specific admission frontend while both
+    // frontends share the exact store recorder backend and drain worker.
     let first_recorder = first_service
         .delivery_settlement_recorder(Some(&root))
         .await
@@ -329,7 +331,29 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
         .delivery_settlement_recorder(Some(&linked_root))
         .await
         .expect("linked-root recorder");
-    assert!(Arc::ptr_eq(&first_recorder, &linked_recorder));
+    assert!(!Arc::ptr_eq(&first_recorder, &linked_recorder));
+    assert_eq!(
+        linked_recorder
+            .try_record(DeliverySettlementV1 {
+                attempt: DeliverySettlementAttemptV1 {
+                    owner_event_id: "linked:settlement:b".to_owned(),
+                    event_class: DeliveryEventClassV1::OperationTerminal,
+                    channel: DeliveryChannelIdentityV1 {
+                        surface: DeliverySurfaceFamilyV1::Lsp,
+                        channel_ref: "lsp:linked-root-b".to_owned(),
+                    },
+                    work_attempt: None,
+                    eligible: 1,
+                    valid_at: UtcMicros(20),
+                    attempted_at: UtcMicros(21),
+                },
+                outcome: DeliverySettlementOutcomeV1::Delivered,
+                settled_at: UtcMicros(22),
+                drop_reason: None,
+            })
+            .expect("record linked-root B settlement"),
+        DeliverySettlementRecordOutcomeV1::Enqueued
+    );
     // Retaining recorder handles would pin the store spool lock past the
     // last-alias shutdown below and block the restart from reopening it.
     drop(first_recorder);
@@ -498,6 +522,27 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
         persisted_policies.get("alias:linked").copied(),
         Some(linked_policy_revision.as_str()),
         "the linked-root frontend must stamp its own policy provenance"
+    );
+    let delivery_page = RegisteredObservabilityPortV1::new(&database)
+        .query(ObservabilityQueryV1 {
+            authorized_scope_ref: project_id.as_str().to_owned(),
+            event_kinds: vec!["work.delivery_fanout.observed.v1".to_owned()],
+            horizon: ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: i64::MAX,
+            },
+            after_watermark: None,
+            limit: 8,
+        })
+        .await
+        .expect("query linked-root settlement");
+    let [delivery] = delivery_page.events.as_slice() else {
+        panic!("one linked-root delivery settlement observation is required");
+    };
+    assert_eq!(
+        delivery.policy_revision,
+        linked_policy_revision.as_str(),
+        "the root-selected delivery recorder must retain root B's policy"
     );
     let mut streams: BTreeMap<&str, BTreeSet<u64>> = BTreeMap::new();
     for event in &page.events {
@@ -913,6 +958,130 @@ async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finis
         )
         .expect("one replacement after both aliases release");
     replacement.shutdown().await.expect("replacement shutdown");
+}
+
+#[tokio::test]
+async fn adjacent_linked_alias_capacity_drops_retain_distinct_policy_carriers() {
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let (_project, project_id, database, _runtime) =
+        runtime("observability-linked-capacity-drops").await;
+    let blocker = database
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    let registry = StoreObservabilityRegistryV1::default();
+    let configuration_provenance_revision = digest('0');
+    let policy_a = digest('a');
+    let policy_b = digest('b');
+    let producer = BoundedObservabilityProducerV1::start(
+        database.clone(),
+        ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: project_id.as_str().to_owned(),
+            process_boot_id: "daemon:linked-capacity-drops".to_owned(),
+            producer_revision: "producer.v1".to_owned(),
+            configuration_revision: digest('c').as_str().to_owned(),
+            policy_revision: policy_a.as_str().to_owned(),
+        },
+        1,
+    )
+    .expect("producer");
+    let first = registry
+        .acquire_or_start::<&'static str>(
+            &database,
+            &configuration_provenance_revision,
+            |_| false,
+            ObservabilityProducerIdentityV1::clone,
+            || "unexpected incumbent store producer",
+            || Ok(producer),
+            1,
+            |error| error,
+        )
+        .expect("first alias");
+    let linked = registry
+        .acquire_or_start::<&'static str>(
+            &database,
+            &configuration_provenance_revision,
+            |_| true,
+            |incumbent| {
+                let mut identity = incumbent.clone();
+                identity.policy_revision = policy_b.as_str().to_owned();
+                identity
+            },
+            || "unexpected incumbent refusal",
+            || Err("must not start a second producer"),
+            1,
+            |error| error,
+        )
+        .expect("linked alias");
+    let first_producer = first.producer();
+    let linked_producer = linked.producer();
+
+    let mut index = 0_u64;
+    let first_missing_sequence = loop {
+        let outcome = first_producer
+            .try_emit(envelope(&project_id, &format!("capacity:alias-a:{index}")))
+            .expect("bounded alias A emission");
+        index = index.saturating_add(1);
+        if outcome == ObservabilityEmissionOutcomeV1::DroppedAtCapacity {
+            break index;
+        }
+        assert!(index < 1_024, "writer pressure must fill the bounded queue");
+    };
+    assert_eq!(
+        linked_producer
+            .try_emit(envelope(&project_id, "capacity:alias-b"))
+            .expect("adjacent bounded alias B emission"),
+        ObservabilityEmissionOutcomeV1::DroppedAtCapacity
+    );
+
+    blocker.commit().await.expect("release registered writer");
+    first.shutdown().await.expect("release first alias");
+    linked.shutdown().await.expect("drain last alias");
+
+    let page = RegisteredObservabilityPortV1::new(&database)
+        .query(ObservabilityQueryV1 {
+            authorized_scope_ref: project_id.as_str().to_owned(),
+            event_kinds: vec!["telemetry.drop.observed.v1".to_owned()],
+            horizon: ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: i64::MAX,
+            },
+            after_watermark: None,
+            limit: 8,
+        })
+        .await
+        .expect("query linked-root capacity drops");
+    let dropped: BTreeMap<&str, (u64, u64, u64)> = page
+        .events
+        .iter()
+        .filter_map(|event| {
+            let ObservabilityPayloadV1::TelemetryDrop(drop) = &event.payload else {
+                return None;
+            };
+            (drop.proved_drop_lower_bound > 0).then_some((
+                event.policy_revision.as_str(),
+                (
+                    drop.first_missing_sequence,
+                    drop.last_missing_sequence,
+                    drop.proved_drop_lower_bound,
+                ),
+            ))
+        })
+        .collect();
+    assert_eq!(
+        dropped,
+        BTreeMap::from([
+            (
+                policy_a.as_str(),
+                (first_missing_sequence, first_missing_sequence, 1),
+            ),
+            (
+                policy_b.as_str(),
+                (first_missing_sequence + 1, first_missing_sequence + 1, 1),
+            ),
+        ]),
+        "adjacent alias losses must not coalesce or inherit core A's policy"
+    );
 }
 
 #[tokio::test]

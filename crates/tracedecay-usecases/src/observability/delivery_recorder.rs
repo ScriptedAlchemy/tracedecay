@@ -8,10 +8,10 @@ use tokio::time::{MissedTickBehavior, interval, timeout};
 use tracedecay_application::ApplicationContractError;
 use tracedecay_domain::DeliverySettlementV1;
 
-use super::DeliverySettlementAuthorityV1;
 use super::delivery_spool::{
     DeliveryRecorderSourceReceiptV1, DeliveryRecorderSpoolError, DeliveryRecorderSpoolV1,
 };
+use super::{DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1};
 
 const RECORDER_RUNNING: u8 = 0;
 const RECORDER_STOPPING: u8 = 1;
@@ -48,12 +48,13 @@ enum RecorderControl {
 /// pressure therefore delays SQLite work without erasing delivery evidence;
 /// transient failures remain replayable across process restart.
 pub struct BoundedDeliverySettlementRecorderV1 {
+    identity: ObservabilityProducerIdentityV1,
     wake: mpsc::Sender<()>,
     control: mpsc::Sender<RecorderControl>,
     state: Arc<AtomicU8>,
-    admission: Mutex<()>,
+    admission: Arc<Mutex<()>>,
     spool: Arc<DeliveryRecorderSpoolV1>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl BoundedDeliverySettlementRecorderV1 {
@@ -75,19 +76,45 @@ impl BoundedDeliverySettlementRecorderV1 {
         let worker_state = Arc::clone(&state);
         let worker_spool = Arc::clone(&spool);
         let worker = runtime.spawn(run_recorder(
-            authority,
+            Arc::clone(&authority),
             worker_spool,
             wake_rx,
             control_rx,
             worker_state,
         ));
         Ok(Self {
+            identity: authority.identity().clone(),
             wake,
             control,
             state,
-            admission: Mutex::new(()),
+            admission: Arc::new(Mutex::new(())),
             spool,
-            worker: Mutex::new(Some(worker)),
+            worker: Arc::new(Mutex::new(Some(worker))),
+        })
+    }
+
+    /// Attach one linked root's policy-specific admission frontend to this
+    /// recorder's existing spool, wake lane, lifecycle, and worker.
+    pub fn alias_with_policy_identity(
+        &self,
+        identity: ObservabilityProducerIdentityV1,
+    ) -> Result<Self, &'static str> {
+        identity.validate()?;
+        if identity.authorized_scope_ref != self.identity.authorized_scope_ref
+            || identity.process_boot_id != self.identity.process_boot_id
+            || identity.producer_revision != self.identity.producer_revision
+            || identity.configuration_revision != self.identity.configuration_revision
+        {
+            return Err("delivery_settlement_recorder_alias_identity");
+        }
+        Ok(Self {
+            identity,
+            wake: self.wake.clone(),
+            control: self.control.clone(),
+            state: Arc::clone(&self.state),
+            admission: Arc::clone(&self.admission),
+            spool: Arc::clone(&self.spool),
+            worker: Arc::clone(&self.worker),
         })
     }
 
@@ -96,8 +123,8 @@ impl BoundedDeliverySettlementRecorderV1 {
         settlement: DeliverySettlementV1,
     ) -> Result<DeliverySettlementRecordOutcomeV1, &'static str> {
         settlement.validate()?;
-        let receipt =
-            DeliveryRecorderSourceReceiptV1::new(settlement).map_err(map_spool_admission_error)?;
+        let receipt = DeliveryRecorderSourceReceiptV1::new(settlement, self.identity.clone())
+            .map_err(map_spool_admission_error)?;
         let _admission = self
             .admission
             .lock()
@@ -242,8 +269,16 @@ async fn drain_once(
     let mut acknowledged = 0_usize;
     for receipt in receipts {
         let result = async {
-            authority.begin(&receipt.settlement.attempt).await?;
-            authority.settle(&receipt.settlement).await?;
+            let receipt_authority = authority
+                .alias_with_policy_identity(
+                    receipt
+                        .emission_identity
+                        .clone()
+                        .unwrap_or_else(|| authority.identity().clone()),
+                )
+                .map_err(|error| ApplicationContractError::Domain(error.to_owned()))?;
+            receipt_authority.begin(&receipt.settlement.attempt).await?;
+            receipt_authority.settle(&receipt.settlement).await?;
             spool
                 .acknowledge(receipt.receipt_id)
                 .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;

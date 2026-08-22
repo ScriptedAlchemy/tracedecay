@@ -163,14 +163,17 @@ impl StoreObservabilityRegistryV1 {
                             .alias_with_policy_identity(emission_identity)
                             .map_err(&unavailable)?,
                     );
-                    *aliases = aliases.checked_add(1).ok_or_else(|| {
+                    let next_aliases = aliases.checked_add(1).ok_or_else(|| {
                         unavailable("store_observability_alias_capacity_exhausted")
                     })?;
-                    return Ok(RegisteredObservabilityProducerV1::alias(
+                    let registered = RegisteredObservabilityProducerV1::alias(
                         self.clone(),
                         Arc::clone(core),
                         producer,
-                    ));
+                    )
+                    .map_err(&unavailable)?;
+                    *aliases = next_aliases;
+                    return Ok(registered);
                 }
                 StoreObservabilityStateV1::Stopping { .. } => {
                     return Err(unavailable("store_observability_retiring"));
@@ -190,6 +193,12 @@ impl StoreObservabilityRegistryV1 {
             )
             .map_err(&unavailable)?,
         );
+        let registered = RegisteredObservabilityProducerV1::alias(
+            self.clone(),
+            Arc::clone(&core),
+            Arc::clone(&core.producer),
+        )
+        .map_err(&unavailable)?;
         entries.push(StoreObservabilityEntryV1 {
             database: database.clone(),
             state: StoreObservabilityStateV1::Active {
@@ -197,11 +206,7 @@ impl StoreObservabilityRegistryV1 {
                 aliases: 1,
             },
         });
-        Ok(RegisteredObservabilityProducerV1::alias(
-            self.clone(),
-            Arc::clone(&core),
-            Arc::clone(&core.producer),
-        ))
+        Ok(registered)
     }
 
     fn begin_retirement(
@@ -286,6 +291,8 @@ pub(crate) struct RegisteredObservabilityProducerV1 {
     registry: StoreObservabilityRegistryV1,
     core: Arc<StoreObservabilityCoreV1>,
     producer: Arc<BoundedObservabilityProducerV1>,
+    delivery_settlement_authority: Arc<DeliverySettlementAuthorityV1>,
+    delivery_settlements: Arc<BoundedDeliverySettlementRecorderV1>,
     released: AtomicBool,
 }
 
@@ -294,13 +301,24 @@ impl RegisteredObservabilityProducerV1 {
         registry: StoreObservabilityRegistryV1,
         core: Arc<StoreObservabilityCoreV1>,
         producer: Arc<BoundedObservabilityProducerV1>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, &'static str> {
+        let emission_identity = producer.identity().clone();
+        let delivery_settlement_authority = Arc::new(
+            core.delivery_settlement_authority
+                .alias_with_policy_identity(emission_identity.clone())?,
+        );
+        let delivery_settlements = Arc::new(
+            core.delivery_settlements
+                .alias_with_policy_identity(emission_identity)?,
+        );
+        Ok(Self {
             registry,
             core,
             producer,
+            delivery_settlement_authority,
+            delivery_settlements,
             released: AtomicBool::new(false),
-        }
+        })
     }
 
     pub(crate) fn producer(&self) -> Arc<BoundedObservabilityProducerV1> {
@@ -314,11 +332,11 @@ impl RegisteredObservabilityProducerV1 {
     pub(crate) fn delivery_settlement_authority(
         &self,
     ) -> Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1> {
-        Arc::clone(&self.core.delivery_settlement_authority)
+        Arc::clone(&self.delivery_settlement_authority)
     }
 
     pub(crate) fn delivery_settlement_recorder(&self) -> Arc<BoundedDeliverySettlementRecorderV1> {
-        Arc::clone(&self.core.delivery_settlements)
+        Arc::clone(&self.delivery_settlements)
     }
 
     pub(crate) fn matches(

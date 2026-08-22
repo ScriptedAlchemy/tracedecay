@@ -60,6 +60,20 @@ impl DeliverySettlementAuthorityV1 {
         })
     }
 
+    pub const fn identity(&self) -> &ObservabilityProducerIdentityV1 {
+        &self.identity
+    }
+
+    /// Retain this store authority while selecting one linked root's policy
+    /// identity for the resulting observability envelope.
+    pub fn alias_with_policy_identity(
+        &self,
+        identity: ObservabilityProducerIdentityV1,
+    ) -> Result<Self, &'static str> {
+        let producer = Arc::new(self.producer.alias_with_policy_identity(identity.clone())?);
+        Self::new(self.db.clone(), producer, identity)
+    }
+
     pub async fn begin(
         &self,
         attempt: &DeliverySettlementAttemptV1,
