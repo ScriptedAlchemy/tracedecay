@@ -475,6 +475,11 @@ async fn apply_code_generation_retention(
     };
     let layout = graph.hook_store_layout();
     let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
+    // Retired generations stay reachable for graph replay through the replay
+    // pool; retention hard-links each one there before its release event
+    // becomes durable, and the replay reconciler deletes pool entries once
+    // the graph confirms it no longer needs them.
+    let graph_replay_pool_root = graph.db().database_path().with_extension("graph-replay");
     if let Some(failure) = vector_inventory.degraded_reason() {
         log_code_generation_retention_degraded(&failure);
     }
@@ -508,12 +513,14 @@ async fn apply_code_generation_retention(
     let plan_root = store_root.clone();
     let plan_sources = vector_readable_sources.clone();
     let plan_cancellation = cancellation.clone();
+    let plan_pool_root = graph_replay_pool_root.clone();
     let plan = tokio::task::spawn_blocking(move || {
         prepare_next_code_generation_retention_cancellable(
             &plan_root,
             &plan_sources,
             DEFAULT_SUPERSEDED_GENERATION_FLOOR,
             &|| plan_cancellation.is_cancelled(),
+            Some(&plan_pool_root),
         )
     })
     .await;
@@ -696,12 +703,14 @@ async fn apply_code_generation_retention(
     }
     let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
     let execution_root = store_root.clone();
+    let execution_pool_root = graph_replay_pool_root.clone();
     let report = tokio::task::spawn_blocking(move || {
         execute_code_generation_retention(
             &execution_root,
             plan,
             CodeGenerationRetentionModeV1::Apply,
             completed_at,
+            Some(&execution_pool_root),
         )
     })
     .await;
