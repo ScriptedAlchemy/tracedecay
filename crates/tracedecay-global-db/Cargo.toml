@@ -55,6 +55,11 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", feat
 # crate's WAL reclaim tests need to prove exclusive-maintenance truncation.
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers", "test-transport"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+# The one sanctioned test-only probe: thread-local counters at the domain's
+# canonicalize-then-hash boundaries, so the collision tests can prove the
+# terminal-refusal fast path re-derives, re-decodes, and re-hashes nothing —
+# with no test-only seam in this crate's production adapter.
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0", features = ["identity-digest-probe"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 
 [[bench]]

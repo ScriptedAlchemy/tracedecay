@@ -24,10 +24,14 @@
 //!   replays and gap-shaped candidates leave every ledger untouched;
 //! * only the narrow existing-output collision converges on drain; divergent
 //!   workflow/effect state stays a hard error;
-//! * no-rework is proven by the real sessions JSONL `FileBytes` path: zero
-//!   bytes consumed and zero calls at the fully materialized host-admission
-//!   boundary means no frame was deserialized and no native/canonical identity
-//!   or payload digest was constructed on a subsequent trigger.
+//! * no-rework is proven at the domain's canonicalize-then-hash boundary
+//!   itself (`tracedecay_domain::identity_digest_probe`): zero identity and
+//!   payload digests with exactly one frontier cursor-read command digest
+//!   means no record content was decoded, derived, or hashed and no extra
+//!   runtime command was dispatched — and by the real sessions JSONL
+//!   `FileBytes` path: zero bytes consumed and zero calls at the fully
+//!   materialized host-admission boundary means no frame was deserialized on
+//!   a subsequent trigger.
 
 use serde_json::{Value, json};
 use std::path::Path;
@@ -42,7 +46,7 @@ use tracedecay_domain::{
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, UtcMicros,
+    SessionId, UtcMicros, identity_digest_probe,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationCoverageReason, ObservationPersistOutcome,
@@ -50,13 +54,28 @@ use tracedecay_store::{
     ProjectionPersistOutcome, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
-use crate::tests::harness::{
-    CountingObservationRuntime, HostAdmissionScope, HostAdmissionTestRuntimeV1,
-    ObservationDispatchCounts,
-};
+use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::params;
 
 const COLLISION_PROVIDER: &str = "collision-test";
+
+/// One thread-local view of the sanctioned domain digest probe:
+/// `(identity digests, payload digests, canonical command digests)`.
+///
+/// Identity and payload digests are record work: every fresh identity
+/// derivation, every stored-row decode (which re-derives and verifies the
+/// identity), and every payload-content hash increments them. Canonical
+/// command digests are computed on the calling thread before every runtime
+/// read or submit crosses the dispatch boundary, so their delta also bounds
+/// dispatched record work — a stored-row read whose decode would land on the
+/// reader thread still costs its command digest here first.
+fn digest_counts() -> (u64, u64, u64) {
+    (
+        identity_digest_probe::identity_digests(),
+        identity_digest_probe::payload_digests(),
+        identity_digest_probe::canonical_digests(),
+    )
+}
 
 fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
     SanitizationReceiptV1::new(
@@ -541,8 +560,8 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
         .unwrap();
-    let (store, counts) = runtime
-        .counting_observation_store(HostAdmissionScope::Profile)
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
     let session_id = SessionId::new("session.identity-collision.readmitted").unwrap();
     let (original, original_write) = collision_candidate(
@@ -569,7 +588,7 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
         "receipt.identity-collision.readmitted.rewritten",
         committed_cursor,
     );
-    let before_first = counts.snapshot();
+    let before_first = digest_counts();
     let first = store
         .persist_observation(rewritten_write.clone())
         .await
@@ -584,12 +603,14 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
         ),
         "{first:?}"
     );
-    let before = counts.snapshot();
+    let before = digest_counts();
     // Non-vacuity anchor: the first collision classifies against the stored
-    // row, so the counting seam must have observed its stored-row read.
+    // row and converges coverage, so the probe must have counted its
+    // stored-row read and frontier cursor-read command digests.
     assert!(
-        before.stored_observation_reads > before_first.stored_observation_reads,
-        "the first collision must read the stored row through the counted dispatch seam"
+        before.2 - before_first.2 >= 2,
+        "the first collision must digest its stored-row read and frontier cursor-read \
+         commands at the counted canonical boundary"
     );
 
     // A later catch-up pass or temporal trigger re-presents the exact same
@@ -609,25 +630,28 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
         "{second:?}"
     );
 
-    let after = counts.snapshot();
+    let after = digest_counts();
     assert_eq!(
-        after.stored_observation_reads - before.stored_observation_reads,
+        after.0 - before.0,
         0,
-        "re-admitted terminal collision must not read the stored observation row again — \
-         without that read it cannot decode, re-classify the collision, or re-probe the \
-         payload revision"
+        "re-admitted terminal collision must not derive or verify an observation \
+         identity — zero identity digests proves the stored row was never decoded and \
+         the candidate identity never re-derived"
     );
     assert_eq!(
-        after.submits - before.submits,
+        after.1 - before.1,
         0,
-        "re-admitted terminal collision must not submit a runtime write, so it never \
-         canonicalizes or hashes a command again"
+        "re-admitted terminal collision must not canonicalize or hash any payload"
     );
-    // The seam stayed live inside the asserted window: the re-admission's own
-    // frontier check dispatches exactly one typed source-cursor read.
-    assert!(
-        after.source_cursor_reads > before.source_cursor_reads,
-        "the counting seam must observe the re-admission's frontier cursor read"
+    // Exactly one canonical command digest: the frontier source-cursor read
+    // inside the atomic coverage convergence. Its presence proves the probe
+    // stayed live inside the asserted window; a second digest would mean a
+    // stored-row read or a runtime submit crept back into the fast path.
+    assert_eq!(
+        after.2 - before.2,
+        1,
+        "re-admitted terminal collision dispatches exactly one typed command — the \
+         frontier source-cursor read; anything more is re-introduced record work"
     );
     // The terminal coverage stays single-row and the cursor stays put.
     assert_eq!(
@@ -654,8 +678,8 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
         .unwrap();
-    let (store, counts) = runtime
-        .counting_observation_store(HostAdmissionScope::Profile)
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
     let session_id = SessionId::new("session.identity-collision.domain-replacement").unwrap();
     let (original, original_write) = collision_candidate(
@@ -719,7 +743,7 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
     );
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
 
-    let before = counts.snapshot();
+    let before = digest_counts();
     let second = store
         .persist_observation(replacement_write)
         .await
@@ -731,16 +755,13 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
             ..
         }
     ));
-    let after = counts.snapshot();
+    let after = digest_counts();
     assert_eq!(
-        (
-            after.stored_observation_reads - before.stored_observation_reads,
-            after.submits - before.submits,
-        ),
-        (0, 0),
-        "re-admission must not read the stored row (the only route to decoding, \
-         classifying, or revision-probing it) and must not submit (so nothing is \
-         canonicalized or hashed)"
+        (after.0 - before.0, after.1 - before.1, after.2 - before.2),
+        (0, 0, 1),
+        "re-admission must not derive an identity or hash a payload (zero record work at \
+         the domain digest boundary) and dispatches exactly one typed command — the \
+         frontier cursor read"
     );
 }
 
@@ -1060,13 +1081,13 @@ async fn raw_observation_json(
 /// Boundary accounting for one record a catch-up pass decoded and persisted.
 struct CatchUpRecordReceipt {
     result: Result<ObservationPersistOutcome, ObservationStoreError>,
-    /// Runtime-dispatch deltas across the persist call, observed at the
-    /// adapter's real dispatch seam: `(stored-observation reads, runtime
-    /// submits)`. A stored-observation read is the only route to decoding,
-    /// collision-classifying, or revision-probing the retained row, and
-    /// every submit is keyed by exactly one canonical command digest — so
-    /// `(0, 0)` proves the persist call repeated none of that record work.
-    dispatch_deltas: (u64, u64),
+    /// Domain digest-probe deltas across the persist call, measured at the
+    /// canonicalize-then-hash boundary itself (see [`digest_counts`]):
+    /// `(identity digests, payload digests, canonical command digests)`.
+    /// `(0, 0, 1)` proves the persist call decoded, derived, and hashed no
+    /// record content and dispatched exactly one typed command — the
+    /// frontier cursor read of the atomic coverage convergence.
+    digest_deltas: (u64, u64, u64),
 }
 
 /// One real catch-up pass over raw persisted source input: read the durable
@@ -1075,8 +1096,7 @@ struct CatchUpRecordReceipt {
 /// ABORTING the pass on a persist error — an identity collision ends the
 /// pass, it does not skip to the next record.
 async fn run_catch_up_pass(
-    store: &crate::GlobalDbObservationStore<CountingObservationRuntime>,
-    counts: &ObservationDispatchCounts,
+    store: &crate::GlobalDbObservationStore,
     session_id: &SessionId,
     generation: u64,
     raw_lines: &[((u64, u64), String)],
@@ -1107,16 +1127,13 @@ async fn run_catch_up_pass(
             &format!("receipt.catch-up.{pass_label}.{index}"),
         );
         let write = anchored_write_for(observation, cursor);
-        let before = counts.snapshot();
+        let before = digest_counts();
         let result = store.persist_observation(write).await;
-        let after = counts.snapshot();
+        let after = digest_counts();
         let aborted = result.is_err();
         receipts.push(CatchUpRecordReceipt {
             result,
-            dispatch_deltas: (
-                after.stored_observation_reads - before.stored_observation_reads,
-                after.submits - before.submits,
-            ),
+            digest_deltas: (after.0 - before.0, after.1 - before.1, after.2 - before.2),
         });
         if aborted {
             break;
@@ -1639,8 +1656,8 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
         .unwrap();
-    let (store, counts) = runtime
-        .counting_observation_store(HostAdmissionScope::Profile)
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
     let session_id = SessionId::new("session.terminal-refusal.retention").unwrap();
 
@@ -1677,7 +1694,7 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
 
     // Pass 0: gen-1 ingest of the original file.
     let (decoded, receipts) =
-        run_catch_up_pass(&store, &counts, &session_id, 1, &original_lines, "gen1").await;
+        run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
     assert_eq!(decoded, 1);
     assert!(matches!(
         receipts[0].result,
@@ -1689,7 +1706,7 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     // refusal's own coverage advance lets the follow-up pass move on to
     // record one and converge.
     let (decoded, receipts) =
-        run_catch_up_pass(&store, &counts, &session_id, 2, &rewritten_lines, "gen2").await;
+        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
     assert_eq!(decoded, 1, "the collision aborts the pass");
     assert!(matches!(
         receipts[0].result,
@@ -1698,15 +1715,8 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
             ..
         })
     ));
-    let (decoded, receipts) = run_catch_up_pass(
-        &store,
-        &counts,
-        &session_id,
-        2,
-        &rewritten_lines,
-        "gen2-resume",
-    )
-    .await;
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-resume").await;
     assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
     assert!(matches!(
         receipts[0].result,
@@ -1723,8 +1733,7 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
 
     // Pass 2: a later catch-up pass reopens nothing.
-    let (decoded, _) =
-        run_catch_up_pass(&store, &counts, &session_id, 2, &rewritten_lines, "gen2-b").await;
+    let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
     assert_eq!(
         decoded, 0,
         "catch-up must not reopen covered source records"
@@ -1768,7 +1777,7 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     // refused candidate without a current frontier view) still terminates
     // with zero decode/derive/hash work.
     let stale_replay = anchored_write_for(refused.clone(), None);
-    let before = counts.snapshot();
+    let before = digest_counts();
     let error = store.persist_observation(stale_replay).await.unwrap_err();
     assert!(
         matches!(
@@ -1780,17 +1789,12 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
         ),
         "{error:?}"
     );
-    let after = counts.snapshot();
+    let after = digest_counts();
     assert_eq!(
-        after.stored_observation_reads - before.stored_observation_reads,
-        0,
-        "the stale re-admission must not read the stored row, so it cannot decode, \
-         classify, or revision-probe it"
-    );
-    assert_eq!(
-        after.submits - before.submits,
-        0,
-        "the stale re-admission must not submit a runtime write, so nothing is hashed"
+        (after.0 - before.0, after.1 - before.1, after.2 - before.2),
+        (0, 0, 1),
+        "the stale re-admission must decode, derive, and hash no record content at the \
+         domain digest boundary, dispatching only the frontier cursor-read command"
     );
 
     // Restart: the terminal and coverage are durable, catch-up still reopens
@@ -1800,18 +1804,11 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
         .unwrap();
-    let (reopened_store, reopened_counts) = reopened
-        .counting_observation_store(HostAdmissionScope::Profile)
+    let reopened_store = reopened
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let (decoded, _) = run_catch_up_pass(
-        &reopened_store,
-        &reopened_counts,
-        &session_id,
-        2,
-        &rewritten_lines,
-        "gen2-c",
-    )
-    .await;
+    let (decoded, _) =
+        run_catch_up_pass(&reopened_store, &session_id, 2, &rewritten_lines, "gen2-c").await;
     assert_eq!(decoded, 0);
     assert_eq!(admission_refusal_rows(&reopened).await.len(), 1);
     assert_eq!(
@@ -1829,11 +1826,13 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
 /// re-admits the refused record and must be suppressed by the retained
 /// terminal with ZERO store-side decode/canonicalize/SHA work.
 ///
-/// Runtime-dispatch counts at the adapter's dispatch seam prove the retained
-/// row is not read again (so never decoded, collision classified, or
-/// revision-probed) and nothing is submitted (so never command-digested). The
-/// real Vibe journey below separately proves the production source boundary
-/// performs no subsequent frame materialization.
+/// Deltas at the domain's canonicalize-then-hash boundary itself
+/// (`tracedecay_domain::identity_digest_probe`) prove no identity is derived
+/// or verified, no payload is hashed, and only the single frontier
+/// cursor-read command is digested — so the retained row is never read back,
+/// decoded, collision classified, or revision-probed. The real Vibe journey
+/// below separately proves the production source boundary performs no
+/// subsequent frame materialization.
 #[tokio::test]
 async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework() {
     use crate::observation::retention::{ObservationRetentionConfig, RetentionMode};
@@ -1842,8 +1841,8 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
         .unwrap();
-    let (store, counts) = runtime
-        .counting_observation_store(HostAdmissionScope::Profile)
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
     let session_id = SessionId::new("session.terminal-refusal.rescan").unwrap();
     let original_lines = vec![(
@@ -1880,14 +1879,14 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
     // record terminally and commits the appended record, advancing the cursor
     // strictly past the refused coverage.
     let (decoded, receipts) =
-        run_catch_up_pass(&store, &counts, &session_id, 1, &original_lines, "gen1").await;
+        run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
     assert_eq!(decoded, 1);
     assert!(matches!(
         receipts[0].result,
         Ok(ObservationPersistOutcome::Committed(_))
     ));
     let (decoded, receipts) =
-        run_catch_up_pass(&store, &counts, &session_id, 2, &rewritten_lines, "gen2").await;
+        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
     assert_eq!(decoded, 1, "the collision aborts the pass like production");
     assert!(matches!(
         receipts[0].result,
@@ -1896,15 +1895,8 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
             ..
         })
     ));
-    let (decoded, receipts) = run_catch_up_pass(
-        &store,
-        &counts,
-        &session_id,
-        2,
-        &rewritten_lines,
-        "gen2-resume",
-    )
-    .await;
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-resume").await;
     assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
     assert!(matches!(
         receipts[0].result,
@@ -1944,7 +1936,7 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
     // fast path answers from the terminal, converges coverage with one typed
     // cursor-advance write, and aborts the pass like production.
     let (decoded, receipts) =
-        run_catch_up_pass(&store, &counts, &session_id, 3, &rewritten_lines, "gen3").await;
+        run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3").await;
     assert_eq!(
         decoded, 1,
         "a rescan after a real file change re-reads the raw source and aborts on the collision"
@@ -1962,11 +1954,11 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
         refused_readmit.result
     );
     assert_eq!(
-        refused_readmit.dispatch_deltas,
-        (0, 0),
-        "the re-admit must not read the stored row (so it cannot classify or probe \
-         revisions) and must not submit (so it digests nothing); coverage converges \
-         inside one direct authority transaction with no record work"
+        refused_readmit.digest_deltas,
+        (0, 0, 1),
+        "the re-admit must derive no identity and hash no payload, and may digest only \
+         the frontier cursor-read command; coverage converges inside one direct \
+         authority transaction with no record work"
     );
     // The suppression above was answered by the retained refusal terminal:
     // it must have survived cursor-advance retention.
@@ -1977,19 +1969,11 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
     );
     // The resumed pass commits the appended record past the converged
     // coverage, and the NEXT pass reopens zero source records.
-    let (decoded, receipts) = run_catch_up_pass(
-        &store,
-        &counts,
-        &session_id,
-        3,
-        &rewritten_lines,
-        "gen3-resume",
-    )
-    .await;
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-resume").await;
     assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
     assert!(receipts[0].result.is_ok(), "{:?}", receipts[0].result);
-    let (decoded, _) =
-        run_catch_up_pass(&store, &counts, &session_id, 3, &rewritten_lines, "gen3-b").await;
+    let (decoded, _) = run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-b").await;
     assert_eq!(decoded, 0, "the converged rescan reopens no source records");
 
     // Immutable old row: byte-identical after every pass.
@@ -2014,8 +1998,8 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
         .unwrap();
-    let (store, counts) = runtime
-        .counting_observation_store(HostAdmissionScope::Profile)
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
     let session_id = SessionId::new("session.terminal-refusal.eof").unwrap();
     // The refused record is the ONLY record: nothing follows it, ever.
@@ -2029,7 +2013,7 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
     )];
 
     let (decoded, receipts) =
-        run_catch_up_pass(&store, &counts, &session_id, 1, &original_lines, "gen1").await;
+        run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
     assert_eq!(decoded, 1);
     assert!(matches!(
         receipts[0].result,
@@ -2039,7 +2023,7 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
     // Gen-2 rescan: the EOF record collides and the pass aborts. The refusal
     // records terminal + coverage, so the SAME generation never reopens it.
     let (decoded, receipts) =
-        run_catch_up_pass(&store, &counts, &session_id, 2, &rewritten_lines, "gen2").await;
+        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
     assert_eq!(decoded, 1);
     assert!(matches!(
         receipts[0].result,
@@ -2056,8 +2040,7 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
         "receipt.catch-up.gen2.0",
     );
     let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
-    let (decoded, _) =
-        run_catch_up_pass(&store, &counts, &session_id, 2, &rewritten_lines, "gen2-b").await;
+    let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
     assert_eq!(
         decoded, 0,
         "the refused EOF coverage holds within its generation"
@@ -2082,7 +2065,7 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
     // terminal AND converges the new generation's coverage, so this exact
     // decode happens once per real file change — never again for gen 3.
     let (decoded, receipts) =
-        run_catch_up_pass(&store, &counts, &session_id, 3, &rewritten_lines, "gen3").await;
+        run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3").await;
     assert_eq!(decoded, 1);
     let readmit = &receipts[0];
     assert!(
@@ -2097,12 +2080,12 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
         readmit.result
     );
     assert_eq!(
-        readmit.dispatch_deltas,
-        (0, 0),
-        "the EOF re-admit converges coverage atomically with no record work"
+        readmit.digest_deltas,
+        (0, 0, 1),
+        "the EOF re-admit converges coverage atomically with no record work — zero \
+         identity and payload digests, one frontier cursor-read command digest"
     );
-    let (decoded, _) =
-        run_catch_up_pass(&store, &counts, &session_id, 3, &rewritten_lines, "gen3-b").await;
+    let (decoded, _) = run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-b").await;
     assert_eq!(
         decoded, 0,
         "later gen-3 passes must never reopen the refused EOF record"
@@ -2127,18 +2110,11 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
     let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
         .unwrap();
-    let (reopened_store, reopened_counts) = reopened
-        .counting_observation_store(HostAdmissionScope::Profile)
+    let reopened_store = reopened
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let (decoded, _) = run_catch_up_pass(
-        &reopened_store,
-        &reopened_counts,
-        &session_id,
-        3,
-        &rewritten_lines,
-        "gen3-c",
-    )
-    .await;
+    let (decoded, _) =
+        run_catch_up_pass(&reopened_store, &session_id, 3, &rewritten_lines, "gen3-c").await;
     assert_eq!(
         decoded, 0,
         "restarted rescans must never reopen the refused EOF record"
@@ -2162,8 +2138,8 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
         .unwrap();
-    let (store, counts) = runtime
-        .counting_observation_store(HostAdmissionScope::Profile)
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
     let session_id = SessionId::new("session.terminal-refusal.orphan").unwrap();
     let original_lines = vec![(
@@ -2175,7 +2151,7 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
         raw_source_line(&session_id, "record.orphan.0", (0, 1), "rewritten record"),
     )];
     let (decoded, receipts) =
-        run_catch_up_pass(&store, &counts, &session_id, 1, &original_lines, "gen1").await;
+        run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
     assert_eq!(decoded, 1);
     assert!(matches!(
         receipts[0].result,
@@ -2223,7 +2199,7 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
     // The next frontier pass re-admits the record from raw source: the
     // orphaned marker must answer it AND repair the missing coverage.
     let (decoded, receipts) =
-        run_catch_up_pass(&store, &counts, &session_id, 2, &rewritten_lines, "gen2").await;
+        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
     assert_eq!(decoded, 1);
     let repair = &receipts[0];
     assert!(
@@ -2238,15 +2214,15 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
         repair.result
     );
     assert_eq!(
-        repair.dispatch_deltas,
-        (0, 0),
-        "the orphan-marker re-admit repairs coverage atomically with no record work"
+        repair.digest_deltas,
+        (0, 0, 1),
+        "the orphan-marker re-admit repairs coverage atomically with no record work — \
+         zero identity and payload digests, one frontier cursor-read command digest"
     );
 
     // Coverage is repaired: later passes never reopen the record, even after
     // a restart, and no duplicate marker rows appear.
-    let (decoded, _) =
-        run_catch_up_pass(&store, &counts, &session_id, 2, &rewritten_lines, "gen2-b").await;
+    let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
     assert_eq!(decoded, 0, "repaired coverage must not reopen the record");
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
     drop(store);
@@ -2254,18 +2230,11 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
     let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
         .unwrap();
-    let (reopened_store, reopened_counts) = reopened
-        .counting_observation_store(HostAdmissionScope::Profile)
+    let reopened_store = reopened
+        .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let (decoded, _) = run_catch_up_pass(
-        &reopened_store,
-        &reopened_counts,
-        &session_id,
-        2,
-        &rewritten_lines,
-        "gen2-c",
-    )
-    .await;
+    let (decoded, _) =
+        run_catch_up_pass(&reopened_store, &session_id, 2, &rewritten_lines, "gen2-c").await;
     assert_eq!(decoded, 0);
     assert_eq!(
         raw_observation_json(&reopened, refused.observation_id().as_str()).await,

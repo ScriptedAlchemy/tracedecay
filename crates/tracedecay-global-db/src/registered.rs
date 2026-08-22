@@ -581,22 +581,6 @@ impl RegisteredGlobalDb {
         crate::GlobalDbObservationStore::new(self.database.clone())
     }
 
-    /// Test-only [`Self::observation_store`] variant that binds the adapter
-    /// to an explicit runtime dispatch seam (e.g. a counting wrapper over
-    /// this client's runtime client), so tests can observe the record work a
-    /// persist call dispatches without changing the adapter's production
-    /// shape.
-    #[cfg(test)]
-    pub(crate) fn observation_store_with_runtime_dispatch<R>(
-        &self,
-        runtime: R,
-    ) -> crate::GlobalDbObservationStore<R>
-    where
-        R: crate::observation_adapter::ObservationRuntimeDispatch,
-    {
-        crate::GlobalDbObservationStore::with_runtime_dispatch(self.database.clone(), runtime)
-    }
-
     /// Retains this exact client for closed runtime read/submit requests.
     ///
     /// The returned capability has no raw Store runtime, connection, or

@@ -476,107 +476,6 @@ pub(crate) enum SessionTemporalFixtureCountV1 {
     RefreshProgress,
 }
 
-/// Runtime-dispatch counts observed by [`CountingObservationRuntime`].
-///
-/// `stored_observation_reads` counts stored-record runtime reads — the only
-/// way a persist path can obtain, decode, collision-classify, or
-/// revision-probe a retained observation row. `submits` counts runtime
-/// writes — every submit is keyed by exactly one canonical command digest
-/// computed immediately before dispatch, and the digest call sites are
-/// unreachable without either a stored-record read or a submit. A window
-/// with zero deltas on both therefore proves the persist call repeated none
-/// of the expensive record work, while `source_cursor_reads` shows the seam
-/// stayed live inside that same window.
-#[cfg(test)]
-#[derive(Debug, Default)]
-pub(crate) struct ObservationDispatchCounts {
-    stored_observation_reads: AtomicU64,
-    source_cursor_reads: AtomicU64,
-    submits: AtomicU64,
-}
-
-/// One consistent view of [`ObservationDispatchCounts`].
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ObservationDispatchSnapshot {
-    pub(crate) stored_observation_reads: u64,
-    pub(crate) source_cursor_reads: u64,
-    pub(crate) submits: u64,
-}
-
-#[cfg(test)]
-impl ObservationDispatchCounts {
-    pub(crate) fn snapshot(&self) -> ObservationDispatchSnapshot {
-        ObservationDispatchSnapshot {
-            stored_observation_reads: self.stored_observation_reads.load(Ordering::Relaxed),
-            source_cursor_reads: self.source_cursor_reads.load(Ordering::Relaxed),
-            submits: self.submits.load(Ordering::Relaxed),
-        }
-    }
-}
-
-/// Counting test double over the production runtime client at the adapter's
-/// real dispatch seam: every read and submit is forwarded unchanged to the
-/// wrapped [`DatabaseRuntimeClientV1`] after classifying it into
-/// [`ObservationDispatchCounts`].
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct CountingObservationRuntime {
-    inner: tracedecay_runtime_core::db::DatabaseRuntimeClientV1,
-    counts: Arc<ObservationDispatchCounts>,
-}
-
-#[cfg(test)]
-impl crate::observation_adapter::ObservationRuntimeDispatch for CountingObservationRuntime {
-    fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
-        self.inner.binding()
-    }
-
-    fn dispatch_read(
-        &self,
-        request: tracedecay_store::RuntimeReadRequestV1,
-        probe: &dyn tracedecay_store::RuntimeRequestProbeV1,
-    ) -> Result<
-        tracedecay_store::RuntimeReadOutcomeV1,
-        tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure,
-    > {
-        if let tracedecay_store::RuntimeReadOperationV1::Repository {
-            op:
-                tracedecay_store::RepositoryReadOperationV1::Project(
-                    tracedecay_store::ProjectReadOperationV1::Observation(operation),
-                ),
-        } = request.operation()
-        {
-            match operation {
-                tracedecay_store::ObservationReadOperationV1::Observation { .. } => {
-                    self.counts
-                        .stored_observation_reads
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                tracedecay_store::ObservationReadOperationV1::SourceCursor { .. } => {
-                    self.counts
-                        .source_cursor_reads
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                _ => {}
-            }
-        }
-        self.inner.dispatch_read(request, probe)
-    }
-
-    async fn dispatch_submit(
-        &self,
-        request: tracedecay_store::RuntimeSubmitRequestV1,
-        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
-    ) -> Result<
-        tracedecay_store::RuntimeSubmitOutcomeV1,
-        tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure,
-    > {
-        self.counts.submits.fetch_add(1, Ordering::Relaxed);
-        self.inner.dispatch_submit(request, probe).await
-    }
-}
-
 /// Test-only registered database fixture retained below the use-case layer.
 #[doc(hidden)]
 pub struct HostAdmissionTestRuntimeV1 {
@@ -734,29 +633,6 @@ impl HostAdmissionTestRuntimeV1 {
     ) -> tracedecay_runtime_core::errors::Result<crate::GlobalDbObservationStore> {
         let database = self.session_database_for_test(scope)?;
         Ok(database.observation_store())
-    }
-
-    /// An observation store whose runtime dispatch seam is wrapped in
-    /// [`CountingObservationRuntime`], plus the shared counters, so a test
-    /// can prove exactly which record work a persist call dispatched.
-    #[cfg(test)]
-    pub(crate) fn counting_observation_store(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::errors::Result<(
-        crate::GlobalDbObservationStore<CountingObservationRuntime>,
-        Arc<ObservationDispatchCounts>,
-    )> {
-        let database = self.session_database_for_test(scope)?;
-        let counts = Arc::new(ObservationDispatchCounts::default());
-        let runtime = CountingObservationRuntime {
-            inner: database.runtime_client(),
-            counts: Arc::clone(&counts),
-        };
-        Ok((
-            database.observation_store_with_runtime_dispatch(runtime),
-            counts,
-        ))
     }
 
     pub async fn upsert_session_for_test(
