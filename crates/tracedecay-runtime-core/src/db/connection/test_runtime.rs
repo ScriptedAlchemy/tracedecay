@@ -421,7 +421,32 @@ impl Database {
                 operation: "publish registered test runtime".to_owned(),
             });
         }
-        Self::publish_registered_test_runtime_with_retirement_control_inner(
+        Self::publish_registered_fixture_with_retirement_control(
+            db_path, authority, mode, None, scope,
+        )
+        .await
+    }
+
+    /// Publishes a registered fixture under the active daemon authority whose
+    /// scope the test controls. This stays separate from the unconditional
+    /// Test-authority publisher so a fixture cannot silently bypass actor-time
+    /// scope revocation.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    pub async fn publish_registered_daemon_test_runtime_with_retirement_control(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        scope: TestDatabaseRuntimeScope,
+    ) -> Result<RegisteredTestRuntimeFixtureV1> {
+        if authority.role() != super::DatabaseAuthorityRole::Daemon {
+            return Err(TraceDecayError::Database {
+                message: "daemon-scoped registered test runtime requires explicit daemon authority"
+                    .to_owned(),
+                operation: "publish daemon-scoped registered test runtime".to_owned(),
+            });
+        }
+        Self::publish_registered_fixture_with_retirement_control(
             db_path, authority, mode, None, scope,
         )
         .await
@@ -462,6 +487,20 @@ impl Database {
                 operation: "publish registered test runtime".to_owned(),
             });
         }
+        Self::publish_registered_fixture_with_retirement_control(
+            db_path, authority, mode, identity, scope,
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    async fn publish_registered_fixture_with_retirement_control(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        identity: Option<TestRuntimeProfileIdentityV1>,
+        scope: TestDatabaseRuntimeScope,
+    ) -> Result<RegisteredTestRuntimeFixtureV1> {
         let publication = Self::publish_fixture_runtime_publication(
             db_path,
             authority,
@@ -854,6 +893,74 @@ mod tests {
                 identity.profile_id().clone(),
             )
         );
+    }
+
+    #[tokio::test]
+    async fn daemon_scoped_registered_fixture_requires_exact_daemon_authority() {
+        let root = tempfile::tempdir().expect("daemon-scoped fixture root");
+        let _scope = crate::db::enter_daemon_database_scope(
+            root.path(),
+            1,
+            "daemon-scoped-registered-fixture",
+        )
+        .expect("enter daemon database scope");
+        let path = root.path().join("sessions.db");
+        let authority = DatabaseAuthority::for_owned_runtime(
+            &path,
+            "daemon-scoped registered fixture authority",
+        )
+        .expect("acquire daemon fixture authority");
+
+        let fixture = Database::publish_registered_daemon_test_runtime_with_retirement_control(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .expect("publish daemon-scoped registered fixture");
+        let (owner, _runtime, _retirement) = fixture.into_parts();
+        let database = owner.issue_lease().expect("issue daemon-scoped client");
+        assert_eq!(
+            database
+                .write_authority()
+                .expect("daemon-scoped write authority")
+                .role(),
+            crate::db::DatabaseAuthorityRole::Daemon
+        );
+
+        let invalid_path = root.path().join("invalid.db");
+        let invalid = DatabaseAuthority::acquire_test(
+            &invalid_path,
+            "invalid daemon-scoped registered fixture authority",
+        )
+        .expect("acquire explicit test authority");
+        let error = match Database::publish_registered_daemon_test_runtime_with_retirement_control(
+            &invalid_path,
+            &invalid,
+            TestDatabaseRuntimeMode::Initialize,
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        {
+            Ok(_) => panic!("Test authority published a daemon-scoped fixture"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("explicit daemon authority"));
+
+        let foreign_path = root.path().join("foreign.db");
+        let error = match Database::publish_registered_daemon_test_runtime_with_retirement_control(
+            &foreign_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        {
+            Ok(_) => panic!("foreign daemon authority published another fixture"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("different database"));
     }
 
     #[test]
