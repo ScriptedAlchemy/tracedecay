@@ -143,6 +143,7 @@ struct QueuedObservation {
 struct QueuedOwnerFact {
     json: String,
     durable_claimed: bool,
+    emission_identity: ObservabilityProducerIdentityV1,
 }
 
 struct ProducerWorkerState {
@@ -174,9 +175,9 @@ pub struct BoundedObservabilityProducerV1 {
     next_sequence: Arc<AtomicU64>,
     state: Arc<AtomicU8>,
     deadlines: ObservabilityProducerDeadlinesV1,
-    emission_lock: Mutex<()>,
+    emission_lock: Arc<Mutex<()>>,
     durable_emission_lock: Arc<AsyncMutex<()>>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl BoundedObservabilityProducerV1 {
@@ -244,9 +245,45 @@ impl BoundedObservabilityProducerV1 {
             next_sequence,
             state,
             deadlines,
-            emission_lock: Mutex::new(()),
+            emission_lock: Arc::new(Mutex::new(())),
             durable_emission_lock,
-            worker: Mutex::new(Some(worker)),
+            worker: Arc::new(Mutex::new(Some(worker))),
+        })
+    }
+
+    /// Attach a policy-specific emission frontend to this producer's shared
+    /// queue, sequence, lifecycle, and worker.
+    ///
+    /// Linked worktrees share one registered project-session store owner but
+    /// retain distinct policy provenance. Every backend authority must match;
+    /// only the policy stamped at admission may differ.
+    pub fn alias_with_policy_identity(
+        &self,
+        identity: ObservabilityProducerIdentityV1,
+    ) -> Result<Self, &'static str> {
+        identity.validate()?;
+        if identity.authorized_scope_ref != self.identity.authorized_scope_ref
+            || identity.process_boot_id != self.identity.process_boot_id
+            || identity.producer_revision != self.identity.producer_revision
+            || identity.configuration_revision != self.identity.configuration_revision
+        {
+            return Err("observability_producer_alias_identity");
+        }
+        Ok(Self {
+            db: self.db.clone(),
+            identity,
+            data: self.data.clone(),
+            control: self.control.clone(),
+            pending_dropped: Arc::clone(&self.pending_dropped),
+            total_dropped: Arc::clone(&self.total_dropped),
+            first_missing_sequence: Arc::clone(&self.first_missing_sequence),
+            last_missing_sequence: Arc::clone(&self.last_missing_sequence),
+            next_sequence: Arc::clone(&self.next_sequence),
+            state: Arc::clone(&self.state),
+            deadlines: self.deadlines,
+            emission_lock: Arc::clone(&self.emission_lock),
+            durable_emission_lock: Arc::clone(&self.durable_emission_lock),
+            worker: Arc::clone(&self.worker),
         })
     }
 
@@ -809,7 +846,7 @@ async fn record_queued(
         } else {
             claim_and_settle_durable(
                 db,
-                identity,
+                &owner_fact.emission_identity,
                 next_sequence,
                 observation.envelope,
                 owner_fact.json,

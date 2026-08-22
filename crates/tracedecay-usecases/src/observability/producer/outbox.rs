@@ -59,6 +59,7 @@ impl BoundedObservabilityProducerV1 {
             owner_fact: Some(QueuedOwnerFact {
                 json: owner_fact_json,
                 durable_claimed: false,
+                emission_identity: self.identity.clone(),
             }),
         }) {
             Ok(()) => Ok(ObservabilityEmissionOutcomeV1::Enqueued),
@@ -167,6 +168,7 @@ impl BoundedObservabilityProducerV1 {
                         owner_fact: Some(QueuedOwnerFact {
                             json: owner_fact_json,
                             durable_claimed: true,
+                            emission_identity: self.identity.clone(),
                         }),
                     });
                     Ok(ObservabilityOwnerEmissionOutcomeV1::Enqueued)

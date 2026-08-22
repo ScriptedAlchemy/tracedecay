@@ -76,14 +76,25 @@ pub(in crate::daemon) async fn mount_test_work_observability(
     scope: &ResolvedScope,
     configuration_digest: &ManifestDigest,
 ) -> ManifestDigest {
-    let policy_digest =
-        ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).expect("policy digest");
+    let configuration_provenance_digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.test.work-observability-provenance.v1",
+        configuration_digest,
+    ))
+    .expect("configuration provenance digest");
+    let policy_digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.daemon.configuration-policy.v1",
+        &scope.scope_digest,
+        configuration_digest,
+        &configuration_provenance_digest,
+    ))
+    .expect("policy digest");
     service
         .mount_observability_producer(
             project_root.to_path_buf(),
             database,
             scope.project_id.clone(),
             configuration_digest.clone(),
+            configuration_provenance_digest,
             policy_digest.clone(),
         )
         .await

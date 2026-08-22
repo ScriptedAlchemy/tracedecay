@@ -38,11 +38,13 @@ fn registered_observability_producer_matches_mount(
     database: &crate::global_db::RegisteredGlobalDbLeaseV1,
     project_id: &ProjectId,
     configuration_revision: &ManifestDigest,
+    configuration_provenance_revision: &ManifestDigest,
     policy_revision: &ManifestDigest,
 ) -> bool {
     let incumbent = registered.producer();
     registered.matches(
         database,
+        configuration_provenance_revision,
         &tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
             authorized_scope_ref: project_id.as_str().to_owned(),
             process_boot_id: incumbent.identity().process_boot_id.clone(),
@@ -60,6 +62,7 @@ impl DaemonInvocationService {
         database: crate::global_db::RegisteredGlobalDbLeaseV1,
         project_id: ProjectId,
         configuration_revision: ManifestDigest,
+        configuration_provenance_revision: ManifestDigest,
         policy_revision: ManifestDigest,
     ) -> Result<
         Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
@@ -74,6 +77,7 @@ impl DaemonInvocationService {
                         &database,
                         &project_id,
                         &configuration_revision,
+                        &configuration_provenance_revision,
                         &policy_revision,
                     )
                     .then_some(())
@@ -91,6 +95,7 @@ impl DaemonInvocationService {
                     // recorder for the same store.
                     self.store_observability.acquire_or_start(
                         &database,
+                        &configuration_provenance_revision,
                         |incumbent| {
                             incumbent.authorized_scope_ref == project_id.as_str()
                                 && incumbent.producer_revision
