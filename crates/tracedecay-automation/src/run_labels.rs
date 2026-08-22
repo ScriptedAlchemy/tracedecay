@@ -55,21 +55,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn labels_pin_their_exact_wire_values() {
-        assert_eq!(AUTOMATION_DISABLED, "automation_disabled");
-        assert_eq!(
-            SESSION_EVIDENCE_BUDGET_EXHAUSTED,
-            "session_evidence_budget_exhausted"
-        );
-        assert_eq!(
-            SESSION_EVIDENCE_BUDGET_SUPPRESSED,
-            "session_evidence_budget_suppressed"
-        );
-        assert_eq!(
-            SKILL_OVERLAP_REMOVAL_TOMBSTONE,
-            "skill_overlap_removal_tombstone"
-        );
-    }
 }

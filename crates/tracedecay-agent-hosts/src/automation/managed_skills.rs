@@ -426,16 +426,11 @@ async fn apply_managed_skill_consolidation_kind(
     })
 }
 
+/// Typed-error adapter over the single pairwise overlap authority in
+/// `skill_usage`; proposal parsing runs the same predicate, so the two layers
+/// cannot disagree about whether a pair is a detected overlap.
 fn validate_detected_skill_overlap_pair(first: &ManagedSkill, second: &ManagedSkill) -> Result<()> {
-    let skills = [first.clone(), second.clone()];
-    let detected = super::skill_usage::skill_overlap_candidates(&skills, 1)
-        .into_iter()
-        .any(|candidate| {
-            (candidate.skill_a == first.metadata.id && candidate.skill_b == second.metadata.id)
-                || (candidate.skill_a == second.metadata.id
-                    && candidate.skill_b == first.metadata.id)
-        });
-    if !detected {
+    if !super::skill_usage::detected_skill_overlap_pair(first, second) {
         return Err(config_error(format!(
             "managed skills '{}' and '{}' are not a detected overlap candidate pair",
             first.metadata.id, second.metadata.id
