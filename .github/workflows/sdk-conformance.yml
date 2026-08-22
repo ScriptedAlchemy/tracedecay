@@ -3,11 +3,7 @@ name: SDK conformance
 on:
   pull_request:
     paths:
-      - ".github/workflows/sdk-conformance.yml"
-      - ".github/workflows/release.yml"
-      - ".github/workflows/release-beta.yml"
-      - ".github/workflows/release-please.yml"
-      - ".github/workflows/release-pr-integrity.yml"
+      - ".github/workflows/**"
       - ".github/release-targets.json"
       - "crates/tracedecay-api/**"
       - "crates/tracedecay-application/**"
@@ -18,6 +14,8 @@ on:
       - "scripts/check-sdk-codegen.sh"
       - "scripts/check-sdk-publish-workflow.py"
       - "scripts/test-check-sdk-publish-workflow.py"
+      - "scripts/check-github-hosted-runners.py"
+      - "scripts/test-check-github-hosted-runners.py"
       - "scripts/package-release-archive.py"
       - "scripts/test-package-release-archive.py"
       - "scripts/plan-release-recovery.py"
@@ -43,6 +41,10 @@ jobs:
         run: |
           python3 scripts/test-check-sdk-publish-workflow.py
           python3 scripts/check-sdk-publish-workflow.py
+      - name: Check GitHub-hosted runner authority
+        run: |
+          python3 scripts/test-check-github-hosted-runners.py
+          python3 scripts/check-github-hosted-runners.py
       - name: Install pinned actionlint
         run: |
           set -euo pipefail
