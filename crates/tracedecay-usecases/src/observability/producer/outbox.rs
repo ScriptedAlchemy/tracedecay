@@ -9,6 +9,7 @@ impl BoundedObservabilityProducerV1 {
         envelope: ObservabilityEnvelopeV1,
     ) -> Result<ObservabilityEmissionOutcomeV1, &'static str> {
         let _emission_guard = self
+            .core
             .emission_lock
             .lock()
             .map_err(|_| "observability_producer_lock_poisoned")?;
@@ -29,6 +30,7 @@ impl BoundedObservabilityProducerV1 {
             return Err("observability_owner_batch_bounds");
         }
         let _emission_guard = self
+            .core
             .emission_lock
             .lock()
             .map_err(|_| "observability_producer_lock_poisoned")?;
@@ -53,7 +55,7 @@ impl BoundedObservabilityProducerV1 {
         envelope: ObservabilityEnvelopeV1,
         owner_fact_json: String,
     ) -> Result<ObservabilityEmissionOutcomeV1, &'static str> {
-        match self.data.try_send(QueuedObservation {
+        match self.core.data.try_send(QueuedObservation {
             envelope,
             carried_drops: Vec::new(),
             owner_fact: Some(QueuedOwnerFact {
@@ -64,7 +66,7 @@ impl BoundedObservabilityProducerV1 {
         }) {
             Ok(()) => Ok(ObservabilityEmissionOutcomeV1::Enqueued),
             Err(mpsc::error::TrySendError::Full(_)) => {
-                let sequence = self.next_sequence.fetch_add(1, Ordering::AcqRel);
+                let sequence = self.core.next_sequence.fetch_add(1, Ordering::AcqRel);
                 self.record_capacity_drop(sequence)?;
                 Ok(ObservabilityEmissionOutcomeV1::DroppedAtCapacity)
             }
@@ -79,7 +81,7 @@ impl BoundedObservabilityProducerV1 {
         envelope: ObservabilityEnvelopeV1,
     ) -> Result<ObservabilityOwnerEmissionOutcomeV1, ApplicationContractError> {
         timeout(
-            self.deadlines.persistence,
+            self.core.deadlines.persistence,
             self.emit_owner_fact_unbounded(envelope),
         )
         .await
@@ -99,7 +101,7 @@ impl BoundedObservabilityProducerV1 {
                 "observability_owner_batch_bounds".to_owned(),
             ));
         }
-        timeout(self.deadlines.persistence, async {
+        timeout(self.core.deadlines.persistence, async {
             let mut outcomes = Vec::with_capacity(envelopes.len());
             for envelope in envelopes {
                 outcomes.push(self.emit_owner_fact_unbounded(envelope).await?);
@@ -116,7 +118,7 @@ impl BoundedObservabilityProducerV1 {
         &self,
         envelope: ObservabilityEnvelopeV1,
     ) -> Result<ObservabilityOwnerEmissionOutcomeV1, ApplicationContractError> {
-        let _durable_guard = self.durable_emission_lock.lock().await;
+        let _durable_guard = self.core.durable_emission_lock.lock().await;
         self.validate_admission(&envelope)
             .map_err(|error| ApplicationContractError::Domain(error.to_owned()))?;
         let owner_fact_json = normalized_owner_fact_json(&envelope).map_err(|error| {
@@ -126,6 +128,7 @@ impl BoundedObservabilityProducerV1 {
         })?;
         let owner_event_id = envelope.idempotency_key.clone();
         if let Some(existing) = self
+            .core
             .db
             .observability_emission_claim(
                 &self.identity.authorized_scope_ref,
@@ -138,9 +141,9 @@ impl BoundedObservabilityProducerV1 {
             return Ok(replay_owner_claim(existing));
         }
 
-        let permit = self.data.try_reserve().ok();
+        let permit = self.core.data.try_reserve().ok();
         let delayed = permit.is_none();
-        let sequence = self.next_sequence.fetch_add(1, Ordering::AcqRel);
+        let sequence = self.core.next_sequence.fetch_add(1, Ordering::AcqRel);
         let delivery = self
             .prepare_delivery(envelope, sequence, delayed)
             .map_err(|error| ApplicationContractError::Domain(error.to_owned()))?;
@@ -150,6 +153,7 @@ impl BoundedObservabilityProducerV1 {
             ))
         })?;
         let claim = self
+            .core
             .db
             .claim_observability_emission(
                 &self.identity.authorized_scope_ref,
