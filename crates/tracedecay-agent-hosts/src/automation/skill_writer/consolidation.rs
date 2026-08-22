@@ -6,7 +6,8 @@ use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 
 use super::super::managed_skills::{
     ManagedSkill, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
-    apply_managed_skill_archive, apply_managed_skill_consolidation, preview_managed_skill_update,
+    apply_managed_skill_overlap_archive, apply_managed_skill_overlap_consolidation,
+    preview_managed_skill_update,
 };
 use super::super::skill_usage::{DEFAULT_SKILL_OVERLAP_LIMIT, skill_overlap_candidates};
 use super::{
@@ -19,6 +20,8 @@ use crate::errors::Result;
 pub(super) struct SkillArchiveProposal {
     pub(super) skill_id: String,
     pub(super) base_checksum: String,
+    pub(super) overlap_skill_id: String,
+    pub(super) overlap_base_checksum: String,
 }
 
 #[derive(Debug, Clone)]
@@ -66,20 +69,35 @@ fn required_consolidation_reason(value: Option<&Value>) -> std::result::Result<S
     Ok(reason)
 }
 
-fn is_detected_overlap_candidate(
+fn is_detected_overlap_pair(
     existing_skills: &BTreeMap<String, ManagedSkill>,
-    skill_id: &str,
-    paired_skill_id: Option<&str>,
+    first_skill_id: &str,
+    second_skill_id: &str,
 ) -> bool {
     let skills = existing_skills.values().cloned().collect::<Vec<_>>();
     skill_overlap_candidates(&skills, DEFAULT_SKILL_OVERLAP_LIMIT)
         .iter()
-        .any(|candidate| match paired_skill_id {
-            Some(paired_skill_id) => {
-                (candidate.skill_a == skill_id && candidate.skill_b == paired_skill_id)
-                    || (candidate.skill_a == paired_skill_id && candidate.skill_b == skill_id)
+        .any(|candidate| {
+            (candidate.skill_a == first_skill_id && candidate.skill_b == second_skill_id)
+                || (candidate.skill_a == second_skill_id && candidate.skill_b == first_skill_id)
+        })
+}
+
+fn detected_overlap_partner(
+    existing_skills: &BTreeMap<String, ManagedSkill>,
+    skill_id: &str,
+) -> Option<String> {
+    let skills = existing_skills.values().cloned().collect::<Vec<_>>();
+    skill_overlap_candidates(&skills, DEFAULT_SKILL_OVERLAP_LIMIT)
+        .into_iter()
+        .find_map(|candidate| {
+            if candidate.skill_a == skill_id {
+                Some(candidate.skill_b)
+            } else if candidate.skill_b == skill_id {
+                Some(candidate.skill_a)
+            } else {
+                None
             }
-            None => candidate.skill_a == skill_id || candidate.skill_b == skill_id,
         })
 }
 
@@ -94,14 +112,27 @@ pub(super) fn skill_archive_from_proposal(
     let base_checksum = required_proposal_string(object.get("base_checksum"), "base_checksum")?;
     required_consolidation_reason(object.get("reason"))?;
     consolidation_guard(existing_skills, &id, &base_checksum, "archive")?;
-    if !is_detected_overlap_candidate(existing_skills, &id, None) {
-        return Err(format!(
-            "managed skill '{id}' is not a detected overlap candidate"
-        ));
-    }
+    let overlap_skill_id = detected_overlap_partner(existing_skills, &id)
+        .ok_or_else(|| format!("managed skill '{id}' is not a detected overlap candidate"))?;
+    let overlap_base_checksum = existing_skills
+        .get(&overlap_skill_id)
+        .ok_or_else(|| {
+            format!("detected overlap partner managed skill id '{overlap_skill_id}' does not exist")
+        })?
+        .metadata
+        .checksum
+        .clone();
+    consolidation_guard(
+        existing_skills,
+        &overlap_skill_id,
+        &overlap_base_checksum,
+        "archive overlap partner",
+    )?;
     Ok(SkillArchiveProposal {
         skill_id: id,
         base_checksum,
+        overlap_skill_id,
+        overlap_base_checksum,
     })
 }
 
@@ -129,7 +160,7 @@ pub(super) fn skill_merge_from_proposal(
         &source_base_checksum,
         "merge source",
     )?;
-    if !is_detected_overlap_candidate(existing_skills, &target_skill_id, Some(&source_skill_id)) {
+    if !is_detected_overlap_pair(existing_skills, &target_skill_id, &source_skill_id) {
         return Err(format!(
             "managed skills '{target_skill_id}' and '{source_skill_id}' are not a detected overlap candidate pair"
         ));
@@ -175,11 +206,12 @@ pub(super) async fn apply_skill_archive(
     profile_root: &Path,
     archive: &SkillArchiveProposal,
 ) -> Result<ManagedSkill> {
-    apply_managed_skill_archive(
+    apply_managed_skill_overlap_archive(
         profile_root,
         &archive.skill_id,
         &archive.base_checksum,
-        Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE.to_string()),
+        &archive.overlap_skill_id,
+        &archive.overlap_base_checksum,
     )
     .await
 }
@@ -191,14 +223,13 @@ pub(super) async fn apply_skill_merge(
     profile_root: &Path,
     merge: &SkillMergeProposal,
 ) -> Result<(ManagedSkill, Option<ManagedSkill>)> {
-    let result = apply_managed_skill_consolidation(
+    let result = apply_managed_skill_overlap_consolidation(
         profile_root,
-        Some(&merge.target_skill_id),
-        Some(&merge.base_checksum),
+        &merge.target_skill_id,
+        &merge.base_checksum,
         merge.update.clone(),
         &merge.source_skill_id,
         &merge.source_base_checksum,
-        SKILL_OVERLAP_REMOVAL_TOMBSTONE,
     )
     .await?;
     Ok((result.source, result.target))
@@ -414,6 +445,8 @@ mod tests {
             &skills,
         ));
         assert_eq!(valid.skill_id, "workflow-a");
+        assert_eq!(valid.overlap_skill_id, "workflow-b");
+        assert_eq!(valid.overlap_base_checksum, checksum(&skills, "workflow-b"));
 
         assert_err_eq(
             skill_archive_from_proposal(
