@@ -6,7 +6,8 @@ use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 
 use super::super::managed_skills::{
     ManagedSkill, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
-    apply_managed_skill_archive, apply_managed_skill_consolidation, preview_managed_skill_update,
+    apply_managed_skill_overlap_archive, apply_managed_skill_overlap_consolidation,
+    preview_managed_skill_update,
 };
 use super::super::skill_usage::{DEFAULT_SKILL_OVERLAP_LIMIT, skill_overlap_candidates};
 use super::{
@@ -19,6 +20,8 @@ use crate::errors::Result;
 pub(super) struct SkillArchiveProposal {
     pub(super) skill_id: String,
     pub(super) base_checksum: String,
+    pub(super) overlap_skill_id: String,
+    pub(super) overlap_base_checksum: String,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +61,30 @@ fn consolidation_guard<'a>(
     Ok(skill)
 }
 
+fn overlap_partner_guard<'a>(
+    existing_skills: &'a BTreeMap<String, ManagedSkill>,
+    id: &str,
+    base_checksum: &str,
+) -> std::result::Result<&'a ManagedSkill, String> {
+    let skill = existing_skills
+        .get(id)
+        .ok_or_else(|| format!("archive overlap partner managed skill id '{id}' does not exist"))?;
+    if base_checksum != skill.metadata.checksum {
+        return Err(format!(
+            "base_checksum for managed skill id '{id}' is stale"
+        ));
+    }
+    if skill.metadata.pinned {
+        return Err(format!(
+            "managed skill '{id}' is pinned and exempt from consolidation"
+        ));
+    }
+    if skill.metadata.state != ManagedSkillState::Active {
+        return Err(format!("managed skill '{id}' is not active"));
+    }
+    Ok(skill)
+}
+
 fn required_consolidation_reason(value: Option<&Value>) -> std::result::Result<String, String> {
     let reason = required_proposal_string(value, "reason")?;
     if reason == SKILL_OVERLAP_REMOVAL_TOMBSTONE {
@@ -66,20 +93,35 @@ fn required_consolidation_reason(value: Option<&Value>) -> std::result::Result<S
     Ok(reason)
 }
 
-fn is_detected_overlap_candidate(
+fn is_detected_overlap_pair(
     existing_skills: &BTreeMap<String, ManagedSkill>,
-    skill_id: &str,
-    paired_skill_id: Option<&str>,
+    first_skill_id: &str,
+    second_skill_id: &str,
 ) -> bool {
     let skills = existing_skills.values().cloned().collect::<Vec<_>>();
     skill_overlap_candidates(&skills, DEFAULT_SKILL_OVERLAP_LIMIT)
         .iter()
-        .any(|candidate| match paired_skill_id {
-            Some(paired_skill_id) => {
-                (candidate.skill_a == skill_id && candidate.skill_b == paired_skill_id)
-                    || (candidate.skill_a == paired_skill_id && candidate.skill_b == skill_id)
+        .any(|candidate| {
+            (candidate.skill_a == first_skill_id && candidate.skill_b == second_skill_id)
+                || (candidate.skill_a == second_skill_id && candidate.skill_b == first_skill_id)
+        })
+}
+
+fn detected_overlap_partner(
+    existing_skills: &BTreeMap<String, ManagedSkill>,
+    skill_id: &str,
+) -> Option<String> {
+    let skills = existing_skills.values().cloned().collect::<Vec<_>>();
+    skill_overlap_candidates(&skills, DEFAULT_SKILL_OVERLAP_LIMIT)
+        .into_iter()
+        .find_map(|candidate| {
+            if candidate.skill_a == skill_id {
+                Some(candidate.skill_b)
+            } else if candidate.skill_b == skill_id {
+                Some(candidate.skill_a)
+            } else {
+                None
             }
-            None => candidate.skill_a == skill_id || candidate.skill_b == skill_id,
         })
 }
 
@@ -94,14 +136,22 @@ pub(super) fn skill_archive_from_proposal(
     let base_checksum = required_proposal_string(object.get("base_checksum"), "base_checksum")?;
     required_consolidation_reason(object.get("reason"))?;
     consolidation_guard(existing_skills, &id, &base_checksum, "archive")?;
-    if !is_detected_overlap_candidate(existing_skills, &id, None) {
-        return Err(format!(
-            "managed skill '{id}' is not a detected overlap candidate"
-        ));
-    }
+    let overlap_skill_id = detected_overlap_partner(existing_skills, &id)
+        .ok_or_else(|| format!("managed skill '{id}' is not a detected overlap candidate"))?;
+    let overlap_base_checksum = existing_skills
+        .get(&overlap_skill_id)
+        .ok_or_else(|| {
+            format!("detected overlap partner managed skill id '{overlap_skill_id}' does not exist")
+        })?
+        .metadata
+        .checksum
+        .clone();
+    overlap_partner_guard(existing_skills, &overlap_skill_id, &overlap_base_checksum)?;
     Ok(SkillArchiveProposal {
         skill_id: id,
         base_checksum,
+        overlap_skill_id,
+        overlap_base_checksum,
     })
 }
 
@@ -129,7 +179,7 @@ pub(super) fn skill_merge_from_proposal(
         &source_base_checksum,
         "merge source",
     )?;
-    if !is_detected_overlap_candidate(existing_skills, &target_skill_id, Some(&source_skill_id)) {
+    if !is_detected_overlap_pair(existing_skills, &target_skill_id, &source_skill_id) {
         return Err(format!(
             "managed skills '{target_skill_id}' and '{source_skill_id}' are not a detected overlap candidate pair"
         ));
@@ -175,11 +225,12 @@ pub(super) async fn apply_skill_archive(
     profile_root: &Path,
     archive: &SkillArchiveProposal,
 ) -> Result<ManagedSkill> {
-    apply_managed_skill_archive(
+    apply_managed_skill_overlap_archive(
         profile_root,
         &archive.skill_id,
         &archive.base_checksum,
-        Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE.to_string()),
+        &archive.overlap_skill_id,
+        &archive.overlap_base_checksum,
     )
     .await
 }
@@ -191,14 +242,13 @@ pub(super) async fn apply_skill_merge(
     profile_root: &Path,
     merge: &SkillMergeProposal,
 ) -> Result<(ManagedSkill, Option<ManagedSkill>)> {
-    let result = apply_managed_skill_consolidation(
+    let result = apply_managed_skill_overlap_consolidation(
         profile_root,
-        Some(&merge.target_skill_id),
-        Some(&merge.base_checksum),
+        &merge.target_skill_id,
+        &merge.base_checksum,
         merge.update.clone(),
         &merge.source_skill_id,
         &merge.source_base_checksum,
-        SKILL_OVERLAP_REMOVAL_TOMBSTONE,
     )
     .await?;
     Ok((result.source, result.target))
@@ -254,6 +304,7 @@ mod tests {
         ManagedSkillDraft, ManagedSkillProvenance, ManagedSupportFile, apply_managed_skill_update,
         create_managed_skill, default_managed_skill_targets, load_managed_skill,
     };
+    #[cfg(unix)]
     use super::super::super::skill_usage::skill_usage_ledger_path;
     use super::super::skill_proposal_action;
     use super::*;
@@ -371,8 +422,72 @@ mod tests {
         .collect()
     }
 
+    async fn persisted_archive_fixture_with_authored_partner(
+        profile_root: &Path,
+        partner_source: ManagedSkillSource,
+    ) -> BTreeMap<String, ManagedSkill> {
+        let partner =
+            create_managed_skill(profile_root, fixture_draft("workflow-a", partner_source))
+                .await
+                .unwrap();
+        let source = create_managed_skill(
+            profile_root,
+            fixture_draft("workflow-b", ManagedSkillSource::AutomationRun),
+        )
+        .await
+        .unwrap();
+        [
+            (partner.metadata.id.clone(), partner),
+            (source.metadata.id.clone(), source),
+        ]
+        .into_iter()
+        .collect()
+    }
+
     fn checksum(skills: &BTreeMap<String, ManagedSkill>, id: &str) -> String {
         skills[id].metadata.checksum.clone()
+    }
+
+    #[cfg(unix)]
+    fn replace_usage_ledger_with_blocking_fifo(
+        profile_root: &Path,
+    ) -> (std::thread::JoinHandle<std::fs::File>, std::path::PathBuf) {
+        let ledger_path = skill_usage_ledger_path(profile_root);
+        match std::fs::remove_file(&ledger_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove usage ledger before FIFO replacement: {error}"),
+        }
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&ledger_path)
+                .status()
+                .expect("run mkfifo")
+                .success(),
+            "the production usage-ledger read must block on a real FIFO"
+        );
+        let writer_path = ledger_path.clone();
+        let writer = std::thread::spawn(move || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(writer_path)
+                .expect("open FIFO writer after the production reader arrives")
+        });
+        (writer, ledger_path)
+    }
+
+    #[cfg(unix)]
+    async fn await_usage_ledger_reader(
+        writer: std::thread::JoinHandle<std::fs::File>,
+    ) -> std::fs::File {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !writer.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("production usage-ledger reader opens the FIFO");
+        writer.join().expect("FIFO writer thread joins")
     }
 
     #[test]
@@ -388,6 +503,8 @@ mod tests {
             &skills,
         ));
         assert_eq!(valid.skill_id, "workflow-a");
+        assert_eq!(valid.overlap_skill_id, "workflow-b");
+        assert_eq!(valid.overlap_base_checksum, checksum(&skills, "workflow-b"));
 
         assert_err_eq(
             skill_archive_from_proposal(
@@ -479,6 +596,26 @@ mod tests {
             ),
             "managed skill 'archived-skill' is already archived",
         );
+    }
+
+    #[test]
+    fn archive_still_requires_an_automation_owned_source() {
+        let skills = consolidation_fixture();
+
+        for id in ["user-skill", "imported-skill"] {
+            assert_err_eq(
+                skill_archive_from_proposal(
+                    &json!({
+                        "action": "archive",
+                        "id": id,
+                        "base_checksum": checksum(&skills, id),
+                        "reason": "duplicate guidance"
+                    }),
+                    &skills,
+                ),
+                &format!("managed skill '{id}' is not automation-owned"),
+            );
+        }
     }
 
     #[test]
@@ -783,18 +920,90 @@ mod tests {
         );
     }
 
-    /// Replaces the usage ledger file with a directory so every post-commit
-    /// usage sync fails at its real filesystem boundary. The typed tombstone
-    /// must then come from the commit transaction alone.
-    fn break_usage_sync(profile_root: &Path) {
-        let ledger_path = skill_usage_ledger_path(profile_root);
-        std::fs::remove_file(&ledger_path).unwrap();
-        std::fs::create_dir(&ledger_path).unwrap();
-        assert!(ledger_path.is_dir());
+    #[tokio::test]
+    async fn archive_refuses_a_changed_exact_overlap_partner() {
+        let profile = tempfile::tempdir().unwrap();
+        let skills = persisted_consolidation_fixture(profile.path()).await;
+        let archive = skill_archive_from_proposal(
+            &json!({
+                "action": "archive",
+                "id": "workflow-b",
+                "base_checksum": checksum(&skills, "workflow-b"),
+                "reason": "duplicate guidance"
+            }),
+            &skills,
+        )
+        .unwrap();
+        apply_managed_skill_update(
+            profile.path(),
+            "workflow-a",
+            &checksum(&skills, "workflow-a"),
+            ManagedSkillUpdate {
+                body_markdown: Some(
+                    "Model library failures with explicit error enums and no automation guidance."
+                        .to_string(),
+                ),
+                ..ManagedSkillUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let error = apply_skill_archive(profile.path(), &archive)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("base_checksum for managed skill id 'workflow-a' is stale")
+        );
+        let source = load_managed_skill(profile.path(), "workflow-b")
+            .await
+            .unwrap();
+        assert_eq!(source.metadata.state, ManagedSkillState::Active);
+        assert_eq!(source.metadata.archived_reason, None);
     }
 
     #[tokio::test]
-    async fn archive_commit_durably_carries_tombstone_despite_usage_sync_failure() {
+    async fn archive_accepts_user_and_import_authored_overlap_partners() {
+        for partner_source in [ManagedSkillSource::User, ManagedSkillSource::Import] {
+            let profile = tempfile::tempdir().unwrap();
+            let skills =
+                persisted_archive_fixture_with_authored_partner(profile.path(), partner_source)
+                    .await;
+            let partner_before = skills["workflow-a"].clone();
+            let archive = skill_archive_from_proposal(
+                &json!({
+                    "action": "archive",
+                    "id": "workflow-b",
+                    "base_checksum": checksum(&skills, "workflow-b"),
+                    "reason": "duplicate guidance"
+                }),
+                &skills,
+            )
+            .unwrap();
+
+            let archived = apply_skill_archive(profile.path(), &archive).await.unwrap();
+            let partner = load_managed_skill(profile.path(), "workflow-a")
+                .await
+                .unwrap();
+
+            assert_eq!(archived.metadata.state, ManagedSkillState::Archived);
+            assert_eq!(
+                archived.metadata.archived_reason.as_deref(),
+                Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
+            );
+            assert_eq!(partner, partner_before);
+            assert_eq!(partner.metadata.state, ManagedSkillState::Active);
+            assert_eq!(partner.metadata.provenance.source, partner_source);
+            assert!(!partner.metadata.pinned);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn archive_persists_tombstone_before_postcommit_usage_sync_can_be_cancelled() {
         let profile = tempfile::tempdir().unwrap();
         let skills = persisted_consolidation_fixture(profile.path()).await;
         let proposal = json!({
@@ -804,36 +1013,68 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let archive = skill_archive_from_proposal(&proposal, &skills).unwrap();
-        break_usage_sync(profile.path());
+        let (fifo_writer, ledger_path) = replace_usage_ledger_with_blocking_fifo(profile.path());
+        let profile_root = profile.path().to_path_buf();
+        let archive_for_task = archive.clone();
+        let mut task =
+            tokio::spawn(
+                async move { apply_skill_archive(&profile_root, &archive_for_task).await },
+            );
 
-        let archived = apply_skill_archive(profile.path(), &archive)
-            .await
-            .expect("committed archive must succeed despite best-effort sync failure");
-
-        assert_eq!(archived.metadata.state, ManagedSkillState::Archived);
-        assert_eq!(
-            archived.metadata.archived_reason.as_deref(),
-            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
-        );
-        let committed = load_managed_skill(profile.path(), "workflow-b")
-            .await
-            .unwrap();
+        let committed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    result = &mut task => {
+                        panic!("archive exited before its committed revision was observable: {result:?}");
+                    }
+                    loaded = load_managed_skill(profile.path(), "workflow-b") => {
+                        let loaded = loaded.expect("load archive candidate through the production store");
+                        if loaded.metadata.state == ManagedSkillState::Archived {
+                            break loaded;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("archive commit becomes observable before usage sync completes");
         assert_eq!(committed.metadata.state, ManagedSkillState::Archived);
         assert_eq!(
             committed.metadata.archived_reason.as_deref(),
             Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE),
-            "the archive commit must durably carry its typed tombstone even when \
-             post-commit usage sync never succeeds"
+            "the archive commit must durably carry its typed tombstone before \
+             post-commit usage sync completes"
         );
+        let fifo_writer = await_usage_ledger_reader(fifo_writer).await;
         assert!(
-            skill_usage_ledger_path(profile.path()).is_dir(),
-            "usage sync must not have replaced the broken ledger, so the \
-             tombstone cannot have come from the sync phase"
+            !task.is_finished(),
+            "archive remains blocked at the production usage-ledger read"
+        );
+        task.abort();
+        drop(fifo_writer);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut task)
+                .await
+                .expect("cancelled archive task joins")
+                .unwrap_err()
+                .is_cancelled()
+        );
+        std::fs::remove_file(ledger_path).expect("remove usage-ledger FIFO");
+        assert_eq!(
+            load_managed_skill(profile.path(), "workflow-b")
+                .await
+                .unwrap()
+                .metadata
+                .archived_reason
+                .as_deref(),
+            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
         );
     }
 
-    #[tokio::test]
-    async fn merge_commit_durably_carries_tombstone_despite_usage_sync_failure() {
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_persists_tombstone_before_postcommit_usage_sync_can_be_cancelled() {
         let profile = tempfile::tempdir().unwrap();
         let skills = persisted_consolidation_fixture(profile.path()).await;
         let proposal = json!({
@@ -845,18 +1086,36 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let merge = skill_merge_from_proposal(&proposal, &skills).unwrap();
-        break_usage_sync(profile.path());
+        let (fifo_writer, ledger_path) = replace_usage_ledger_with_blocking_fifo(profile.path());
+        let profile_root = profile.path().to_path_buf();
+        let merge_for_task = merge.clone();
+        let mut task =
+            tokio::spawn(async move { apply_skill_merge(&profile_root, &merge_for_task).await });
 
-        let (source, _target) = apply_skill_merge(profile.path(), &merge)
+        let committed_source =
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    tokio::select! {
+                        result = &mut task => {
+                            panic!("merge exited before its committed source was observable: {result:?}");
+                        }
+                        loaded = load_managed_skill(profile.path(), "workflow-b") => {
+                            let loaded = loaded.expect("load merge source through the production store");
+                            if loaded.metadata.state == ManagedSkillState::Archived {
+                                break loaded;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                }
+            })
             .await
-            .expect("committed merge must succeed despite best-effort sync failure");
-
-        assert_eq!(source.metadata.state, ManagedSkillState::Archived);
-        assert_eq!(source.metadata.absorbed_into.as_deref(), Some("workflow-a"));
-        let committed_source = load_managed_skill(profile.path(), "workflow-b")
-            .await
-            .unwrap();
-        assert_eq!(committed_source.metadata.state, ManagedSkillState::Archived);
+            .expect("merge commit becomes observable before usage sync completes");
+        assert_eq!(
+            committed_source.metadata.state,
+            ManagedSkillState::Archived,
+            "the cancellation gate must run after the merge commit"
+        );
         assert_eq!(
             committed_source.metadata.absorbed_into.as_deref(),
             Some("workflow-a")
@@ -864,13 +1123,32 @@ mod tests {
         assert_eq!(
             committed_source.metadata.archived_reason.as_deref(),
             Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE),
-            "the merge commit must durably carry its typed tombstone even when \
-             post-commit usage sync never succeeds"
+            "the merge commit must durably carry its typed tombstone before \
+             post-commit usage sync completes"
         );
+        let fifo_writer = await_usage_ledger_reader(fifo_writer).await;
         assert!(
-            skill_usage_ledger_path(profile.path()).is_dir(),
-            "usage sync must not have replaced the broken ledger, so the \
-             tombstone cannot have come from the sync phase"
+            !task.is_finished(),
+            "merge remains blocked at the production usage-ledger read"
+        );
+        task.abort();
+        drop(fifo_writer);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut task)
+                .await
+                .expect("cancelled merge task joins")
+                .unwrap_err()
+                .is_cancelled()
+        );
+        std::fs::remove_file(ledger_path).expect("remove usage-ledger FIFO");
+        assert_eq!(
+            load_managed_skill(profile.path(), "workflow-b")
+                .await
+                .unwrap()
+                .metadata
+                .archived_reason
+                .as_deref(),
+            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
         );
     }
 

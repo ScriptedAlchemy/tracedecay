@@ -7,6 +7,7 @@ use super::config_error;
 use crate::errors::Result;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 
 pub use super::managed_skill_model::{
@@ -32,6 +33,20 @@ pub struct SkillConsolidationResult {
     pub target_after_checksum: Option<String>,
     pub source_before_checksum: String,
     pub source_after_checksum: String,
+}
+
+enum SkillConsolidationKind<'a> {
+    General(&'a str),
+    DetectedOverlap,
+}
+
+impl SkillConsolidationKind<'_> {
+    fn archived_reason(&self) -> &str {
+        match self {
+            Self::General(reason) => reason,
+            Self::DetectedOverlap => SKILL_OVERLAP_REMOVAL_TOMBSTONE,
+        }
+    }
 }
 
 struct SkillStoreLock(File);
@@ -306,6 +321,48 @@ pub async fn apply_managed_skill_consolidation(
     source_checksum: &str,
     reason: &str,
 ) -> Result<SkillConsolidationResult> {
+    reject_reserved_overlap_tombstone(Some(reason))?;
+    apply_managed_skill_consolidation_kind(
+        profile_root,
+        target_id,
+        target_checksum,
+        target_update,
+        source_id,
+        source_checksum,
+        SkillConsolidationKind::General(reason),
+    )
+    .await
+}
+
+pub(crate) async fn apply_managed_skill_overlap_consolidation(
+    profile_root: &Path,
+    target_id: &str,
+    target_checksum: &str,
+    target_update: Option<ManagedSkillUpdate>,
+    source_id: &str,
+    source_checksum: &str,
+) -> Result<SkillConsolidationResult> {
+    apply_managed_skill_consolidation_kind(
+        profile_root,
+        Some(target_id),
+        Some(target_checksum),
+        target_update,
+        source_id,
+        source_checksum,
+        SkillConsolidationKind::DetectedOverlap,
+    )
+    .await
+}
+
+async fn apply_managed_skill_consolidation_kind(
+    profile_root: &Path,
+    target_id: Option<&str>,
+    target_checksum: Option<&str>,
+    target_update: Option<ManagedSkillUpdate>,
+    source_id: &str,
+    source_checksum: &str,
+    kind: SkillConsolidationKind<'_>,
+) -> Result<SkillConsolidationResult> {
     if target_id == Some(source_id) {
         return Err(config_error(
             "managed skill consolidation source and target must differ",
@@ -329,6 +386,13 @@ pub async fn apply_managed_skill_consolidation(
         None => None,
     };
 
+    if matches!(&kind, SkillConsolidationKind::DetectedOverlap) {
+        let target = target
+            .as_ref()
+            .ok_or_else(|| config_error("skill-overlap consolidation requires an exact target"))?;
+        validate_detected_skill_overlap_pair(target, &source)?;
+    }
+
     if let (Some(target), Some(update)) = (&mut target, target_update)
         && apply_managed_skill_update_fields(target, update)?
     {
@@ -337,7 +401,7 @@ pub async fn apply_managed_skill_consolidation(
     }
 
     source.metadata.absorbed_into = target_id.map(ToOwned::to_owned);
-    source.metadata.archived_reason = Some(reason.to_string());
+    source.metadata.archived_reason = Some(kind.archived_reason().to_string());
     source.set_state(ManagedSkillState::Archived);
     let mut revisions: Vec<&ManagedSkill> = target.iter().collect();
     revisions.push(&source);
@@ -362,6 +426,24 @@ pub async fn apply_managed_skill_consolidation(
     })
 }
 
+fn validate_detected_skill_overlap_pair(first: &ManagedSkill, second: &ManagedSkill) -> Result<()> {
+    let skills = [first.clone(), second.clone()];
+    let detected = super::skill_usage::skill_overlap_candidates(&skills, 1)
+        .into_iter()
+        .any(|candidate| {
+            (candidate.skill_a == first.metadata.id && candidate.skill_b == second.metadata.id)
+                || (candidate.skill_a == second.metadata.id
+                    && candidate.skill_b == first.metadata.id)
+        });
+    if !detected {
+        return Err(config_error(format!(
+            "managed skills '{}' and '{}' are not a detected overlap candidate pair",
+            first.metadata.id, second.metadata.id
+        )));
+    }
+    Ok(())
+}
+
 fn validate_autonomous_consolidation_skill(skill: &ManagedSkill, checksum: &str) -> Result<()> {
     let id = &skill.metadata.id;
     if skill.metadata.checksum != checksum {
@@ -383,6 +465,24 @@ fn validate_autonomous_consolidation_skill(skill: &ManagedSkill, checksum: &str)
         return Err(config_error(format!(
             "managed skill '{id}' is already archived"
         )));
+    }
+    Ok(())
+}
+
+fn validate_overlap_partner(skill: &ManagedSkill, checksum: &str) -> Result<()> {
+    let id = &skill.metadata.id;
+    if skill.metadata.checksum != checksum {
+        return Err(config_error(format!(
+            "base_checksum for managed skill id '{id}' is stale"
+        )));
+    }
+    if skill.metadata.pinned {
+        return Err(config_error(format!(
+            "managed skill '{id}' is pinned and exempt from consolidation"
+        )));
+    }
+    if skill.metadata.state != ManagedSkillState::Active {
+        return Err(config_error(format!("managed skill '{id}' is not active")));
     }
     Ok(())
 }
@@ -624,11 +724,50 @@ pub async fn apply_managed_skill_archive(
     base_checksum: &str,
     reason: Option<String>,
 ) -> Result<ManagedSkill> {
+    reject_reserved_overlap_tombstone(reason.as_deref())?;
     let lock = lock_skill_store_async(profile_root).await?;
     let skill = apply_managed_skill_archive_unlocked(profile_root, id, base_checksum, reason)?;
     drop(lock);
     record_skill_patch_best_effort(profile_root, &skill, "automatic_archive").await;
     Ok(skill)
+}
+
+pub(crate) async fn apply_managed_skill_overlap_archive(
+    profile_root: &Path,
+    source_id: &str,
+    source_checksum: &str,
+    overlap_id: &str,
+    overlap_checksum: &str,
+) -> Result<ManagedSkill> {
+    if source_id == overlap_id {
+        return Err(config_error(
+            "skill-overlap archive source and partner must differ",
+        ));
+    }
+    let lock = lock_skill_store_async(profile_root).await?;
+    let source = load_managed_skill_unlocked(profile_root, source_id)?;
+    validate_autonomous_consolidation_skill(&source, source_checksum)?;
+    let overlap = load_managed_skill_unlocked(profile_root, overlap_id)?;
+    validate_overlap_partner(&overlap, overlap_checksum)?;
+    validate_detected_skill_overlap_pair(&source, &overlap)?;
+    let skill = apply_managed_skill_archive_unlocked(
+        profile_root,
+        source_id,
+        source_checksum,
+        Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE.to_string()),
+    )?;
+    drop(lock);
+    record_skill_patch_best_effort(profile_root, &skill, "automatic_archive").await;
+    Ok(skill)
+}
+
+fn reject_reserved_overlap_tombstone(reason: Option<&str>) -> Result<()> {
+    if reason == Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE) {
+        return Err(config_error(
+            "reserved skill-overlap tombstone requires exact overlap authority",
+        ));
+    }
+    Ok(())
 }
 
 fn apply_managed_skill_archive_unlocked(
@@ -776,6 +915,7 @@ mod transaction_tests {
         next_a.body_markdown = "# A\nnew".to_string();
         next_a.refresh_checksum();
         let mut next_b = original_b.clone();
+        next_b.metadata.archived_reason = Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE.to_string());
         next_b.set_state(ManagedSkillState::Archived);
         let root = managed_skill_root(profile);
         let nonce = 7;
@@ -799,6 +939,10 @@ mod transaction_tests {
         let loaded_b = load_managed_skill(profile, "skill-b").await.unwrap();
         assert_eq!(loaded_a.body_markdown, "# A\nnew");
         assert_eq!(loaded_b.metadata.state, ManagedSkillState::Archived);
+        assert_eq!(
+            loaded_b.metadata.archived_reason.as_deref(),
+            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
+        );
         assert!(!root.join(SKILL_TRANSACTION_JOURNAL).exists());
         assert!(
             journal
@@ -857,6 +1001,113 @@ mod transaction_tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("source and target must differ"));
+    }
+
+    #[tokio::test]
+    async fn archive_authority_rejects_the_reserved_overlap_tombstone() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let original = skill("unrelated-archive", "# Unrelated archive");
+        save_managed_skill(profile, &original).await.unwrap();
+
+        let error = apply_managed_skill_archive(
+            profile,
+            &original.metadata.id,
+            &original.metadata.checksum,
+            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE.to_string()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("reserved skill-overlap tombstone")
+        );
+        assert_eq!(
+            load_managed_skill(profile, &original.metadata.id)
+                .await
+                .unwrap(),
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn consolidation_authority_rejects_the_reserved_overlap_tombstone() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let target = skill("unrelated-target", "# Unrelated target");
+        let source = skill("unrelated-source", "# Unrelated source");
+        save_managed_skill(profile, &target).await.unwrap();
+        save_managed_skill(profile, &source).await.unwrap();
+
+        let error = apply_managed_skill_consolidation(
+            profile,
+            Some(&target.metadata.id),
+            Some(&target.metadata.checksum),
+            None,
+            &source.metadata.id,
+            &source.metadata.checksum,
+            SKILL_OVERLAP_REMOVAL_TOMBSTONE,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("reserved skill-overlap tombstone")
+        );
+        assert_eq!(
+            load_managed_skill(profile, &target.metadata.id)
+                .await
+                .unwrap(),
+            target
+        );
+        assert_eq!(
+            load_managed_skill(profile, &source.metadata.id)
+                .await
+                .unwrap(),
+            source
+        );
+    }
+
+    #[tokio::test]
+    async fn overlap_archive_authority_rejects_an_unrelated_exact_pair() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let source = skill(
+            "rust-errors",
+            "# Rust errors\nModel failures with typed enums and explicit conversions.",
+        );
+        let partner = skill(
+            "dashboard-layout",
+            "# Dashboard layout\nAlign responsive cards with accessible navigation.",
+        );
+        save_managed_skill(profile, &source).await.unwrap();
+        save_managed_skill(profile, &partner).await.unwrap();
+
+        let error = apply_managed_skill_overlap_archive(
+            profile,
+            &source.metadata.id,
+            &source.metadata.checksum,
+            &partner.metadata.id,
+            &partner.metadata.checksum,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("not a detected overlap candidate pair")
+        );
+        assert_eq!(
+            load_managed_skill(profile, &source.metadata.id)
+                .await
+                .unwrap(),
+            source
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
