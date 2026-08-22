@@ -88,7 +88,13 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         validate_cache_budget(cache_budget_bytes)?;
         let path = path.as_ref();
-        let file_size = path.metadata().map_err(map_artifact_file_error)?.len();
+        let metadata = path.symlink_metadata().map_err(map_artifact_file_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "artifact path is not a regular file".to_owned(),
+            ));
+        }
+        let file_size = metadata.len();
         if file_size != expected_file_size_bytes {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
                 "artifact file has {file_size} bytes; the durable head names {expected_file_size_bytes}"
@@ -120,6 +126,7 @@ impl CodeLexicalArtifactReaderV1 {
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
             .map_err(|error| map_reader_open_error(path, error))?;
+            configure_reader_window(&connection, cache_budget_bytes, 0)?;
             connection
                 .pragma_update(None, "query_only", true)
                 .map_err(sqlite_error)?;
@@ -153,7 +160,13 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         validate_cache_budget(cache_budget_bytes)?;
         let path = path.as_ref();
-        let file_size = path.metadata().map_err(map_artifact_file_error)?.len();
+        let metadata = path.symlink_metadata().map_err(map_artifact_file_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "artifact path is not a regular file".to_owned(),
+            ));
+        }
+        let file_size = metadata.len();
         if file_size != expected.file_size_bytes() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
                 "artifact file has {file_size} bytes; receipt binds {}",
@@ -195,18 +208,7 @@ impl CodeLexicalArtifactReaderV1 {
                 "lexical artifact reader budget leaves {sqlite_budget} bytes, under the {ARTIFACT_SQLITE_CACHE_FLOOR_BYTES}-byte kernel page-cache floor"
             )));
         }
-        let page_cache_bytes = sqlite_budget.min(ARTIFACT_SQLITE_CACHE_BYTES);
-        connection
-            .pragma_update(
-                None,
-                "cache_size",
-                -i64::try_from(page_cache_bytes / 1024)
-                    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
-            )
-            .map_err(sqlite_error)?;
-        connection
-            .pragma_update(None, "mmap_size", 0i64)
-            .map_err(sqlite_error)?;
+        configure_reader_window(&connection, cache_budget_bytes, stored_metadata_len)?;
         let (stored_metadata_bytes, stored_metadata_digest): (Vec<u8>, String) = connection
             .query_row(
                 "SELECT metadata, metadata_digest FROM artifact_state WHERE singleton = 1",
@@ -1355,6 +1357,41 @@ fn validate_cache_budget(cache_budget_bytes: usize) -> Result<(), CodeLexicalArt
             "lexical artifact cache must be within 1..={CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1} bytes"
         )));
     }
+    Ok(())
+}
+
+fn configure_reader_window(
+    connection: &Connection,
+    cache_budget_bytes: usize,
+    retained_metadata_bytes: usize,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let available = cache_budget_bytes
+        .checked_sub(retained_metadata_bytes)
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Unreserved(
+                "lexical artifact metadata exceeds the reader reservation".to_owned(),
+            )
+        })?;
+    if available == 0 {
+        return Err(CodeLexicalArtifactErrorV1::Unreserved(
+            "lexical artifact reader has no SQLite cache reservation".to_owned(),
+        ));
+    }
+    let page_cache_bytes = available.min(ARTIFACT_SQLITE_CACHE_BYTES);
+    connection
+        .pragma_update(
+            None,
+            "cache_size",
+            -i64::try_from(page_cache_bytes / 1024)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
+        )
+        .map_err(sqlite_error)?;
+    connection
+        .pragma_update(None, "mmap_size", 0i64)
+        .map_err(sqlite_error)?;
+    connection
+        .pragma_update(None, "temp_store", "FILE")
+        .map_err(sqlite_error)?;
     Ok(())
 }
 
