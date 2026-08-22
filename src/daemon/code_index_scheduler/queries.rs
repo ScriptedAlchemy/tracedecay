@@ -43,11 +43,11 @@ use super::{
 };
 use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
-    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest, ExactLaneRetriever,
+    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest,
 };
 use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
 use tracedecay_query::retrieval::lexical::{
-    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest, LexicalLaneRetriever,
+    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest,
 };
 use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
 use tracedecay_query::retrieval::{
@@ -1592,7 +1592,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
-            let outcome = owners.exact.retrieve_exact(&lane_request);
+            let outcome = owners.retrieve_exact(&lane_request);
             match outcome {
                 Ok(outcome) => {
                     let Ok(outcome) =
@@ -1695,7 +1695,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
-            let outcome = owners.lexical.retrieve_lexical(&lane_request);
+            let outcome = owners.retrieve_lexical(&lane_request);
             match outcome {
                 Ok(outcome) => {
                     let Ok(outcome) = native_context.lexical(outcome, |path| {

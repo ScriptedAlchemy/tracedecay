@@ -1239,11 +1239,12 @@ fn config_validates_scheduler_idle_and_lock_bounds() {
         },
         ..AutomationConfigPatch::default()
     };
+    let error = effective_config(&AutomationConfig::default(), Some(&patch))
+        .unwrap_err()
+        .to_string();
     assert!(
-        effective_config(&AutomationConfig::default(), Some(&patch))
-            .unwrap_err()
-            .to_string()
-            .contains("min_idle_secs")
+        error.contains("memory_curator min_idle_secs must be greater than zero"),
+        "zero min_idle_secs must retain its field-specific rejection: {error}"
     );
 
     let patch = AutomationConfigPatch {
@@ -1253,12 +1254,28 @@ fn config_validates_scheduler_idle_and_lock_bounds() {
         },
         ..AutomationConfigPatch::default()
     };
+    let error = effective_config(&AutomationConfig::default(), Some(&patch))
+        .unwrap_err()
+        .to_string();
     assert!(
-        effective_config(&AutomationConfig::default(), Some(&patch))
-            .unwrap_err()
-            .to_string()
-            .contains("stale_lock_secs")
+        error.contains("memory_curator stale_lock_secs must be greater than zero"),
+        "zero stale_lock_secs must retain its field-specific rejection: {error}"
     );
+
+    // Nonzero bounds on the same fields remain accepted, so the rejection
+    // above is about the zero value rather than the fields themselves.
+    let patch = AutomationConfigPatch {
+        memory_curator: AutomationTaskPatch {
+            min_idle_secs: Some(Some(600)),
+            stale_lock_secs: Some(Some(3_600)),
+            ..AutomationTaskPatch::default()
+        },
+        ..AutomationConfigPatch::default()
+    };
+    let config =
+        effective_config(&AutomationConfig::default(), Some(&patch)).expect("nonzero bounds");
+    assert_eq!(config.tasks.memory_curator.min_idle_secs, Some(600));
+    assert_eq!(config.tasks.memory_curator.stale_lock_secs, Some(3_600));
 }
 
 #[cfg(any(unix, windows))]

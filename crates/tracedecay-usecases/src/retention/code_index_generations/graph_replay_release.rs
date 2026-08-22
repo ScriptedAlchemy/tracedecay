@@ -79,6 +79,31 @@ pub(super) fn write_events(
     sync_directory(&root)
 }
 
+/// Whether the durable release event for one retired generation is still
+/// queued. A consumed event is the graph reconciler's typed retirement
+/// confirmation: the replay pool copy has been released and must never be
+/// re-exposed for this receipt.
+pub(super) fn release_event_exists(
+    store_root: &Path,
+    receipt: &CodeGenerationRetentionReceiptV1,
+    generation: &CodeGenerationRetentionGenerationV1,
+) -> Result<bool, CodeGenerationRetentionErrorV1> {
+    let release = CodeGenerationGraphReplayReleaseV1 {
+        schema: GRAPH_REPLAY_RELEASE_SCHEMA.to_owned(),
+        receipt_digest: receipt.receipt_digest.clone(),
+        generation: generation.clone(),
+    };
+    match std::fs::symlink_metadata(release_path(store_root, &release)?) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "graph replay release for '{}' is not a regular file",
+            generation.generation_file
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(storage(error)),
+    }
+}
+
 pub(super) fn remove_events(
     store_root: &Path,
     receipt: &CodeGenerationRetentionReceiptV1,

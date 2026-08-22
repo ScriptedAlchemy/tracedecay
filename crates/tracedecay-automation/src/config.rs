@@ -148,9 +148,6 @@ pub fn merge_project_config(
 }
 
 pub fn validate_config(config: &AutomationConfig) -> Result<()> {
-    config
-        .validate()
-        .map_err(|error| config_error(format!("invalid automation settings: {error}")))?;
     if config.timeout_secs == 0 {
         return Err(config_error(
             "automation timeout_secs must be greater than zero",
@@ -164,6 +161,9 @@ pub fn validate_config(config: &AutomationConfig) -> Result<()> {
     validate_task_config("memory_curator", &config.tasks.memory_curator)?;
     validate_task_config("session_reflector", &config.tasks.session_reflector)?;
     validate_task_config("skill_writer", &config.tasks.skill_writer)?;
+    config
+        .validate()
+        .map_err(|error| config_error(format!("invalid automation settings: {error}")))?;
     Ok(())
 }
 
@@ -655,13 +655,11 @@ mod tests {
             },
             ..AutomationConfigPatch::default()
         };
-        // The domain settings validation rejects the zero duration before the
-        // task-level check can render its field-specific message.
         let error = effective_config(&base, Some(&zero_patch)).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("automation task duration is not canonical"),
+            error.to_string().contains(
+                "session_reflector session_evidence_budget_backoff_secs must be greater than zero"
+            ),
             "zero windows must be rejected: {error}"
         );
     }
