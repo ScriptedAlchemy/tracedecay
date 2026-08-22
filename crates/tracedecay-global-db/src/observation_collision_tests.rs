@@ -108,7 +108,8 @@ fn collision_candidate(
     )
     .unwrap();
     let write = ObservationWrite::new(observation.clone(), expected_cursor, next_cursor).unwrap();
-    let projection_generation = ProjectionGenerationId::new("projection.collision-test.v1").unwrap();
+    let projection_generation =
+        ProjectionGenerationId::new("projection.collision-test.v1").unwrap();
     let authorization = tracedecay_store::build_observation_resolution_authorization_v1(
         write.observation(),
         "collision-test",
@@ -213,7 +214,9 @@ async fn provenance_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<Provenance
 #[tokio::test]
 async fn identity_collision_records_durable_admission_refused_coverage() {
     let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path()).await.unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
@@ -306,7 +309,9 @@ async fn identity_collision_records_durable_admission_refused_coverage() {
 #[tokio::test]
 async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() {
     let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path()).await.unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
@@ -394,7 +399,10 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
     );
 
     // The terminal coverage stays single-row and the cursor stays put.
-    assert_eq!(admission_refused_advance_count(&runtime, &original).await, 1);
+    assert_eq!(
+        admission_refused_advance_count(&runtime, &original).await,
+        1
+    );
     assert_eq!(
         store
             .get_source_cursor(original.source(), original.scope())
@@ -414,7 +422,9 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
 #[tokio::test]
 async fn drain_provenance_collision_with_existing_output_converges_to_durable_skip() {
     let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path()).await.unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();

@@ -177,12 +177,12 @@ mod checkpoint_tests;
 // the harness must survive being compiled as a dependency. `test-helpers` is
 // the explicit opt-in dependent test builds enable.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod observation_collision_tests;
-#[cfg(test)]
 mod observability_outbox_tests;
 #[cfg(test)]
 mod observability_rollup_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod observation_collision_tests;
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub mod tests;
