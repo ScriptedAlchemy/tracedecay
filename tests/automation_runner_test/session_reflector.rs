@@ -89,7 +89,10 @@ async fn session_reflector_runner_skips_when_task_is_disabled() {
         &config,
         &run_control,
         &backend,
-        SessionReflectorAutomationOptions::default(),
+        SessionReflectorAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            ..SessionReflectorAutomationOptions::default()
+        },
     )
     .await
     .unwrap();

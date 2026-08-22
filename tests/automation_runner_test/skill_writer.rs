@@ -76,6 +76,7 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
         &config,
         &backend,
         SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
             profile_root: Some(temp.path().join("profile")),
             ..SkillWriterAutomationOptions::default()
         },
