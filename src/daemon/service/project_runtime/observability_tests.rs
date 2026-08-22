@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +19,7 @@ use tracedecay_usecases::observability::{
 
 use crate::daemon::service::invocation::DaemonInvocationService;
 
-use super::RegisteredObservabilityProducerV1;
+use super::StoreObservabilityRegistryV1;
 
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
@@ -186,13 +186,15 @@ async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown
 }
 
 #[tokio::test]
-async fn each_producer_lifetime_uses_a_disjoint_ordered_stream() {
+async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let (_project, project_id, database) = runtime("observability-stream-identity").await;
+    let (_project, project_id, database) = runtime("observability-store-alias").await;
+    let root = PathBuf::from("/project/observability-store-alias");
+    let linked_root = PathBuf::from("/project/observability-store-alias-linked");
     let first_service = DaemonInvocationService::default();
     let first = first_service
         .mount_observability_producer(
-            PathBuf::from("/project/observability-stream-identity"),
+            root.clone(),
             database.clone(),
             project_id.clone(),
             digest('1'),
@@ -202,7 +204,7 @@ async fn each_producer_lifetime_uses_a_disjoint_ordered_stream() {
         .expect("first producer");
     let first_reconciled = first_service
         .mount_observability_producer(
-            PathBuf::from("/project/observability-stream-identity"),
+            root.clone(),
             database.clone(),
             project_id.clone(),
             digest('1'),
@@ -217,7 +219,7 @@ async fn each_producer_lifetime_uses_a_disjoint_ordered_stream() {
     );
     let linked = first_service
         .mount_observability_producer(
-            PathBuf::from("/project/observability-stream-identity-linked"),
+            linked_root.clone(),
             database.clone(),
             project_id.clone(),
             digest('1'),
@@ -225,18 +227,109 @@ async fn each_producer_lifetime_uses_a_disjoint_ordered_stream() {
         )
         .await
         .expect("linked-root producer");
+    // Linked roots are aliases of one store-keyed producer: same Arc, one
+    // ordered boot stream per registered store, never one per root.
+    assert!(Arc::ptr_eq(&first, &linked));
+    assert_eq!(
+        first.identity().process_boot_id,
+        linked.identity().process_boot_id
+    );
+    // The delivery settlement recorder is store-keyed: both roots reach the
+    // exact same recorder rather than running one drain per root.
+    let first_recorder = first_service
+        .delivery_settlement_recorder(Some(&root))
+        .await
+        .expect("first-root recorder");
+    let linked_recorder = first_service
+        .delivery_settlement_recorder(Some(&linked_root))
+        .await
+        .expect("linked-root recorder");
+    assert!(Arc::ptr_eq(&first_recorder, &linked_recorder));
+    // Retaining recorder handles would pin the store spool lock past the
+    // last-alias shutdown below and block the restart from reopening it.
+    drop(first_recorder);
+    drop(linked_recorder);
+    // A root presenting different revisions for the same registered store is
+    // refused, not given a second store owner and not silently aliased.
+    let refused = match first_service
+        .mount_observability_producer(
+            PathBuf::from("/project/observability-store-alias-foreign"),
+            database.clone(),
+            project_id.clone(),
+            digest('9'),
+            digest('2'),
+        )
+        .await
+    {
+        Ok(_) => panic!("mismatched revisions must not mount a second store producer"),
+        Err(error) => error,
+    };
+    assert!(
+        refused.to_string().contains("already mounted"),
+        "unexpected refusal: {refused}"
+    );
     first
-        .try_emit(envelope(&project_id, "stream:first"))
+        .try_emit(envelope(&project_id, "alias:first"))
         .expect("first emission");
     linked
-        .try_emit(envelope(&project_id, "stream:linked"))
+        .try_emit(envelope(&project_id, "alias:linked"))
         .expect("linked emission");
+
+    // Full-upgrade shape for one linked root: quiesce drains that root's
+    // runtime while the other alias keeps the store producer and its boot
+    // stream alive; the remount reattaches to the same live producer.
+    let lsp_registry = Arc::new(tokio::sync::Mutex::new(
+        tracedecay_lsp::LspSessionRegistry::default(),
+    ));
+    let profile_id = database.binding().shard_id.profile_id.clone();
+    let quiescence = first_service
+        .quiesce_project(
+            &lsp_registry,
+            &profile_id,
+            &project_id,
+            &BTreeSet::from([root.clone()]),
+        )
+        .await
+        .expect("quiesce the first root");
+    assert_eq!(
+        linked
+            .try_emit(envelope(&project_id, "alias:after-quiesce"))
+            .expect("surviving alias emission"),
+        ObservabilityEmissionOutcomeV1::Enqueued
+    );
+    drop(quiescence);
+    let remounted = first_service
+        .mount_observability_producer(
+            root.clone(),
+            database.clone(),
+            project_id.clone(),
+            digest('1'),
+            digest('2'),
+        )
+        .await
+        .expect("remounted producer after quiescence");
+    assert!(Arc::ptr_eq(&remounted, &linked));
+    assert_eq!(
+        remounted.identity().process_boot_id,
+        linked.identity().process_boot_id
+    );
+    remounted
+        .try_emit(envelope(&project_id, "alias:remounted"))
+        .expect("remounted emission");
+
+    // The last alias shuts the store producer down.
     first_service.expire_all().await;
+    assert_eq!(
+        linked
+            .try_emit(envelope(&project_id, "alias:after-shutdown"))
+            .expect_err("last alias shutdown closes the store producer"),
+        "observability_producer_closed"
+    );
 
     let restarted_service = DaemonInvocationService::default();
     let restarted = restarted_service
         .mount_observability_producer(
-            PathBuf::from("/project/observability-stream-identity"),
+            root.clone(),
             database.clone(),
             project_id.clone(),
             digest('1'),
@@ -244,20 +337,23 @@ async fn each_producer_lifetime_uses_a_disjoint_ordered_stream() {
         )
         .await
         .expect("restarted producer");
-    let registrations = [&first, &linked, &restarted].map(|producer| {
-        producer
-            .identity()
+    assert!(!Arc::ptr_eq(&first, &restarted));
+    assert_ne!(
+        first.identity().process_boot_id,
+        restarted.identity().process_boot_id
+    );
+    let registration = |identity: &ObservabilityProducerIdentityV1| {
+        identity
             .process_boot_id
             .rsplit(':')
             .next()
             .expect("registration suffix")
             .parse::<u64>()
             .expect("numeric registration suffix")
-    });
-    assert_eq!(registrations[1], registrations[0].saturating_add(1));
-    assert_eq!(registrations[2], registrations[1].saturating_add(1));
+    };
+    assert!(registration(restarted.identity()) > registration(first.identity()));
     restarted
-        .try_emit(envelope(&project_id, "stream:restarted"))
+        .try_emit(envelope(&project_id, "alias:restarted"))
         .expect("restarted emission");
     restarted_service.expire_all().await;
 
@@ -274,24 +370,39 @@ async fn each_producer_lifetime_uses_a_disjoint_ordered_stream() {
         })
         .await
         .expect("query producer streams");
-    assert_eq!(page.events.len(), 3);
-    assert!(page.events.iter().all(|event| event.producer_sequence == 1));
-    let boot_ids = page
-        .events
-        .iter()
-        .map(|event| event.process_boot_id.as_str())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(boot_ids.len(), 3);
+    assert_eq!(page.events.len(), 5);
+    let mut streams: BTreeMap<&str, BTreeSet<u64>> = BTreeMap::new();
+    for event in &page.events {
+        streams
+            .entry(event.process_boot_id.as_str())
+            .or_default()
+            .insert(event.producer_sequence);
+    }
+    // One shared alias stream carries every linked-root emission in order;
+    // the restart after the last-alias shutdown boots a second stream.
+    assert_eq!(streams.len(), 2);
+    assert_eq!(
+        streams
+            .get(first.identity().process_boot_id.as_str())
+            .expect("shared alias stream"),
+        &BTreeSet::from([1, 2, 3, 4])
+    );
+    assert_eq!(
+        streams
+            .get(restarted.identity().process_boot_id.as_str())
+            .expect("restarted stream"),
+        &BTreeSet::from([1])
+    );
     let process_prefix = format!("daemon:{}:", crate::runtime_identity::process_run_id());
     assert!(
-        boot_ids
-            .iter()
+        streams
+            .keys()
             .all(|boot_id| boot_id.starts_with(&process_prefix))
     );
 }
 
 #[tokio::test]
-async fn exact_profile_routing_collapses_linked_roots_without_crossing_profiles() {
+async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let profile_a = tempfile::tempdir().expect("profile A");
     let profile_b = tempfile::tempdir().expect("profile B");
@@ -318,19 +429,24 @@ async fn exact_profile_routing_collapses_linked_roots_without_crossing_profiles(
     let database_b = runtime_b
         .project_database_arc()
         .expect("profile B database");
-    let brain_a_id = database_a.binding().shard_id.brain_id.clone();
-    let brain_b_id = database_b.binding().shard_id.brain_id.clone();
-    let profile_a_id = database_a.binding().shard_id.profile_id.clone();
-    let profile_b_id = database_b.binding().shard_id.profile_id.clone();
-    assert_ne!(brain_a_id, brain_b_id);
-    assert_ne!(profile_a_id, profile_b_id);
+    // The test-runtime resolver pins one logical brain/profile identity for
+    // every store, so the two profile stores are distinguished by exactly the
+    // registered-store authority the producer registry keys on: the verified
+    // locator and the registered client token. Logical shard ids alone must
+    // never be treated as the same authority.
+    let brain_id = database_a.binding().shard_id.brain_id.clone();
+    let profile_id = database_a.binding().shard_id.profile_id.clone();
+    assert_eq!(brain_id, database_b.binding().shard_id.brain_id);
+    assert_eq!(profile_id, database_b.binding().shard_id.profile_id);
+    assert!(!database_a.shares_client_with(&database_b));
+    assert_ne!(database_a.verified_locator(), database_b.verified_locator());
     let service = DaemonInvocationService::default();
     let root_a = PathBuf::from("/project/profile-a/shared-observability");
     let linked_a = PathBuf::from("/project/profile-a/shared-observability-linked");
     let root_b = PathBuf::from("/project/profile-b/shared-observability");
     let producer_a = service
         .mount_observability_producer(
-            root_a,
+            root_a.clone(),
             database_a.clone(),
             project_id.clone(),
             digest('1'),
@@ -348,9 +464,20 @@ async fn exact_profile_routing_collapses_linked_roots_without_crossing_profiles(
         )
         .await
         .expect("linked profile A producer");
+    // Linked roots of one exact store alias one producer, and while that is
+    // the only mounted store its exact identity routing resolves it.
+    assert!(Arc::ptr_eq(&producer_a, &linked_producer_a));
+    let routed_a = service
+        .observability_producer_for_brain_profile_project(&brain_id, &profile_id, &project_id)
+        .expect("linked roots resolve one exact profile A store");
+    assert!(Arc::ptr_eq(&routed_a, &producer_a));
+
+    // The same logical identity behind a different registered store must not
+    // alias profile A's producer, even though only the locator and client
+    // token distinguish the two stores.
     let producer_b = service
         .mount_observability_producer(
-            root_b,
+            root_b.clone(),
             database_b,
             project_id.clone(),
             digest('3'),
@@ -358,22 +485,31 @@ async fn exact_profile_routing_collapses_linked_roots_without_crossing_profiles(
         )
         .await
         .expect("profile B producer");
-
-    let routed_a = service
-        .observability_producer_for_brain_profile_project(&brain_a_id, &profile_a_id, &project_id)
-        .expect("linked roots resolve one exact profile A store");
-    assert!(Arc::ptr_eq(&routed_a, &producer_a) || Arc::ptr_eq(&routed_a, &linked_producer_a));
-    let routed_b = service
-        .observability_producer_for_brain_profile_project(&brain_b_id, &profile_b_id, &project_id)
-        .expect("profile B exact producer");
-    assert!(Arc::ptr_eq(&routed_b, &producer_b));
-    assert!(!Arc::ptr_eq(&routed_a, &routed_b));
+    assert!(!Arc::ptr_eq(&producer_a, &producer_b));
+    let recorder_a = service
+        .delivery_settlement_recorder(Some(&root_a))
+        .await
+        .expect("profile A recorder");
+    let recorder_b = service
+        .delivery_settlement_recorder(Some(&root_b))
+        .await
+        .expect("profile B recorder");
+    assert!(!Arc::ptr_eq(&recorder_a, &recorder_b));
+    // With two distinct store authorities mounted under one logical identity,
+    // exact routing refuses to pick either rather than crossing stores.
+    assert!(
+        service
+            .observability_producer_for_brain_profile_project(&brain_id, &profile_id, &project_id)
+            .is_none()
+    );
+    // A foreign identity never routes to a mounted store.
+    let foreign_project = ProjectId::new("project.unmounted-observability").unwrap();
     assert!(
         service
             .observability_producer_for_brain_profile_project(
-                &brain_b_id,
-                &profile_a_id,
-                &project_id,
+                &brain_id,
+                &profile_id,
+                &foreign_project,
             )
             .is_none()
     );
@@ -400,7 +536,15 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
         },
     )
     .expect("producer");
-    let registered = RegisteredObservabilityProducerV1::new(database.clone(), producer, 1)
+    let registered = StoreObservabilityRegistryV1::default()
+        .acquire_or_start::<&'static str>(
+            &database,
+            |_| false,
+            || "unexpected incumbent store producer",
+            || Ok(producer),
+            1,
+            |error| error,
+        )
         .expect("registered observability producer");
     let blocker = database
         .begin_write_transaction()
