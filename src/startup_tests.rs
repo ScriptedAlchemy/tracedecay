@@ -651,15 +651,13 @@ fn agent_install_health_check_is_selective() {
     }));
     assert!(should_skip_agent_install_check(&Commands::Doctor));
 
-    for (label, args) in [("init", &["tracedecay", "init", "."][..])] {
-        let cli = Cli::try_parse_from(args)
-            .unwrap_or_else(|error| panic!("{label} entrypoint must parse: {error}"));
-        let command = cli.command.expect("entrypoint command");
-        assert!(
-            !should_skip_agent_install_check(&command),
-            "{label} should retain the read-only install health check"
-        );
-    }
+    let cli = Cli::try_parse_from(["tracedecay", "init", "."])
+        .unwrap_or_else(|error| panic!("init entrypoint must parse: {error}"));
+    let command = cli.command.expect("entrypoint command");
+    assert!(
+        !should_skip_agent_install_check(&command),
+        "init should retain the read-only install health check"
+    );
 
     for (label, args) in [
         ("status", &["tracedecay", "status", "--json"][..]),

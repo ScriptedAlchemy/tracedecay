@@ -213,7 +213,7 @@ async fn cold_project_shutdown_joins_every_production_graph_holder() {
     release_cold_commit
         .send(())
         .expect("release cold mount during shutdown");
-    let shutdown = tokio::time::timeout(std::time::Duration::from_secs(60), shutdown)
+    let shutdown = tokio::time::timeout(std::time::Duration::from_mins(1), shutdown)
         .await
         .expect("daemon shutdown deadline")
         .expect("daemon shutdown task");
