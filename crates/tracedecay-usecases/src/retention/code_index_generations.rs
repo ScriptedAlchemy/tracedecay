@@ -577,6 +577,7 @@ struct CodeTextArtifactRetentionTransactionV1 {
     receipt: CodeTextArtifactRetentionReceiptV1,
 }
 
+#[derive(Debug)]
 struct CodeTextArtifactRetentionInventoryV1 {
     candidates: Vec<CodeTextArtifactRetentionCandidateV1>,
     unique_bytes: u64,
