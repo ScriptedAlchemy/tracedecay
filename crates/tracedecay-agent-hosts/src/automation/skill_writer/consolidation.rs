@@ -1043,9 +1043,13 @@ mod tests {
                 .unwrap();
 
             assert_eq!(archived.metadata.state, ManagedSkillState::Archived);
+            // Independently spelled pin of the persisted tombstone: skills
+            // archived by earlier releases durably carry this exact string,
+            // so constant drift must fail here instead of silently
+            // re-labeling the on-disk format.
             assert_eq!(
                 archived.metadata.archived_reason.as_deref(),
-                Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
+                Some("skill_overlap_removal_tombstone")
             );
             assert_eq!(partner, partner_before);
             assert_eq!(partner.metadata.state, ManagedSkillState::Active);
