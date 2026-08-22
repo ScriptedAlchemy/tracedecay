@@ -364,14 +364,25 @@ impl VerifiedSealedLexicalPageV1 {
         Ok(())
     }
 
-    /// Heap bytes retained by this page's chunk and import vectors.
+    /// Heap bytes retained by this page's chunk and import vectors plus its
+    /// digest identities.
     ///
     /// Vector and `String` storage uses actual capacities. Immutable typed-ID,
     /// exact-term, and sanitized-text payloads expose lengths rather than
     /// capacities, so their byte-exact payload size is counted once alongside
-    /// the owning vector slots. Allocator metadata and fixed inline fields are
-    /// deliberately excluded.
+    /// the owning vector slots. The page, cumulative, and both cursor digest
+    /// strings are heap-owned and counted at length. Allocator metadata and
+    /// fixed inline fields (including hash states) are deliberately excluded.
     pub fn retained_owned_bytes(&self) -> usize {
+        let digest_bytes = self
+            .page_digest
+            .as_str()
+            .len()
+            .saturating_add(self.cumulative_digest.as_str().len())
+            .saturating_add(self.next_cursor.import_dictionary_digest.as_str().len())
+            .saturating_add(self.next_cursor.cumulative_digest.as_str().len())
+            .saturating_add(self.previous_cursor.import_dictionary_digest.as_str().len())
+            .saturating_add(self.previous_cursor.cumulative_digest.as_str().len());
         let chunk_bytes = self.chunks.iter().fold(
             self.chunks
                 .capacity()
@@ -429,7 +440,7 @@ impl VerifiedSealedLexicalPageV1 {
             },
         );
         self.imports.iter().fold(
-            chunk_bytes.saturating_add(
+            chunk_bytes.saturating_add(digest_bytes).saturating_add(
                 self.imports
                     .capacity()
                     .saturating_mul(std::mem::size_of::<CodeIndexImportEvidenceV1>()),
@@ -631,6 +642,49 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
 
     pub fn cursor(&self) -> &VerifiedSealedLexicalCursorV1 {
         &self.cursor
+    }
+
+    /// Restore this source to its just-opened state so a consumer whose
+    /// staging failed after pages were already accepted can replay the same
+    /// sealed pages on the same instance instead of terminally blocking.
+    ///
+    /// The verified structural layout and state digest are kept; only the
+    /// cursor and the cumulative and import-dictionary hash authorities are
+    /// reset to their canonical initial values.
+    pub fn rewind(&mut self) -> Result<(), CodeIndexProductionErrorV1> {
+        let cumulative_hasher = source_hasher();
+        let import_hasher = import_dictionary_hasher();
+        self.cursor = VerifiedSealedLexicalCursorV1 {
+            next_file_ordinal: 0,
+            next_chunk_ordinal: 0,
+            next_import_ordinal: 0,
+            next_page_ordinal: 0,
+            emitted_chunks: 0,
+            emitted_payload_bytes: 0,
+            emitted_imports: 0,
+            emitted_import_payload_bytes: 0,
+            import_dictionary_digest: digest_hasher(import_hasher.clone())?,
+            cumulative_digest: digest_hasher(cumulative_hasher.clone())?,
+        };
+        self.cumulative_hasher = cumulative_hasher;
+        self.import_dictionary_hasher = import_hasher;
+        Ok(())
+    }
+
+    /// Serialized bytes this source may stage at once while minting a page:
+    /// the largest admitted file's sealed byte range (files are decoded one
+    /// at a time) plus the bounded page payload itself. Consumers charge this
+    /// window against their memory ledgers before driving the source.
+    pub fn staging_window_bytes(&self) -> usize {
+        let largest_file = self
+            .file_ranges
+            .iter()
+            .map(|range| range.end.saturating_sub(range.start))
+            .max()
+            .unwrap_or(0);
+        usize::try_from(largest_file)
+            .unwrap_or(usize::MAX)
+            .saturating_add(self.maximum_page_bytes)
     }
 
     pub fn next_page(
