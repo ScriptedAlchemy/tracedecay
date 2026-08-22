@@ -43,6 +43,7 @@ const OBSERVATION_AUTHORITY_TABLES: &[&str] = &[
     "sanitization_receipts",
     "source_cursors",
     "source_cursor_advances",
+    "observation_admission_refusals",
     "projection_queue",
     "remote_writer_fences",
     "remote_observation_events",
