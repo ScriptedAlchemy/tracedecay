@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.36](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.35...v0.1.0-beta.36) (2026-08-22)
+
+
+### Features
+
+* **automation:** add crate-owned run label vocabulary ([70ba894](https://github.com/ScriptedAlchemy/tracedecay/commit/70ba8946b1ab3599f215a421fc636d7a49ed9c22))
+* **automation:** emit typed tombstone label on skill consolidations ([8cb732e](https://github.com/ScriptedAlchemy/tracedecay/commit/8cb732e84ae26fe6af6792d6f581149eb0d7f516))
+* **automation:** wire typed skill-overlap tombstone label into production consolidation records ([4eb0f20](https://github.com/ScriptedAlchemy/tracedecay/commit/4eb0f20465ac4cb8878691a6a8758982eb8f3868))
+* **retention:** zero-copy replay retirement (stage 0b of plan 40) ([0bd09ce](https://github.com/ScriptedAlchemy/tracedecay/commit/0bd09cec5e0bb18455979df37dc3c61df5ab9462))
+
+
+### Bug Fixes
+
+* **agent-hosts:** admit authored overlap partners ([22dbc1d](https://github.com/ScriptedAlchemy/tracedecay/commit/22dbc1dc9b55f56bb5f9415f752a7890d8de7f93))
+* **agent-hosts:** bind overlap tombstones to exact pairs ([ef34f73](https://github.com/ScriptedAlchemy/tracedecay/commit/ef34f73e5826109f19cb3fb0cf733bca17253113))
+* **agent-hosts:** bind overlap tombstones to exact pairs ([4abbf4c](https://github.com/ScriptedAlchemy/tracedecay/commit/4abbf4c240bf39fcb63efad3846087dfe967b656))
+* **automation:** persist consolidation tombstones atomically ([efa8ea4](https://github.com/ScriptedAlchemy/tracedecay/commit/efa8ea47989d75793e2737e88169840e3c0a01b8))
+* **automation:** persist consolidation tombstones atomically ([aae11dd](https://github.com/ScriptedAlchemy/tracedecay/commit/aae11dd51ef6ae6a1f66f74194fcb19c04fb0fcf))
+* **automation:** preserve field-specific duration errors ([cd5f9c1](https://github.com/ScriptedAlchemy/tracedecay/commit/cd5f9c1e7e8c58c3c3ca6895da29f30f4aa9fe9b))
+* **automation:** return consolidation receipts before sync ([d80cbd3](https://github.com/ScriptedAlchemy/tracedecay/commit/d80cbd34515dccebeaa31f96df4d176005faa836))
+* **automation:** validate skill overlap tombstones ([6973717](https://github.com/ScriptedAlchemy/tracedecay/commit/6973717199dde18956e08b11e97a5e466876b918))
+* **catalog:** unpin eight existing application-surface operations ([40d72f0](https://github.com/ScriptedAlchemy/tracedecay/commit/40d72f0cc2132350924b4a71f38457d4e645fea5))
+* **catalog:** unpin eight existing application-surface operations ([d0697b4](https://github.com/ScriptedAlchemy/tracedecay/commit/d0697b431a87ec89f5891aa4b1d8ca86a748b894))
+* **daemon:** alias observability producers per exact store authority ([8b11a11](https://github.com/ScriptedAlchemy/tracedecay/commit/8b11a11be2ca51a00dba846589f9dbadf4055f71))
+* **daemon:** alias observability producers per exact store authority ([4418102](https://github.com/ScriptedAlchemy/tracedecay/commit/44181022b0b4d946963fdaaa837219beb43f9cb8))
+* **daemon:** keep runtimeless drops retiring until the drain confirms ([4757f6a](https://github.com/ScriptedAlchemy/tracedecay/commit/4757f6a129645deffd7645e42f126ca47a5e902e))
+* **daemon:** keep runtimeless drops retiring until the drain confirms ([f61afbd](https://github.com/ScriptedAlchemy/tracedecay/commit/f61afbd024523ad5b6a596d6f15455c267628474))
+* **daemon:** key observability aliases by store authority ([5a44002](https://github.com/ScriptedAlchemy/tracedecay/commit/5a44002287078ef75f87d6700d6650d65c29127c))
+* **daemon:** preserve linked-root observability policy ([e62a29f](https://github.com/ScriptedAlchemy/tracedecay/commit/e62a29fc6598a77d073ec8411df44b8d8ef84a96))
+* **daemon:** preserve linked-root observability policy ([eda2929](https://github.com/ScriptedAlchemy/tracedecay/commit/eda292906bb09a66e32bd4c09ede241fa0c8277a))
+* **daemon:** retain alias observability identity ([381a4d8](https://github.com/ScriptedAlchemy/tracedecay/commit/381a4d817f32e5d56ee949c9d8549d7da0b36cb4))
+* **daemon:** retain observability owners through shutdown ([496bd52](https://github.com/ScriptedAlchemy/tracedecay/commit/496bd52efcef8018930d3f48e7a839e9705300e8))
+* **global-db:** align refusal coverage with cursor authority ([aa11fd2](https://github.com/ScriptedAlchemy/tracedecay/commit/aa11fd20a31b30b0eea094cb1bf15a40f25b4ef2))
+* **global-db:** clear admission refusals in the scoped authority reset ([8a2849d](https://github.com/ScriptedAlchemy/tracedecay/commit/8a2849db732eb681c8d1d652b71b2afc4ed9de7c))
+* **global-db:** converge only different-output provenance collisions ([5e32f13](https://github.com/ScriptedAlchemy/tracedecay/commit/5e32f131d20e4c9b4f32fab3200cfed70c342587))
+* **global-db:** converge refusal coverage on fast-path re-admits ([211b968](https://github.com/ScriptedAlchemy/tracedecay/commit/211b968b911a85d94d2e7f91683a53340aa9a406))
+* **global-db:** durable terminal coverage for observation collisions ([4868b1b](https://github.com/ScriptedAlchemy/tracedecay/commit/4868b1b997b01309ba0b4d033854c272bfbf4f84))
+* **global-db:** enforce retention scope authority ([fddb6d5](https://github.com/ScriptedAlchemy/tracedecay/commit/fddb6d5c41746c4da470f5389211d4e712c21c3f))
+* **global-db:** enforce retention scope authority ([21ba4b7](https://github.com/ScriptedAlchemy/tracedecay/commit/21ba4b712776b978b62f21bfa0142cb37f1eaf7e))
+* **global-db:** make collision refusal progress durable ([9adad7a](https://github.com/ScriptedAlchemy/tracedecay/commit/9adad7af0377221d4cbb7056e1b9696deff79b39))
+* **global-db:** make observation collisions terminal ([236df00](https://github.com/ScriptedAlchemy/tracedecay/commit/236df00cca6c31bfe2c4942b8d962349c8362c9c))
+* **global-db:** record refusal marker and coverage atomically ([e198d80](https://github.com/ScriptedAlchemy/tracedecay/commit/e198d80781c2b5046199e01341fd8300a3bbdbbb))
+* **global-db:** surface refusal frontier advance construction errors ([cef7761](https://github.com/ScriptedAlchemy/tracedecay/commit/cef77619f7d107175c46077fc7d8a36f2775104a))
+* **global-db:** treat source generations as opaque identities ([bd92565](https://github.com/ScriptedAlchemy/tracedecay/commit/bd92565c3f1930cb7467546bd292d06c9165125b))
+* **graph:** enforce private replay root ([3bc6e1a](https://github.com/ScriptedAlchemy/tracedecay/commit/3bc6e1a5279d7efeb8ddc15a594024e3ff98210e))
+* **graph:** preserve replay collision error contract ([3ea49da](https://github.com/ScriptedAlchemy/tracedecay/commit/3ea49da7dba79abcba4c0225f629d840f655858a))
+* **graph:** preserve staged replay unlink identity ([dccb483](https://github.com/ScriptedAlchemy/tracedecay/commit/dccb48329cd346198e2a6803113655c8a1fded34))
+* **graph:** verify lazy replay sources ([d46b55d](https://github.com/ScriptedAlchemy/tracedecay/commit/d46b55dc5eabc76a59fa42945677e87fdb04edfe))
+* **observability:** replay durable policy across restarts ([bf46b23](https://github.com/ScriptedAlchemy/tracedecay/commit/bf46b23eab417e35dbdf96b96d608d3707040530))
+* **query:** honest artifact memory ledger and bounded top-K reads (B2) ([bb372f6](https://github.com/ScriptedAlchemy/tracedecay/commit/bb372f6bdce413201ae87104225d1f4020b6c758))
+* **retention:** harden graph replay retirement ([63f0426](https://github.com/ScriptedAlchemy/tracedecay/commit/63f0426999b964af77e6317b1e10830c3a82a044))
+* **runtime-core:** bind test runtimes to profile identity ([39137d1](https://github.com/ScriptedAlchemy/tracedecay/commit/39137d18044805c412a2d3b1273da134c3c3012a))
+* **runtime-core:** bind test runtimes to profile identity ([626369a](https://github.com/ScriptedAlchemy/tracedecay/commit/626369a95aa87264682e115878f777d98fbaa46c))
+* **runtime-core:** derive test runtime identity per fixture root ([5d1d70e](https://github.com/ScriptedAlchemy/tracedecay/commit/5d1d70e3ae8fb663c8a4d5e8567f373fb519871e))
+* **storage:** keep schema installation authority-bound ([3c26c02](https://github.com/ScriptedAlchemy/tracedecay/commit/3c26c029e808c87759ef29bc8791f1dbddd17b7d))
+* **storage:** keep schema installation authority-bound ([bcdbf82](https://github.com/ScriptedAlchemy/tracedecay/commit/bcdbf824e6af211b66369c6299568543f3c475cf))
+
+
+### Performance Improvements
+
+* **graph:** stop eager replay seal copies ([d13a013](https://github.com/ScriptedAlchemy/tracedecay/commit/d13a0135320919295910572fac86457c26dbbe26))
+* **graph:** stop eager replay seal copies ([b2a0577](https://github.com/ScriptedAlchemy/tracedecay/commit/b2a05773313d1621f132a05d9e19bd63d4535078))
+
 ## [0.1.0-beta.35](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.34...v0.1.0-beta.35) (2026-08-22)
 
 
