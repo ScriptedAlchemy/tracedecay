@@ -156,7 +156,8 @@ async fn require_admitted_observation_shape(
         );
     }
     let refusals = table_columns(conn, "observation_admission_refusals").await?;
-    if !refusals.is_empty() && refusals != canonical_column_set(ADMISSION_REFUSALS_CANONICAL_COLUMNS)
+    if !refusals.is_empty()
+        && refusals != canonical_column_set(ADMISSION_REFUSALS_CANONICAL_COLUMNS)
     {
         return Err(
             tracedecay_runtime_core::errors::TraceDecayError::reset_required(
