@@ -3237,6 +3237,136 @@ mod tests {
         }
     }
 
+    fn fixture_verified_text_artifact(
+        generation_id: &CodeGenerationId,
+        artifact_digest: &ManifestDigest,
+        artifact_size_bytes: u64,
+        sealed_digest: &ManifestDigest,
+    ) -> VerifiedCodeLexicalArtifactV1 {
+        let freshness = tracedecay_domain::SourceFreshness {
+            source_namespace: tracedecay_domain::SourceNamespace::new("ns.retention.fixture")
+                .expect("source namespace"),
+            source_instance: tracedecay_domain::SourceInstanceKey::new(
+                "instance.retention.fixture",
+            )
+            .expect("source instance"),
+            source_watermark: Some(1),
+            projection_watermark: Some(1),
+            observed_at: UtcMicros(1),
+            source_generation: Some(1),
+            generation_lag: Some(0),
+            compatibility: tracedecay_domain::FreshnessCompatibilityV1::Current,
+            policy_revision: tracedecay_domain::ComponentRevision::new("policy.retention.v1")
+                .expect("policy revision"),
+        };
+        serde_json::from_value(serde_json::json!({
+            "format_revision": 1,
+            "generation": generation_id,
+            "repository_id": "repository.retention.fixture",
+            "freshness": freshness,
+            "metadata_digest": format!("sha256:{}", "11".repeat(32)),
+            "source_state_digest": sealed_digest,
+            "source_cumulative_digest": format!("sha256:{}", "22".repeat(32)),
+            "source_format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
+            "page_count": 1,
+            "total_chunks": 1,
+            "total_payload_bytes": 7,
+            "total_imports": 0,
+            "import_payload_bytes": 0,
+            "import_dictionary_digest": format!("sha256:{}", "33".repeat(32)),
+            "artifact_digest": artifact_digest,
+            "section_digests": [],
+            "file_size_bytes": artifact_size_bytes,
+        }))
+        .expect("verified artifact fixture")
+    }
+
+    fn fixture_text_head_material(
+        generation: &FixtureGeneration,
+        descriptor: DurableCodeTextArtifactDescriptorV1,
+    ) -> DurableCodeTextArtifactHeadMaterialV1 {
+        let sealed_digest =
+            ManifestDigest::new(generation.state_digest.clone()).expect("sealed generation digest");
+        let verified_artifact = fixture_verified_text_artifact(
+            &generation.id,
+            &descriptor.artifact_digest,
+            descriptor.artifact_size_bytes,
+            &sealed_digest,
+        );
+        DurableCodeTextArtifactHeadMaterialV1 {
+            schema: CODE_TEXT_ARTIFACT_HEAD_SCHEMA_V1.to_owned(),
+            project_id: tracedecay_domain::ProjectId::new("project.retention.fixture")
+                .expect("project id"),
+            repository_id: tracedecay_domain::RepositoryId::new("repository.retention.fixture")
+                .expect("repository id"),
+            worktree_id: tracedecay_domain::WorktreeId::new("worktree.retention.fixture")
+                .expect("worktree id"),
+            generation_id: generation.id.clone(),
+            parent_generation: None,
+            source_reference: Some(
+                tracedecay_domain::RefId::new("refs/heads/main").expect("source reference"),
+            ),
+            source_revision: Some(
+                tracedecay_domain::CommitId::new("commit.retention.fixture")
+                    .expect("source revision"),
+            ),
+            source_tree: Some(
+                tracedecay_domain::TreeId::new("tree.retention.fixture").expect("source tree"),
+            ),
+            privacy_domain: tracedecay_domain::PrivacyDomainId::new("privacy.retention.fixture")
+                .expect("privacy domain"),
+            sealed_at_micros: 1,
+            source_manifest_digest: ManifestDigest::new(format!("sha256:{}", "44".repeat(32)))
+                .expect("source manifest digest"),
+            snapshot_digest: ManifestDigest::new(format!("sha256:{}", "55".repeat(32)))
+                .expect("snapshot digest"),
+            invalidation_digest: ManifestDigest::new(format!("sha256:{}", "66".repeat(32)))
+                .expect("invalidation digest"),
+            snapshot_content_identity: tracedecay_domain::ContentDigest::new(format!(
+                "sha256:{}",
+                "77".repeat(32)
+            ))
+            .expect("snapshot content identity"),
+            capability_manifest_digest: ManifestDigest::new(format!("sha256:{}", "88".repeat(32)))
+                .expect("capability manifest digest"),
+            sealed_identity: DurableSealedCodeGenerationIdentityV1 {
+                locator: generation.file.clone(),
+                digest: sealed_digest,
+                size_bytes: generation.size_bytes,
+            },
+            artifact: descriptor,
+            verified_artifact,
+            files: vec![DurableCodeTextArtifactFileV1 {
+                file_occurrence_id: tracedecay_domain::FileOccurrenceId::new("file.fixture")
+                    .expect("file occurrence"),
+                logical_path: "src/lib.rs".to_owned(),
+                content_digest: tracedecay_domain::ContentDigest::new(format!(
+                    "sha256:{}",
+                    "99".repeat(32)
+                ))
+                .expect("file content digest"),
+                disposition: tracedecay_domain::SnapshotFileDispositionV1::Present,
+            }],
+            ignored_source_admissions: Vec::new(),
+            ignored_source_admissions_digest: ManifestDigest::new(format!(
+                "sha256:{}",
+                "aa".repeat(32)
+            ))
+            .expect("ignored-source digest"),
+            repository_parse_identity_digest: ManifestDigest::new(format!(
+                "sha256:{}",
+                "bb".repeat(32)
+            ))
+            .expect("parse identity digest"),
+            generation_statistics:
+                tracedecay_code_index::production::CodeIndexGenerationStatisticsV1 {
+                    source_total_bytes: 7,
+                    symbol_count: 1,
+                    edge_count: 0,
+                },
+        }
+    }
+
     #[test]
     fn durable_index_bounds_clean_and_dirty_history_by_ttl_bytes_and_count() {
         let now = MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1 * 2;
@@ -3384,6 +3514,95 @@ mod tests {
         .expect("write active pointer");
 
         (store, generations)
+    }
+
+    fn write_fixture_text_artifact(
+        store: &tempfile::TempDir,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+    ) {
+        let artifacts_root = code_text_artifacts_root(store.path());
+        std::fs::create_dir_all(&artifacts_root).expect("create text artifact directory");
+        std::fs::write(
+            artifacts_root.join(&descriptor.artifact_file),
+            vec![0x5a; usize::try_from(descriptor.artifact_size_bytes).expect("artifact size")],
+        )
+        .expect("write text artifact fixture");
+    }
+
+    #[test]
+    fn durable_text_head_round_trips_and_rejects_digest_tampering() {
+        let (store, generations) = fixture_store(1);
+        let generation = generations.last().expect("active generation");
+        let descriptor = text_artifact(&generation.id, 13, 4096);
+        write_fixture_text_artifact(&store, &descriptor);
+        let expected_pointer = read_active_pointer(store.path()).expect("active pointer");
+        let lock = acquire_code_generation_store_lock(store.path()).expect("generation store lock");
+        let attached_pointer = attach_verified_text_artifact_under_lock(
+            &lock,
+            &expected_pointer,
+            &DurableSealedCodeGenerationIdentityV1 {
+                locator: generation.file.clone(),
+                digest: ManifestDigest::new(generation.state_digest.clone())
+                    .expect("sealed digest"),
+                size_bytes: generation.size_bytes,
+            },
+            descriptor.clone(),
+        )
+        .expect("attach artifact to generation index");
+        let head = DurableCodeTextArtifactHeadV1::from_material(fixture_text_head_material(
+            generation, descriptor,
+        ))
+        .expect("build canonical text head");
+        let published = publish_code_text_artifact_head_under_lock(&lock, None, head.clone())
+            .expect("publish text head");
+        drop(lock);
+
+        assert_eq!(published, head);
+        assert_eq!(
+            read_durable_code_text_artifact_head(store.path()).expect("read durable text head"),
+            Some(head)
+        );
+        assert_eq!(
+            read_active_pointer(store.path()).expect("attached generation pointer"),
+            attached_pointer,
+            "head publication must not rewrite the generation pointer"
+        );
+
+        let head_path = store.path().join(ACTIVE_CODE_TEXT_ARTIFACT_FILE_V1);
+        let mut tampered: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&head_path).expect("read head bytes"))
+                .expect("decode head value");
+        tampered["project_id"] = serde_json::Value::String("project.tampered".to_owned());
+        std::fs::write(
+            &head_path,
+            serde_json::to_vec(&tampered).expect("encode tampered head"),
+        )
+        .expect("write tampered head");
+
+        assert!(matches!(
+            read_durable_code_text_artifact_head(store.path()),
+            Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+        ));
+    }
+
+    #[test]
+    fn text_head_refuses_a_receipt_for_a_different_generation() {
+        let (_store, generations) = fixture_store(2);
+        let first = &generations[0];
+        let second = &generations[1];
+        let descriptor = text_artifact(&second.id, 17, 4096);
+        let mut material = fixture_text_head_material(second, descriptor.clone());
+        material.verified_artifact = fixture_verified_text_artifact(
+            &first.id,
+            &descriptor.artifact_digest,
+            descriptor.artifact_size_bytes,
+            &ManifestDigest::new(first.state_digest.clone()).expect("first sealed digest"),
+        );
+
+        assert!(matches!(
+            DurableCodeTextArtifactHeadV1::from_material(material),
+            Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+        ));
     }
 
     #[test]
