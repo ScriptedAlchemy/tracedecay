@@ -1316,7 +1316,7 @@ fn finish_section(
     row_count: u64,
     accumulator: &[u8],
 ) -> Result<CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactErrorV1> {
-    let accumulator: [u8; 32] = accumulator.as_ref().try_into().map_err(|_| {
+    let accumulator: [u8; 32] = accumulator.try_into().map_err(|_| {
         CodeLexicalArtifactErrorV1::Corrupt(
             "lexical artifact finalization accumulator has the wrong length".to_owned(),
         )
