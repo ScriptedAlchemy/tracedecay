@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
@@ -13,7 +14,7 @@ use tracedecay_domain::{
 use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    SessionRecord, build_observation_resolution_authorization_v1,
+    SessionRecord, SessionTemporalSnapshotRequestV1, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
 use tracedecay_temporal_query::context::CompactContext;
@@ -30,8 +31,27 @@ struct RealPageFixture {
     provider: String,
     session_id: String,
     message_id: String,
+    projected_message_id: String,
     text: String,
     anchor_id: RetrievalAnchorId,
+    active_generation: u64,
+}
+
+fn test_binding_digest(label: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(label.as_bytes())))
+}
+
+#[test]
+fn real_page_fixture_rejects_legacy_binding_digests_and_accepts_test_digests() {
+    for (field, invalid) in [
+        ("root_digest", "root.page"),
+        ("request_digest", "request.page.session.page.00"),
+        ("access_digest", "access.page.session.page.00"),
+        ("configuration", "page-test"),
+    ] {
+        assert!(BindingDigest::new(field, invalid).is_err());
+        assert!(BindingDigest::new(field, test_binding_digest(invalid)).is_ok());
+    }
 }
 
 fn real_page_root(root_id: &str) -> TemporalAuthorizedRoot {
@@ -41,15 +61,16 @@ fn real_page_root(root_id: &str) -> TemporalAuthorizedRoot {
 
 fn real_page_snapshot(
     session_id: &str,
+    active_generation: u64,
     root: TemporalAuthorizedRoot,
     cancelled: bool,
 ) -> TemporalExecutionSnapshot {
     TemporalExecutionSnapshot::new_authorized(
         TemporalSnapshotRequest::new(
             SessionId::new(session_id).expect("session"),
-            "root.page",
-            format!("request.page.{session_id}"),
-            format!("access.page.{session_id}"),
+            test_binding_digest("root.page"),
+            test_binding_digest(&format!("request.page.{session_id}")),
+            test_binding_digest(&format!("access.page.{session_id}")),
             TemporalModeV1::Current,
             tracedecay_domain::RetrievalGrainV1::LogicalMessage,
         )
@@ -58,7 +79,7 @@ fn real_page_snapshot(
         .expect("root binding")
         .with_cancellation_requested(cancelled),
         TemporalWatermarks {
-            generation: 1,
+            generation: active_generation,
             source: 0,
             projection: 0,
             index: 0,
@@ -67,8 +88,11 @@ fn real_page_snapshot(
         KernelVersions {
             schema: 1,
             ranking: 1,
-            configuration_digest: BindingDigest::new("configuration", "page-test")
-                .expect("configuration"),
+            configuration_digest: BindingDigest::new(
+                "configuration",
+                test_binding_digest("page-test"),
+            )
+            .expect("configuration"),
         },
         None,
         ValidatedAuthorization::Authorized,
@@ -165,6 +189,11 @@ async fn seed_real_page_fixture(
     let ordinal = u64::try_from(rank).expect("ordinal");
     let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
     let record_id = ObservationId::new(format!("record.page.{rank:02}")).expect("record id");
+    let projected_message_id = if provider == "claude" {
+        record_id.as_str().to_owned()
+    } else {
+        message_id.clone()
+    };
     let relations = CanonicalObservationRelationsV1::new(session)
         .with_message_id(ObservationId::new(message_id.clone()).expect("message id"));
     let envelope = CanonicalObservationEnvelopeV1::new(
@@ -256,17 +285,28 @@ async fn seed_real_page_fixture(
         )
         .await
         .expect("materialize canonical temporal occurrence");
+    let active_generation = database
+        .freeze_session_temporal_snapshot_result(SessionTemporalSnapshotRequestV1::new(
+            SessionId::new(session_id.clone()).expect("frozen session"),
+        ))
+        .await
+        .expect("freeze materialized temporal snapshot")
+        .watermarks()
+        .active_generation()
+        .value();
 
     RealPageFixture {
         provider,
         session_id,
         message_id,
+        projected_message_id,
         text,
         anchor_id: derive_exact_observation_anchor_id(
             observation.scope(),
             observation.observation_id(),
         )
         .expect("canonical anchor id"),
+        active_generation,
     }
 }
 
@@ -297,7 +337,12 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
         .iter()
         .map(|fixture| {
             real_page_kernel(
-                real_page_snapshot(&fixture.session_id, root.clone(), false),
+                real_page_snapshot(
+                    &fixture.session_id,
+                    fixture.active_generation,
+                    root.clone(),
+                    false,
+                ),
                 vec![real_page_candidate(fixture)],
                 vec![TemporalHydratedResult::available_for_test(
                     0,
@@ -324,7 +369,12 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
     items.insert(
         25,
         real_page_kernel(
-            real_page_snapshot(&summary_fixture.session_id, root.clone(), false),
+            real_page_snapshot(
+                &summary_fixture.session_id,
+                summary_fixture.active_generation,
+                root.clone(),
+                false,
+            ),
             vec![summary],
             vec![TemporalHydratedResult::available_for_test(
                 0,
@@ -340,9 +390,16 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
         ("unavailable.page", HydrationStateV1::RetainedButUnavailable),
     ] {
         let fixture = &fixtures[0];
+        let mut candidate = real_page_candidate(fixture);
+        candidate.stable_id = stable_id.to_owned();
         items.push(real_page_kernel(
-            real_page_snapshot(&fixture.session_id, root.clone(), false),
-            vec![real_page_candidate(fixture)],
+            real_page_snapshot(
+                &fixture.session_id,
+                fixture.active_generation,
+                root.clone(),
+                false,
+            ),
+            vec![candidate],
             vec![TemporalHydratedResult::unavailable_for_test(
                 0,
                 stable_id,
@@ -382,7 +439,7 @@ async fn fifty_real_page_results_use_one_registered_frozen_snapshot() {
             .collect::<Vec<_>>(),
         fixtures
             .iter()
-            .map(|fixture| fixture.message_id.as_str())
+            .map(|fixture| fixture.projected_message_id.as_str())
             .collect::<Vec<_>>(),
         "available messages retain their rank order without promotion"
     );
@@ -443,13 +500,19 @@ async fn real_page_rejects_mixed_roots_and_honors_cancellation_checkpoints() {
     let mixed = service
         .page(vec![
             real_page_kernel(
-                real_page_snapshot(&fixture.session_id, root.clone(), false),
+                real_page_snapshot(
+                    &fixture.session_id,
+                    fixture.active_generation,
+                    root.clone(),
+                    false,
+                ),
                 vec![real_page_candidate(&fixture)],
                 vec![hydrated()],
             ),
             real_page_kernel(
                 real_page_snapshot(
                     &fixture.session_id,
+                    fixture.active_generation,
                     TemporalAuthorizedRoot::profile(
                         "profile.page",
                         "store.foreign",
@@ -480,7 +543,12 @@ async fn real_page_rejects_mixed_roots_and_honors_cancellation_checkpoints() {
 
     let pre_admission_cancelled = service
         .page(vec![real_page_kernel(
-            real_page_snapshot(&fixture.session_id, root.clone(), true),
+            real_page_snapshot(
+                &fixture.session_id,
+                fixture.active_generation,
+                root.clone(),
+                true,
+            ),
             vec![real_page_candidate(&fixture)],
             vec![hydrated()],
         )])
@@ -503,12 +571,17 @@ async fn real_page_rejects_mixed_roots_and_honors_cancellation_checkpoints() {
     let cancelled_between_items = service
         .page(vec![
             real_page_kernel(
-                real_page_snapshot(&fixture.session_id, root.clone(), false),
+                real_page_snapshot(
+                    &fixture.session_id,
+                    fixture.active_generation,
+                    root.clone(),
+                    false,
+                ),
                 vec![real_page_candidate(&fixture)],
                 vec![hydrated()],
             ),
             real_page_kernel(
-                real_page_snapshot(&fixture.session_id, root, true),
+                real_page_snapshot(&fixture.session_id, fixture.active_generation, root, true),
                 vec![real_page_candidate(&fixture)],
                 vec![hydrated()],
             ),
