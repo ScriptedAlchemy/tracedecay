@@ -296,10 +296,25 @@ impl CodeLexicalArtifactBuilderV1 {
                 "finalized lexical artifacts cannot be rebuilt in place".to_owned(),
             ));
         }
-        if source.cursor().next_page_ordinal() != 0 {
-            return Err(CodeLexicalArtifactErrorV1::Contract(
-                "lexical artifact finalization replay must start at source page zero".to_owned(),
-            ));
+        // A prior interrupted replay may have left this source mid-stream;
+        // the interrupted staging transaction rolled back, so the canonical
+        // resume is a full replay of the same instance from page zero.
+        source
+            .rewind()
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        // The source stages one decoded file plus one bounded page while
+        // minting; that window is charged before any page is staged so the
+        // replay never allocates outside the ledger claim.
+        let source_window_bytes = source.staging_window_bytes();
+        if self
+            .fixed_ledger_charge_bytes
+            .checked_add(source_window_bytes)
+            .is_none_or(|charge| charge >= self.memory_budget_bytes)
+        {
+            return Err(CodeLexicalArtifactErrorV1::Contract(format!(
+                "the sealed source staging window needs {source_window_bytes} ledger bytes on top of the {}-byte fixed charge, exceeding the {}-byte build memory budget",
+                self.fixed_ledger_charge_bytes, self.memory_budget_bytes
+            )));
         }
 
         let metadata = self.metadata.clone();
@@ -307,18 +322,21 @@ impl CodeLexicalArtifactBuilderV1 {
         let metadata_bytes = serde_json::to_vec(&metadata)
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
         let path = self.path.clone();
-        let fixed_ledger_charge_bytes = self.fixed_ledger_charge_bytes;
+        let fixed_ledger_charge_bytes = self
+            .fixed_ledger_charge_bytes
+            .saturating_add(source_window_bytes);
         let memory_budget_bytes = self.memory_budget_bytes;
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
         clear_staged_projection(&transaction)?;
         checkpoint(control)?;
-        let mut previous_cursor = None;
+        let mut previous_cursor: Option<VerifiedSealedLexicalCursorV1> = None;
         let source_receipt = loop {
             checkpoint(control)?;
-            // Admission runs inside `next_page_if`: a bound or ledger
-            // refusal leaves the source cursor and hash authorities
-            // unchanged, so a retry resumes on the same source-minted page
-            // instead of silently skipping it.
+            // Admission AND staging run inside `next_page_if`: the source
+            // cursor and hash authorities advance only after the page has
+            // been fully staged into the transaction, so a bound or ledger
+            // refusal, a cancellation, or a SQLite failure all leave the
+            // source on the same source-minted page for the retry.
             let admitted = source
                 .next_page_if(control, |page| {
                     if page.retained_owned_bytes()
@@ -334,17 +352,17 @@ impl CodeLexicalArtifactBuilderV1 {
                         fixed_ledger_charge_bytes,
                         memory_budget_bytes,
                         page,
-                    )
+                    )?;
+                    page.verify_transition(previous_cursor.as_ref())
+                        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+                    append_imports(&transaction, page, control)?;
+                    append_page_rows(&transaction, &metadata, page, control)?;
+                    insert_source_page(&transaction, page)
                 })
                 .map_err(map_source_replay_error)?;
             let read = admitted?;
             match read {
                 VerifiedSealedLexicalPageReadV1::Page(page) => {
-                    page.verify_transition(previous_cursor.as_ref())
-                        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-                    append_imports(&transaction, &page, control)?;
-                    append_page_rows(&transaction, &metadata, &page, control)?;
-                    insert_source_page(&transaction, &page)?;
                     previous_cursor = Some(page.next_cursor().clone());
                 }
                 VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
@@ -419,8 +437,16 @@ fn map_source_replay_error(error: CodeIndexProductionErrorV1) -> CodeLexicalArti
     }
 }
 
+/// Amortized per-entry b-tree node overhead (headers and edge pointers)
+/// charged on top of each entry's key/value payload.
+const BTREE_MAP_ENTRY_OVERHEAD_BYTES: usize = 16;
+
 /// Validate a caller-selected build memory budget and return the fixed
 /// ledger charge it must absorb before any page is admitted.
+///
+/// Create, open, and rebuild each hold up to two simultaneous metadata
+/// structures (the retained copy plus a clone or the decoded stored copy)
+/// and one serialized JSON copy, so the fixed charge covers all three.
 fn validated_fixed_ledger_charge(
     metadata: &CodeLexicalProjectionMetadataV1,
     memory_budget_bytes: usize,
@@ -432,8 +458,20 @@ fn validated_fixed_ledger_charge(
             "lexical artifact build memory budget must be within 1..={CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1} bytes"
         )));
     }
+    let serialized_bytes = serde_json::to_vec(metadata)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?
+        .capacity();
     let fixed = ARTIFACT_SQLITE_CACHE_BYTES
-        .checked_add(metadata_retained_bytes(metadata))
+        .checked_add(
+            metadata_retained_bytes(metadata)
+                .checked_mul(2)
+                .ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Contract(
+                        "lexical artifact metadata ledger charge overflowed".to_owned(),
+                    )
+                })?,
+        )
+        .and_then(|bytes| bytes.checked_add(serialized_bytes))
         .ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract(
                 "lexical artifact fixed ledger charge overflowed".to_owned(),
@@ -447,34 +485,42 @@ fn validated_fixed_ledger_charge(
     Ok(fixed)
 }
 
-/// Owned bytes the builder retains for the projection metadata: identity
-/// strings at length and logical paths at capacity, per map entry.
+/// Owned bytes one projection metadata structure retains: logical paths at
+/// capacity with per-entry b-tree node overhead, and every scalar identity
+/// string charged as its `String` header plus payload length.
 fn metadata_retained_bytes(metadata: &CodeLexicalProjectionMetadataV1) -> usize {
     let path_bytes = metadata.logical_paths.iter().fold(
-        metadata
-            .logical_paths
-            .len()
-            .saturating_mul(std::mem::size_of::<(FileOccurrenceId, String)>()),
+        metadata.logical_paths.len().saturating_mul(
+            std::mem::size_of::<(FileOccurrenceId, String)>()
+                .saturating_add(BTREE_MAP_ENTRY_OVERHEAD_BYTES),
+        ),
         |bytes, (file, path)| {
             bytes
                 .saturating_add(file.as_str().len())
                 .saturating_add(path.capacity())
         },
     );
-    path_bytes
-        .saturating_add(metadata.generation.as_str().len())
-        .saturating_add(
-            metadata
-                .repository_id
-                .as_ref()
-                .map_or(0, |repository| repository.as_str().len()),
-        )
-        .saturating_add(metadata.freshness.source_namespace.as_str().len())
-        .saturating_add(metadata.freshness.source_instance.as_str().len())
-        .saturating_add(metadata.freshness.policy_revision.as_str().len())
-        .saturating_add(metadata.exact_retriever_revision.as_str().len())
-        .saturating_add(metadata.lexical_retriever_revision.as_str().len())
-        .saturating_add(metadata.exact_score_domain.as_str().len())
+    let scalar_identities = [
+        Some(metadata.generation.as_str()),
+        metadata
+            .repository_id
+            .as_ref()
+            .map(|repository| repository.as_str()),
+        Some(metadata.freshness.source_namespace.as_str()),
+        Some(metadata.freshness.source_instance.as_str()),
+        Some(metadata.freshness.policy_revision.as_str()),
+        Some(metadata.exact_retriever_revision.as_str()),
+        Some(metadata.lexical_retriever_revision.as_str()),
+        Some(metadata.exact_score_domain.as_str()),
+    ];
+    scalar_identities
+        .into_iter()
+        .flatten()
+        .fold(path_bytes, |bytes, identity| {
+            bytes
+                .saturating_add(std::mem::size_of::<String>())
+                .saturating_add(identity.len())
+        })
 }
 
 /// Refuse a page whose ledger charge does not fit the remaining budget.
