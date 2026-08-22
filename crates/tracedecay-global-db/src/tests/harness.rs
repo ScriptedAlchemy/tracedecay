@@ -1201,10 +1201,6 @@ async fn open_registered_test_database_with(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
-        path,
-        "open registered global-db test runtime",
-    )?;
     // The exact test-runtime resolver refuses `Initialize` for a store that is
     // already on disk (and `Existing` for one that is not). Fixtures reach this
     // helper both ways — a fresh profile root, and a shard some earlier stage of
@@ -1214,25 +1210,39 @@ async fn open_registered_test_database_with(
     } else {
         tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize
     };
-    let fixture = tracedecay_runtime_core::db::Database::publish_registered_test_runtime_with_retirement_control(
-        path, &authority, mode, scope,
-    )
-    .await?;
-    let (database_owner, _runtime, _retirement) = fixture.into_parts();
-    let database = RegisteredGlobalDbOwnerV1::admit_and_attach(database_owner).await?;
-    // The physical fixture is already opened in the mode requested above.
-    // Issuance preserves that capability; neither test branch manufactures a
-    // second raw authority after publication.
-    let registered = match write_authority {
-        RegisteredTestWriteAuthority::Fixture | RegisteredTestWriteAuthority::DaemonScoped => {
-            database.issue_lease().map_err(|failure| {
-                tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "issue registered global-db test database lease".to_owned(),
-                    message: format!("{failure:?}"),
-                }
-            })?
+    let fixture = match write_authority {
+        RegisteredTestWriteAuthority::Fixture => {
+            let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+                path,
+                "open registered global-db test runtime",
+            )?;
+            tracedecay_runtime_core::db::Database::publish_registered_test_runtime_with_retirement_control(
+                path, &authority, mode, scope,
+            )
+            .await?
+        }
+        RegisteredTestWriteAuthority::DaemonScoped => {
+            let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_owned_runtime(
+                path,
+                "open registered global-db daemon-scoped test runtime",
+            )?;
+            tracedecay_runtime_core::db::Database::publish_registered_daemon_test_runtime_with_retirement_control(
+                path, &authority, mode, scope,
+            )
+            .await?
         }
     };
+    let (database_owner, _runtime, _retirement) = fixture.into_parts();
+    let database = RegisteredGlobalDbOwnerV1::admit_and_attach(database_owner).await?;
+    // The physical fixture is already opened with the requested authority.
+    // Issuance preserves that capability; neither branch manufactures a
+    // second raw authority after publication.
+    let registered = database.issue_lease().map_err(|failure| {
+        tracedecay_runtime_core::errors::TraceDecayError::Database {
+            operation: "issue registered global-db test database lease".to_owned(),
+            message: format!("{failure:?}"),
+        }
+    })?;
     Ok((registered, database))
 }
 
