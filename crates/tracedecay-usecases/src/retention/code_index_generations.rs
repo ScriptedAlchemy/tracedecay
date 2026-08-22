@@ -105,7 +105,7 @@ pub const MAX_CODE_GENERATION_RETENTION_BATCH_V1: usize = 32;
 /// the active generation can own one resumable staging file. The inventory
 /// reads that fixed liveness window plus one removal page, so a restart reaches
 /// later debris without ever materializing an unbounded directory listing.
-pub const MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1: usize = 32;
+const MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1: usize = 32;
 const MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1: usize =
     MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1 + 1 + MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1;
 
@@ -451,8 +451,8 @@ pub enum CodeTextArtifactRetentionKindV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeTextArtifactRetentionCandidateV1 {
-    pub artifact_file: String,
-    pub kind: CodeTextArtifactRetentionKindV1,
+    pub(crate) artifact_file: String,
+    pub(crate) kind: CodeTextArtifactRetentionKindV1,
     pub size_bytes: u64,
 }
 
@@ -466,12 +466,12 @@ pub struct CodeGenerationRetentionPlanV1 {
     /// Derived text-artifact debris selected from one bounded canonical
     /// inventory. Descriptor-referenced and still-in-progress staging files
     /// are deliberately absent.
-    pub collectable_text_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
+    pub(crate) collectable_text_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
     /// Unique bytes seen in the bounded text-artifact inventory: durable
     /// descriptor targets, the one resumable active staging file, and this
     /// pass's selected debris candidates. A descriptor shared by retained
     /// generations is counted once by its canonical artifact path.
-    pub text_artifact_inventory_bytes: u64,
+    pub(crate) text_artifact_inventory_bytes: u64,
     /// How thoroughly this plan proved generation integrity. Apply-mode
     /// execution refuses anything but [`GenerationDigestVerificationV1::Full`].
     pub verification: GenerationDigestVerificationV1,
@@ -492,16 +492,6 @@ impl CodeGenerationRetentionPlanV1 {
     #[must_use]
     pub fn collectable_generation_bytes(&self) -> u64 {
         total_bytes(&self.collectable_generations)
-    }
-
-    #[must_use]
-    pub fn collectable_text_artifact_bytes(&self) -> u64 {
-        total_text_artifact_bytes(&self.collectable_text_artifacts)
-    }
-
-    #[must_use]
-    pub fn text_artifact_inventory_bytes(&self) -> u64 {
-        self.text_artifact_inventory_bytes
     }
 
     #[must_use]
@@ -529,14 +519,14 @@ pub struct CodeGenerationRetentionReceiptV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeTextArtifactRetentionReceiptV1 {
-    pub schema: String,
-    pub receipt_digest: String,
-    pub active_generation_id: CodeGenerationId,
-    pub active_generation_index_digest: String,
-    pub deleted_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
-    pub inventory_bytes_before_collection: u64,
+    pub(crate) schema: String,
+    pub(crate) receipt_digest: String,
+    pub(crate) active_generation_id: CodeGenerationId,
+    pub(crate) active_generation_index_digest: String,
+    pub(crate) deleted_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
+    pub(crate) inventory_bytes_before_collection: u64,
     pub reclaimed_bytes: u64,
-    pub completed_at_micros: i64,
+    pub(crate) completed_at_micros: i64,
 }
 
 #[derive(Serialize)]
@@ -4579,7 +4569,7 @@ mod tests {
         assert_eq!(plan.collectable_text_artifacts.len(), 3);
         assert!(plan.has_collectable_work());
         assert_eq!(
-            plan.collectable_text_artifact_bytes(),
+            total_text_artifact_bytes(&plan.collectable_text_artifacts),
             std::fs::metadata(&orphan_path)
                 .expect("orphan metadata")
                 .len()
@@ -4595,7 +4585,7 @@ mod tests {
                 )
         );
         assert_eq!(
-            plan.text_artifact_inventory_bytes(),
+            plan.text_artifact_inventory_bytes,
             std::fs::metadata(artifacts_root.join(&referenced.artifact_file),)
                 .expect("referenced metadata")
                 .len()
@@ -4604,7 +4594,7 @@ mod tests {
                         .expect("active staging metadata")
                         .len(),
                 )
-                .saturating_add(plan.collectable_text_artifact_bytes()),
+                .saturating_add(total_text_artifact_bytes(&plan.collectable_text_artifacts)),
             "the bounded inventory accounts descriptor bytes, resumable staging, and each candidate once"
         );
 
@@ -5824,8 +5814,7 @@ mod tests {
             "metadata observation must identify the same bounded artifact debris"
         );
         assert_eq!(
-            full.text_artifact_inventory_bytes(),
-            metadata_only.text_artifact_inventory_bytes(),
+            full.text_artifact_inventory_bytes, metadata_only.text_artifact_inventory_bytes,
             "both modes must account the same unique descriptor, staging, and candidate bytes"
         );
         assert!(
