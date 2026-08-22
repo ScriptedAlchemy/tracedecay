@@ -240,8 +240,9 @@ pub(super) fn applied_consolidation_record(
 #[cfg(test)]
 mod tests {
     use super::super::super::managed_skills::{
-        ManagedSkillDraft, ManagedSkillProvenance, ManagedSupportFile, apply_managed_skill_update,
-        create_managed_skill, default_managed_skill_targets, load_managed_skill,
+        ManagedSkillDraft, ManagedSkillProvenance, ManagedSupportFile, apply_managed_skill_archive,
+        apply_managed_skill_update, create_managed_skill, default_managed_skill_targets,
+        install_post_commit_usage_sync_test_gate, load_managed_skill,
     };
     use super::super::skill_proposal_action;
     use super::*;
@@ -747,6 +748,138 @@ mod tests {
             target.body_markdown,
             "Merged workflow guidance covering both variants."
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn archive_returns_tombstone_before_postcommit_usage_sync_can_be_cancelled() {
+        let profile = tempfile::tempdir().unwrap();
+        let first = create_managed_skill(
+            profile.path(),
+            fixture_draft("workflow-a", ManagedSkillSource::AutomationRun),
+        )
+        .await
+        .unwrap();
+        let second = create_managed_skill(
+            profile.path(),
+            fixture_draft("workflow-b", ManagedSkillSource::AutomationRun),
+        )
+        .await
+        .unwrap();
+        let skills = [
+            (first.metadata.id.clone(), first),
+            (second.metadata.id.clone(), second),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+        let proposal = json!({
+            "action": "archive",
+            "id": "workflow-b",
+            "base_checksum": checksum(&skills, "workflow-b"),
+            "reason": "duplicate guidance"
+        });
+        let archive = skill_archive_from_proposal(&proposal, &skills).unwrap();
+        let gate = install_post_commit_usage_sync_test_gate();
+        let profile_root = profile.path().to_path_buf();
+        let archive_for_task = archive.clone();
+        let task = tokio::spawn(async move {
+            apply_managed_skill_archive(
+                &profile_root,
+                &archive_for_task.skill_id,
+                &archive_for_task.base_checksum,
+                Some(archive_for_task.reason),
+            )
+            .await
+        });
+
+        gate.entered().await;
+        assert_eq!(
+            load_managed_skill(profile.path(), "workflow-b")
+                .await
+                .unwrap()
+                .metadata
+                .state,
+            ManagedSkillState::Archived,
+            "the cancellation gate must run after the archive commit"
+        );
+        task.abort();
+        let archived = task
+            .await
+            .expect("the committed archive receipt must return before best-effort usage sync")
+            .unwrap();
+        let record = applied_consolidation_record(
+            SkillProposalAction::Archive,
+            &proposal,
+            &archived,
+            &archive.base_checksum,
+            None,
+        );
+        assert_eq!(record["tombstone_label"], SKILL_OVERLAP_REMOVAL_TOMBSTONE);
+        gate.release();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_returns_tombstone_before_postcommit_usage_sync_can_be_cancelled() {
+        let profile = tempfile::tempdir().unwrap();
+        let target = create_managed_skill(
+            profile.path(),
+            fixture_draft("workflow-a", ManagedSkillSource::AutomationRun),
+        )
+        .await
+        .unwrap();
+        let source = create_managed_skill(
+            profile.path(),
+            fixture_draft("workflow-b", ManagedSkillSource::AutomationRun),
+        )
+        .await
+        .unwrap();
+        let skills = [
+            (target.metadata.id.clone(), target),
+            (source.metadata.id.clone(), source),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+        let proposal = json!({
+            "action": "merge",
+            "id": "workflow-a",
+            "base_checksum": checksum(&skills, "workflow-a"),
+            "source_skill_id": "workflow-b",
+            "source_base_checksum": checksum(&skills, "workflow-b"),
+            "reason": "duplicate guidance"
+        });
+        let merge = skill_merge_from_proposal(&proposal, &skills).unwrap();
+        let gate = install_post_commit_usage_sync_test_gate();
+        let profile_root = profile.path().to_path_buf();
+        let merge_for_task = merge.clone();
+        let task =
+            tokio::spawn(async move { apply_skill_merge(&profile_root, &merge_for_task).await });
+
+        gate.entered().await;
+        let committed_source = load_managed_skill(profile.path(), "workflow-b")
+            .await
+            .unwrap();
+        assert_eq!(
+            committed_source.metadata.state,
+            ManagedSkillState::Archived,
+            "the cancellation gate must run after the merge commit"
+        );
+        assert_eq!(
+            committed_source.metadata.absorbed_into.as_deref(),
+            Some("workflow-a")
+        );
+        task.abort();
+        let (source, _target) = task
+            .await
+            .expect("the committed merge receipt must return before best-effort usage sync")
+            .unwrap();
+        let record = applied_consolidation_record(
+            SkillProposalAction::Merge,
+            &proposal,
+            &source,
+            &merge.source_base_checksum,
+            Some(&merge),
+        );
+        assert_eq!(record["tombstone_label"], SKILL_OVERLAP_REMOVAL_TOMBSTONE);
+        gate.release();
     }
 
     #[tokio::test]

@@ -20,6 +20,80 @@ use super::managed_skill_validation::{
     validate_managed_skill, validate_managed_skill_update, validate_skill_id,
 };
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct PostCommitUsageSyncTestGate {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static POST_COMMIT_USAGE_SYNC_TEST_GATE: std::sync::Mutex<Option<PostCommitUsageSyncTestGate>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static POST_COMMIT_USAGE_SYNC_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(super) struct PostCommitUsageSyncTestGuard {
+    gate: PostCommitUsageSyncTestGate,
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl PostCommitUsageSyncTestGuard {
+    pub(super) async fn entered(&self) {
+        self.gate.entered.notified().await;
+    }
+
+    pub(super) fn release(&self) {
+        self.gate.release.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+impl Drop for PostCommitUsageSyncTestGuard {
+    fn drop(&mut self) {
+        self.gate.release.notify_waiters();
+        let mut active = POST_COMMIT_USAGE_SYNC_TEST_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = None;
+    }
+}
+
+#[cfg(test)]
+pub(super) fn install_post_commit_usage_sync_test_gate() -> PostCommitUsageSyncTestGuard {
+    let serial = POST_COMMIT_USAGE_SYNC_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let gate = PostCommitUsageSyncTestGate {
+        entered: std::sync::Arc::new(tokio::sync::Notify::new()),
+        release: std::sync::Arc::new(tokio::sync::Notify::new()),
+    };
+    let mut active = POST_COMMIT_USAGE_SYNC_TEST_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(active.replace(gate.clone()).is_none());
+    drop(active);
+    PostCommitUsageSyncTestGuard {
+        gate,
+        _serial: serial,
+    }
+}
+
+#[cfg(test)]
+async fn wait_for_post_commit_usage_sync_test_gate() {
+    let gate = POST_COMMIT_USAGE_SYNC_TEST_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(gate) = gate {
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
+}
+
 pub fn managed_skill_root(profile_root: &Path) -> PathBuf {
     profile_root.join("agent_managed").join("skills")
 }
@@ -342,13 +416,9 @@ pub async fn apply_managed_skill_consolidation(
     let mut revisions: Vec<&ManagedSkill> = target.iter().collect();
     revisions.push(&source);
     persist_skill_transaction_unlocked(profile_root, &revisions)?;
+    let committed_revisions = revisions.into_iter().cloned().collect::<Vec<_>>();
     drop(lock);
-    for skill in &revisions {
-        if let Err(error) = super::skill_usage::sync_skill_usage_metadata(profile_root, skill).await
-        {
-            tracing::warn!(skill_id = %skill.metadata.id, error = %error, "skill usage metadata reconciliation failed after committed consolidation");
-        }
-    }
+    spawn_consolidation_usage_sync_best_effort(profile_root, committed_revisions);
 
     Ok(SkillConsolidationResult {
         target_before_checksum: original_target
@@ -627,7 +697,7 @@ pub async fn apply_managed_skill_archive(
     let lock = lock_skill_store_async(profile_root).await?;
     let skill = apply_managed_skill_archive_unlocked(profile_root, id, base_checksum, reason)?;
     drop(lock);
-    record_skill_patch_best_effort(profile_root, &skill, "automatic_archive").await;
+    spawn_skill_patch_best_effort(profile_root, skill.clone(), "automatic_archive");
     Ok(skill)
 }
 
@@ -700,6 +770,8 @@ fn apply_managed_skill_update_fields(
 }
 
 async fn record_skill_patch_best_effort(profile_root: &Path, skill: &ManagedSkill, target: &str) {
+    #[cfg(test)]
+    wait_for_post_commit_usage_sync_test_gate().await;
     if let Err(error) = super::skill_usage::record_skill_usage_event(
         profile_root,
         super::skill_usage::SkillUsageEvent {
@@ -714,6 +786,28 @@ async fn record_skill_patch_best_effort(profile_root: &Path, skill: &ManagedSkil
     {
         tracing::warn!(skill_id = %skill.metadata.id, target, error = %error, "skill usage patch recording failed after committed skill change");
     }
+}
+
+fn spawn_skill_patch_best_effort(profile_root: &Path, skill: ManagedSkill, target: &'static str) {
+    let profile_root = profile_root.to_path_buf();
+    drop(tokio::spawn(async move {
+        record_skill_patch_best_effort(&profile_root, &skill, target).await;
+    }));
+}
+
+fn spawn_consolidation_usage_sync_best_effort(profile_root: &Path, skills: Vec<ManagedSkill>) {
+    let profile_root = profile_root.to_path_buf();
+    drop(tokio::spawn(async move {
+        #[cfg(test)]
+        wait_for_post_commit_usage_sync_test_gate().await;
+        for skill in &skills {
+            if let Err(error) =
+                super::skill_usage::sync_skill_usage_metadata(&profile_root, skill).await
+            {
+                tracing::warn!(skill_id = %skill.metadata.id, error = %error, "skill usage metadata reconciliation failed after committed consolidation");
+            }
+        }
+    }));
 }
 
 pub async fn disable_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
