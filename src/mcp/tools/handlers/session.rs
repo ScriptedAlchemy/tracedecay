@@ -1470,6 +1470,9 @@ fn non_negative_timestamp_arg(
     let Some(value) = args.get(name) else {
         return Ok(None);
     };
+    if value.is_null() {
+        return Ok(None);
+    }
     let timestamp = match value {
         Value::Number(number) => number
             .as_i64()

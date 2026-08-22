@@ -2,6 +2,18 @@ use super::*;
 use crate::mcp::response_handles::lock_response_handle_store;
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
+#[test]
+fn message_search_time_range_ignores_null_optional_bounds() {
+    let range = message_search_time_range(&serde_json::json!({
+        "since": "2026-08-20",
+        "until": null,
+    }))
+    .expect("null optional bounds should be treated as absent");
+
+    assert!(range.start_time.is_some());
+    assert_eq!(range.end_time, None);
+}
+
 #[tokio::test]
 async fn identical_message_catch_ups_share_one_leader() {
     let key = format!("test-singleflight-{}", std::process::id());

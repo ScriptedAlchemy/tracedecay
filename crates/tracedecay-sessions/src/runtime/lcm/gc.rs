@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use libsql::{Connection, params};
+use libsql::{Connection, Value as SqlValue, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -143,15 +143,8 @@ pub async fn referenced_payload_refs(
     session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
     let mut refs = BTreeSet::new();
-    let mut rows = conn
-        .query(
-            "SELECT storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
-             FROM lcm_raw_messages
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
-        )
-        .await?;
+    let (sql, values) = referenced_payload_refs_query(provider, session_id);
+    let mut rows = conn.query(&sql, values).await?;
     while let Some(row) = rows.next().await? {
         let storage_kind: String = row.get(0)?;
         let payload_ref: Option<String> = row.get(1).unwrap_or(None);
@@ -168,6 +161,39 @@ pub async fn referenced_payload_refs(
         }
     }
     Ok(refs)
+}
+
+fn referenced_payload_refs_query(
+    provider: &str,
+    session_id: Option<&str>,
+) -> (String, Vec<SqlValue>) {
+    // Every live externalized placeholder is indexed in index_text. Drive the
+    // scan from FTS so status/doctor inspect payload-bearing messages instead
+    // of materializing every text-heavy raw message in a large session store.
+    let mut values = vec![SqlValue::Text("externalized".to_string())];
+    let mut filters = Vec::new();
+    if provider != "all" {
+        filters.push(format!("r.provider = ?{}", values.len() + 1));
+        values.push(SqlValue::Text(provider.to_string()));
+    }
+    if let Some(session_id) = session_id {
+        filters.push(format!("r.session_id = ?{}", values.len() + 1));
+        values.push(SqlValue::Text(session_id.to_string()));
+    }
+    let filter_sql = if filters.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {}", filters.join(" AND "))
+    };
+    (
+        format!(
+            "SELECT r.storage_kind, r.payload_ref, r.content, r.snippet_text, r.index_text, r.metadata_json
+             FROM lcm_raw_messages_fts
+             JOIN lcm_raw_messages r ON r.store_id = lcm_raw_messages_fts.rowid
+             WHERE lcm_raw_messages_fts MATCH ?{filter_sql}"
+        ),
+        values,
+    )
 }
 
 fn extract_live_payload_refs_from_text(text: &str) -> Vec<String> {
@@ -1129,6 +1155,18 @@ mod tests {
             tombstone_placeholder_in_text(&expected, PRIMARY_REF),
             expected
         );
+    }
+
+    #[test]
+    fn referenced_payload_refs_query_uses_fts_candidates_and_scoped_filters() {
+        let (sql, values) = referenced_payload_refs_query("codex", Some("session-a"));
+
+        assert!(sql.contains("FROM lcm_raw_messages_fts"));
+        assert!(sql.contains("lcm_raw_messages_fts MATCH ?"));
+        assert!(sql.contains("r.provider = ?"));
+        assert!(sql.contains("r.session_id = ?"));
+        assert!(!sql.contains("? = 'all' OR"));
+        assert_eq!(values.len(), 3);
     }
 
     #[tokio::test]
