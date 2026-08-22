@@ -27,8 +27,8 @@ use super::apply::{
 use super::state::{
     consume_projection_queue_item, decode_observation_row, decode_sequence,
     ensure_projection_output_state_cache, projection_retry_state, queued_sequence, read_checkpoint,
-    read_message, read_observation, read_session, schedule_projection_retry, storage,
-    storage_message, write_checkpoint,
+    read_message, read_observation, read_session, reaggregate_output_state_for_output,
+    schedule_projection_retry, storage, storage_message, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -1128,86 +1128,7 @@ async fn reconcile_collided_observation_provenance(
     .await
     .map_err(|error| storage("remove collided projection provenance", error))?;
     for (output_provider, output_message_id) in affected {
-        conn.execute(
-            "DELETE FROM temp.observation_projection_output_state
-             WHERE projector_version = ?1
-               AND output_provider = ?2 AND output_message_id = ?3",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                output_provider.as_str(),
-                output_message_id.as_str(),
-            ],
-        )
-        .await
-        .map_err(|error| storage("reset collided projection output state", error))?;
-        conn.execute(
-            "INSERT INTO temp.observation_projection_output_state (
-                projector_version, output_provider, output_message_id,
-                canonical_observation_id, latest_observation_id, latest_sequence,
-                projector_owned, owner_count
-             )
-             SELECT groups.projector_version, groups.output_provider, groups.output_message_id,
-                    CASE WHEN groups.projector_owned = 1 THEN (
-                        SELECT provenance.observation_id
-                        FROM observation_projection_provenance AS provenance
-                        JOIN observations AS observation
-                          ON observation.observation_id = provenance.observation_id
-                        WHERE provenance.projector_version = groups.projector_version
-                          AND provenance.output_provider = groups.output_provider
-                          AND provenance.output_message_id = groups.output_message_id
-                        ORDER BY observation.sequence DESC, provenance.observation_id DESC
-                        LIMIT 1
-                    ) ELSE (
-                        SELECT provenance.observation_id
-                        FROM observation_projection_provenance AS provenance
-                        JOIN observations AS observation
-                          ON observation.observation_id = provenance.observation_id
-                        WHERE provenance.projector_version = groups.projector_version
-                          AND provenance.output_provider = groups.output_provider
-                          AND provenance.output_message_id = groups.output_message_id
-                        ORDER BY observation.sequence ASC, provenance.observation_id ASC
-                        LIMIT 1
-                    ) END,
-                    (
-                        SELECT provenance.observation_id
-                        FROM observation_projection_provenance AS provenance
-                        JOIN observations AS observation
-                          ON observation.observation_id = provenance.observation_id
-                        WHERE provenance.projector_version = groups.projector_version
-                          AND provenance.output_provider = groups.output_provider
-                          AND provenance.output_message_id = groups.output_message_id
-                        ORDER BY observation.sequence DESC, provenance.observation_id DESC
-                        LIMIT 1
-                    ),
-                    (
-                        SELECT observation.sequence
-                        FROM observation_projection_provenance AS provenance
-                        JOIN observations AS observation
-                          ON observation.observation_id = provenance.observation_id
-                        WHERE provenance.projector_version = groups.projector_version
-                          AND provenance.output_provider = groups.output_provider
-                          AND provenance.output_message_id = groups.output_message_id
-                        ORDER BY observation.sequence DESC, provenance.observation_id DESC
-                        LIMIT 1
-                    ),
-                    groups.projector_owned, groups.owner_count
-             FROM (
-                SELECT projector_version, output_provider, output_message_id,
-                       MAX(message_created) AS projector_owned,
-                       COUNT(*) AS owner_count
-                FROM observation_projection_provenance
-                WHERE projector_version = ?1
-                  AND output_provider = ?2 AND output_message_id = ?3
-                GROUP BY projector_version, output_provider, output_message_id
-             ) AS groups",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                output_provider.as_str(),
-                output_message_id.as_str(),
-            ],
-        )
-        .await
-        .map_err(|error| storage("reaggregate collided projection output state", error))?;
+        reaggregate_output_state_for_output(conn, &output_provider, &output_message_id).await?;
     }
     Ok(())
 }
