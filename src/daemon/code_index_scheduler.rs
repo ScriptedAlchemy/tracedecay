@@ -1404,7 +1404,12 @@ struct CodeTextArtifactBuildV1 {
 
 fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
     match error {
-        CodeLexicalArtifactErrorV1::Interrupted(_) => RetrievalPortError::Cancelled,
+        CodeLexicalArtifactErrorV1::Interrupted(
+            crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+        ) => RetrievalPortError::Cancelled,
+        CodeLexicalArtifactErrorV1::Interrupted(
+            crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+        ) => RetrievalPortError::BudgetExceeded,
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
         CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
@@ -1417,6 +1422,12 @@ fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortEr
 
 fn map_sealed_page_source_error(error: CodeIndexProductionErrorV1) -> RetrievalPortError {
     match error {
+        CodeIndexProductionErrorV1::Interrupted(
+            crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+        ) => RetrievalPortError::Cancelled,
+        CodeIndexProductionErrorV1::Interrupted(
+            crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+        ) => RetrievalPortError::BudgetExceeded,
         CodeIndexProductionErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
         error => RetrievalPortError::AuthorityUnavailable(error.to_string()),
     }
