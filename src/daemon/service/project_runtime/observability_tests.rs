@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tracedecay_application::{
@@ -568,6 +569,196 @@ async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
 }
 
 #[tokio::test]
+async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let (_project, project_id, database) = runtime("observability-retiring-shutdown").await;
+    let root = PathBuf::from("/project/observability-retiring-shutdown");
+    let linked_root = PathBuf::from("/project/observability-retiring-shutdown-linked");
+    let service = DaemonInvocationService::default();
+    let producer = service
+        .mount_observability_producer(
+            root.clone(),
+            database.clone(),
+            project_id.clone(),
+            digest('3'),
+            digest('4'),
+        )
+        .await
+        .expect("first producer");
+    let blocker = database
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    producer
+        .try_emit(envelope(&project_id, "retiring:blocked"))
+        .expect("enqueue blocked event");
+
+    let lsp_registry = Arc::new(tokio::sync::Mutex::new(
+        tracedecay_lsp::LspSessionRegistry::default(),
+    ));
+    let profile_id = database.binding().shard_id.profile_id.clone();
+    let quiescing_service = service.clone();
+    let quiescing_lsp = Arc::clone(&lsp_registry);
+    let quiescing_project = project_id.clone();
+    let quiescing_root = root.clone();
+    let quiescence = tokio::spawn(async move {
+        quiescing_service
+            .quiesce_project(
+                &quiescing_lsp,
+                &profile_id,
+                &quiescing_project,
+                &BTreeSet::from([quiescing_root]),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        let mut probe = 0_u64;
+        loop {
+            match producer.try_emit(envelope(&project_id, &format!("retiring:probe:{probe}"))) {
+                Err("observability_producer_closed") => break,
+                Err(error) => panic!("unexpected producer state: {error}"),
+                Ok(_) => {
+                    probe += 1;
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        }
+    })
+    .await
+    .expect("last-alias shutdown reaches the producer");
+
+    let retiring = match service
+        .mount_observability_producer(
+            linked_root.clone(),
+            database.clone(),
+            project_id.clone(),
+            digest('3'),
+            digest('5'),
+        )
+        .await
+    {
+        Ok(_) => panic!("retiring store must refuse a replacement owner"),
+        Err(error) => error,
+    };
+    assert!(
+        retiring
+            .to_string()
+            .contains("store_observability_retiring"),
+        "unexpected retiring result: {retiring}"
+    );
+
+    blocker.commit().await.expect("release registered writer");
+    let quiescence = tokio::time::timeout(Duration::from_secs(3), quiescence)
+        .await
+        .expect("quiescence completes")
+        .expect("quiescence task")
+        .expect("clean project quiescence");
+    drop(quiescence);
+    service
+        .mount_observability_producer(linked_root, database, project_id, digest('3'), digest('5'))
+        .await
+        .expect("one replacement mounts after retirement");
+    service.expire_all().await;
+}
+
+#[tokio::test]
+async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let (_project, project_id, database) = runtime("observability-retiring-drop").await;
+    let registry = StoreObservabilityRegistryV1::default();
+    let producer = BoundedObservabilityProducerV1::start(
+        database.clone(),
+        ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: project_id.as_str().to_owned(),
+            process_boot_id: "daemon:retiring-drop".to_owned(),
+            producer_revision: "producer.v1".to_owned(),
+            configuration_revision: digest('6').as_str().to_owned(),
+            policy_revision: digest('7').as_str().to_owned(),
+        },
+        1,
+    )
+    .expect("producer");
+    let registered = registry
+        .acquire_or_start::<&'static str>(
+            &database,
+            |_| false,
+            ObservabilityProducerIdentityV1::clone,
+            || "unexpected incumbent store producer",
+            || Ok(producer),
+            1,
+            |error| error,
+        )
+        .expect("registered observability producer");
+    let blocker = database
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    registered
+        .producer()
+        .try_emit(envelope(&project_id, "drop:blocked"))
+        .expect("enqueue blocked event");
+    drop(registered);
+
+    let retiring = registry.acquire_or_start::<&'static str>(
+        &database,
+        |_| true,
+        ObservabilityProducerIdentityV1::clone,
+        || "unexpected incumbent refusal",
+        || {
+            BoundedObservabilityProducerV1::start(
+                database.clone(),
+                ObservabilityProducerIdentityV1 {
+                    authorized_scope_ref: project_id.as_str().to_owned(),
+                    process_boot_id: "daemon:retiring-drop-overlap".to_owned(),
+                    producer_revision: "producer.v1".to_owned(),
+                    configuration_revision: digest('6').as_str().to_owned(),
+                    policy_revision: digest('7').as_str().to_owned(),
+                },
+                1,
+            )
+        },
+        1,
+        |error| error,
+    );
+    assert!(matches!(retiring, Err("store_observability_retiring")));
+    blocker.commit().await.expect("release registered writer");
+
+    let replacement = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let attempt = registry.acquire_or_start::<&'static str>(
+                &database,
+                |_| true,
+                ObservabilityProducerIdentityV1::clone,
+                || "unexpected incumbent refusal",
+                || {
+                    BoundedObservabilityProducerV1::start(
+                        database.clone(),
+                        ObservabilityProducerIdentityV1 {
+                            authorized_scope_ref: project_id.as_str().to_owned(),
+                            process_boot_id: "daemon:retiring-drop-replacement".to_owned(),
+                            producer_revision: "producer.v1".to_owned(),
+                            configuration_revision: digest('6').as_str().to_owned(),
+                            policy_revision: digest('7').as_str().to_owned(),
+                        },
+                        1,
+                    )
+                },
+                1,
+                |error| error,
+            );
+            match attempt {
+                Ok(replacement) => break replacement,
+                Err("store_observability_retiring") => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected replacement result: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("dropped owner retirement completes");
+    replacement.shutdown().await.expect("replacement shutdown");
+}
+
+#[tokio::test]
 async fn registered_shutdown_reports_a_blocked_producer_flush() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database) = runtime("observability-shutdown-failure").await;
@@ -587,7 +778,8 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
         },
     )
     .expect("producer");
-    let registered = StoreObservabilityRegistryV1::default()
+    let registry = StoreObservabilityRegistryV1::default();
+    let registered = registry
         .acquire_or_start::<&'static str>(
             &database,
             |_| false,
@@ -619,4 +811,30 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
             .contains("observability_persistence_deadline"),
         "unexpected shutdown error: {error}"
     );
+    let start_called = Arc::new(AtomicBool::new(false));
+    let observed_start = Arc::clone(&start_called);
+    let failed = registry.acquire_or_start::<&'static str>(
+        &database,
+        |_| true,
+        ObservabilityProducerIdentityV1::clone,
+        || "unexpected incumbent refusal",
+        || {
+            observed_start.store(true, Ordering::Release);
+            BoundedObservabilityProducerV1::start(
+                database.clone(),
+                ObservabilityProducerIdentityV1 {
+                    authorized_scope_ref: project_id.as_str().to_owned(),
+                    process_boot_id: "daemon:shutdown-failure-replacement".to_owned(),
+                    producer_revision: "producer.v1".to_owned(),
+                    configuration_revision: digest('e').as_str().to_owned(),
+                    policy_revision: digest('f').as_str().to_owned(),
+                },
+                1,
+            )
+        },
+        1,
+        |error| error,
+    );
+    assert!(matches!(failed, Err("store_observability_shutdown_failed")));
+    assert!(!start_called.load(Ordering::Acquire));
 }
