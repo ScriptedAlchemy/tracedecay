@@ -14,6 +14,7 @@ pub mod managed_skill_format;
 mod managed_skill_model;
 mod managed_skill_validation;
 mod ports;
+pub mod run_labels;
 pub mod skill_frontmatter;
 pub mod text;
 
