@@ -1,17 +1,19 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use roaring::RoaringBitmap;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkId, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1,
-    FixedPointScore, LogicalEvidenceId, RetrieverBatch, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, ScoreDomainId, SourceOccurrenceId,
+    FixedPointScore, LogicalEvidenceId, ManifestDigest, RetrieverBatch, RetrieverCoverage,
+    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId,
 };
 
 use super::builder::compute_section_digests;
@@ -22,6 +24,7 @@ use super::format::{
 };
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, query_ngrams};
 use super::{
+    ARTIFACT_SQLITE_CACHE_BYTES, ARTIFACT_SQLITE_CACHE_FLOOR_BYTES,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1, checkpoint,
     sqlite_corrupt, sqlite_error,
 };
@@ -68,6 +71,81 @@ impl CodeLexicalArtifactReaderV1 {
         cache_budget_bytes: usize,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         Self::open_with_control(path, expected, cache_budget_bytes, &NeverInterrupted)
+    }
+
+    /// Open a published artifact whose trust anchor is its content address:
+    /// the durable head names the artifact file's size and SHA-256 digest,
+    /// the embedded receipt is decoded only after the whole file matches
+    /// that digest, and the standard receipt-bound verification then runs
+    /// unchanged. This is the reopen path for a durable text head that
+    /// survived a daemon restart.
+    pub fn open_content_addressed(
+        path: impl AsRef<Path>,
+        expected_file_digest: &ManifestDigest,
+        expected_file_size_bytes: u64,
+        cache_budget_bytes: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        checkpoint(control)?;
+        let path = path.as_ref();
+        let file_size = path
+            .metadata()
+            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?
+            .len();
+        if file_size != expected_file_size_bytes {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
+                "artifact file has {file_size} bytes; the durable head names {expected_file_size_bytes}"
+            )));
+        }
+        let mut file = std::fs::File::open(path)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 1 << 16];
+        loop {
+            checkpoint(control)?;
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let digest = ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        if &digest != expected_file_digest {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "artifact file bytes do not match the durable head digest".to_owned(),
+            ));
+        }
+        let receipt = {
+            let connection = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(sqlite_error)?;
+            connection
+                .pragma_update(None, "query_only", true)
+                .map_err(sqlite_error)?;
+            let receipt_bytes: Vec<u8> = connection
+                .query_row(
+                    "SELECT receipt FROM artifact_state WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite_corrupt)?;
+            decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "content-addressed lexical artifact has no finalized receipt".to_owned(),
+                )
+            })?
+        };
+        if receipt.file_size_bytes() != expected_file_size_bytes {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "embedded receipt disagrees with the durable head file size".to_owned(),
+            ));
+        }
+        Self::open_with_control(path, &receipt, cache_budget_bytes, control)
     }
 
     pub fn open_with_control(
@@ -119,24 +197,26 @@ impl CodeLexicalArtifactReaderV1 {
         let metadata: super::super::CodeLexicalProjectionMetadataV1 =
             serde_json::from_slice(&stored_metadata_bytes)
                 .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        // Kernel SQLite window: no mmap grant, page cache clamped to
+        // [2, 64] MiB. The caller budget covers the retained metadata copy
+        // plus the cache actually granted; nothing else is claimed.
         let sqlite_budget = cache_budget_bytes - stored_metadata_bytes.len();
-        let page_cache_bytes = sqlite_budget / 4;
-        let mmap_bytes = sqlite_budget - page_cache_bytes;
+        if sqlite_budget < ARTIFACT_SQLITE_CACHE_FLOOR_BYTES {
+            return Err(CodeLexicalArtifactErrorV1::Contract(format!(
+                "lexical artifact reader budget leaves {sqlite_budget} bytes, under the {ARTIFACT_SQLITE_CACHE_FLOOR_BYTES}-byte kernel page-cache floor"
+            )));
+        }
+        let page_cache_bytes = sqlite_budget.min(ARTIFACT_SQLITE_CACHE_BYTES);
         connection
             .pragma_update(
                 None,
                 "cache_size",
-                -i64::try_from((page_cache_bytes / 1024).max(1))
+                -i64::try_from(page_cache_bytes / 1024)
                     .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
             )
             .map_err(sqlite_error)?;
         connection
-            .pragma_update(
-                None,
-                "mmap_size",
-                i64::try_from(mmap_bytes)
-                    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
-            )
+            .pragma_update(None, "mmap_size", 0i64)
             .map_err(sqlite_error)?;
         let integrity: String = connection
             .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
@@ -204,11 +284,12 @@ impl CodeLexicalArtifactReaderV1 {
             ));
         }
         checkpoint(control)?;
+        let retained_owned_bytes = stored_metadata_bytes.len().saturating_add(page_cache_bytes);
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             metadata,
             receipt: stored,
-            retained_owned_bytes: cache_budget_bytes,
+            retained_owned_bytes,
         })
     }
 
