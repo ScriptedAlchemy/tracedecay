@@ -62,12 +62,12 @@ if [[ -z "$release_version" ]]; then
     echo "release drift detected: no published GitHub release v$local_version" >&2
     exit 1
   fi
-  release_version="$(python3 - "$local_version" "$expected_prerelease" "$release_response" <<'PY'
+  release_version="$(python3 -c '
 import json
 import sys
 
-local_version, expected_prerelease, payload = sys.argv[1:]
-release = json.loads(payload)
+local_version, expected_prerelease = sys.argv[1:]
+release = json.load(sys.stdin)
 tag = release.get("tag_name")
 if not isinstance(tag, str) or not tag:
     raise SystemExit("GitHub release response has no tag_name")
@@ -77,8 +77,7 @@ if expected_prerelease == "true":
     if release.get("draft") is not False or release.get("prerelease") is not True:
         raise SystemExit(f"GitHub prerelease v{local_version} is not published")
 print(tag)
-PY
-)"
+' "$local_version" "$expected_prerelease" <<<"$release_response")"
 fi
 
 release_version="${release_version#v}"

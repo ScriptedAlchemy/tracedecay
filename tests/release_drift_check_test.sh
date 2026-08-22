@@ -42,6 +42,18 @@ case "$*" in
       stable)
         printf '%s\n' '{"tag_name":"v0.1.0-beta.34","draft":false,"prerelease":false}'
         ;;
+      large)
+        python3 - <<'PY'
+import json
+
+print(json.dumps({
+    "tag_name": "v0.1.0-beta.34",
+    "draft": False,
+    "prerelease": True,
+    "body": "x" * 200_000,
+}))
+PY
+        ;;
       published)
         printf '%s\n' '{"tag_name":"v0.1.0-beta.34","draft":false,"prerelease":true}'
         ;;
@@ -63,6 +75,12 @@ prerelease_repo="$(write_repo 0.1.0-beta.34)"
 gate_run env PATH="$fake_bin:$PATH" "$SCRIPT" --repo "$prerelease_repo"
 gate_expect_success "published prerelease lookup"
 gate_output_contains "published prerelease lookup" \
+  "release versions are aligned: 0.1.0-beta.34"
+
+gate_run env FAKE_RELEASE_STATE=large PATH="$fake_bin:$PATH" \
+  "$SCRIPT" --repo "$prerelease_repo"
+gate_expect_success "published prerelease with large metadata"
+gate_output_contains "published prerelease with large metadata" \
   "release versions are aligned: 0.1.0-beta.34"
 
 gate_run env FAKE_RELEASE_STATE=draft PATH="$fake_bin:$PATH" \
