@@ -14,7 +14,10 @@ mod format;
 mod postings;
 mod reader;
 
-pub use builder::{CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1};
+pub use builder::{
+    CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1,
+    CodeLexicalArtifactFinalizationStepV1,
+};
 pub use format::{
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactSectionDigestV1,
     CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1,
@@ -27,12 +30,11 @@ pub use reader::{CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1};
 /// The enforced ledger charges, as if simultaneous: the SQLite page-cache
 /// authority granted to the staging connection, the builder-retained
 /// projection metadata (identity and logical-path capacities), the sealed
-/// page's retained owned bytes, and the measured per-chunk/per-import
-/// transient peak — the cloned chunk, the projected row, the field/token
-/// vectors and per-field frequency map at `Vec`/`String` capacity
-/// granularity, the row and import JSON serialization buffers, and the
-/// pre-compaction n-gram scratch. A page whose charge exceeds the budget is
-/// refused before any staging mutation and before the source advances.
+/// page's retained owned bytes, and a conservative arithmetic per-chunk/
+/// per-import transient upper bound — the cloned chunk, projected row,
+/// field/token vectors and frequency map, serialization buffers, and
+/// n-gram scratch. A page whose charge exceeds the budget is refused before
+/// any preflight allocation, staging mutation, or source advance.
 ///
 /// Explicitly outside the claim (the narrowed part): SQLite's `cache_size`
 /// is a target the engine may transiently exceed, per-statement and
@@ -66,6 +68,10 @@ pub enum CodeLexicalArtifactErrorV1 {
     Incompatible(String),
     #[error("lexical artifact I/O is unavailable: {0}")]
     Io(String),
+    #[error("lexical artifact authority is missing: {0}")]
+    Missing(String),
+    #[error("lexical artifact reservation is unavailable: {0}")]
+    Unreserved(String),
     #[error("lexical artifact operation was interrupted: {0:?}")]
     Interrupted(CodeIndexInterruptionV1),
     #[error("lexical artifact contract violation: {0}")]
@@ -103,8 +109,8 @@ fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
 /// no mmap grant, page cache at the kernel's 64 MiB ceiling, and
 /// `synchronous = NORMAL`. The single deliberate exception is
 /// `journal_mode = DELETE`: a sealed artifact is one content-addressed file,
-/// and a WAL sidecar would fall outside its digest; the finalization replay
-/// re-verifies every derived row, so rollback-journal durability suffices.
+/// and a WAL sidecar would fall outside its digest; bounded finalization
+/// persists its own verified progress, so rollback-journal durability suffices.
 fn open_builder_connection(
     path: &Path,
 ) -> Result<rusqlite::Connection, CodeLexicalArtifactErrorV1> {

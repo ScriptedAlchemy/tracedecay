@@ -75,11 +75,6 @@ pub enum StoreShardKind {
     ProjectSessions,
     /// A code-graph shard for one worktree, branch, or immutable snapshot.
     Code,
-    /// One sealed lexical text artifact (`code-text-artifacts-v1/`): an
-    /// immutable, content-addressed `SQLite` file derived entirely from a
-    /// sealed code-index generation. Not producible from a
-    /// [`StoreShardScopeV1`]; publication names it directly.
-    CodeTextArtifact,
 }
 
 impl From<&StoreShardScopeV1> for StoreShardKind {
@@ -137,7 +132,7 @@ pub const fn shard_kind_durability_class(kind: StoreShardKind) -> StoreDurabilit
         StoreShardKind::ProfileSessions | StoreShardKind::ProjectSessions => {
             StoreDurabilityClass::Recoverable
         }
-        StoreShardKind::Code | StoreShardKind::CodeTextArtifact => StoreDurabilityClass::Derived,
+        StoreShardKind::Code => StoreDurabilityClass::Derived,
     }
 }
 
@@ -157,11 +152,7 @@ impl StoreShardKind {
             // creates in every sessions store.
             | Self::ProfileSessions
             | Self::ProjectSessions => true,
-            Self::Profile
-            | Self::ProfileMemory
-            | Self::RemoteNode
-            | Self::Code
-            | Self::CodeTextArtifact => false,
+            Self::Profile | Self::ProfileMemory | Self::RemoteNode | Self::Code => false,
         }
     }
 }
@@ -291,16 +282,6 @@ mod tests {
             shard_kind_durability_class(StoreShardKind::Code),
             StoreDurabilityClass::Derived
         );
-    }
-
-    #[test]
-    fn code_text_artifacts_are_derived_single_class_and_droppable() {
-        assert_eq!(
-            shard_kind_durability_class(StoreShardKind::CodeTextArtifact),
-            StoreDurabilityClass::Derived
-        );
-        assert!(!StoreShardKind::CodeTextArtifact.mixes_durability_classes());
-        assert!(whole_store_may_be_dropped(StoreShardKind::CodeTextArtifact));
     }
 
     #[test]
