@@ -1327,7 +1327,8 @@ pub fn execute_code_generation_retention_cancellable(
     })
 }
 
-pub fn recover_code_generation_retention(
+#[cfg(test)]
+fn recover_code_generation_retention(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     graph_replay_pool_root: Option<&Path>,
@@ -1344,7 +1345,7 @@ pub fn recover_code_generation_retention(
 /// a successful maintenance pass. Recovery is journaled, so a cancellation
 /// before either transaction family starts leaves the durable journal for the
 /// next attempt rather than clearing partial evidence.
-pub fn recover_code_generation_retention_cancellable(
+fn recover_code_generation_retention_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     graph_replay_pool_root: Option<&Path>,
@@ -1390,7 +1391,7 @@ pub fn run_code_generation_retention(
 /// Plan, recover, and apply with one cancellation authority. The old wrapper
 /// preserves current callers while daemon maintenance is integrated with this
 /// control boundary.
-pub fn run_code_generation_retention_cancellable(
+fn run_code_generation_retention_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     rollback_floor: usize,
