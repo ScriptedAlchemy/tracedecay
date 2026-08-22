@@ -308,7 +308,13 @@ fn pin_existing_replay_seal(
     if !staged_identity_matches(destination, &file, &fingerprint)? {
         return Err(GraphDbError::Conflict);
     }
-    verify_seal_file_digest(&mut file, expected_digest, check)?;
+    // The stage/publish journey installs with no-clobber semantics: an exact
+    // seal is an idempotent replay, while a foreign destination is preserved
+    // and rejected as a conflict rather than reported as pool corruption.
+    match verify_seal_file_digest(&mut file, expected_digest, check)? {
+        SealDigestOutcome::Verified => {}
+        SealDigestOutcome::Mismatch => return Err(GraphDbError::Conflict),
+    }
     if !staged_identity_matches(destination, &file, &fingerprint)? {
         return Err(GraphDbError::Conflict);
     }
@@ -590,14 +596,27 @@ pub(super) fn verify_seal_digest(
 ) -> Result<(), GraphDbError> {
     let mut file =
         std::fs::File::open(path).map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-    verify_seal_file_digest(&mut file, expected, check)
+    match verify_seal_file_digest(&mut file, expected, check)? {
+        SealDigestOutcome::Verified => Ok(()),
+        SealDigestOutcome::Mismatch => Err(GraphDbError::Corrupt {
+            message: "project graph replay seal digest does not match its filename".to_owned(),
+        }),
+    }
+}
+
+/// Whether a seal's bytes hash to the digest its filename claims. A mismatch
+/// is a fact about the file, not an error: read paths report it as pool
+/// corruption while publish treats the file as a preserved foreign occupant.
+enum SealDigestOutcome {
+    Verified,
+    Mismatch,
 }
 
 fn verify_seal_file_digest(
     file: &mut File,
     expected: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<(), GraphDbError> {
+) -> Result<SealDigestOutcome, GraphDbError> {
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
@@ -614,11 +633,9 @@ fn verify_seal_file_digest(
     }
     check()?;
     if hex::encode(digest.finalize()) != expected {
-        return Err(GraphDbError::Corrupt {
-            message: "project graph replay seal digest does not match its filename".to_owned(),
-        });
+        return Ok(SealDigestOutcome::Mismatch);
     }
-    Ok(())
+    Ok(SealDigestOutcome::Verified)
 }
 
 #[cfg(test)]
