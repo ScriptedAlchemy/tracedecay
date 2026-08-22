@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::{Value, json};
+use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 
 use super::super::managed_skills::{
     ManagedSkill, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
@@ -172,6 +173,9 @@ pub(super) fn applied_consolidation_record(
         "application_status": "applied",
         "resulting_state": "archived",
         "archived_skill_id": applied_source.metadata.id,
+        // Canonical typed removal-tombstone label; consumers must key on this
+        // constant, not on the free-form proposal reason above.
+        "tombstone_label": SKILL_OVERLAP_REMOVAL_TOMBSTONE,
     });
     if let Some(object) = record.as_object_mut() {
         if let Some(merge) = merge {
@@ -500,6 +504,55 @@ mod tests {
             assert_ok(skill_proposal_action(&json!({"action": "archive"}))),
             SkillProposalAction::Archive
         );
+    }
+
+    #[test]
+    fn applied_consolidation_records_carry_the_canonical_tombstone_label() {
+        let skills = consolidation_fixture();
+        let archive_record = applied_consolidation_record(
+            SkillProposalAction::Archive,
+            &json!({
+                "action": "archive",
+                "id": "workflow-a",
+                "base_checksum": checksum(&skills, "workflow-a"),
+                "reason": "unused overlap"
+            }),
+            &skills["workflow-a"],
+            &checksum(&skills, "workflow-a"),
+            None,
+        );
+        let merge = assert_ok(skill_merge_from_proposal(
+            &json!({
+                "action": "merge",
+                "id": "workflow-a",
+                "base_checksum": checksum(&skills, "workflow-a"),
+                "source_skill_id": "workflow-b",
+                "source_base_checksum": checksum(&skills, "workflow-b"),
+                "reason": "duplicate guidance"
+            }),
+            &skills,
+        ));
+        let merge_record = applied_consolidation_record(
+            SkillProposalAction::Merge,
+            &json!({"reason": "duplicate guidance"}),
+            &skills["workflow-b"],
+            &checksum(&skills, "workflow-b"),
+            Some(&merge),
+        );
+
+        for (action, record) in [("archive", &archive_record), ("merge", &merge_record)] {
+            assert_eq!(
+                record["tombstone_label"],
+                json!(SKILL_OVERLAP_REMOVAL_TOMBSTONE),
+                "the applied {action} consolidation record must carry the canonical \
+                 typed removal-tombstone label"
+            );
+            assert_ne!(
+                record["tombstone_label"], record["reason"],
+                "the {action} record's tombstone label must be the typed constant, \
+                 not the free-form proposal reason"
+            );
+        }
     }
 
     #[tokio::test]
