@@ -23,6 +23,9 @@ use super::managed_skill_validation::{
 #[cfg(test)]
 #[derive(Clone)]
 pub(super) struct PostCommitUsageSyncTestGate {
+    // Scopes the gate to one test's skill store so concurrent tests touching
+    // other stores neither trip the gate nor wake its owner spuriously.
+    profile_root: PathBuf,
     entered: std::sync::Arc<tokio::sync::Notify>,
     release: std::sync::Arc<tokio::sync::Notify>,
 }
@@ -59,11 +62,14 @@ impl Drop for PostCommitUsageSyncTestGuard {
 }
 
 #[cfg(test)]
-pub(super) fn install_post_commit_usage_sync_test_gate() -> PostCommitUsageSyncTestGuard {
+pub(super) fn install_post_commit_usage_sync_test_gate(
+    profile_root: &Path,
+) -> PostCommitUsageSyncTestGuard {
     let serial = POST_COMMIT_USAGE_SYNC_TEST_SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let gate = PostCommitUsageSyncTestGate {
+        profile_root: profile_root.to_path_buf(),
         entered: std::sync::Arc::new(tokio::sync::Notify::new()),
         release: std::sync::Arc::new(tokio::sync::Notify::new()),
     };
@@ -79,12 +85,14 @@ pub(super) fn install_post_commit_usage_sync_test_gate() -> PostCommitUsageSyncT
 }
 
 #[cfg(test)]
-async fn wait_for_post_commit_usage_sync_test_gate() {
+async fn wait_for_post_commit_usage_sync_test_gate(profile_root: &Path) {
     let gate = POST_COMMIT_USAGE_SYNC_TEST_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    if let Some(gate) = gate {
+    if let Some(gate) = gate
+        && gate.profile_root == profile_root
+    {
         gate.entered.notify_one();
         gate.release.notified().await;
     }
@@ -414,7 +422,7 @@ pub async fn apply_managed_skill_consolidation(
     persist_skill_transaction_unlocked(profile_root, &revisions)?;
     drop(lock);
     #[cfg(test)]
-    wait_for_post_commit_usage_sync_test_gate().await;
+    wait_for_post_commit_usage_sync_test_gate(profile_root).await;
     for skill in &revisions {
         if let Err(error) = super::skill_usage::sync_skill_usage_metadata(profile_root, skill).await
         {
@@ -773,7 +781,7 @@ fn apply_managed_skill_update_fields(
 
 async fn record_skill_patch_best_effort(profile_root: &Path, skill: &ManagedSkill, target: &str) {
     #[cfg(test)]
-    wait_for_post_commit_usage_sync_test_gate().await;
+    wait_for_post_commit_usage_sync_test_gate(profile_root).await;
     if let Err(error) = super::skill_usage::record_skill_usage_event(
         profile_root,
         super::skill_usage::SkillUsageEvent {

@@ -791,7 +791,7 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let archive = skill_archive_from_proposal(&proposal, &skills).unwrap();
-        let gate = install_post_commit_usage_sync_test_gate();
+        let gate = install_post_commit_usage_sync_test_gate(profile.path());
         let profile_root = profile.path().to_path_buf();
         let archive_for_task = archive.clone();
         let task =
@@ -835,7 +835,7 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let merge = skill_merge_from_proposal(&proposal, &skills).unwrap();
-        let gate = install_post_commit_usage_sync_test_gate();
+        let gate = install_post_commit_usage_sync_test_gate(profile.path());
         let profile_root = profile.path().to_path_buf();
         let merge_for_task = merge.clone();
         let task =
