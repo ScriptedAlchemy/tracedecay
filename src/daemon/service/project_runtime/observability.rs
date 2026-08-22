@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
+use tracedecay_application::ApplicationContractError;
 use tracedecay_usecases::observability::{
     BoundedDeliverySettlementRecorderV1, BoundedObservabilityProducerV1,
     DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1, WorkOwnerObservationRecoveryV1,
@@ -10,7 +11,7 @@ use tracedecay_usecases::observability::{
 ///
 /// The producer, the delivery settlement recorder, and Work owner-observation
 /// recovery all drain and settle against the registered store itself, so
-/// exactly one of each runs per registered store client no matter how many
+/// exactly one of each runs per registered store authority no matter how many
 /// project roots (linked worktrees) mount observability for that store.
 struct StoreObservabilityCoreV1 {
     database: crate::global_db::RegisteredGlobalDbLeaseV1,
@@ -87,9 +88,20 @@ fn same_registered_store_authority(
         && incumbent.verified_locator() == candidate.verified_locator()
 }
 
+enum StoreObservabilityStateV1 {
+    Active {
+        core: Arc<StoreObservabilityCoreV1>,
+        aliases: usize,
+    },
+    Stopping {
+        core: Arc<StoreObservabilityCoreV1>,
+    },
+    Failed,
+}
+
 struct StoreObservabilityEntryV1 {
-    core: Arc<StoreObservabilityCoreV1>,
-    aliases: usize,
+    database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    state: StoreObservabilityStateV1,
 }
 
 /// Live observability owners keyed by exact registered-store authority.
@@ -104,10 +116,10 @@ pub(crate) struct StoreObservabilityRegistryV1 {
 }
 
 impl StoreObservabilityRegistryV1 {
-    fn lock_entries(&self) -> MutexGuard<'_, Vec<StoreObservabilityEntryV1>> {
+    fn lock_entries(&self) -> Result<MutexGuard<'_, Vec<StoreObservabilityEntryV1>>, &'static str> {
         self.entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map_err(|_| "store_observability_registry_lock_poisoned")
     }
 
     /// Attach an alias to the incumbent owners of this exact registered
@@ -121,39 +133,130 @@ impl StoreObservabilityRegistryV1 {
         refused: impl FnOnce() -> E,
         start_producer: impl FnOnce() -> Result<BoundedObservabilityProducerV1, E>,
         delivery_capacity: usize,
-        core_start_failed: impl FnOnce(&'static str) -> E,
+        unavailable: impl Fn(&'static str) -> E,
     ) -> Result<RegisteredObservabilityProducerV1, E> {
-        let mut entries = self.lock_entries();
+        let mut entries = self.lock_entries().map_err(&unavailable)?;
         if let Some(entry) = entries
             .iter_mut()
-            .find(|entry| same_registered_store_authority(&entry.core.database, database))
+            .find(|entry| same_registered_store_authority(&entry.database, database))
         {
-            if !accepts_incumbent(entry.core.producer.identity()) {
-                return Err(refused());
+            match &mut entry.state {
+                StoreObservabilityStateV1::Active { core, aliases } => {
+                    if !accepts_incumbent(core.producer.identity()) {
+                        return Err(refused());
+                    }
+                    let mount_identity = alias_identity(core.producer.identity());
+                    *aliases = aliases.checked_add(1).ok_or_else(|| {
+                        unavailable("store_observability_alias_capacity_exhausted")
+                    })?;
+                    return Ok(RegisteredObservabilityProducerV1::alias(
+                        self.clone(),
+                        Arc::clone(core),
+                        mount_identity,
+                    ));
+                }
+                StoreObservabilityStateV1::Stopping { .. } => {
+                    return Err(unavailable("store_observability_retiring"));
+                }
+                StoreObservabilityStateV1::Failed => {
+                    return Err(unavailable("store_observability_shutdown_failed"));
+                }
             }
-            let mount_identity = alias_identity(entry.core.producer.identity());
-            entry.aliases += 1;
-            return Ok(RegisteredObservabilityProducerV1::alias(
-                self.clone(),
-                Arc::clone(&entry.core),
-                mount_identity,
-            ));
         }
         let producer = start_producer()?;
         let mount_identity = alias_identity(producer.identity());
         let core = Arc::new(
             StoreObservabilityCoreV1::start(database.clone(), producer, delivery_capacity)
-                .map_err(core_start_failed)?,
+                .map_err(&unavailable)?,
         );
         entries.push(StoreObservabilityEntryV1 {
-            core: Arc::clone(&core),
-            aliases: 1,
+            database: database.clone(),
+            state: StoreObservabilityStateV1::Active {
+                core: Arc::clone(&core),
+                aliases: 1,
+            },
         });
         Ok(RegisteredObservabilityProducerV1::alias(
             self.clone(),
             core,
             mount_identity,
         ))
+    }
+
+    fn begin_retirement(
+        &self,
+        core: &Arc<StoreObservabilityCoreV1>,
+    ) -> Result<bool, ApplicationContractError> {
+        let mut entries =
+            self.lock_entries()
+                .map_err(|_| ApplicationContractError::Inconsistent {
+                    field: "store_observability_registry_lock_poisoned",
+                })?;
+        let Some(entry) = entries.iter_mut().find(|entry| {
+            same_registered_store_authority(&entry.database, &core.database)
+                && matches!(
+                    &entry.state,
+                    StoreObservabilityStateV1::Active {
+                        core: incumbent,
+                        ..
+                    } if Arc::ptr_eq(incumbent, core)
+                )
+        }) else {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "store_observability_active_owner",
+            });
+        };
+        let StoreObservabilityStateV1::Active { aliases, .. } = &mut entry.state else {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "store_observability_active_owner",
+            });
+        };
+        match *aliases {
+            0 => {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "store_observability_alias_count",
+                });
+            }
+            1 => {}
+            _ => {
+                *aliases -= 1;
+                return Ok(false);
+            }
+        }
+        entry.state = StoreObservabilityStateV1::Stopping {
+            core: Arc::clone(core),
+        };
+        Ok(true)
+    }
+
+    fn finish_retirement(
+        &self,
+        core: &Arc<StoreObservabilityCoreV1>,
+        succeeded: bool,
+    ) -> Result<(), ApplicationContractError> {
+        let mut entries =
+            self.lock_entries()
+                .map_err(|_| ApplicationContractError::Inconsistent {
+                    field: "store_observability_registry_lock_poisoned",
+                })?;
+        let Some(index) = entries.iter().position(|entry| {
+            same_registered_store_authority(&entry.database, &core.database)
+                && matches!(
+                    &entry.state,
+                    StoreObservabilityStateV1::Stopping { core: incumbent }
+                        if Arc::ptr_eq(incumbent, core)
+                )
+        }) else {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "store_observability_retiring_owner",
+            });
+        };
+        if succeeded {
+            entries.remove(index);
+        } else {
+            entries[index].state = StoreObservabilityStateV1::Failed;
+        }
+        Ok(())
     }
 }
 
@@ -208,40 +311,62 @@ impl RegisteredObservabilityProducerV1 {
 
     /// Releases this alias from its store entry, reporting whether it was the
     /// last one. Idempotent: shutdown and drop release at most once.
-    fn release(&self) -> bool {
+    fn begin_retirement(&self) -> Result<bool, ApplicationContractError> {
         if self.released.swap(true, Ordering::AcqRel) {
-            return false;
+            return Ok(false);
         }
-        let mut entries = self.registry.lock_entries();
-        let Some(index) = entries
-            .iter()
-            .position(|entry| Arc::ptr_eq(&entry.core, &self.core))
-        else {
-            return false;
-        };
-        entries[index].aliases -= 1;
-        if entries[index].aliases == 0 {
-            entries.remove(index);
-            return true;
-        }
-        false
+        self.registry.begin_retirement(&self.core)
     }
 
-    pub(crate) async fn shutdown(
-        &self,
-    ) -> Result<(), tracedecay_application::ApplicationContractError> {
-        if !self.release() {
+    pub(crate) async fn shutdown(&self) -> Result<(), ApplicationContractError> {
+        if !self.begin_retirement()? {
             return Ok(());
         }
-        self.core.shutdown().await
+        let result = self.core.shutdown().await;
+        let retirement = self.registry.finish_retirement(&self.core, result.is_ok());
+        match result {
+            Ok(()) => retirement,
+            Err(error) => {
+                if let Err(retirement_error) = retirement {
+                    tracing::warn!(
+                        %retirement_error,
+                        "failed observability shutdown could not be retained"
+                    );
+                }
+                Err(error)
+            }
+        }
     }
 }
 
 impl Drop for RegisteredObservabilityProducerV1 {
     fn drop(&mut self) {
-        // An alias dropped without shutdown still releases its store entry,
-        // so a later mount starts fresh owners instead of attaching to owners
-        // nobody is left to flush.
-        self.release();
+        let is_last = match self.begin_retirement() {
+            Ok(is_last) => is_last,
+            Err(error) => {
+                tracing::warn!(%error, "observability alias release was incomplete");
+                return;
+            }
+        };
+        if !is_last {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            if let Err(error) = self.registry.finish_retirement(&self.core, false) {
+                tracing::warn!(%error, "observability owner failure could not be retained");
+            }
+            return;
+        };
+        let registry = self.registry.clone();
+        let core = Arc::clone(&self.core);
+        runtime.spawn(async move {
+            let result = core.shutdown().await;
+            if let Err(error) = &result {
+                tracing::warn!(%error, "dropped observability owner shutdown was incomplete");
+            }
+            if let Err(error) = registry.finish_retirement(&core, result.is_ok()) {
+                tracing::warn!(%error, "dropped observability retirement was incomplete");
+            }
+        });
     }
 }

@@ -131,7 +131,7 @@ impl DaemonInvocationService {
                         },
                         DAEMON_DELIVERY_SETTLEMENT_QUEUE_CAPACITY,
                         |error| TraceDecayError::Config {
-                            message: format!("project delivery settlement mount failed: {error}"),
+                            message: format!("project observability owner mount failed: {error}"),
                         },
                     )
                 },

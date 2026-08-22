@@ -455,37 +455,51 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
 
 #[tokio::test]
 async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let profile_a = tempfile::tempdir().expect("profile A");
-    let profile_b = tempfile::tempdir().expect("profile B");
+    let profile_a_dir = tempfile::tempdir().expect("profile A");
+    let profile_b_dir = tempfile::tempdir().expect("profile B");
+    let profile_a = profile_a_dir.path().join("profile");
+    let profile_b = profile_b_dir.path().join("profile");
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_a)
+        .expect("create private profile A");
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_b)
+        .expect("create private profile B");
     let project_a = tempfile::tempdir().expect("project A");
     let project_b = tempfile::tempdir().expect("project B");
     let project_id = ProjectId::new("project.shared-observability").unwrap();
-    let runtime_a = crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        profile_a.path(),
-        project_a.path(),
-        project_id.clone(),
-    )
-    .await
-    .expect("profile A runtime");
-    let runtime_b = crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        profile_b.path(),
-        project_b.path(),
-        project_id.clone(),
-    )
-    .await
-    .expect("profile B runtime");
+    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_a)
+        .expect("persist production profile identity");
+    let runtime_identity = tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1::new(
+        profile_identity.brain_id().clone(),
+        profile_identity.profile_id().clone(),
+    );
+    let runtime_a =
+        crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project_for_profile_identity(
+            &profile_a,
+            project_a.path(),
+            project_id.clone(),
+            runtime_identity.clone(),
+        )
+        .await
+        .expect("profile A runtime");
+    let runtime_b =
+        crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project_for_profile_identity(
+            &profile_b,
+            project_b.path(),
+            project_id.clone(),
+            runtime_identity,
+        )
+        .await
+        .expect("profile B runtime");
     let database_a = runtime_a
         .project_database_arc()
         .expect("profile A database");
     let database_b = runtime_b
         .project_database_arc()
         .expect("profile B database");
-    // The test-runtime resolver pins one logical brain/profile identity for
-    // every store, so the two profile stores are distinguished by exactly the
-    // registered-store authority the producer registry keys on: the verified
-    // locator and the registered client token. Logical shard ids alone must
-    // never be treated as the same authority.
+    // Both collision stores are published under one identity minted and
+    // persisted by the production profile authority. They are distinguished
+    // by the exact registered-store locator, never by a synthetic identity or
+    // an independently issued client token.
     let brain_id = database_a.binding().shard_id.brain_id.clone();
     let profile_id = database_a.binding().shard_id.profile_id.clone();
     assert_eq!(brain_id, database_b.binding().shard_id.brain_id);
