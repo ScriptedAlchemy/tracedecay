@@ -259,7 +259,7 @@ impl PersistentBenchmarkGraph {
                 &mut self.authority,
                 &publish_context,
                 &key,
-                Some(manifest),
+                Some(manifest.into()),
             )
             .expect("benchmark generation publishes and verifies");
         drop(completion);
