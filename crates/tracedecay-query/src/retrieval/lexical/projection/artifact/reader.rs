@@ -527,7 +527,7 @@ fn union_document_queries(queries: impl IntoIterator<Item = DocumentQueryV1>) ->
             continue;
         };
         if sql.is_empty() {
-            sql.push_str("SELECT document_id FROM (");
+            sql.push_str("SELECT DISTINCT document_id FROM (");
         } else {
             sql.push_str(" UNION ");
         }
@@ -1578,6 +1578,17 @@ mod tests {
         ]);
 
         assert_eq!(streamed_documents(&connection, &query), vec![1, 2, 3]);
+        assert_eq!(
+            streamed_documents(
+                &connection,
+                &union_document_queries([DocumentQueryV1::term(
+                    "subtoken".to_owned(),
+                    "render".to_owned(),
+                )]),
+            ),
+            vec![3],
+            "one source query must preserve bitmap-like candidate deduplication"
+        );
     }
 
     #[test]
