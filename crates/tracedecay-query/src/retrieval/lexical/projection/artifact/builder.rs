@@ -993,19 +993,28 @@ fn insert_exact_posting(
     Ok(())
 }
 
+/// Aggregated `source_pages` progress: page count, chunk and payload sums,
+/// import sums, then the latest dictionary digest, cumulative digest, and
+/// persisted cursor.
+type PersistedProgressRowV1 = (
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<Vec<u8>>,
+);
+
+/// One staged `source_pages` receipt row: page and cumulative digests, chunk
+/// and payload counts, import counts, dictionary digest, and cursor bytes.
+type StoredSourcePageRowV1 = (String, String, i64, i64, i64, i64, String, Vec<u8>);
+
 fn progress(
     connection: &Connection,
 ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
-    let progress: (
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        Option<String>,
-        Option<String>,
-        Option<Vec<u8>>,
-    ) = connection
+    let progress: PersistedProgressRowV1 = connection
         .query_row(
             "SELECT COUNT(*), COALESCE(SUM(chunk_count), 0), COALESCE(SUM(payload_bytes), 0), COALESCE(SUM(import_count), 0), COALESCE(SUM(import_payload_bytes), 0), (SELECT import_dictionary_digest FROM source_pages ORDER BY page_ordinal DESC LIMIT 1), (SELECT cumulative_digest FROM source_pages ORDER BY page_ordinal DESC LIMIT 1), (SELECT next_cursor FROM source_pages ORDER BY page_ordinal DESC LIMIT 1) FROM source_pages",
             [],
@@ -1073,7 +1082,7 @@ fn verify_replayed_page(
     connection: &Connection,
     page: &VerifiedSealedLexicalPageV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let stored: Option<(String, String, i64, i64, i64, i64, String, Vec<u8>)> = connection
+    let stored: Option<StoredSourcePageRowV1> = connection
         .query_row(
             "SELECT page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages WHERE page_ordinal = ?1",
             [i64::try_from(page.page_ordinal()).map_err(contract_number)?],
@@ -1183,7 +1192,7 @@ fn digest_query(
     let mut rows = statement.query([]).map_err(sqlite_error)?;
     let mut row_count = 0u64;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
-        if row_count % 4_096 == 0 {
+        if row_count.is_multiple_of(4_096) {
             checkpoint(control)?;
         }
         for column in 0..column_count {

@@ -533,6 +533,7 @@ impl VerifiedSealedLexicalSourceReceiptV1 {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // typed page-read terminal states; pages dominate reads
 pub enum VerifiedSealedLexicalPageReadV1 {
     Page(VerifiedSealedLexicalPageV1),
     Complete(VerifiedSealedLexicalSourceReceiptV1),
@@ -556,6 +557,7 @@ struct StagedSealedLexicalPageV1 {
     import_dictionary_hasher: Sha256,
 }
 
+#[allow(clippy::large_enum_variant)] // staged pages dominate this private read result
 enum StagedSealedLexicalPageReadV1 {
     Page(StagedSealedLexicalPageV1),
     Complete(VerifiedSealedLexicalSourceReceiptV1),

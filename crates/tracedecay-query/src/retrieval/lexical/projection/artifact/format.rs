@@ -195,6 +195,7 @@ pub(super) fn metadata_digest(
     manifest_digest(b"tracedecay.code-lexical-artifact-metadata.v1\0", metadata)
 }
 
+#[allow(clippy::too_many_arguments)] // one committed digest tuple, spelled once
 pub(super) fn artifact_digest(
     metadata_digest: &ManifestDigest,
     source_state_digest: &ManifestDigest,
