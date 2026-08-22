@@ -549,6 +549,18 @@ struct PendingSealedLexicalPageV1 {
     import_dictionary_hasher: Sha256,
 }
 
+struct StagedSealedLexicalPageV1 {
+    page: VerifiedSealedLexicalPageV1,
+    cursor: VerifiedSealedLexicalCursorV1,
+    cumulative_hasher: Sha256,
+    import_dictionary_hasher: Sha256,
+}
+
+enum StagedSealedLexicalPageReadV1 {
+    Page(StagedSealedLexicalPageV1),
+    Complete(VerifiedSealedLexicalSourceReceiptV1),
+}
+
 /// Seekable, bounded lexical projection source over a verified v5/v6 seal.
 ///
 /// Opening performs a streaming structural scan and verifies the exact raw
@@ -623,6 +635,42 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         &mut self,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<VerifiedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
+        match self.next_page_if(control, |_| Ok::<(), std::convert::Infallible>(()))? {
+            Ok(read) => Ok(read),
+            Err(never) => match never {},
+        }
+    }
+
+    /// Stage one verified page and advance only after caller admission.
+    ///
+    /// Source failures use the outer result. A caller rejection uses the inner
+    /// result and leaves the persisted cursor and cumulative hash authorities
+    /// unchanged, so retrying yields the same source-minted page.
+    pub fn next_page_if<E>(
+        &mut self,
+        control: &dyn CodeIndexExecutionControlV1,
+        admit: impl FnOnce(&VerifiedSealedLexicalPageV1) -> Result<(), E>,
+    ) -> Result<Result<VerifiedSealedLexicalPageReadV1, E>, CodeIndexProductionErrorV1> {
+        match self.stage_next_page(control)? {
+            StagedSealedLexicalPageReadV1::Page(staged) => {
+                if let Err(error) = admit(&staged.page) {
+                    return Ok(Err(error));
+                }
+                self.cursor = staged.cursor;
+                self.cumulative_hasher = staged.cumulative_hasher;
+                self.import_dictionary_hasher = staged.import_dictionary_hasher;
+                Ok(Ok(VerifiedSealedLexicalPageReadV1::Page(staged.page)))
+            }
+            StagedSealedLexicalPageReadV1::Complete(receipt) => {
+                Ok(Ok(VerifiedSealedLexicalPageReadV1::Complete(receipt)))
+            }
+        }
+    }
+
+    fn stage_next_page(
+        &mut self,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<StagedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
         checkpoint(control)?;
         let mut cursor = self.cursor.clone();
         let mut cumulative_hasher = self.cumulative_hasher.clone();
@@ -805,7 +853,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 import_dictionary_hasher,
             });
         }
-        Ok(VerifiedSealedLexicalPageReadV1::Complete(
+        Ok(StagedSealedLexicalPageReadV1::Complete(
             VerifiedSealedLexicalSourceReceiptV1 {
                 source_state_digest: self.source_state_digest.clone(),
                 format_revision: self.format_revision,
@@ -897,7 +945,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     fn commit_page(
         &mut self,
         pending: PendingSealedLexicalPageV1,
-    ) -> Result<VerifiedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
+    ) -> Result<StagedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
         let PendingSealedLexicalPageV1 {
             chunks,
             page_bytes,
@@ -985,10 +1033,14 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             cumulative_hasher_before: self.cumulative_hasher.clone(),
             import_dictionary_hasher_before: self.import_dictionary_hasher.clone(),
         };
-        self.cursor = cursor;
-        self.cumulative_hasher = cumulative_hasher;
-        self.import_dictionary_hasher = import_dictionary_hasher;
-        Ok(VerifiedSealedLexicalPageReadV1::Page(page))
+        Ok(StagedSealedLexicalPageReadV1::Page(
+            StagedSealedLexicalPageV1 {
+                page,
+                cursor,
+                cumulative_hasher,
+                import_dictionary_hasher,
+            },
+        ))
     }
 }
 

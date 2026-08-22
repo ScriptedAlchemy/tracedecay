@@ -21,7 +21,7 @@ use tracedecay_code_index::{
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
         CodeIndexRepositoryParseIdentityV1, SEALED_GENERATION_FORMAT_REVISION_V1,
         VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
-        sealed_generation_payload_digest,
+        VerifiedSealedLexicalPageV1, sealed_generation_payload_digest,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -1277,6 +1277,103 @@ fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files()
     expected_chunks.sort_by(|left, right| left.id.cmp(&right.id));
     assert_eq!(observed_chunks, expected_chunks);
     assert_eq!(observed_imports, generation.imports());
+}
+
+#[test]
+fn rejected_sealed_lexical_page_admission_does_not_advance_the_source() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(request("file.lexical-admission", 1_266_500), &ActiveControl)
+        .expect("generation publishes");
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+    let state_digest = id::<ManifestDigest>(
+        envelope["state_digest"]
+            .as_str()
+            .expect("state digest string"),
+    );
+    let mut source = VerifiedSealedLexicalPageSourceV1::open(
+        Cursor::new(sealed.clone()),
+        u64::try_from(sealed.len()).expect("sealed length"),
+        state_digest,
+        usize::MAX,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect("verified page source opens");
+    let cursor_before = source
+        .cursor()
+        .persisted_bytes()
+        .expect("initial cursor persists");
+    let mut rejected_page_bytes = None;
+    let rejected = source
+        .next_page_if(&ActiveControl, |page| {
+            page.verify_transition(None)
+                .expect("source-minted page verifies before admission");
+            rejected_page_bytes = Some(sealed_lexical_page_bytes(page));
+            Err::<(), _>("builder memory budget exhausted")
+        })
+        .expect("source read succeeds");
+    assert_eq!(
+        rejected.expect_err("caller admission must reject the page"),
+        "builder memory budget exhausted"
+    );
+    assert_eq!(
+        source
+            .cursor()
+            .persisted_bytes()
+            .expect("rejected cursor persists"),
+        cursor_before,
+        "caller rejection must not advance any persisted source authority"
+    );
+
+    let mut accepted_page_bytes = None;
+    let accepted = source
+        .next_page_if(&ActiveControl, |page| {
+            page.verify_transition(None)
+                .expect("retried source-minted page verifies");
+            accepted_page_bytes = Some(sealed_lexical_page_bytes(page));
+            Ok::<(), &str>(())
+        })
+        .expect("retried source read succeeds")
+        .expect("caller admits the retried page");
+    let VerifiedSealedLexicalPageReadV1::Page(page) = accepted else {
+        panic!("the first admitted read must be a page")
+    };
+    assert_eq!(rejected_page_bytes, accepted_page_bytes);
+    assert_eq!(page.next_cursor().next_page_ordinal(), 1);
+    assert_eq!(source.cursor(), page.next_cursor());
+    assert_eq!(source.cursor().emitted_chunks(), page.chunk_count());
+    assert_eq!(
+        source.cursor().emitted_payload_bytes(),
+        page.payload_bytes()
+    );
+}
+
+fn sealed_lexical_page_bytes(page: &VerifiedSealedLexicalPageV1) -> Vec<u8> {
+    let chunks = page
+        .chunks()
+        .iter()
+        .map(|chunk| chunk.chunk())
+        .collect::<Vec<_>>();
+    serde_json::to_vec(&(
+        page.page_ordinal(),
+        page.chunk_count(),
+        page.payload_bytes(),
+        page.import_count(),
+        page.import_payload_bytes(),
+        page.page_digest().as_str(),
+        page.cumulative_digest().as_str(),
+        page.next_cursor()
+            .persisted_bytes()
+            .expect("page cursor persists"),
+        chunks,
+        page.imports(),
+    ))
+    .expect("page observation serializes")
 }
 
 #[test]
