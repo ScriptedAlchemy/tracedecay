@@ -28,17 +28,72 @@ use tracedecay_store::{
 };
 
 use tracedecay_runtime_core::db::{Database, DatabaseRuntimeClientV1};
+
+/// Test-only counters over the expensive persist-path work (stored-row
+/// decode, collision classification, payload-revision probing, canonical
+/// command digesting). A re-admitted terminal identity collision must repeat
+/// none of it, and only counters observed at these exact call sites can prove
+/// that without editing the domain identity derivation.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct ObservationPersistProbeV1 {
+    pub(crate) stored_observation_reads: std::sync::atomic::AtomicU64,
+    pub(crate) collision_classifications: std::sync::atomic::AtomicU64,
+    pub(crate) payload_revision_probes: std::sync::atomic::AtomicU64,
+    pub(crate) canonical_command_digests: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(test)]
+impl ObservationPersistProbeV1 {
+    pub(crate) fn snapshot(&self) -> (u64, u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.stored_observation_reads.load(Relaxed),
+            self.collision_classifications.load(Relaxed),
+            self.payload_revision_probes.load(Relaxed),
+            self.canonical_command_digests.load(Relaxed),
+        )
+    }
+}
+
+#[cfg(test)]
+macro_rules! probe_count {
+    ($store:expr, $counter:ident) => {
+        $store
+            .persist_probe
+            .$counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! probe_count {
+    ($store:expr, $counter:ident) => {};
+}
+
 /// Observation-store adapter over the already-registered authoritative runtime.
 #[derive(Clone)]
 pub struct GlobalDbObservationStore {
     database: Database,
     runtime: DatabaseRuntimeClientV1,
+    #[cfg(test)]
+    persist_probe: Arc<ObservationPersistProbeV1>,
 }
 
 impl GlobalDbObservationStore {
     pub fn new(database: Database) -> Self {
         let runtime = database.runtime_client();
-        Self { database, runtime }
+        Self {
+            database,
+            runtime,
+            #[cfg(test)]
+            persist_probe: Arc::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persist_probe(&self) -> Arc<ObservationPersistProbeV1> {
+        Arc::clone(&self.persist_probe)
     }
 
     pub async fn converge_projection_predecessor(
@@ -57,11 +112,14 @@ impl ObservationStore for GlobalDbObservationStore {
         let observation_id = write.observation().observation_id().clone();
         let candidate = write.observation().clone();
         let candidate_cursor = write.next_cursor().clone();
+        probe_count!(self, stored_observation_reads);
         let existing = read_runtime_stored_observation(runtime, &observation_id)?;
-        let collision = existing
-            .as_ref()
-            .map(|existing| classify_observation_collision(existing.observation(), &candidate));
+        let collision = existing.as_ref().map(|existing| {
+            probe_count!(self, collision_classifications);
+            classify_observation_collision(existing.observation(), &candidate)
+        });
         let canonical_payload_revision = existing.as_ref().is_some_and(|existing| {
+            probe_count!(self, payload_revision_probes);
             is_canonical_payload_revision_replay(existing.observation(), &candidate)
         });
         if collision == Some(ObservationCollisionOutcomeV1::IdentityCollision)
@@ -184,6 +242,7 @@ impl ObservationStore for GlobalDbObservationStore {
                 existing.commit_receipt().clone(),
             ));
         }
+        probe_count!(self, canonical_command_digests);
         let idempotency_key = format!(
             "observation.{}",
             canonical_runtime_digest(&runtime_observation_command(&write))?
@@ -204,6 +263,7 @@ impl ObservationStore for GlobalDbObservationStore {
             candidate.source().session_id().as_str(),
         )
         .map_err(|(operation, detail)| runtime_storage_error(operation, detail))?;
+        probe_count!(self, stored_observation_reads);
         let stored =
             read_runtime_stored_observation(runtime, &observation_id)?.ok_or_else(|| {
                 runtime_storage_error("read committed observation", "row unavailable")
@@ -274,6 +334,7 @@ impl ObservationStore for GlobalDbObservationStore {
             "scope": advance.next_cursor().scope(),
             "coverage": advance.coverage(),
         });
+        probe_count!(self, canonical_command_digests);
         let key = format!("cursor.{}", canonical_runtime_digest(&identity)?);
         let outcome = submit_runtime_write(
             runtime,
@@ -757,6 +818,7 @@ mod tests {
             let GlobalDbObservationStore {
                 database: _,
                 runtime: _,
+                persist_probe: _,
             } = store;
         }
 
