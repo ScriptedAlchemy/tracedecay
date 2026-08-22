@@ -1185,8 +1185,8 @@ fn disk_artifact_first_finalize_rejects_self_attesting_derived_mutation() {
 }
 
 #[test]
-fn disk_artifact_rebuild_restores_canonical_artifact_state_before_return() {
-    let (fixture, pages, _) = real_verified_pages();
+fn disk_artifact_finalization_rejects_mutated_artifact_state() {
+    let (fixture, pages, source_receipt) = real_verified_pages();
     let metadata = fixture.metadata.clone();
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory
@@ -1209,8 +1209,8 @@ fn disk_artifact_rebuild_restores_canonical_artifact_state_before_return() {
     let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
     connection
         .execute(
-            "UPDATE artifact_state SET format_revision = ?1, metadata = ?2, metadata_digest = ?3 WHERE singleton = 1",
-            rusqlite::params![2u32, forged_metadata, forged_digest.as_str()],
+            "UPDATE artifact_state SET metadata = ?1, metadata_digest = ?2 WHERE singleton = 1",
+            rusqlite::params![forged_metadata, forged_digest.as_str()],
         )
         .expect("mutate structurally valid pre-seal artifact state");
     let integrity: String = connection
@@ -1219,18 +1219,10 @@ fn disk_artifact_rebuild_restores_canonical_artifact_state_before_return() {
     assert_eq!(integrity, "ok");
     drop(connection);
 
-    let mut final_source = fixture.open_source(128);
-    let verified = builder
-        .rebuild_and_finalize(&mut final_source, &control)
-        .expect("authoritative replay restores the singleton state");
-    let reader = CodeLexicalArtifactReaderV1::open_with_control(
-        &artifact_path,
-        &verified,
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        &control,
-    )
-    .expect("returned receipt must reopen immediately");
-    assert_eq!(reader.metadata(), &fixture.metadata);
+    assert!(matches!(
+        builder.advance_finalization(&source_receipt, 4_096, &control),
+        Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+    ));
 }
 
 #[test]
@@ -1673,10 +1665,9 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
     // source or duplicating rows. Their SQLite cursor is deliberately
     // durable, so retries are not required to preserve the staging file's
     // byte size.
-    for (round, exhaustion_observation) in [2usize, 4, 7, 11].into_iter().enumerate() {
-        let exhausted = BudgetExhaustedAtObservation::new(exhaustion_observation);
-        let mut replay_source = fixture.open_source(1);
-        let outcome = builder.rebuild_and_finalize(&mut replay_source, &exhausted);
+    for round in 0..4 {
+        let exhausted = BudgetExhaustedAtObservation::new(2);
+        let outcome = builder.advance_finalization(&source_receipt, usize::MAX, &exhausted);
         assert!(
             matches!(
                 outcome,
@@ -1703,13 +1694,7 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
     }
 
     // The retried activation RESUMES and seals.
-    let mut final_source = fixture.open_source(1);
-    let verified = builder
-        .rebuild_and_finalize(&mut final_source, &control)
-        .expect(
-            "bounded read work must resume and seal; activation must not terminally block on \
-         'the read port exceeded its bounded work budget'",
-        );
+    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
     let (rows, _) = staged_row_cardinality(&artifact_path);
     assert_eq!(rows, source_receipt.total_chunks());
 
@@ -2033,8 +2018,8 @@ fn sealed_page_retained_bytes_include_digest_identities() {
         );
         assert_eq!(
             page.retained_owned_bytes(),
-            payload_bytes + 6 * sha256_digest_len,
-            "page {} retained bytes must include its six digest identity strings",
+            payload_bytes + 8 * sha256_digest_len,
+            "page {} retained bytes must include its eight digest identity strings",
             page.page_ordinal()
         );
     }

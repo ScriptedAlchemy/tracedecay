@@ -177,27 +177,8 @@ impl CodeLexicalArtifactBuilderV1 {
         }
         let connection = open_builder_connection(path)?;
         require_integrity(&connection)?;
-        let (format_revision, metadata_bytes, stored_digest): (u32, Vec<u8>, String) = connection
-            .query_row(
-                "SELECT format_revision, metadata, metadata_digest FROM artifact_state WHERE singleton = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-        if format_revision != CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1 {
-            return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
-                "format revision {format_revision} is not supported"
-            )));
-        }
-        let stored_metadata: CodeLexicalProjectionMetadataV1 =
-            serde_json::from_slice(&metadata_bytes)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
         let expected_digest = metadata_digest(&expected_metadata)?;
-        if stored_metadata != expected_metadata || stored_digest != expected_digest.as_str() {
-            return Err(CodeLexicalArtifactErrorV1::Incompatible(
-                "staging metadata does not match the requested generation".to_owned(),
-            ));
-        }
+        verify_artifact_state_metadata(&connection, &expected_metadata, &expected_digest)?;
         validate_contiguous_pages(&connection)?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -316,17 +297,25 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         checkpoint(control)?;
+        verify_artifact_state_metadata(&self.connection, &self.metadata, &self.metadata_digest)?;
         let staged = verify_staged_source_receipt(&self.connection, source)?;
         if let Some(receipt) = read_receipt(&self.connection)? {
             verify_sealed_receipt_header(&receipt, &self.metadata_digest, source, &staged)?;
             return Ok(CodeLexicalArtifactFinalizationStepV1::Ready(receipt));
         }
 
+        if load_finalization_state(&self.connection)?.is_none() {
+            let transaction = self.connection.transaction().map_err(sqlite_error)?;
+            store_finalization_state(&transaction, &PersistedFinalizationStateV1::new()?)?;
+            transaction.commit().map_err(sqlite_error)?;
+        }
+
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
-        let mut state = match load_finalization_state(&transaction)? {
-            Some(state) => state,
-            None => PersistedFinalizationStateV1::new()?,
-        };
+        let mut state = load_finalization_state(&transaction)?.ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact finalization marker disappeared".to_owned(),
+            )
+        })?;
         validate_finalization_state(&state)?;
         let mut remaining_work = maximum_work;
         let section_count = u64::try_from(SECTION_NAMES.len()).map_err(contract_number)?;
@@ -885,6 +874,39 @@ impl PersistedFinalizationStateV1 {
             completed_rows: 0,
         })
     }
+}
+
+fn verify_artifact_state_metadata(
+    connection: &Connection,
+    expected_metadata: &CodeLexicalProjectionMetadataV1,
+    expected_digest: &ManifestDigest,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let (format_revision, metadata_bytes, stored_digest): (u32, Vec<u8>, String) = connection
+        .query_row(
+            "SELECT format_revision, metadata, metadata_digest FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+    if format_revision != CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1 {
+        return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
+            "format revision {format_revision} is not supported"
+        )));
+    }
+    let stored_metadata: CodeLexicalProjectionMetadataV1 = serde_json::from_slice(&metadata_bytes)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+    let actual_digest = metadata_digest(&stored_metadata)?;
+    if stored_digest != actual_digest.as_str() {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact metadata digest does not verify".to_owned(),
+        ));
+    }
+    if &stored_metadata != expected_metadata || &actual_digest != expected_digest {
+        return Err(CodeLexicalArtifactErrorV1::Incompatible(
+            "staging metadata does not match the requested generation".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn finalization_started(connection: &Connection) -> Result<bool, CodeLexicalArtifactErrorV1> {
