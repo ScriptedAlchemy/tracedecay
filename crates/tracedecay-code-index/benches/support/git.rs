@@ -250,7 +250,7 @@ impl PersistentGitGraph {
                 &mut self.authority,
                 &publish_context,
                 &key,
-                Some(manifest.into()),
+                Some(manifest),
             )
             .expect("benchmark generation publishes and verifies");
         self.latest_head = Some(commit.head);
