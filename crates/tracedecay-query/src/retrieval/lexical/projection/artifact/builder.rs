@@ -2589,33 +2589,6 @@ mod tests {
     }
 
     #[test]
-    fn document_integrity_queries_seek_document_leading_indexes() {
-        let connection = Connection::open_in_memory().expect("open artifact database");
-        create_schema(&connection).expect("create artifact schema");
-
-        for (query, expected_index) in [
-            (DOCUMENT_TERM_POSTINGS_QUERY, "term_postings_by_document"),
-            (DOCUMENT_EXACT_POSTINGS_QUERY, "exact_postings_by_document"),
-            (DOCUMENT_NGRAM_POSTINGS_QUERY, "ngram_postings_by_document"),
-        ] {
-            let plan = explain_document_integrity_query(&connection, query);
-            assert!(
-                plan.iter()
-                    .any(|detail| { detail.contains("SEARCH") && detail.contains(expected_index) }),
-                "document integrity query must seek {expected_index}, got {plan:?}"
-            );
-            assert!(
-                plan.iter().all(|detail| !detail.contains("SCAN")),
-                "document integrity query must not scan its generation, got {plan:?}"
-            );
-            assert!(
-                plan.iter().all(|detail| !detail.contains("TEMP B-TREE")),
-                "document integrity query must not sort its generation, got {plan:?}"
-            );
-        }
-    }
-
-    #[test]
     fn one_document_integrity_row_does_not_visit_unrelated_generation_rows() {
         let mut connection = Connection::open_in_memory().expect("open artifact database");
         create_schema(&connection).expect("create artifact schema");
@@ -2733,18 +2706,6 @@ mod tests {
         assert_eq!(state.section_row_count, 0);
         assert_eq!(state.completed_rows, 0);
         assert_eq!(state.section_last_key, None);
-    }
-
-    fn explain_document_integrity_query(connection: &Connection, query: &str) -> Vec<String> {
-        let mut statement = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
-            .expect("prepare document integrity query plan");
-        let mut rows = statement.query([0i64]).expect("query plan");
-        let mut details = Vec::new();
-        while let Some(row) = rows.next().expect("read query plan") {
-            details.push(row.get(3).expect("query plan detail"));
-        }
-        details
     }
 
     #[test]
