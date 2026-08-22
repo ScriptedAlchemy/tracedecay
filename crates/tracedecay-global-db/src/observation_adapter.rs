@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_application::clock::now_micros;
@@ -21,79 +22,86 @@ use tracedecay_store::{
     RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
     RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
-    RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
-    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
-    RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
-    StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
+    RuntimeReadOperationV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeReadResultV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
+    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1,
+    StoreOperationIdV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, StoredObservation,
+    StoredObservationRowV1,
 };
 
 use tracedecay_runtime_core::db::{Database, DatabaseRuntimeClientV1};
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure;
 
-/// Test-only counters over the expensive persist-path work (stored-row
-/// decode, collision classification, payload-revision probing, canonical
-/// command digesting). A re-admitted terminal identity collision must repeat
-/// none of it, and only counters observed at these exact call sites can prove
-/// that without editing the domain identity derivation.
-#[cfg(test)]
-#[derive(Debug, Default)]
-pub(crate) struct ObservationPersistProbeV1 {
-    pub(crate) stored_observation_reads: std::sync::atomic::AtomicU64,
-    pub(crate) collision_classifications: std::sync::atomic::AtomicU64,
-    pub(crate) payload_revision_probes: std::sync::atomic::AtomicU64,
-    pub(crate) canonical_command_digests: std::sync::atomic::AtomicU64,
+/// The closed dispatch boundary between this adapter and the authoritative
+/// store runtime. Every stored-record read and every runtime write the
+/// adapter performs crosses this seam, so an observer wrapped around it sees
+/// exactly the record work one persist call dispatches — the collision tests
+/// prove the terminal-refusal fast path repeats no stored-row read (and thus
+/// no decode, classification, or revision probing) and no submit (and thus no
+/// canonical command digest) by counting here.
+pub(crate) trait ObservationRuntimeDispatch: Clone + Send + Sync {
+    fn binding(&self) -> &StoreRuntimeBindingV1;
+
+    fn dispatch_read(
+        &self,
+        request: RuntimeReadRequestV1,
+        probe: &dyn RuntimeRequestProbeV1,
+    ) -> Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure>;
+
+    fn dispatch_submit(
+        &self,
+        request: RuntimeSubmitRequestV1,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+    ) -> impl Future<Output = Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure>> + Send;
 }
 
-#[cfg(test)]
-impl ObservationPersistProbeV1 {
-    pub(crate) fn snapshot(&self) -> (u64, u64, u64, u64) {
-        use std::sync::atomic::Ordering::Relaxed;
-        (
-            self.stored_observation_reads.load(Relaxed),
-            self.collision_classifications.load(Relaxed),
-            self.payload_revision_probes.load(Relaxed),
-            self.canonical_command_digests.load(Relaxed),
-        )
+impl ObservationRuntimeDispatch for DatabaseRuntimeClientV1 {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        DatabaseRuntimeClientV1::binding(self)
+    }
+
+    fn dispatch_read(
+        &self,
+        request: RuntimeReadRequestV1,
+        probe: &dyn RuntimeRequestProbeV1,
+    ) -> Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
+        DatabaseRuntimeClientV1::dispatch_read(self, request, probe)
+    }
+
+    async fn dispatch_submit(
+        &self,
+        request: RuntimeSubmitRequestV1,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+    ) -> Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure> {
+        DatabaseRuntimeClientV1::dispatch_submit(self, request, probe).await
     }
 }
 
-#[cfg(test)]
-macro_rules! probe_count {
-    ($store:expr, $counter:ident) => {
-        $store
-            .persist_probe
-            .$counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    };
-}
-
-#[cfg(not(test))]
-macro_rules! probe_count {
-    ($store:expr, $counter:ident) => {};
-}
-
 /// Observation-store adapter over the already-registered authoritative runtime.
+///
+/// The runtime parameter exists so tests can observe the dispatch seam;
+/// production only ever constructs the default [`DatabaseRuntimeClientV1`]
+/// via [`GlobalDbObservationStore::new`], and the struct shape is identical
+/// in every build.
 #[derive(Clone)]
-pub struct GlobalDbObservationStore {
+pub struct GlobalDbObservationStore<R = DatabaseRuntimeClientV1> {
     database: Database,
-    runtime: DatabaseRuntimeClientV1,
-    #[cfg(test)]
-    persist_probe: Arc<ObservationPersistProbeV1>,
+    runtime: R,
 }
 
 impl GlobalDbObservationStore {
     pub fn new(database: Database) -> Self {
         let runtime = database.runtime_client();
-        Self {
-            database,
-            runtime,
-            #[cfg(test)]
-            persist_probe: Arc::default(),
-        }
+        Self { database, runtime }
     }
+}
 
+impl<R> GlobalDbObservationStore<R> {
+    /// Binds the adapter to an explicit runtime dispatch seam so a test can
+    /// count the record work a persist path performs.
     #[cfg(test)]
-    pub(crate) fn persist_probe(&self) -> Arc<ObservationPersistProbeV1> {
-        Arc::clone(&self.persist_probe)
+    pub(crate) fn with_runtime_dispatch(database: Database, runtime: R) -> Self {
+        Self { database, runtime }
     }
 
     /// Records a terminal refusal — the marker in
@@ -116,7 +124,10 @@ impl GlobalDbObservationStore {
         &self,
         write: &AnchoredObservationWrite,
         retained_digest: &PayloadDigestV1,
-    ) -> ObservationStoreResult<()> {
+    ) -> ObservationStoreResult<()>
+    where
+        R: ObservationRuntimeDispatch,
+    {
         const OPERATION: &str = "record refused admission terminal and coverage";
         let candidate = write.observation();
         let identity = candidate.identity();
@@ -290,7 +301,7 @@ impl GlobalDbObservationStore {
     }
 }
 
-impl ObservationStore for GlobalDbObservationStore {
+impl<R: ObservationRuntimeDispatch> ObservationStore for GlobalDbObservationStore<R> {
     async fn persist_observation(
         &self,
         write: AnchoredObservationWrite,
@@ -332,14 +343,11 @@ impl ObservationStore for GlobalDbObservationStore {
                 outcome: ObservationCollisionOutcomeV1::IdentityCollision,
             });
         }
-        probe_count!(self, stored_observation_reads);
         let existing = read_runtime_stored_observation(runtime, &observation_id)?;
-        let collision = existing.as_ref().map(|existing| {
-            probe_count!(self, collision_classifications);
-            classify_observation_collision(existing.observation(), &candidate)
-        });
+        let collision = existing
+            .as_ref()
+            .map(|existing| classify_observation_collision(existing.observation(), &candidate));
         let canonical_payload_revision = existing.as_ref().is_some_and(|existing| {
-            probe_count!(self, payload_revision_probes);
             is_canonical_payload_revision_replay(existing.observation(), &candidate)
         });
         if collision == Some(ObservationCollisionOutcomeV1::IdentityCollision)
@@ -517,7 +525,6 @@ impl ObservationStore for GlobalDbObservationStore {
                 existing.commit_receipt().clone(),
             ));
         }
-        probe_count!(self, canonical_command_digests);
         let idempotency_key = format!(
             "observation.{}",
             canonical_runtime_digest(&runtime_observation_command(&write))?
@@ -538,7 +545,6 @@ impl ObservationStore for GlobalDbObservationStore {
             candidate.source().session_id().as_str(),
         )
         .map_err(|(operation, detail)| runtime_storage_error(operation, detail))?;
-        probe_count!(self, stored_observation_reads);
         let stored =
             read_runtime_stored_observation(runtime, &observation_id)?.ok_or_else(|| {
                 runtime_storage_error("read committed observation", "row unavailable")
@@ -609,7 +615,6 @@ impl ObservationStore for GlobalDbObservationStore {
             "scope": advance.next_cursor().scope(),
             "coverage": advance.coverage(),
         });
-        probe_count!(self, canonical_command_digests);
         let key = format!("cursor.{}", canonical_runtime_digest(&identity)?);
         let outcome = submit_runtime_write(
             runtime,
@@ -718,7 +723,7 @@ impl RuntimeRequestProbeV1 for RuntimeObservationProbe {
 }
 
 fn dispatch_runtime_observation_read(
-    runtime: &DatabaseRuntimeClientV1,
+    runtime: &impl ObservationRuntimeDispatch,
     operation: ObservationReadOperationV1,
 ) -> ObservationStoreResult<ObservationReadResultV1> {
     let command_digest = canonical_sha256(&operation)
@@ -819,7 +824,7 @@ fn stored_observation_from_runtime_row(
 }
 
 fn read_runtime_source_cursor(
-    runtime: &DatabaseRuntimeClientV1,
+    runtime: &impl ObservationRuntimeDispatch,
     source: &ClaudeSourceIdentityV1,
     scope: &ObservationScopeV1,
 ) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
@@ -839,7 +844,7 @@ fn read_runtime_source_cursor(
 }
 
 fn read_runtime_retrieval_anchor_by_alias(
-    runtime: &DatabaseRuntimeClientV1,
+    runtime: &impl ObservationRuntimeDispatch,
     scope: &ObservationScopeV1,
     alias: &tracedecay_domain::NativeAliasV2,
 ) -> ObservationStoreResult<Option<tracedecay_domain::RetrievalAnchorId>> {
@@ -938,7 +943,7 @@ async fn read_admission_refusal(
 }
 
 fn read_runtime_stored_observation(
-    runtime: &DatabaseRuntimeClientV1,
+    runtime: &impl ObservationRuntimeDispatch,
     observation_id: &CanonicalObservationIdV1,
 ) -> ObservationStoreResult<Option<StoredObservation>> {
     match dispatch_runtime_observation_read(
@@ -958,7 +963,7 @@ fn read_runtime_stored_observation(
 }
 
 async fn submit_runtime_write(
-    runtime: &DatabaseRuntimeClientV1,
+    runtime: &impl ObservationRuntimeDispatch,
     payload: RepositoryWritePayloadV1,
     idempotency_key: String,
     operation: &'static str,
@@ -1101,7 +1106,7 @@ fn runtime_storage_error(
     }
 }
 
-impl ObservationProjectionStore for GlobalDbObservationStore {
+impl<R: ObservationRuntimeDispatch> ObservationProjectionStore for GlobalDbObservationStore<R> {
     async fn next_queued_observation(
         &self,
     ) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
@@ -1172,7 +1177,6 @@ mod tests {
             let GlobalDbObservationStore {
                 database: _,
                 runtime: _,
-                persist_probe: _,
             } = store;
         }
 
