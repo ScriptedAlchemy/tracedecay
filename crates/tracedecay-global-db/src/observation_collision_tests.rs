@@ -810,10 +810,16 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
         "receipt.identity-collision.readmitted.rewritten",
         committed_cursor,
     );
+    let first_admission_work = Arc::new(AdmissionWorkTrace::default());
+    let first_dispatch = Dispatch::new(AdmissionWorkSubscriber {
+        trace: Arc::clone(&first_admission_work),
+    });
+    let first_trace_guard = tracing::dispatcher::set_default(&first_dispatch);
     let first = store
         .persist_observation(rewritten_write.clone())
         .await
         .unwrap_err();
+    drop(first_trace_guard);
     assert!(
         matches!(
             first,
@@ -823,6 +829,16 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
             }
         ),
         "{first:?}"
+    );
+    assert_eq!(
+        first_admission_work.snapshot(),
+        AdmissionWorkSnapshot {
+            identity_derivations: 1,
+            payload_digests: 1,
+            runtime_commands: 2,
+        },
+        "the full collision path must measure one decoded stored identity, one verified \
+         stored payload, and the stored-observation plus source-cursor runtime reads"
     );
 
     // The terminal marker now exists. Arm the corruption tripwire: overwrite

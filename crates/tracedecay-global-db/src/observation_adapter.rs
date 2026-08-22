@@ -705,6 +705,11 @@ fn dispatch_runtime_observation_read(
     )
     .map_err(|error| runtime_storage_error("build observation runtime read", error))?;
     let probe = RuntimeObservationProbe::from_control(request.control());
+    tracing::trace!(
+        target: "tracedecay::observation_admission_work",
+        work = "runtime_command",
+        "dispatch observation runtime read"
+    );
     let outcome = runtime.dispatch_read(request, &probe).map_err(|error| {
         runtime_storage_error(
             "dispatch observation runtime read",
@@ -894,9 +899,22 @@ fn read_runtime_stored_observation(
             observation_id: observation_id.clone(),
         },
     )? {
-        ObservationReadResultV1::Observation(row) => {
-            (*row).map(stored_observation_from_runtime_row).transpose()
-        }
+        ObservationReadResultV1::Observation(row) => match *row {
+            Some(row) => {
+                tracing::trace!(
+                    target: "tracedecay::observation_admission_work",
+                    work = "identity_derivation",
+                    "materialized stored observation identity"
+                );
+                tracing::trace!(
+                    target: "tracedecay::observation_admission_work",
+                    work = "payload_digest",
+                    "verified stored observation payload"
+                );
+                stored_observation_from_runtime_row(row).map(Some)
+            }
+            None => Ok(None),
+        },
         _ => Err(runtime_storage_error(
             "read observation",
             "runtime returned a mismatched observation read result",
@@ -977,6 +995,11 @@ async fn submit_runtime_write(
         control,
     )
     .map_err(|error| runtime_storage_error(operation, error.to_string()))?;
+    tracing::trace!(
+        target: "tracedecay::observation_admission_work",
+        work = "runtime_command",
+        "dispatch observation runtime submit"
+    );
     runtime
         .dispatch_submit(
             request,
