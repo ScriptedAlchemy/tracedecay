@@ -81,7 +81,7 @@ impl ExactMismatchReplay {
                 &mut mismatch,
                 &publish_context,
                 &key,
-                Some(manifest.clone()),
+                Some(manifest.clone().into()),
             )
             .expect_err("the exact recovered-digest mismatch must reject publication");
         assert!(
@@ -136,7 +136,7 @@ impl ExactMismatchReplay {
                 &mut self.graph.authority,
                 &context,
                 &self.key,
-                Some(self.manifest),
+                Some(self.manifest.into()),
             )
             .expect("exact mismatch replay reopens and verifies");
         assert_eq!(commit.head.key, self.key);
