@@ -269,14 +269,11 @@ async fn drain_once(
     let mut acknowledged = 0_usize;
     for receipt in receipts {
         let result = async {
-            let receipt_authority = authority
-                .alias_with_policy_identity(
-                    receipt
-                        .emission_identity
-                        .clone()
-                        .unwrap_or_else(|| authority.identity().clone()),
-                )
-                .map_err(|error| ApplicationContractError::Domain(error.to_owned()))?;
+            let receipt_authority = match receipt.emission_identity.as_ref() {
+                Some(identity) => authority.alias_for_durable_replay(identity),
+                None => authority.alias_with_policy_identity(authority.identity().clone()),
+            }
+            .map_err(|error| ApplicationContractError::Domain(error.to_owned()))?;
             receipt_authority.begin(&receipt.settlement.attempt).await?;
             receipt_authority.settle(&receipt.settlement).await?;
             spool
@@ -328,5 +325,102 @@ const fn map_spool_admission_error(error: DeliveryRecorderSpoolError) -> &'stati
         DeliveryRecorderSpoolError::LockPoisoned => {
             "delivery_settlement_recorder_spool_lock_poisoned"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::{
+        DeliveryChannelIdentityV1, DeliveryEventClassV1, DeliverySettlementAttemptV1,
+        DeliverySettlementOutcomeV1, DeliverySurfaceFamilyV1, ProjectId, UtcMicros,
+        canonical_sha256,
+    };
+
+    use super::super::BoundedObservabilityProducerV1;
+    use super::*;
+
+    fn legacy_receipt_id(settlement: &DeliverySettlementV1) -> [u8; 16] {
+        let digest =
+            canonical_sha256(&("tracedecay.delivery-recorder-source-receipt.v1", settlement))
+                .expect("legacy receipt digest");
+        let hex = digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .expect("canonical digest prefix");
+        let mut receipt_id = [0_u8; 16];
+        for (index, slot) in receipt_id.iter_mut().enumerate() {
+            let offset = index * 2;
+            *slot = u8::from_str_radix(&hex[offset..offset + 2], 16).expect("canonical digest hex");
+        }
+        receipt_id
+    }
+
+    #[tokio::test]
+    async fn legacy_v1_receipt_replays_through_current_process_identity() {
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project");
+        let project_id = ProjectId::new("project.delivery.legacy-replay").expect("project id");
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered runtime");
+        let db = runtime.project_database_arc().expect("project database");
+        let identity = ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: project_id.as_str().to_owned(),
+            process_boot_id: "boot:delivery-legacy-replay".to_owned(),
+            producer_revision: "delivery-legacy-replay-producer.v1".to_owned(),
+            configuration_revision: "delivery-legacy-replay-config.v1".to_owned(),
+            policy_revision: "delivery-legacy-replay-policy.v1".to_owned(),
+        };
+        let producer = Arc::new(
+            BoundedObservabilityProducerV1::start(db.clone(), identity.clone(), 8)
+                .expect("producer"),
+        );
+        let authority = Arc::new(
+            DeliverySettlementAuthorityV1::new(db, Arc::clone(&producer), identity)
+                .expect("settlement authority"),
+        );
+        let settlement = DeliverySettlementV1 {
+            attempt: DeliverySettlementAttemptV1 {
+                owner_event_id: "work:delivery-legacy-replay".to_owned(),
+                event_class: DeliveryEventClassV1::OperationTerminal,
+                channel: DeliveryChannelIdentityV1 {
+                    surface: DeliverySurfaceFamilyV1::Mcp,
+                    channel_ref: "mcp:delivery-legacy-replay".to_owned(),
+                },
+                work_attempt: None,
+                eligible: 1,
+                valid_at: UtcMicros(100),
+                attempted_at: UtcMicros(110),
+            },
+            outcome: DeliverySettlementOutcomeV1::Delivered,
+            settled_at: UtcMicros(120),
+            drop_reason: None,
+        };
+        let spool = DeliveryRecorderSpoolV1::open(authority.spool_root()).expect("spool");
+        spool
+            .append(&DeliveryRecorderSourceReceiptV1 {
+                receipt_id: legacy_receipt_id(&settlement),
+                settlement,
+                emission_identity: None,
+            })
+            .expect("append legacy receipt");
+        let mut summary = DeliverySettlementRecorderSummaryV1::default();
+
+        assert_eq!(
+            drain_once(authority.as_ref(), &spool, &mut summary).await,
+            1
+        );
+        assert_eq!(summary.settled, 1);
+        assert_eq!(spool.len().expect("pending receipts"), 0);
+
+        drop(spool);
+        drop(authority);
+        let producer = Arc::try_unwrap(producer)
+            .unwrap_or_else(|_| panic!("authority must release producer after replay"));
+        producer.shutdown().await.expect("flush producer");
     }
 }

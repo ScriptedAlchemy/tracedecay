@@ -362,3 +362,59 @@ fn decode_nibble(byte: u8) -> Result<u8, DeliveryRecorderSpoolError> {
         _ => Err(DeliveryRecorderSpoolError::InvalidReceipt),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::{
+        DeliveryChannelIdentityV1, DeliveryEventClassV1, DeliverySettlementAttemptV1,
+        DeliverySettlementOutcomeV1, DeliverySurfaceFamilyV1, UtcMicros,
+    };
+
+    use super::*;
+
+    fn settlement() -> DeliverySettlementV1 {
+        DeliverySettlementV1 {
+            attempt: DeliverySettlementAttemptV1 {
+                owner_event_id: "work:delivery-spool:test".to_owned(),
+                event_class: DeliveryEventClassV1::OperationTerminal,
+                channel: DeliveryChannelIdentityV1 {
+                    surface: DeliverySurfaceFamilyV1::Mcp,
+                    channel_ref: "mcp:delivery-spool:test".to_owned(),
+                },
+                work_attempt: None,
+                eligible: 1,
+                valid_at: UtcMicros(100),
+                attempted_at: UtcMicros(110),
+            },
+            outcome: DeliverySettlementOutcomeV1::Delivered,
+            settled_at: UtcMicros(120),
+            drop_reason: None,
+        }
+    }
+
+    fn identity() -> ObservabilityProducerIdentityV1 {
+        ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: "project.delivery-spool".to_owned(),
+            process_boot_id: "boot:delivery-spool".to_owned(),
+            producer_revision: "delivery-spool-producer.v1".to_owned(),
+            configuration_revision: "delivery-spool-config.v1".to_owned(),
+            policy_revision: "delivery-spool-policy.v1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn v2_receipt_refuses_tampered_emission_identity() {
+        let mut receipt =
+            DeliveryRecorderSourceReceiptV1::new(settlement(), identity()).expect("v2 receipt");
+        receipt
+            .emission_identity
+            .as_mut()
+            .expect("v2 emission identity")
+            .policy_revision = "delivery-spool-tampered-policy.v1".to_owned();
+
+        assert_eq!(
+            receipt.validate(),
+            Err(DeliveryRecorderSpoolError::InvalidReceipt)
+        );
+    }
+}
