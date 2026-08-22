@@ -337,10 +337,7 @@ impl CodeLexicalArtifactBuilderV1 {
                     )
                 })
                 .map_err(map_source_replay_error)?;
-            let read = match admitted {
-                Ok(read) => read,
-                Err(refusal) => return Err(refusal),
-            };
+            let read = admitted?;
             match read {
                 VerifiedSealedLexicalPageReadV1::Page(page) => {
                     page.verify_transition(previous_cursor.as_ref())
