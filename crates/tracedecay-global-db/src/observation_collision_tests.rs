@@ -1212,9 +1212,8 @@ async fn generation_jump_collision_records_no_false_coverage() {
     );
 }
 
-/// The refusal CAS compares typed cursor authority. An explicitly encoded
-/// default `ordering_domain: file_bytes` is semantically identical to the
-/// serializer's omitted default and must not prevent atomic coverage.
+/// The refusal CAS compares typed cursor authority. JSON whitespace is not
+/// part of that authority and must not prevent atomic coverage.
 #[tokio::test]
 async fn refusal_cas_accepts_equivalent_cursor_json_spelling() {
     let tmp = TempDir::new().unwrap();
@@ -1247,10 +1246,10 @@ async fn refusal_cas_accepts_equivalent_cursor_json_spelling() {
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database");
     let transaction = database.begin_write_transaction().await.unwrap();
-    transaction
+    let updated = transaction
         .execute(
             "UPDATE source_cursors
-             SET cursor_json = json_set(cursor_json, '$.ordering_domain', 'file_bytes')
+             SET cursor_json = ' ' || cursor_json
              WHERE source_json = ?1 AND scope_json = ?2",
             params![
                 serde_json::to_string(original.source()).unwrap(),
@@ -1259,7 +1258,20 @@ async fn refusal_cas_accepts_equivalent_cursor_json_spelling() {
         )
         .await
         .unwrap();
+    assert_eq!(
+        updated, 1,
+        "the fixture must rewrite the durable cursor row"
+    );
     transaction.commit().await.unwrap();
+    assert_eq!(
+        store
+            .get_source_cursor(original.source(), original.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&committed_cursor),
+        "the alternate JSON spelling must decode to the same typed cursor"
+    );
 
     let (_, refusal_write) = collision_candidate(
         &session_id,
