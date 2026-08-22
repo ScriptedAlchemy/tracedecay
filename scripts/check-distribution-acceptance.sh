@@ -281,6 +281,17 @@ fixture_metadata=$(assert_fastembed_fixture \
   "$fastembed_fixture_source/validate_fixture.py")
 IFS=$'\t' read -r fastembed_dimensions fastembed_max_length <<<"$fixture_metadata"
 
+# The gate is intentionally offline, so ort-sys cannot acquire its runtime
+# while compiling the production feature set. Linux release targets receive a
+# pinned runtime from prepare-release-runtime.py; macOS and Windows reuse the
+# checksum-verified runtime acquired by the preceding online release build.
+# Resolve that cache before the first production link, not only before the
+# later semantic tests.
+ort_lib_path=${ORT_LIB_PATH:-$(python3 "$repo/scripts/resolve-cached-ort-library.py")}
+[[ -n $ort_lib_path ]] ||
+  die "cached ONNX Runtime library is unavailable for the offline production build"
+export ORT_LIB_PATH="$ort_lib_path"
+
 echo "distribution acceptance: release-building the production feature set"
 cargo build \
   --manifest-path "$repo/Cargo.toml" \
@@ -409,28 +420,6 @@ cargo check \
   --features production \
   --lib \
   --config "$patch_config"
-
-ort_lib_path=${ORT_LIB_PATH:-$(python3 - <<'PY'
-import os
-from pathlib import Path
-
-cache_root = Path(
-    os.environ.get("ORT_CACHE_DIR", Path.home() / ".cache" / "ort.pyke.io")
-)
-names = {"libonnxruntime.a", "libonnxruntime.dylib", "onnxruntime.lib"}
-candidates = [
-    path
-    for path in cache_root.glob("dfbin/**/*")
-    if path.is_file()
-    and (path.name in names or path.name.startswith("libonnxruntime.so"))
-]
-if candidates:
-    print(max(candidates, key=lambda path: path.stat().st_mtime).parent)
-PY
-)}
-[[ -n $ort_lib_path ]] ||
-  die "cached ONNX Runtime library is unavailable for the offline semantic tests"
-export ORT_LIB_PATH="$ort_lib_path"
 
 echo "distribution acceptance: checking extracted query semantic fallback behavior"
 CARGO_NET_OFFLINE=true cargo nextest run \

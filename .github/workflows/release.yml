@@ -191,6 +191,7 @@ jobs:
           python3 .release-automation/scripts/test-resolve-release-source-profile.py
           python3 .release-automation/scripts/test-package-release-archive.py
           python3 .release-automation/scripts/test-prepare-release-runtime.py
+          python3 .release-automation/scripts/test-resolve-cached-ort-library.py
           python3 .release-automation/scripts/test-plan-release-recovery.py
           python3 .release-automation/scripts/test-check-release-artifacts.py
 

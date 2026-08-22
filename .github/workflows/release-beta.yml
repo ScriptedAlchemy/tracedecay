@@ -141,6 +141,7 @@ jobs:
           python3 .release-automation/scripts/test-resolve-release-source-profile.py
           python3 .release-automation/scripts/test-package-release-archive.py
           python3 .release-automation/scripts/test-prepare-release-runtime.py
+          python3 .release-automation/scripts/test-resolve-cached-ort-library.py
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
