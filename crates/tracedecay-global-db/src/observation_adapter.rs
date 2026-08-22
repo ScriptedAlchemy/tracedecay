@@ -35,10 +35,9 @@ use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
 
 /// Observation-store adapter over the already-registered authoritative
 /// runtime. The struct is concrete: the collision tests prove the
-/// terminal-refusal fast path repeats no record work by counting at the
-/// domain's canonicalize-then-hash boundary
-/// (`tracedecay_domain::identity_digest_probe`), not through any adapter
-/// seam.
+/// terminal-refusal fast path never accesses the retained observation row —
+/// they corrupt and hide that row after the marker exists, so any later read
+/// fails loudly — not through an adapter seam or test-only port.
 #[derive(Clone)]
 pub struct GlobalDbObservationStore {
     database: Database,
@@ -705,6 +704,11 @@ fn dispatch_runtime_observation_read(
     )
     .map_err(|error| runtime_storage_error("build observation runtime read", error))?;
     let probe = RuntimeObservationProbe::from_control(request.control());
+    tracing::trace!(
+        target: "tracedecay::observation_admission_work",
+        work = "runtime_command",
+        "dispatch observation runtime read"
+    );
     let outcome = runtime.dispatch_read(request, &probe).map_err(|error| {
         runtime_storage_error(
             "dispatch observation runtime read",
@@ -894,9 +898,10 @@ fn read_runtime_stored_observation(
             observation_id: observation_id.clone(),
         },
     )? {
-        ObservationReadResultV1::Observation(row) => {
-            (*row).map(stored_observation_from_runtime_row).transpose()
-        }
+        ObservationReadResultV1::Observation(row) => match *row {
+            Some(row) => stored_observation_from_runtime_row(row).map(Some),
+            None => Ok(None),
+        },
         _ => Err(runtime_storage_error(
             "read observation",
             "runtime returned a mismatched observation read result",
@@ -977,6 +982,11 @@ async fn submit_runtime_write(
         control,
     )
     .map_err(|error| runtime_storage_error(operation, error.to_string()))?;
+    tracing::trace!(
+        target: "tracedecay::observation_admission_work",
+        work = "runtime_command",
+        "dispatch observation runtime submit"
+    );
     runtime
         .dispatch_submit(
             request,

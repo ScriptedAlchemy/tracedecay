@@ -33,8 +33,6 @@ pub fn canonical_json_value(value: &Value) -> Result<String, DomainError> {
 /// intermediate `serde_json::Value` tree is materialized, which matters for
 /// the six-figure element sets the code index digests on every publish.
 pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<ManifestDigest, DomainError> {
-    #[cfg(feature = "identity-digest-probe")]
-    crate::identity_digest_probe::record_canonical();
     let mut sink = BufferedSink::new(Sha256::new());
     canonical_serializer::serialize_canonical(value, &mut sink)?;
     let digest = sink.finish().finalize();

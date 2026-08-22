@@ -12,8 +12,6 @@ pub mod external_source;
 pub mod feedback;
 pub mod framed_log;
 pub mod git;
-#[cfg(feature = "identity-digest-probe")]
-pub mod identity_digest_probe;
 pub mod integration;
 pub mod memory;
 pub mod multi_root;

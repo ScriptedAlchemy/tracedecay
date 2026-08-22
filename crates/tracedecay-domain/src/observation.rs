@@ -2307,8 +2307,6 @@ fn domain_digest(
     domain: &[u8],
     value: &impl Serialize,
 ) -> Result<String, ObservationContractError> {
-    #[cfg(feature = "identity-digest-probe")]
-    crate::identity_digest_probe::record_identity();
     let bytes =
         canonical_json_bytes(value).map_err(|_| ObservationContractError::CanonicalEncoding)?;
     let mut hasher = Sha256::new();
@@ -2351,8 +2349,6 @@ fn accepted_identity_digests(
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {
-    #[cfg(feature = "identity-digest-probe")]
-    crate::identity_digest_probe::record_payload();
     format_sha256(&Sha256::digest(bytes))
 }
 
