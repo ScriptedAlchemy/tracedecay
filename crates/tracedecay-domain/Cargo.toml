@@ -7,6 +7,14 @@ license = "MIT"
 description = "Pure domain contracts for TraceDecay V2"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
+[features]
+# The one sanctioned test-only observability hook: thread-local counters over
+# the canonicalize-then-SHA256 boundaries (observation identity derivation,
+# payload-content hashing, canonical command digests) so store-level tests can
+# prove a terminally refused record is never re-decoded, re-derived, or
+# re-hashed. Never enable in production builds.
+identity-digest-probe = []
+
 [dependencies]
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
