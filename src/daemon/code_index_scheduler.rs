@@ -82,7 +82,7 @@ use crate::{
         MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
         acquire_code_generation_store_lock, attach_verified_text_artifact_under_lock,
         code_text_artifact_path, code_text_artifacts_root, durable_generation_index_digest,
-        retain_bounded_generation_index,
+        retain_bounded_generation_index, withdraw_verified_text_artifact_under_lock,
     },
 };
 
@@ -1404,7 +1404,10 @@ fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortEr
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
         CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
-        CodeLexicalArtifactErrorV1::Io(detail) => RetrievalPortError::AuthorityUnavailable(detail),
+        CodeLexicalArtifactErrorV1::Unreserved(_) => RetrievalPortError::BudgetExceeded,
+        CodeLexicalArtifactErrorV1::Io(detail) | CodeLexicalArtifactErrorV1::Missing(detail) => {
+            RetrievalPortError::AuthorityUnavailable(detail)
+        }
     }
 }
 
@@ -1507,6 +1510,73 @@ impl DaemonCodeTextArtifactStoreV1 {
             .iter()
             .find(|entry| entry.generation_id == generation_id.as_str())
             .and_then(|entry| entry.text_artifact.clone()))
+    }
+
+    /// Withdraw one exact missing/corrupt derived artifact so the immutable
+    /// sealed generation can rebuild it. A corrupt regular file is moved out
+    /// of the content-addressed namespace before the durable pointer is
+    /// cleared; non-regular objects are preserved and refused fail-closed.
+    fn withdraw_unavailable_descriptor(
+        &self,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+        quarantine_corrupt_file: bool,
+    ) -> Result<(), RetrievalPortError> {
+        let lock = acquire_code_generation_store_lock(&self.store_root)
+            .map_err(text_artifact_unavailable)?;
+        let pointer = self
+            .publication
+            .read_publication_pointer()
+            .map_err(text_artifact_unavailable)?
+            .ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(
+                    "durable publication pointer disappeared during artifact repair".to_owned(),
+                )
+            })?;
+        let current = pointer
+            .generation_index
+            .iter()
+            .find(|entry| entry.generation_id == descriptor.generation_id.as_str())
+            .and_then(|entry| entry.text_artifact.as_ref());
+        if current != Some(descriptor) {
+            return Err(RetrievalPortError::AuthorityUnavailable(
+                "durable text-artifact attachment changed during repair".to_owned(),
+            ));
+        }
+
+        let mut quarantined = None;
+        if quarantine_corrupt_file {
+            let path = code_text_artifact_path(&self.store_root, descriptor)
+                .map_err(text_artifact_unavailable)?;
+            let metadata = path.symlink_metadata().map_err(text_artifact_unavailable)?;
+            if !metadata.file_type().is_file() {
+                return Err(RetrievalPortError::Contract(
+                    "corrupt code text artifact is not a regular file".to_owned(),
+                ));
+            }
+            let quarantine =
+                path.with_extension(format!("corrupt-{}-{}", std::process::id(), now_micros().0));
+            std::fs::rename(&path, &quarantine).map_err(text_artifact_unavailable)?;
+            DaemonCodeIndexPublicationStoreV1::sync_directory(path.parent().ok_or_else(|| {
+                RetrievalPortError::Contract("code text artifact path has no parent".to_owned())
+            })?)
+            .map_err(text_artifact_unavailable)?;
+            quarantined = Some(quarantine);
+        }
+
+        withdraw_verified_text_artifact_under_lock(&lock, &pointer, descriptor)
+            .map_err(text_artifact_unavailable)?;
+        if let Some(quarantine) = quarantined {
+            std::fs::remove_file(&quarantine).map_err(text_artifact_unavailable)?;
+            DaemonCodeIndexPublicationStoreV1::sync_directory(quarantine.parent().ok_or_else(
+                || {
+                    RetrievalPortError::Contract(
+                        "quarantined code text artifact has no parent".to_owned(),
+                    )
+                },
+            )?)
+            .map_err(text_artifact_unavailable)?;
+        }
+        Ok(())
     }
 
     /// Resolve the immutable, content-addressed sealed file for one retained
@@ -1998,10 +2068,22 @@ impl LatestCompleteCodeIndexV1 {
                     descriptor.artifact_size_bytes,
                     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
                     &control,
-                )
-                .map_err(map_text_artifact_error)?;
-                self.install_artifact_owners(reader, reader_reservation)?;
-                return Ok(true);
+                );
+                match reader {
+                    Ok(reader) => {
+                        self.install_artifact_owners(reader, reader_reservation)?;
+                        return Ok(true);
+                    }
+                    Err(CodeLexicalArtifactErrorV1::Missing(_)) => {
+                        drop(reader_reservation);
+                        store.withdraw_unavailable_descriptor(&descriptor, false)?;
+                    }
+                    Err(CodeLexicalArtifactErrorV1::Corrupt(_)) => {
+                        drop(reader_reservation);
+                        store.withdraw_unavailable_descriptor(&descriptor, true)?;
+                    }
+                    Err(error) => return Err(map_text_artifact_error(error)),
+                }
             }
             // The builder's advertised memory ceiling is reserved through the
             // process resident-memory authority before the build allocates.

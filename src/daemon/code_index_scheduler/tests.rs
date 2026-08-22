@@ -2433,6 +2433,154 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
     );
 }
 
+fn active_text_artifact_path(store_root: &Path) -> PathBuf {
+    let pointer: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(store_root.join("active-code-generation-v1.json"))
+            .expect("read durable pointer"),
+    )
+    .expect("parse durable pointer");
+    let active_generation = pointer["generation_id"]
+        .as_str()
+        .expect("active generation id");
+    let entry = pointer["generation_index"]
+        .as_array()
+        .expect("durable generation index")
+        .iter()
+        .find(|entry| entry["generation_id"] == active_generation)
+        .expect("active generation index entry");
+    let artifact_file = entry["text_artifact"]["artifact_file"]
+        .as_str()
+        .expect("attached text artifact descriptor");
+    store_root
+        .join("code-text-artifacts-v1")
+        .join(artifact_file)
+}
+
+#[test]
+fn missing_durable_text_artifact_is_withdrawn_and_rebuilt() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn rebuilt() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        while !latest
+            .advance_text_serving(64)
+            .expect("build initial text artifact")
+        {}
+    }
+    let artifact_path = active_text_artifact_path(store.path());
+    std::fs::remove_file(&artifact_path).expect("remove derived artifact");
+
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let latest = scheduler.latest_complete().expect("restored generation");
+    while !latest
+        .advance_text_serving(64)
+        .expect("withdraw and rebuild missing artifact")
+    {}
+
+    assert!(latest.query_owners_are_warm());
+    assert!(
+        !latest
+            .text_projection_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(active_text_artifact_path(store.path()).is_file());
+}
+
+#[test]
+fn corrupt_durable_text_artifact_is_quarantined_and_rebuilt() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn repaired() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        while !latest
+            .advance_text_serving(64)
+            .expect("build initial text artifact")
+        {}
+    }
+    let artifact_path = active_text_artifact_path(store.path());
+    let artifact_len = usize::try_from(
+        std::fs::metadata(&artifact_path)
+            .expect("artifact metadata")
+            .len(),
+    )
+    .expect("artifact length fits usize");
+    std::fs::write(&artifact_path, vec![0xa5; artifact_len])
+        .expect("corrupt derived artifact bytes");
+
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let latest = scheduler.latest_complete().expect("restored generation");
+    while !latest
+        .advance_text_serving(64)
+        .expect("withdraw and rebuild corrupt artifact")
+    {}
+
+    assert!(latest.query_owners_are_warm());
+    let repaired =
+        std::fs::read(active_text_artifact_path(store.path())).expect("repaired artifact bytes");
+    assert_ne!(repaired, vec![0xa5; artifact_len]);
+}
+
+#[test]
+fn reader_reservation_refusal_precedes_missing_artifact_access() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn reserved_first() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        while !latest
+            .advance_text_serving(64)
+            .expect("build initial text artifact")
+        {}
+    }
+    let artifact_path = active_text_artifact_path(store.path());
+    std::fs::remove_file(&artifact_path).expect("remove derived artifact");
+
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::new(
+        std::num::NonZeroU64::new(1024 * 1024).expect("tight memory limit"),
+    )));
+    let latest = scheduler.latest_complete().expect("restored generation");
+    assert_eq!(
+        latest.advance_text_serving(1),
+        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
+        "the reservation gate must win before the missing path is inspected"
+    );
+    assert!(
+        !artifact_path.exists(),
+        "reservation refusal must not touch or recreate the missing path"
+    );
+    assert!(latest.text_serving_needs_work());
+}
+
 /// The artifact build and reader ceilings must reserve through the process
 /// resident-memory authority: an authority too small for the advertised
 /// build ceiling refuses the build as a typed unavailability, and a serving
@@ -2459,9 +2607,9 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         assert!(
             matches!(
                 denied,
-                Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+                Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded)
             ),
-            "an unreservable build ceiling must refuse as typed unavailability: {denied:?}"
+            "an unreservable build ceiling must refuse as a typed budget state: {denied:?}"
         );
         assert_eq!(
             tight.snapshot().used_bytes,
@@ -2596,6 +2744,73 @@ fn concurrent_background_wakes_share_one_generation_owned_text_builder() {
     while !latest
         .advance_text_serving(1)
         .expect("finish shared text projection")
+    {}
+    assert!(latest.query_owners_are_warm());
+}
+
+#[test]
+fn scheduler_shutdown_cancels_and_resumes_the_durable_text_build() {
+    let sources = (0..12)
+        .map(|ordinal| {
+            (
+                format!("src/file_{ordinal}.rs"),
+                format!("pub fn cancellation_symbol_{ordinal}() -> usize {{ {ordinal} }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let borrowed = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&borrowed);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    assert!(
+        !latest
+            .advance_text_serving(1)
+            .expect("start bounded text build")
+    );
+    let progress_before = latest
+        .text_projection_build
+        .lock()
+        .expect("text build state")
+        .as_ref()
+        .expect("partial build")
+        .builder
+        .progress()
+        .expect("durable progress");
+
+    latest
+        .text_control_shutdown
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert_eq!(
+        latest.advance_text_serving(1),
+        Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
+    );
+    let progress_after = latest
+        .text_projection_build
+        .lock()
+        .expect("text build state after cancellation")
+        .as_ref()
+        .expect("cancelled build remains resumable")
+        .builder
+        .progress()
+        .expect("durable progress after cancellation");
+    assert_eq!(progress_after, progress_before);
+    assert!(latest.text_serving_needs_work());
+
+    latest
+        .text_control_shutdown
+        .store(false, std::sync::atomic::Ordering::Release);
+    while !latest
+        .advance_text_serving(8)
+        .expect("resume durable text build")
     {}
     assert!(latest.query_owners_are_warm());
 }
