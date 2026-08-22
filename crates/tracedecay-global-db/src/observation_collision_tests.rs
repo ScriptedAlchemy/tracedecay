@@ -78,6 +78,16 @@ fn anchored_write_for(
         observation.identity().position().end(),
     )
     .unwrap();
+    anchored_write_with_cursor(observation, expected_cursor, next_cursor)
+}
+
+/// Anchors one observation write with an explicit next cursor (e.g. one that
+/// carries a JSONL resume checkpoint).
+fn anchored_write_with_cursor(
+    observation: DurableObservationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    next_cursor: ObservationSourceCursorV1,
+) -> AnchoredObservationWrite {
     let write = ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap();
     let projection_generation =
         ProjectionGenerationId::new("projection.collision-test.v1").unwrap();
@@ -1607,10 +1617,10 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
     );
     assert_eq!(
         refused_readmit.persist_probe_deltas,
-        (0, 0, 0, 1),
-        "the re-admit must not read the stored row, classify, or probe revisions; \
-         its single command digest is the typed coverage advance converging the \
-         new generation, not record work"
+        (0, 0, 0, 0),
+        "the re-admit must not read the stored row, classify, probe revisions, or \
+         digest commands; coverage converges inside one direct authority \
+         transaction with no record work"
     );
     // The suppression above was answered by the retained refusal terminal:
     // it must have survived cursor-advance retention.
@@ -1742,8 +1752,8 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
     );
     assert_eq!(
         readmit.persist_probe_deltas,
-        (0, 0, 0, 1),
-        "the EOF re-admit converges coverage with exactly one typed advance and no record work"
+        (0, 0, 0, 0),
+        "the EOF re-admit converges coverage atomically with no record work"
     );
     let digests_before = tracedecay_domain::observation::identity_digest_probe::count();
     let (decoded, _) = run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-b").await;
@@ -1890,8 +1900,8 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
     );
     assert_eq!(
         repair.persist_probe_deltas,
-        (0, 0, 0, 1),
-        "the orphan-marker re-admit repairs coverage with exactly one typed advance"
+        (0, 0, 0, 0),
+        "the orphan-marker re-admit repairs coverage atomically with no record work"
     );
 
     // Coverage is repaired: later passes never reopen the record, even after
@@ -1919,6 +1929,466 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
         raw_observation_json(&reopened, refused.observation_id().as_str()).await,
         retained_row,
         "the retained observation row must stay byte-identical"
+    );
+}
+
+/// Stable simulated inode for the JSONL trigger harness; a replaced file gets
+/// a fresh identity exactly like a new inode.
+fn jsonl_fingerprint(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// One raw JSONL provider record as it sits in the transcript file: the
+/// native record, not a canonical envelope. The trigger builds the envelope
+/// from these bytes plus the byte range it read them at, exactly like
+/// provider ingest.
+fn jsonl_native_line(record_id: &str, text: &str) -> String {
+    format!("{}\n", json!({ "uuid": record_id, "text": text }))
+}
+
+/// Receipts from one JSONL catch-up/temporal trigger.
+struct JsonlTriggerReceipt {
+    /// Raw lines actually read past the resume checkpoint (observable
+    /// source reopenings).
+    lines_reopened: usize,
+    decoded: usize,
+    records: Vec<CatchUpRecordReceipt>,
+}
+
+/// One real FileBytes provider trigger over an on-disk JSONL transcript:
+/// stat + fingerprint the file, honor the durable cursor's resume checkpoint
+/// (matching identity, fingerprint, generation, and byte position mean the
+/// file is NOT reopened past the checkpoint), otherwise scan raw lines at
+/// their byte offsets, build each canonical candidate from the raw bytes,
+/// and persist with FileBytes cursors carrying the resume checkpoint. Aborts
+/// on a persist error exactly like production ingest.
+async fn run_jsonl_trigger(
+    store: &crate::GlobalDbObservationStore,
+    session_id: &SessionId,
+    path: &std::path::Path,
+    file_identity: u64,
+    generation: u64,
+) -> JsonlTriggerReceipt {
+    let bytes = std::fs::read(path).unwrap();
+    let fingerprint = jsonl_fingerprint(&bytes);
+    let provider = ProviderId::new(COLLISION_PROVIDER).unwrap();
+    let source =
+        ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
+    let scope = ObservationScopeV1::Profile;
+    let scan_generation = ObservationSourceGenerationV1::new(generation).unwrap();
+    let probe = store.persist_probe();
+    let cursor = store.get_source_cursor(&source, &scope).await.unwrap();
+    if let Some(current) = cursor.as_ref()
+        && current.generation() == scan_generation
+        && current.ordering_domain() == ObservationOrderingDomainV1::FileBytes
+        && current.file_identity() == Some(file_identity)
+        && current.resume_fingerprint() == Some(fingerprint)
+        && current.position() >= bytes.len() as u64
+    {
+        // Resume checkpoint hit: the trigger reopens nothing.
+        return JsonlTriggerReceipt {
+            lines_reopened: 0,
+            decoded: 0,
+            records: Vec::new(),
+        };
+    }
+    let mut receipt = JsonlTriggerReceipt {
+        lines_reopened: 0,
+        decoded: 0,
+        records: Vec::new(),
+    };
+    let mut offset = 0_u64;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let start = offset;
+        let end = offset + line.len() as u64;
+        offset = end;
+        let cursor = store.get_source_cursor(&source, &scope).await.unwrap();
+        let covered = cursor.as_ref().is_some_and(|cursor| {
+            cursor.generation() == scan_generation
+                && cursor.ordering_domain() == ObservationOrderingDomainV1::FileBytes
+                && cursor.position() >= end
+        });
+        if covered {
+            continue;
+        }
+        receipt.lines_reopened += 1;
+        receipt.decoded += 1;
+        let digests_before_construction =
+            tracedecay_domain::observation::identity_digest_probe::count();
+        // Build the canonical candidate from the raw bytes, exactly like
+        // provider ingest: parse the native record, envelope it with the
+        // byte-range evidence, derive its identity.
+        let native: Value = serde_json::from_slice(line).unwrap();
+        let record_id = ObservationId::new(native["uuid"].as_str().unwrap()).unwrap();
+        let text = native["text"].as_str().unwrap().to_owned();
+        let range = ObservationSourceRangeV1::new(start, end).unwrap();
+        let relations = CanonicalObservationRelationsV1::new(session_id.clone()).with_message_id(
+            ObservationId::new(format!("message.{}", record_id.as_str())).unwrap(),
+        );
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider.clone(),
+            "message",
+            record_id.clone(),
+            relations,
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": text}),
+                model: None,
+                timestamp: Some(1_750_000_000),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
+        )
+        .unwrap();
+        let payload = serde_json::to_value(envelope).unwrap();
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source.clone(),
+            scope.clone(),
+            scan_generation,
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            record_id,
+        )
+        .unwrap();
+        let observation = DurableObservationV1::new(
+            identity,
+            fixture_receipt(
+                &format!("receipt.jsonl.gen{generation}.{start}.{fingerprint}"),
+                &payload,
+            ),
+            RetentionClass::new("retention.collision-test").unwrap(),
+            payload,
+        )
+        .unwrap();
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            source.clone(),
+            scope.clone(),
+            scan_generation,
+            ObservationOrderingDomainV1::FileBytes,
+            end,
+        )
+        .unwrap()
+        .with_resume_checkpoint(file_identity, fingerprint);
+        let write = anchored_write_with_cursor(observation, cursor, next_cursor);
+        let digests_before_persist = tracedecay_domain::observation::identity_digest_probe::count();
+        let (reads, classifications, revision_probes, command_digests) = probe.snapshot();
+        let result = store.persist_observation(write).await;
+        let digests_after_persist = tracedecay_domain::observation::identity_digest_probe::count();
+        let (reads_after, classifications_after, revision_probes_after, command_digests_after) =
+            probe.snapshot();
+        let aborted = result.is_err();
+        receipt.records.push(CatchUpRecordReceipt {
+            result,
+            construction_identity_digests: digests_before_persist - digests_before_construction,
+            persist_identity_digests: digests_after_persist - digests_before_persist,
+            persist_probe_deltas: (
+                reads_after - reads,
+                classifications_after - classifications,
+                revision_probes_after - revision_probes,
+                command_digests_after - command_digests,
+            ),
+        });
+        if aborted {
+            break;
+        }
+    }
+    receipt
+}
+
+/// Linux gate 1: the real production-source shape — an on-disk JSONL
+/// transcript scanned by FileBytes triggers with resume checkpoints. After
+/// the rewrite is terminally refused, every SUBSEQUENT trigger (same
+/// generation, replaced file with identical bytes, and across restart) must
+/// reopen ZERO raw lines and perform ZERO decode/derive/hash work on the
+/// refused terminal row. The single first decode of a genuinely new
+/// generation's incoming bytes is measured separately and is NOT counted as
+/// the subsequent-trigger proof.
+#[tokio::test]
+async fn jsonl_refusal_terminal_suppresses_subsequent_filebytes_triggers() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.jsonl.filebytes-terminal").unwrap();
+    let transcript = tmp.path().join("transcript.jsonl");
+    let file_identity_v1 = 0x51e5_0001_u64;
+
+    // Generation 1: the original record commits from raw bytes.
+    std::fs::write(
+        &transcript,
+        jsonl_native_line("record.jsonl.0", "original body"),
+    )
+    .unwrap();
+    let receipt = run_jsonl_trigger(&store, &session_id, &transcript, file_identity_v1, 1).await;
+    assert_eq!((receipt.lines_reopened, receipt.decoded), (1, 1));
+    assert!(matches!(
+        receipt.records[0].result,
+        Ok(ObservationPersistOutcome::Committed(_))
+    ));
+    // A subsequent generation-1 trigger hits the resume checkpoint.
+    let receipt = run_jsonl_trigger(&store, &session_id, &transcript, file_identity_v1, 1).await;
+    assert_eq!((receipt.lines_reopened, receipt.decoded), (0, 0));
+
+    // The file is rewritten in place: same uuid, different body. The
+    // generation-2 trigger decodes the incoming bytes once (unavoidable and
+    // measured) and is terminally refused with converged coverage.
+    std::fs::write(
+        &transcript,
+        jsonl_native_line("record.jsonl.0", "rewritten body"),
+    )
+    .unwrap();
+    let receipt = run_jsonl_trigger(&store, &session_id, &transcript, file_identity_v1, 2).await;
+    assert_eq!((receipt.lines_reopened, receipt.decoded), (1, 1));
+    assert!(matches!(
+        receipt.records[0].result,
+        Err(ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        })
+    ));
+    assert!(receipt.records[0].construction_identity_digests > 0);
+    assert_eq!(receipt.records[0].persist_identity_digests, 0);
+    let refused_row_id = {
+        let refusals = admission_refusal_rows(&runtime).await;
+        assert_eq!(refusals.len(), 1);
+        refusals[0].0.clone()
+    };
+    let retained_row = raw_observation_json(&runtime, &refused_row_id).await;
+
+    // THE SUBSEQUENT-TRIGGER PROOF: the very next trigger over the same
+    // rewritten file reopens ZERO raw lines and performs ZERO
+    // decode/derive/hash work — the refused terminal row is never touched.
+    let digests_before = tracedecay_domain::observation::identity_digest_probe::count();
+    let receipt = run_jsonl_trigger(&store, &session_id, &transcript, file_identity_v1, 2).await;
+    assert_eq!(
+        (receipt.lines_reopened, receipt.decoded),
+        (0, 0),
+        "the subsequent trigger must not reopen the refused terminal row"
+    );
+    assert_eq!(
+        tracedecay_domain::observation::identity_digest_probe::count() - digests_before,
+        0,
+        "the subsequent trigger must not decode, canonicalize, or hash anything"
+    );
+
+    // The file is REPLACED with byte-identical content (editor/rsync swap):
+    // a new inode, so the checkpoint misses and a genuinely new generation
+    // rescans once. The refused digest is unchanged, so the terminal answers
+    // it and converges the new generation's coverage atomically.
+    let file_identity_v2 = 0x51e5_0002_u64;
+    let receipt = run_jsonl_trigger(&store, &session_id, &transcript, file_identity_v2, 3).await;
+    assert_eq!((receipt.lines_reopened, receipt.decoded), (1, 1));
+    assert!(matches!(
+        receipt.records[0].result,
+        Err(ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        })
+    ));
+    assert_eq!(
+        receipt.records[0].persist_identity_digests, 0,
+        "the new-generation re-admit must not rework the terminal row"
+    );
+    assert_eq!(receipt.records[0].persist_probe_deltas, (0, 0, 0, 0));
+    // Subsequent generation-3 triggers reopen nothing.
+    let digests_before = tracedecay_domain::observation::identity_digest_probe::count();
+    let receipt = run_jsonl_trigger(&store, &session_id, &transcript, file_identity_v2, 3).await;
+    assert_eq!(
+        (receipt.lines_reopened, receipt.decoded),
+        (0, 0),
+        "subsequent triggers after the new-generation re-admit must reopen nothing"
+    );
+    assert_eq!(
+        tracedecay_domain::observation::identity_digest_probe::count() - digests_before,
+        0
+    );
+
+    // Restart: the checkpoint, terminal, and retained row are durable.
+    drop(store);
+    drop(runtime);
+    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let reopened_store = reopened
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let digests_before = tracedecay_domain::observation::identity_digest_probe::count();
+    let receipt = run_jsonl_trigger(
+        &reopened_store,
+        &session_id,
+        &transcript,
+        file_identity_v2,
+        3,
+    )
+    .await;
+    assert_eq!((receipt.lines_reopened, receipt.decoded), (0, 0));
+    assert_eq!(
+        tracedecay_domain::observation::identity_digest_probe::count() - digests_before,
+        0
+    );
+    assert_eq!(admission_refusal_rows(&reopened).await.len(), 1);
+    assert_eq!(
+        raw_observation_json(&reopened, &refused_row_id).await,
+        retained_row,
+        "the retained observation row must stay byte-identical"
+    );
+}
+
+/// Linux gate 2: a REAL injected cursor-advance failure — a conflicting
+/// coverage row already owns the exact advance-ledger key the refusal must
+/// claim, so recording coverage genuinely fails inside the authority
+/// transaction. Marker and coverage are one atomic transaction: the failure
+/// must leave NO visible refusal marker (no orphan), no cursor movement, and
+/// the injected row untouched; clearing the conflict lets the next frontier
+/// pass record marker + coverage together.
+#[tokio::test]
+async fn failed_coverage_advance_leaves_no_visible_refusal_marker() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.refusal.atomic-injection").unwrap();
+    let (original, original_write) = collision_candidate(
+        &session_id,
+        "record.atomic-injection",
+        1,
+        "original transcript record",
+        "receipt.atomic-injection.original",
+        None,
+    );
+    assert!(matches!(
+        store.persist_observation(original_write).await.unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    let committed_cursor = store
+        .get_source_cursor(original.source(), original.scope())
+        .await
+        .unwrap();
+
+    // Inject the advance failure: a conflicting coverage row already holds
+    // the exact (source, scope, coverage) key the refusal will claim, with a
+    // different reason and a bound receipt.
+    let (rewritten, rewritten_write) = collision_candidate(
+        &session_id,
+        "record.atomic-injection",
+        2,
+        "rewritten transcript record",
+        "receipt.atomic-injection.rewritten",
+        committed_cursor.clone(),
+    );
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let source_json = serde_json::to_string(rewritten.source()).unwrap();
+    let scope_json = serde_json::to_string(rewritten.scope()).unwrap();
+    let coverage_json =
+        serde_json::to_string(&tracedecay_store::observation::ObservationCoverageV1::new(
+            rewritten.identity().generation(),
+            rewritten.identity().ordering_domain(),
+            rewritten.identity().position(),
+        ))
+        .unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "INSERT INTO source_cursor_advances
+                (source_json, scope_json, coverage_json, reason, receipt_id)
+             VALUES (?1, ?2, ?3, 'canonical_payload_revision', ?4)",
+            params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                coverage_json.as_str(),
+                original.receipt().receipt().receipt_id().as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    // The refusal hits the injected advance failure. Marker and coverage are
+    // atomic, so NOTHING may be visible: no orphan marker, no cursor move.
+    let error = store
+        .persist_observation(rewritten_write.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        admission_refusal_rows(&runtime).await,
+        Vec::new(),
+        "a failed coverage advance must not leave a visible refusal marker"
+    );
+    assert!(
+        matches!(error, ObservationStoreError::CursorAdvanceCollision),
+        "the injected advance failure must surface as the typed cursor-advance \
+         collision, got {error:?}"
+    );
+    assert_eq!(
+        store
+            .get_source_cursor(original.source(), original.scope())
+            .await
+            .unwrap(),
+        committed_cursor,
+        "a failed coverage advance must not move the cursor"
+    );
+
+    // Clear the injected conflict (operator remediation) and re-present: the
+    // refusal records marker + coverage together.
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch("DROP TRIGGER IF EXISTS source_cursor_advances_immutable_delete_v1")
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "DELETE FROM source_cursor_advances
+             WHERE source_json = ?1 AND scope_json = ?2 AND coverage_json = ?3",
+            params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                coverage_json.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute_batch(
+            "CREATE TRIGGER source_cursor_advances_immutable_delete_v1 BEFORE DELETE ON \
+             source_cursor_advances BEGIN SELECT RAISE(ABORT, \
+             'source cursor advances are immutable'); END",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let error = store
+        .persist_observation(rewritten_write.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ObservationStoreError::ObservationCollision {
+                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    assert_eq!(
+        store
+            .get_source_cursor(original.source(), original.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(rewritten_write.next_cursor()),
+        "marker and coverage must land together"
     );
 }
 
