@@ -5,6 +5,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
+use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
@@ -585,7 +586,7 @@ async fn task_run_gate_with_lock_retention(
             let enablement_skip = if trigger.is_on_demand() {
                 None
             } else if !config.enabled {
-                Some("automation_disabled")
+                Some(AUTOMATION_DISABLED)
             } else if task_disabled(config, task) {
                 Some(task_disabled_reason(task))
             } else {
