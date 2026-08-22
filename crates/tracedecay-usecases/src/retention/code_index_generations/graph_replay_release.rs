@@ -94,7 +94,11 @@ pub(super) fn release_event_exists(
         generation: generation.clone(),
     };
     match std::fs::symlink_metadata(release_path(store_root, &release)?) {
-        Ok(metadata) => Ok(metadata.file_type().is_file()),
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "graph replay release for '{}' is not a regular file",
+            generation.generation_file
+        ))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(storage(error)),
     }
