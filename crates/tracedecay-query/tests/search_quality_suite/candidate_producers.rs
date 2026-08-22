@@ -2040,7 +2040,7 @@ fn disk_artifact_same_source_instance_resumes_after_accepted_page_failure() {
     let control = ArtifactControl { cancelled: false };
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let mut resumed_after_acceptance = false;
-    for cancellation_observation in 3..=96 {
+    for cancellation_observation in 3..=256 {
         let artifact_path = directory
             .path()
             .join(format!("same-source-{cancellation_observation}.sqlite"));
