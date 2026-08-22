@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
 use tracedecay_domain::configuration::{ConfigurationRevisionId, UserProfileId};
 use tracedecay_domain::{ActorId, FactOwnerV1, SessionId};
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
@@ -144,7 +145,7 @@ async fn scheduled_disabled_session_reflector_reads_no_evidence_and_runs_no_back
     .expect("scheduled-disabled reflector skip");
 
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-    assert_eq!(run.report["reason"], "automation_disabled");
+    assert_eq!(run.report["reason"], AUTOMATION_DISABLED);
     assert_eq!(retrieval.calls.load(Ordering::SeqCst), 0);
     assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
 }
@@ -182,7 +183,7 @@ async fn scheduled_disabled_skill_writer_reads_no_evidence_and_runs_no_backend()
     .expect("scheduled-disabled skill writer skip");
 
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-    assert_eq!(run.report["reason"], "automation_disabled");
+    assert_eq!(run.report["reason"], AUTOMATION_DISABLED);
     assert_eq!(retrieval.calls.load(Ordering::SeqCst), 0);
     assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
 }
