@@ -179,15 +179,15 @@ fn decode_raw_source_record(
 /// Candidates built with the same `record_id` share a canonical observation
 /// id regardless of `generation`, range, or payload text — exactly the shape
 /// a rewritten source file produces.
-fn collision_candidate_at(
+fn collision_observation_at(
     session_id: &SessionId,
     record_id: &str,
     generation: u64,
     range: (u64, u64),
+    ordering_domain: ObservationOrderingDomainV1,
     text: &str,
     receipt_id: &str,
-    expected_cursor: Option<ObservationSourceCursorV1>,
-) -> (DurableObservationV1, AnchoredObservationWrite) {
+) -> DurableObservationV1 {
     let provider = ProviderId::new(COLLISION_PROVIDER).unwrap();
     let source =
         ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
@@ -206,7 +206,7 @@ fn collision_candidate_at(
             model: None,
             timestamp: Some(1_750_000_000),
         }],
-        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+        CanonicalObservationEvidenceV1::new(ordering_domain, range),
     )
     .unwrap();
     let payload = serde_json::to_value(envelope).unwrap();
@@ -215,17 +215,37 @@ fn collision_candidate_at(
         ObservationScopeV1::Profile,
         ObservationSourceGenerationV1::new(generation).unwrap(),
         range,
-        ObservationOrderingDomainV1::SnapshotOrder,
+        ordering_domain,
         record,
     )
     .unwrap();
-    let observation = DurableObservationV1::new(
+    DurableObservationV1::new(
         identity,
         fixture_receipt(receipt_id, &payload),
         RetentionClass::new("retention.collision-test").unwrap(),
         payload,
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn collision_candidate_at(
+    session_id: &SessionId,
+    record_id: &str,
+    generation: u64,
+    evidence: CanonicalObservationEvidenceV1,
+    text: &str,
+    receipt_id: &str,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+) -> (DurableObservationV1, AnchoredObservationWrite) {
+    let observation = collision_observation_at(
+        session_id,
+        record_id,
+        generation,
+        (evidence.range().start(), evidence.range().end()),
+        evidence.ordering_domain(),
+        text,
+        receipt_id,
+    );
     let anchored = anchored_write_for(observation.clone(), expected_cursor);
     (observation, anchored)
 }
@@ -242,7 +262,10 @@ fn collision_candidate(
         session_id,
         record_id,
         generation,
-        (0, 1),
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::SnapshotOrder,
+            ObservationSourceRangeV1::new(0, 1).unwrap(),
+        ),
         text,
         receipt_id,
         expected_cursor,
@@ -611,6 +634,107 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
             .unwrap()
             .as_ref(),
         Some(rewritten_write.next_cursor())
+    );
+}
+
+/// A replacement generation may change its ordering domain. The canonical
+/// cursor-transition authority accepts that shape when the FileBytes range
+/// restarts at zero, so collision refusal must commit the same terminal
+/// coverage and keep later re-admission on the zero-record-work fast path.
+#[tokio::test]
+async fn replacement_domain_collision_records_terminal_coverage_without_rework() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.identity-collision.domain-replacement").unwrap();
+    let (original, original_write) = collision_candidate(
+        &session_id,
+        "record.domain-replacement",
+        1,
+        "snapshot-ordered original record",
+        "receipt.domain-replacement.original",
+        None,
+    );
+    assert!(matches!(
+        store.persist_observation(original_write).await.unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    let committed_cursor = store
+        .get_source_cursor(original.source(), original.scope())
+        .await
+        .unwrap();
+    assert_eq!(
+        committed_cursor
+            .as_ref()
+            .map(ObservationSourceCursorV1::ordering_domain),
+        Some(ObservationOrderingDomainV1::SnapshotOrder)
+    );
+
+    let (_, replacement_write) = collision_candidate_at(
+        &session_id,
+        "record.domain-replacement",
+        2,
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::FileBytes,
+            ObservationSourceRangeV1::new(0, 1).unwrap(),
+        ),
+        "file-byte replacement record",
+        "receipt.domain-replacement.replacement",
+        committed_cursor,
+    );
+    let first = store
+        .persist_observation(replacement_write.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        first,
+        ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        }
+    ));
+    assert_eq!(
+        store
+            .get_source_cursor(original.source(), original.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(replacement_write.next_cursor()),
+        "the FileBytes replacement must commit terminal coverage from position zero"
+    );
+    assert_eq!(
+        admission_refused_advance_count(&runtime, &original).await,
+        1
+    );
+    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+
+    let probe = store.persist_probe();
+    let before = probe.snapshot();
+    let second = store
+        .persist_observation(replacement_write)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        second,
+        ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        }
+    ));
+    let after = probe.snapshot();
+    assert_eq!(
+        (
+            after.0 - before.0,
+            after.1 - before.1,
+            after.2 - before.2,
+            after.3 - before.3,
+        ),
+        (0, 0, 0, 0),
+        "re-admission must not read, classify, probe revisions, or hash the record"
     );
 }
 
@@ -1110,7 +1234,10 @@ async fn stale_expected_cursor_collision_stays_a_typed_collision() {
         &session_id,
         "record.stale-expected",
         1,
-        (5, 6),
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::SnapshotOrder,
+            ObservationSourceRangeV1::new(5, 6).unwrap(),
+        ),
         "conflicting gap payload",
         "receipt.stale-expected.conflicting",
         Some(stale_expected),
@@ -1141,12 +1268,11 @@ async fn stale_expected_cursor_collision_stays_a_typed_collision() {
     );
 }
 
-/// Linux P1-3, generation-jump shape: a new-generation candidate that starts
-/// mid-file is a gap, not a rescan frontier — recording coverage for it would
-/// silently claim bytes no scan ever read. Nothing may be recorded and the
-/// cursor must not jump.
+/// FileBytes replacement generations must restart at zero. The canonical
+/// observation-write contract rejects a mid-file replacement before it can
+/// reach persistence, so no refusal, coverage, or cursor mutation can occur.
 #[tokio::test]
-async fn generation_jump_collision_records_no_false_coverage() {
+async fn file_bytes_generation_jump_is_rejected_before_persistence() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -1175,24 +1301,27 @@ async fn generation_jump_collision_records_no_false_coverage() {
     // Same record id resurfaces in a NEW generation but mid-file (71..72)
     // with the current durable cursor as the expected view: bytes 0..71 of
     // that generation were never scanned.
-    let (_, jump_write) = collision_candidate_at(
+    let jump_observation = collision_observation_at(
         &session_id,
         "record.generation-jump",
         2,
         (71, 72),
+        ObservationOrderingDomainV1::FileBytes,
         "conflicting jump payload",
         "receipt.generation-jump.conflicting",
-        committed_cursor.clone(),
     );
-    let error = store.persist_observation(jump_write).await.unwrap_err();
+    let next_cursor = ObservationSourceCursorV1::for_ordering(
+        jump_observation.source().clone(),
+        jump_observation.scope().clone(),
+        jump_observation.identity().generation(),
+        jump_observation.identity().ordering_domain(),
+        jump_observation.identity().position().end(),
+    )
+    .unwrap();
+    let error =
+        ObservationWrite::new(jump_observation, committed_cursor.clone(), next_cursor).unwrap_err();
     assert!(
-        matches!(
-            error,
-            ObservationStoreError::ObservationCollision {
-                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-                ..
-            }
-        ),
+        matches!(error, ObservationStoreError::CursorObservationMismatch),
         "{error:?}"
     );
 

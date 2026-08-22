@@ -122,18 +122,9 @@ impl GlobalDbObservationStore {
         let identity = candidate.identity();
         let actual_cursor =
             read_runtime_source_cursor(&self.runtime, identity.source(), identity.scope())?;
-        if !refused_scan_frontier(write, actual_cursor.as_ref()) {
+        let Some(mut advance) = refused_scan_frontier(write, actual_cursor.as_ref()) else {
             return Ok(());
-        }
-        let mut advance = ObservationCursorAdvance::for_ordering(
-            identity.source().clone(),
-            identity.scope().clone(),
-            identity.generation(),
-            identity.ordering_domain(),
-            write.expected_cursor().cloned(),
-            identity.position(),
-            ObservationCoverageReason::AdmissionRefused,
-        )?;
+        };
         match (
             write.next_cursor().file_identity(),
             write.next_cursor().resume_fingerprint(),
@@ -878,7 +869,7 @@ fn read_runtime_retrieval_anchor_by_alias(
 fn refused_scan_frontier(
     write: &AnchoredObservationWrite,
     actual_cursor: Option<&ClaudeSourceCursorV1>,
-) -> bool {
+) -> Option<ObservationCursorAdvance> {
     let identity = write.observation().identity();
     let candidate_covered = actual_cursor.is_some_and(|cursor| {
         cursor.generation() == identity.generation()
@@ -886,19 +877,18 @@ fn refused_scan_frontier(
             && cursor.position() >= identity.position().end()
     });
     if candidate_covered || actual_cursor != write.expected_cursor() {
-        return false;
+        return None;
     }
-    match write.expected_cursor() {
-        Some(cursor) if cursor.generation() == identity.generation() => {
-            cursor.ordering_domain() == identity.ordering_domain()
-                && cursor.position() == identity.position().start()
-        }
-        Some(cursor) => {
-            cursor.ordering_domain() == identity.ordering_domain()
-                && identity.position().start() == 0
-        }
-        None => identity.position().start() == 0,
-    }
+    ObservationCursorAdvance::for_ordering(
+        identity.source().clone(),
+        identity.scope().clone(),
+        identity.generation(),
+        identity.ordering_domain(),
+        write.expected_cursor().cloned(),
+        identity.position(),
+        ObservationCoverageReason::AdmissionRefused,
+    )
+    .ok()
 }
 
 /// Durable terminal marker for a previously refused identity collision.
