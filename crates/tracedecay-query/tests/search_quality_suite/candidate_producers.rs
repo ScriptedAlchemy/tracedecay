@@ -1960,7 +1960,10 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
     // durable, so retries are not required to preserve the staging file's
     // byte size.
     for round in 0..4 {
-        let exhausted = BudgetExhaustedAtObservation::new(2);
+        // The fifth checkpoint is the first one after the finalization marker
+        // is durable. Earlier refusal is intentionally mutation-free and does
+        // not freeze append admission.
+        let exhausted = BudgetExhaustedAtObservation::new(5);
         let outcome = builder.advance_finalization(&source_receipt, usize::MAX, &exhausted);
         assert!(
             matches!(
