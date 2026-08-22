@@ -556,7 +556,7 @@ async fn apply_code_generation_retention(
             offline_replay_reconcile_failed = true;
         }
     }
-    if plan.collectable_generations.is_empty() {
+    if !plan.has_collectable_work() {
         return !offline_replay_reconcile_failed;
     }
     if cancellation.is_cancelled() {
@@ -718,7 +718,7 @@ async fn apply_code_generation_retention(
 
     match report {
         Ok(Ok(report)) => {
-            let reclaimed = report.receipt.as_ref().map_or_else(
+            let generation_reclaimed = report.receipt.as_ref().map_or_else(
                 || {
                     report
                         .deleted_generations
@@ -728,6 +728,17 @@ async fn apply_code_generation_retention(
                 },
                 |receipt| receipt.reclaimed_bytes,
             );
+            let text_artifact_reclaimed = report.text_artifact_receipt.as_ref().map_or_else(
+                || {
+                    report
+                        .deleted_text_artifacts
+                        .iter()
+                        .map(|artifact| artifact.size_bytes)
+                        .sum()
+                },
+                |receipt| receipt.reclaimed_bytes,
+            );
+            let reclaimed = generation_reclaimed.saturating_add(text_artifact_reclaimed);
             if reclaimed > 0 {
                 log_daemon_event(
                     "retention_code_generations",
@@ -738,6 +749,10 @@ async fn apply_code_generation_retention(
                         (
                             "generations_collected",
                             report.deleted_generations.len().to_string(),
+                        ),
+                        (
+                            "text_artifacts_collected",
+                            report.deleted_text_artifacts.len().to_string(),
                         ),
                     ],
                 );
