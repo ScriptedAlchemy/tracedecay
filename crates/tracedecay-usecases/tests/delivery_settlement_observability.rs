@@ -263,19 +263,29 @@ async fn recorder_replays_retained_receipt_after_transient_db_failure_and_restar
     .await
     .expect("registered runtime");
     let db = runtime.project_database_arc().expect("project database");
-    let identity = ObservabilityProducerIdentityV1 {
+    let core_identity = ObservabilityProducerIdentityV1 {
         authorized_scope_ref: project_id.as_str().to_owned(),
         process_boot_id: "boot:delivery-restart".to_owned(),
         producer_revision: "delivery-restart-producer.v1".to_owned(),
         configuration_revision: "delivery-restart-config.v1".to_owned(),
-        policy_revision: "delivery-restart-policy.v1".to_owned(),
+        policy_revision: "delivery-restart-core-policy.v1".to_owned(),
+    };
+    let linked_identity = ObservabilityProducerIdentityV1 {
+        policy_revision: "delivery-restart-linked-policy.v1".to_owned(),
+        ..core_identity.clone()
     };
     let producer = Arc::new(
-        BoundedObservabilityProducerV1::start(db.clone(), identity.clone(), 8).expect("producer"),
+        BoundedObservabilityProducerV1::start(db.clone(), core_identity.clone(), 8)
+            .expect("producer"),
     );
     let authority = Arc::new(
-        DeliverySettlementAuthorityV1::new(db.clone(), Arc::clone(&producer), identity)
+        DeliverySettlementAuthorityV1::new(db.clone(), Arc::clone(&producer), core_identity)
             .expect("settlement authority"),
+    );
+    let linked_authority = Arc::new(
+        authority
+            .alias_with_policy_identity(linked_identity)
+            .expect("linked settlement authority"),
     );
     let transaction = db
         .begin_write_transaction()
@@ -293,8 +303,8 @@ async fn recorder_replays_retained_receipt_after_transient_db_failure_and_restar
         .expect("install failure trigger");
     transaction.commit().await.expect("commit failure trigger");
 
-    let recorder =
-        BoundedDeliverySettlementRecorderV1::start(Arc::clone(&authority), 1).expect("recorder");
+    let recorder = BoundedDeliverySettlementRecorderV1::start(Arc::clone(&linked_authority), 1)
+        .expect("recorder");
     let terminal = DeliverySettlementV1 {
         attempt: attempt(),
         outcome: DeliverySettlementOutcomeV1::Delivered,
@@ -311,6 +321,13 @@ async fn recorder_replays_retained_receipt_after_transient_db_failure_and_restar
     assert_eq!(failed.settled, 0);
     assert_eq!(failed.retained, 1);
     drop(recorder);
+    drop(linked_authority);
+    drop(authority);
+    let producer = match Arc::try_unwrap(producer) {
+        Ok(producer) => producer,
+        Err(_) => panic!("recorder must release old producer after shutdown"),
+    };
+    producer.shutdown().await.expect("stop old producer");
 
     let transaction = db
         .begin_write_transaction()
@@ -325,8 +342,27 @@ async fn recorder_replays_retained_receipt_after_transient_db_failure_and_restar
         .expect("remove failure trigger");
     transaction.commit().await.expect("commit recovery");
 
-    let restarted =
-        BoundedDeliverySettlementRecorderV1::start(Arc::clone(&authority), 1).expect("restart");
+    let restarted_identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: project_id.as_str().to_owned(),
+        process_boot_id: "boot:delivery-restarted".to_owned(),
+        producer_revision: "delivery-restarted-producer.v2".to_owned(),
+        configuration_revision: "delivery-restarted-config.v2".to_owned(),
+        policy_revision: "delivery-restarted-core-policy.v2".to_owned(),
+    };
+    let producer = Arc::new(
+        BoundedObservabilityProducerV1::start(db.clone(), restarted_identity.clone(), 8)
+            .expect("restarted producer"),
+    );
+    let authority = Arc::new(
+        DeliverySettlementAuthorityV1::new(
+            db.clone(),
+            Arc::clone(&producer),
+            restarted_identity.clone(),
+        )
+        .expect("restarted settlement authority"),
+    );
+    let restarted = BoundedDeliverySettlementRecorderV1::start(Arc::clone(&authority), 1)
+        .expect("restart recorder");
     let recovered = restarted.shutdown().await.expect("restart replay");
     assert_eq!(recovered.settled, 1);
     assert_eq!(recovered.retained, 0);
@@ -343,4 +379,34 @@ async fn recorder_replays_retained_receipt_after_transient_db_failure_and_restar
         Err(_) => panic!("recorder must release producer after restart"),
     };
     producer.shutdown().await.expect("flush producer");
+    let page = RegisteredObservabilityPortV1::new(db.as_ref())
+        .query(ObservabilityQueryV1 {
+            authorized_scope_ref: project_id.as_str().to_owned(),
+            event_kinds: vec!["work.delivery_fanout.observed.v1".to_owned()],
+            horizon: ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: i64::MAX,
+            },
+            after_watermark: None,
+            limit: 8,
+        })
+        .await
+        .expect("restarted settlement observation query");
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(
+        page.events[0].policy_revision,
+        "delivery-restart-linked-policy.v1"
+    );
+    assert_eq!(
+        page.events[0].process_boot_id,
+        restarted_identity.process_boot_id
+    );
+    assert_eq!(
+        page.events[0].producer_revision,
+        restarted_identity.producer_revision
+    );
+    assert_eq!(
+        page.events[0].configuration_revision,
+        restarted_identity.configuration_revision
+    );
 }

@@ -1056,6 +1056,7 @@ mod tests {
         project_id: ProjectId,
         configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
         configuration_digest: ManifestDigest,
+        configuration_provenance_digest: ManifestDigest,
     }
 
     impl CombinedAdmissionFixture {
@@ -1154,6 +1155,7 @@ mod tests {
                 project_id,
                 configuration_revision_id,
                 configuration_digest: access.configuration_digest,
+                configuration_provenance_digest: access.configuration_provenance_digest,
             }
         }
 
@@ -1178,6 +1180,7 @@ mod tests {
                     session_db.clone(),
                     self.project_id.clone(),
                     self.configuration_digest.clone(),
+                    self.configuration_provenance_digest.clone(),
                     policy_digest,
                 )
                 .await

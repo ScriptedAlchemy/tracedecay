@@ -132,6 +132,7 @@ pub async fn dashboard_automation_authority_for_test(
             project_database,
             project_id.clone(),
             configuration.snapshot.effective_behavior_digest,
+            configuration.snapshot.resolution_provenance_digest,
             configuration_policy_digest,
         )
         .await?;

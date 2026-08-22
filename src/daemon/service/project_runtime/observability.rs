@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use tracedecay_application::ApplicationContractError;
+use tracedecay_domain::ManifestDigest;
 use tracedecay_usecases::observability::{
     BoundedDeliverySettlementRecorderV1, BoundedObservabilityProducerV1,
     DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1, WorkOwnerObservationRecoveryV1,
@@ -15,6 +16,10 @@ use tracedecay_usecases::observability::{
 /// project roots (linked worktrees) mount observability for that store.
 struct StoreObservabilityCoreV1 {
     database: crate::global_db::RegisteredGlobalDbLeaseV1,
+    // Canonical configuration resolution provenance is store-wide. Exact
+    // digest equality proves that linked-root policy differences come only
+    // from their scopes; a different provenance must not reuse this owner.
+    configuration_provenance_revision: ManifestDigest,
     producer: Arc<BoundedObservabilityProducerV1>,
     delivery_settlement_authority: Arc<DeliverySettlementAuthorityV1>,
     delivery_settlements: Arc<BoundedDeliverySettlementRecorderV1>,
@@ -24,6 +29,7 @@ struct StoreObservabilityCoreV1 {
 impl StoreObservabilityCoreV1 {
     fn start(
         database: crate::global_db::RegisteredGlobalDbLeaseV1,
+        configuration_provenance_revision: ManifestDigest,
         producer: BoundedObservabilityProducerV1,
         delivery_capacity: usize,
     ) -> Result<Self, &'static str> {
@@ -46,6 +52,7 @@ impl StoreObservabilityCoreV1 {
         )?);
         Ok(Self {
             database,
+            configuration_provenance_revision,
             producer,
             delivery_settlement_authority,
             delivery_settlements,
@@ -128,8 +135,11 @@ impl StoreObservabilityRegistryV1 {
     pub(crate) fn acquire_or_start<E>(
         &self,
         database: &crate::global_db::RegisteredGlobalDbLeaseV1,
+        configuration_provenance_revision: &ManifestDigest,
         accepts_incumbent: impl FnOnce(&ObservabilityProducerIdentityV1) -> bool,
-        alias_identity: impl FnOnce(&ObservabilityProducerIdentityV1) -> ObservabilityProducerIdentityV1,
+        emission_identity: impl FnOnce(
+            &ObservabilityProducerIdentityV1,
+        ) -> ObservabilityProducerIdentityV1,
         refused: impl FnOnce() -> E,
         start_producer: impl FnOnce() -> Result<BoundedObservabilityProducerV1, E>,
         delivery_capacity: usize,
@@ -142,18 +152,28 @@ impl StoreObservabilityRegistryV1 {
         {
             match &mut entry.state {
                 StoreObservabilityStateV1::Active { core, aliases } => {
-                    if !accepts_incumbent(core.producer.identity()) {
+                    if core.configuration_provenance_revision != *configuration_provenance_revision
+                        || !accepts_incumbent(core.producer.identity())
+                    {
                         return Err(refused());
                     }
-                    let mount_identity = alias_identity(core.producer.identity());
-                    *aliases = aliases.checked_add(1).ok_or_else(|| {
+                    let emission_identity = emission_identity(core.producer.identity());
+                    let producer = Arc::new(
+                        core.producer
+                            .alias_with_policy_identity(emission_identity)
+                            .map_err(&unavailable)?,
+                    );
+                    let next_aliases = aliases.checked_add(1).ok_or_else(|| {
                         unavailable("store_observability_alias_capacity_exhausted")
                     })?;
-                    return Ok(RegisteredObservabilityProducerV1::alias(
+                    let registered = RegisteredObservabilityProducerV1::alias(
                         self.clone(),
                         Arc::clone(core),
-                        mount_identity,
-                    ));
+                        producer,
+                    )
+                    .map_err(&unavailable)?;
+                    *aliases = next_aliases;
+                    return Ok(registered);
                 }
                 StoreObservabilityStateV1::Stopping { .. } => {
                     return Err(unavailable("store_observability_retiring"));
@@ -164,11 +184,21 @@ impl StoreObservabilityRegistryV1 {
             }
         }
         let producer = start_producer()?;
-        let mount_identity = alias_identity(producer.identity());
         let core = Arc::new(
-            StoreObservabilityCoreV1::start(database.clone(), producer, delivery_capacity)
-                .map_err(&unavailable)?,
+            StoreObservabilityCoreV1::start(
+                database.clone(),
+                configuration_provenance_revision.clone(),
+                producer,
+                delivery_capacity,
+            )
+            .map_err(&unavailable)?,
         );
+        let registered = RegisteredObservabilityProducerV1::alias(
+            self.clone(),
+            Arc::clone(&core),
+            Arc::clone(&core.producer),
+        )
+        .map_err(&unavailable)?;
         entries.push(StoreObservabilityEntryV1 {
             database: database.clone(),
             state: StoreObservabilityStateV1::Active {
@@ -176,11 +206,7 @@ impl StoreObservabilityRegistryV1 {
                 aliases: 1,
             },
         });
-        Ok(RegisteredObservabilityProducerV1::alias(
-            self.clone(),
-            core,
-            mount_identity,
-        ))
+        Ok(registered)
     }
 
     fn begin_retirement(
@@ -264,7 +290,9 @@ impl StoreObservabilityRegistryV1 {
 pub(crate) struct RegisteredObservabilityProducerV1 {
     registry: StoreObservabilityRegistryV1,
     core: Arc<StoreObservabilityCoreV1>,
-    mount_identity: ObservabilityProducerIdentityV1,
+    producer: Arc<BoundedObservabilityProducerV1>,
+    delivery_settlement_authority: Arc<DeliverySettlementAuthorityV1>,
+    delivery_settlements: Arc<BoundedDeliverySettlementRecorderV1>,
     released: AtomicBool,
 }
 
@@ -272,18 +300,29 @@ impl RegisteredObservabilityProducerV1 {
     fn alias(
         registry: StoreObservabilityRegistryV1,
         core: Arc<StoreObservabilityCoreV1>,
-        mount_identity: ObservabilityProducerIdentityV1,
-    ) -> Self {
-        Self {
+        producer: Arc<BoundedObservabilityProducerV1>,
+    ) -> Result<Self, &'static str> {
+        let emission_identity = producer.identity().clone();
+        let delivery_settlement_authority = Arc::new(
+            core.delivery_settlement_authority
+                .alias_with_policy_identity(emission_identity.clone())?,
+        );
+        let delivery_settlements = Arc::new(
+            core.delivery_settlements
+                .alias_with_policy_identity(emission_identity)?,
+        );
+        Ok(Self {
             registry,
             core,
-            mount_identity,
+            producer,
+            delivery_settlement_authority,
+            delivery_settlements,
             released: AtomicBool::new(false),
-        }
+        })
     }
 
     pub(crate) fn producer(&self) -> Arc<BoundedObservabilityProducerV1> {
-        Arc::clone(&self.core.producer)
+        Arc::clone(&self.producer)
     }
 
     pub(crate) fn database(&self) -> crate::global_db::RegisteredGlobalDbLeaseV1 {
@@ -293,20 +332,22 @@ impl RegisteredObservabilityProducerV1 {
     pub(crate) fn delivery_settlement_authority(
         &self,
     ) -> Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1> {
-        Arc::clone(&self.core.delivery_settlement_authority)
+        Arc::clone(&self.delivery_settlement_authority)
     }
 
     pub(crate) fn delivery_settlement_recorder(&self) -> Arc<BoundedDeliverySettlementRecorderV1> {
-        Arc::clone(&self.core.delivery_settlements)
+        Arc::clone(&self.delivery_settlements)
     }
 
     pub(crate) fn matches(
         &self,
         database: &crate::global_db::RegisteredGlobalDbLeaseV1,
+        configuration_provenance_revision: &ManifestDigest,
         identity: &ObservabilityProducerIdentityV1,
     ) -> bool {
         same_registered_store_authority(&self.core.database, database)
-            && self.mount_identity == *identity
+            && self.core.configuration_provenance_revision == *configuration_provenance_revision
+            && *self.producer.identity() == *identity
     }
 
     /// Releases this alias from its store entry, reporting whether it was the
