@@ -118,6 +118,120 @@ fn graph_release_queue_rejects_corrupt_and_oversize_evidence() {
     ));
 }
 
+/// Deterministic retention-versus-reconciler interleaving at the staged
+/// unlink boundary. Retention exposes the retired generation and makes its
+/// receipt durable; before retention's cleanup phase runs, an old in-process
+/// reconciler — holding the same canonical pool lock the daemon's replay
+/// reconciler uses — consumes the queued release event as its typed
+/// retirement authority, unlinks the pool copy, and completes the event.
+/// Cleanup must then not resurrect the retired pool entry (an orphan no
+/// authority would ever collect), and no required replay may disappear: the
+/// pool copy stays present the whole time the release event is outstanding,
+/// and every retained generation keeps its canonical file.
+#[test]
+fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_missing_replay() {
+    let (store, generations) = fixture_store(5);
+    let pool_root = store.path().join("graph-replay-pool");
+    let plan =
+        plan_code_generation_retention(store.path(), &BTreeSet::new(), 3).expect("plan retention");
+    assert_eq!(plan.collectable_generations.len(), 1);
+    let collectable = plan.collectable_generations[0].clone();
+    let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+    let receipt = build_receipt(&plan, plan.collectable_generations.clone(), UtcMicros(108))
+        .expect("build retention receipt");
+    let transaction = CodeGenerationRetentionTransactionV1 {
+        schema: TRANSACTION_SCHEMA.to_owned(),
+        active_pointer: plan.active_pointer.clone(),
+        receipt: receipt.clone(),
+    };
+
+    // Retention: journal, quarantine, and expose before the receipt.
+    persist_transaction(store.path(), &transaction).expect("persist transaction journal");
+    stage_collectable_generations(store.path(), &transaction).expect("stage generation");
+    expose_staged_generations_to_graph_replay_pool(
+        store.path(),
+        &transaction,
+        &pool_root,
+        GraphReplayPoolExposureV1::BeforeReceipt,
+    )
+    .expect("expose staged generation to the pool");
+    assert!(
+        pool_root.join(&collectable.generation_file).is_file(),
+        "the pool copy must exist before the release event can become durable"
+    );
+
+    // Retention: the receipt and its release event become durable.
+    write_receipt(store.path(), &receipt).expect("write durable receipt");
+    let page = code_generation_graph_replay_release_page(store.path(), None)
+        .expect("read durable release event");
+    assert_eq!(page.releases.len(), 1);
+    let release = page.releases[0].clone();
+    assert_eq!(release.generation, collectable);
+
+    // Old reconciler at the staged unlink boundary: under the canonical pool
+    // lock it retires the pool copy with the release event as its typed
+    // authority, then completes the event. Retention's cleanup has not run.
+    {
+        let _pool_lock =
+            acquire_code_generation_store_lock(&pool_root).expect("reconciler pool lock");
+        assert!(
+            pool_root.join(&collectable.generation_file).is_file(),
+            "the replay never disappears while its release event is outstanding"
+        );
+        std::fs::remove_file(pool_root.join(&collectable.generation_file))
+            .expect("reconciler unlinks the retired pool copy");
+        complete_code_generation_graph_replay_release(store.path(), &release)
+            .expect("reconciler completes the release event");
+    }
+
+    // Retention: cleanup replays exposure after the durable receipt.
+    cleanup_committed_transaction(
+        store.path(),
+        &transaction,
+        &BTreeSet::new(),
+        Some(&pool_root),
+    )
+    .expect("cleanup committed transaction");
+    clear_transaction(store.path()).expect("clear transaction journal");
+
+    // No orphan: the consumed release's pool copy must not be resurrected,
+    // and no release event survives without its pool copy.
+    assert!(
+        !pool_root.join(&collectable.generation_file).exists(),
+        "cleanup must not resurrect a pool entry the graph already retired"
+    );
+    assert!(
+        code_generation_graph_replay_release_page(store.path(), None)
+            .expect("read release queue after cleanup")
+            .releases
+            .is_empty(),
+        "no release event may remain without a matching pool copy"
+    );
+    // No missing replay: the retired generation was fully released under
+    // typed authority, and every retained generation keeps its canonical
+    // file and never entered the pool.
+    assert!(
+        !generations_root.join(&collectable.generation_file).exists(),
+        "the retired generation's canonical file was collected"
+    );
+    for generation in &generations {
+        if generation.file == collectable.generation_file {
+            continue;
+        }
+        assert!(
+            generations_root.join(&generation.file).is_file(),
+            "retained generation '{}' must keep its canonical file",
+            generation.file
+        );
+        assert!(
+            !pool_root.join(&generation.file).exists(),
+            "retained generation '{}' must not leak into the pool",
+            generation.file
+        );
+    }
+    assert!(!transaction_path(store.path()).exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn graph_release_queue_rejects_symlink_evidence() {

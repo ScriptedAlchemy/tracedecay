@@ -1245,7 +1245,9 @@ fn verify_existing_graph_replay_pool_entry(
     let entry_file = File::open(pool_entry).map_err(storage)?;
     let opened = entry_file.metadata().map_err(storage)?;
     if !metadata_identity_matches(&before, &opened) {
-        return Err(unsafe_entry("changed while its identity was being verified"));
+        return Err(unsafe_entry(
+            "changed while its identity was being verified",
+        ));
     }
     let staged_file = File::open(staged).map_err(storage)?;
     if !open_files_are_byte_identical(&entry_file, &staged_file)? {
@@ -1253,7 +1255,9 @@ fn verify_existing_graph_replay_pool_entry(
     }
     let after = entry_file.metadata().map_err(storage)?;
     if !metadata_identity_matches(&before, &after) {
-        return Err(unsafe_entry("changed while its identity was being verified"));
+        return Err(unsafe_entry(
+            "changed while its identity was being verified",
+        ));
     }
     Ok(())
 }
@@ -3578,6 +3582,202 @@ mod tests {
             .map(|entries| entries.count())
             .unwrap_or(0);
         assert_eq!(queued, 0, "rollback must remove the queued release events");
+    }
+
+    fn queued_release_count(store_root: &Path) -> usize {
+        std::fs::read_dir(store_root.join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn retention_refuses_a_corrupt_same_name_graph_replay_pool_entry() {
+        let (store, _generations) = fixture_store(5);
+        let pool_root = store.path().join("graph-replay-pool");
+        std::fs::create_dir_all(&pool_root).expect("create pool root");
+        let plan =
+            plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+                .expect("plan retention");
+        let collectable = plan.collectable_generations[0].clone();
+        let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+        let canonical_bytes = std::fs::read(generations_root.join(&collectable.generation_file))
+            .expect("read collectable bytes");
+        let mut corrupt_bytes = canonical_bytes.clone();
+        corrupt_bytes[0] ^= 0x2a;
+        std::fs::write(pool_root.join(&collectable.generation_file), &corrupt_bytes)
+            .expect("pre-create corrupt same-name pool entry");
+
+        let error = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(104),
+            Some(&pool_root),
+        )
+        .expect_err("a corrupt same-name pool entry must fail retention closed");
+
+        assert!(matches!(
+            error,
+            CodeGenerationRetentionErrorV1::UnsafeState(_)
+        ));
+        assert!(
+            !store.path().join(RECEIPTS_DIRECTORY).exists(),
+            "no deletion receipt may be published over unusable pool evidence"
+        );
+        assert_eq!(
+            queued_release_count(store.path()),
+            0,
+            "no release event may be published over unusable pool evidence"
+        );
+        assert_eq!(
+            std::fs::read(generations_root.join(&collectable.generation_file))
+                .expect("canonical generation bytes survive the refused retention"),
+            canonical_bytes,
+        );
+        assert_eq!(
+            std::fs::read(pool_root.join(&collectable.generation_file))
+                .expect("foreign pool entry is left in place"),
+            corrupt_bytes,
+        );
+        assert!(!transaction_path(store.path()).exists());
+    }
+
+    #[test]
+    fn retention_refuses_a_directory_graph_replay_pool_entry() {
+        let (store, _generations) = fixture_store(5);
+        let pool_root = store.path().join("graph-replay-pool");
+        let plan =
+            plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+                .expect("plan retention");
+        let collectable = plan.collectable_generations[0].clone();
+        let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+        let canonical_bytes = std::fs::read(generations_root.join(&collectable.generation_file))
+            .expect("read collectable bytes");
+        std::fs::create_dir_all(pool_root.join(&collectable.generation_file))
+            .expect("pre-create directory at the pool path");
+
+        let error = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(105),
+            Some(&pool_root),
+        )
+        .expect_err("a directory at the pool path must fail retention closed");
+
+        assert!(matches!(
+            error,
+            CodeGenerationRetentionErrorV1::UnsafeState(_)
+        ));
+        assert!(
+            !store.path().join(RECEIPTS_DIRECTORY).exists(),
+            "no deletion receipt may be published over unusable pool evidence"
+        );
+        assert_eq!(queued_release_count(store.path()), 0);
+        assert_eq!(
+            std::fs::read(generations_root.join(&collectable.generation_file))
+                .expect("canonical generation bytes survive the refused retention"),
+            canonical_bytes,
+        );
+        assert!(
+            pool_root.join(&collectable.generation_file).is_dir(),
+            "the foreign directory is left in place"
+        );
+        assert!(!transaction_path(store.path()).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_refuses_a_symlink_graph_replay_pool_entry() {
+        let (store, _generations) = fixture_store(5);
+        let pool_root = store.path().join("graph-replay-pool");
+        std::fs::create_dir_all(&pool_root).expect("create pool root");
+        let plan =
+            plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+                .expect("plan retention");
+        let collectable = plan.collectable_generations[0].clone();
+        let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+        let canonical_bytes = std::fs::read(generations_root.join(&collectable.generation_file))
+            .expect("read collectable bytes");
+        // The symlink resolves to the exact sealed bytes, so only the
+        // non-regular identity check can refuse it.
+        std::os::unix::fs::symlink(
+            generations_root.join(&collectable.generation_file),
+            pool_root.join(&collectable.generation_file),
+        )
+        .expect("pre-create symlink at the pool path");
+
+        let error = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(106),
+            Some(&pool_root),
+        )
+        .expect_err("a symlink at the pool path must fail retention closed");
+
+        assert!(matches!(
+            error,
+            CodeGenerationRetentionErrorV1::UnsafeState(_)
+        ));
+        assert!(
+            !store.path().join(RECEIPTS_DIRECTORY).exists(),
+            "no deletion receipt may be published over unusable pool evidence"
+        );
+        assert_eq!(queued_release_count(store.path()), 0);
+        assert_eq!(
+            std::fs::read(generations_root.join(&collectable.generation_file))
+                .expect("canonical generation bytes survive the refused retention"),
+            canonical_bytes,
+        );
+        assert!(
+            pool_root
+                .join(&collectable.generation_file)
+                .symlink_metadata()
+                .expect("foreign symlink is left in place")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!transaction_path(store.path()).exists());
+    }
+
+    #[test]
+    fn retention_accepts_an_identical_existing_graph_replay_pool_entry() {
+        let (store, _generations) = fixture_store(5);
+        let pool_root = store.path().join("graph-replay-pool");
+        std::fs::create_dir_all(&pool_root).expect("create pool root");
+        let plan =
+            plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+                .expect("plan retention");
+        let collectable = plan.collectable_generations[0].clone();
+        let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+        let canonical_bytes = std::fs::read(generations_root.join(&collectable.generation_file))
+            .expect("read collectable bytes");
+        // A distinct-inode copy with identical bytes is what the graph's
+        // eager seal staging installs; it must be accepted, not refused.
+        std::fs::write(
+            pool_root.join(&collectable.generation_file),
+            &canonical_bytes,
+        )
+        .expect("pre-create identical pool entry");
+
+        let report = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(107),
+            Some(&pool_root),
+        )
+        .expect("identical pool collision completes retention");
+
+        assert_eq!(report.deleted_generations.len(), 1);
+        assert!(!generations_root.join(&collectable.generation_file).exists());
+        assert_eq!(
+            std::fs::read(pool_root.join(&collectable.generation_file))
+                .expect("pool entry survives retention"),
+            canonical_bytes,
+        );
+        assert_eq!(queued_release_count(store.path()), 1);
     }
 
     #[test]
