@@ -303,6 +303,25 @@ impl RegisteredGlobalDbTestRuntime {
             }
         })
     }
+
+    /// Issues the fresh registered client a second production mount would
+    /// receive while the retained project owner remains ready.
+    pub fn issue_project_database_lease_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
+        let owner = self._project_owner.as_ref().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "issue registered project test database client".to_owned(),
+                message: "registered project database owner is unavailable".to_owned(),
+            }
+        })?;
+        owner.issue_lease().map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "issue registered project test database client".to_owned(),
+                message: format!("{error:?}"),
+            }
+        })
+    }
 }
 
 impl RegisteredGlobalDbHarness {

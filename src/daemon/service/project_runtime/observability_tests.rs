@@ -8,8 +8,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     CoverageStateV1, ManifestDigest, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
-    ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, ProjectId,
-    RetrievalQueryObservedV1,
+    ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, ProjectId, RepositoryId,
+    RetrievalQueryObservedV1, WorktreeId,
 };
 use tracedecay_usecases::observability::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
@@ -188,7 +188,45 @@ async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown
 #[tokio::test]
 async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let (_project, project_id, database) = runtime("observability-store-alias").await;
+    let project = tempfile::tempdir().expect("project");
+    let project_id = ProjectId::new("project.observability-store-alias").expect("project id");
+    let registered_runtime =
+        crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered runtime");
+    let database = registered_runtime
+        .project_database_arc()
+        .expect("first project database client");
+    let linked_database = registered_runtime
+        .issue_project_database_lease_for_test()
+        .expect("independent linked-root database client");
+    assert!(!database.shares_client_with(&linked_database));
+    assert_eq!(database.binding(), linked_database.binding());
+    assert_eq!(
+        database.verified_locator(),
+        linked_database.verified_locator()
+    );
+    let repository_id =
+        RepositoryId::new("repository.observability-store-alias").expect("repository id");
+    let root_scope = tracedecay_application::ResolvedScope::new(
+        project_id.clone(),
+        repository_id.clone(),
+        WorktreeId::new("worktree.observability-store-alias").expect("root worktree id"),
+        None,
+    )
+    .expect("root scope");
+    let linked_scope = tracedecay_application::ResolvedScope::new(
+        project_id.clone(),
+        repository_id,
+        WorktreeId::new("worktree.observability-store-alias-linked").expect("linked worktree id"),
+        None,
+    )
+    .expect("linked scope");
+    assert_ne!(root_scope.scope_digest, linked_scope.scope_digest);
     let root = PathBuf::from("/project/observability-store-alias");
     let linked_root = PathBuf::from("/project/observability-store-alias-linked");
     let first_service = DaemonInvocationService::default();
@@ -198,7 +236,7 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             database.clone(),
             project_id.clone(),
             digest('1'),
-            digest('2'),
+            root_scope.scope_digest.clone(),
         )
         .await
         .expect("first producer");
@@ -208,7 +246,7 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             database.clone(),
             project_id.clone(),
             digest('1'),
-            digest('2'),
+            root_scope.scope_digest.clone(),
         )
         .await
         .expect("reconciled first producer");
@@ -220,10 +258,10 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
     let linked = first_service
         .mount_observability_producer(
             linked_root.clone(),
-            database.clone(),
+            linked_database.clone(),
             project_id.clone(),
             digest('1'),
-            digest('2'),
+            linked_scope.scope_digest.clone(),
         )
         .await
         .expect("linked-root producer");
@@ -257,7 +295,7 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             database.clone(),
             project_id.clone(),
             digest('9'),
-            digest('2'),
+            root_scope.scope_digest.clone(),
         )
         .await
     {
@@ -304,7 +342,7 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             database.clone(),
             project_id.clone(),
             digest('1'),
-            digest('2'),
+            root_scope.scope_digest.clone(),
         )
         .await
         .expect("remounted producer after quiescence");
@@ -333,7 +371,7 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             database.clone(),
             project_id.clone(),
             digest('1'),
-            digest('2'),
+            root_scope.scope_digest.clone(),
         )
         .await
         .expect("restarted producer");
