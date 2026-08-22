@@ -214,7 +214,7 @@ jobs:
 
       - name: Test release distribution
         if: matrix.name == 'x86_64-linux'
-        run: cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
+        run: cargo nextest run --workspace --profile ci --release --target ${{ matrix.target }} --all-features --locked
 
       - name: Verify all-feature release build compiles
         run: cargo build --release --target ${{ matrix.target }} --all-features --locked
