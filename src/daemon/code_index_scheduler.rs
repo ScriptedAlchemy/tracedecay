@@ -100,6 +100,10 @@ const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 /// text artifact. One page is one bounded unit of background build progress.
 const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
+/// One synchronous activation advances only this many page/finalization
+/// operations. Larger caller hints are clamped so work accounting cannot
+/// overflow and every expensive loop retains cancellation checkpoints.
+const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize = 64;
 /// Rows digested by one scheduler finalization operation. The builder persists
 /// its exact section/row cursor after this bounded slice, avoiding both a
 /// corpus-sized wake and one scheduler wake per individual `SQLite` row.
@@ -1679,8 +1683,9 @@ impl DaemonCodeTextArtifactStoreV1 {
         staging_path: &Path,
         generation: &CodeIndexPublishedGenerationV1,
         sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<DurableCodeTextArtifactDescriptorV1, RetrievalPortError> {
-        let artifact_hex = sha256_file_hex(staging_path).map_err(text_artifact_unavailable)?;
+        let artifact_hex = sha256_file_hex(staging_path, control)?;
         let artifact_size_bytes = std::fs::metadata(staging_path)
             .map_err(text_artifact_unavailable)?
             .len();
@@ -1707,7 +1712,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "existing code text artifact does not match its content address".to_owned(),
                 ));
             }
-            let existing_hex = sha256_file_hex(&final_path).map_err(text_artifact_unavailable)?;
+            let existing_hex = sha256_file_hex(&final_path, control)?;
             if existing_hex != artifact_hex {
                 return Err(RetrievalPortError::Contract(
                     "existing code text artifact contains different bytes".to_owned(),
@@ -1814,7 +1819,7 @@ impl LatestCompleteCodeIndexV1 {
     }
 
     fn activate_text_serving(&self) -> Result<(), RetrievalPortError> {
-        if !self.advance_text_serving(usize::MAX)? {
+        if !self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)? {
             return Err(RetrievalPortError::AuthorityUnavailable(
                 "code-index text serving owners are warming".to_owned(),
             ));
@@ -2120,18 +2125,24 @@ impl LatestCompleteCodeIndexV1 {
             let artifacts_root = code_text_artifacts_root(store.store_root());
             std::fs::create_dir_all(&artifacts_root).map_err(text_artifact_unavailable)?;
             let staging_path = artifacts_root.join(format!(".text-artifact-{sealed_hex}.staging"));
+            let mut source = store.open_sealed_source(&sealed_identity, &control)?;
+            let builder_budget = text_artifact_builder_budget(source.staging_window_bytes())?;
             let metadata = self.text_projection_metadata()?;
             let builder = if staging_path.exists() {
-                CodeLexicalArtifactBuilderV1::open_or_resume(&staging_path, metadata)
+                CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget(
+                    &staging_path,
+                    metadata,
+                    builder_budget,
+                )
             } else {
-                CodeLexicalArtifactBuilderV1::create(&staging_path, metadata)
+                CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                    &staging_path,
+                    metadata,
+                    builder_budget,
+                )
             }
             .map_err(map_text_artifact_error)?;
             let progress = builder.progress().map_err(map_text_artifact_error)?;
-            let mut source = store.open_sealed_source(&sealed_identity, &control)?;
-            if source.staging_window_bytes() > CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1 {
-                return Err(RetrievalPortError::BudgetExceeded);
-            }
             if let Some(cursor) = progress.next_cursor.as_ref() {
                 source
                     .restore_cursor(cursor, &control)
@@ -2151,7 +2162,7 @@ impl LatestCompleteCodeIndexV1 {
                 "code-index text artifact build state is missing".to_owned(),
             )
         })?;
-        let mut remaining = maximum_work;
+        let mut remaining = maximum_work.min(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1);
         while remaining > 0 && artifact_build.source_receipt.is_none() {
             let (source, builder) = (&mut artifact_build.source, &mut artifact_build.builder);
             let admitted = source
@@ -2210,8 +2221,12 @@ impl LatestCompleteCodeIndexV1 {
         // finalized staging file.
         drop(builder);
         drop(source);
-        let descriptor =
-            store.publish(&staging_path, self.generation.as_ref(), &sealed_identity)?;
+        let descriptor = store.publish(
+            &staging_path,
+            self.generation.as_ref(),
+            &sealed_identity,
+            &control,
+        )?;
         let reader_reservation = store.reserve_resident_memory(
             &self.generation.manifest().generation_id,
             "code-text-artifact-reader",
@@ -3618,18 +3633,49 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Streaming SHA-256 of one file's bytes, as 64 lowercase hex characters.
-fn sha256_file_hex(path: &Path) -> Result<String, std::io::Error> {
-    let mut file = std::fs::File::open(path)?;
+/// Cancellation is checked before opening and after every bounded read, so a
+/// shutdown or superseding generation cannot strand publication in a
+/// corpus-sized uninterruptible hash.
+fn sha256_file_hex(
+    path: &Path,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<String, RetrievalPortError> {
+    checkpoint_text_artifact_control(control)?;
+    let mut file = std::fs::File::open(path).map_err(text_artifact_unavailable)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = file.read(&mut buffer).map_err(text_artifact_unavailable)?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
+        checkpoint_text_artifact_control(control)?;
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn checkpoint_text_artifact_control(
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), RetrievalPortError> {
+    if control.is_cancelled() {
+        Err(RetrievalPortError::Cancelled)
+    } else if control.is_deadline_exceeded() {
+        Err(RetrievalPortError::BudgetExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+/// Divide the single process reservation between the source's concurrently
+/// retained decode window and the SQLite builder. Each component fitting the
+/// ceiling independently is insufficient because both remain live while a
+/// page is admitted.
+fn text_artifact_builder_budget(source_window_bytes: usize) -> Result<usize, RetrievalPortError> {
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1
+        .checked_sub(source_window_bytes)
+        .filter(|remaining| *remaining > 0)
+        .ok_or(RetrievalPortError::BudgetExceeded)
 }
 
 #[cfg(test)]

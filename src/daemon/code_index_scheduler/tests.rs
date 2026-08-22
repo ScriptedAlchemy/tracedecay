@@ -55,6 +55,7 @@ use super::{
     CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1,
     SharedCodeIndexBytePoolV1,
 };
+use crate::code_index::production::CodeIndexExecutionControlV1;
 use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::exact::{
@@ -2658,6 +2659,78 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         adequate.snapshot().used_bytes,
         0,
         "dropping the serving owners must release every artifact charge"
+    );
+}
+
+#[test]
+fn oversized_activation_hint_is_clamped_to_bounded_text_work() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn bounded_activation() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+
+    assert!(
+        latest
+            .advance_text_serving(usize::MAX)
+            .expect("oversized hint must not overflow finalization accounting"),
+        "the small fixture must complete under the canonical bounded work clamp"
+    );
+    assert!(latest.text_serving_is_ready());
+}
+
+#[test]
+fn text_artifact_hash_honors_cancellation_between_bounded_reads() {
+    struct CancelAfterFirstRead {
+        checkpoints: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CodeIndexExecutionControlV1 for CancelAfterFirstRead {
+        fn is_cancelled(&self) -> bool {
+            self.checkpoints
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                >= 1
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    let directory = TempDir::new().expect("hash fixture root");
+    let staging = directory.path().join("artifact.staging");
+    std::fs::write(&staging, vec![7_u8; 3 * 64 * 1024]).expect("write hash fixture");
+    let control = CancelAfterFirstRead {
+        checkpoints: std::sync::atomic::AtomicUsize::new(0),
+    };
+
+    assert_eq!(
+        super::sha256_file_hex(&staging, &control),
+        Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
+    );
+    assert!(
+        staging.is_file(),
+        "cancelled publication hashing must preserve resumable staging bytes"
+    );
+}
+
+#[test]
+fn source_window_and_builder_share_one_memory_reservation() {
+    let ceiling =
+        tracedecay_query::retrieval::lexical::CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1;
+    assert_eq!(
+        super::text_artifact_builder_budget(ceiling - 1),
+        Ok(1),
+        "the source window must be subtracted from the builder's authority"
+    );
+    assert_eq!(
+        super::text_artifact_builder_budget(ceiling),
+        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
+        "a source consuming the reservation must refuse before builder path access"
     );
 }
 
