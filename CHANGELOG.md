@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.34](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.33...v0.1.0-beta.34) (2026-08-22)
+
+
+### Bug Fixes
+
+* **graph:** resolve sealed replays from the canonical generation root ([5ddd162](https://github.com/ScriptedAlchemy/tracedecay/commit/5ddd16271e8ee288e3973ecd914e84d5d762a93f))
+
 ## [0.1.0-beta.33](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.32...v0.1.0-beta.33) (2026-08-21)
 
 
