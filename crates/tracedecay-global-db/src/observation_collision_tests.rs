@@ -68,9 +68,6 @@ use tracedecay_store::{
     ObservationProjectionStore, ObservationStore, ObservationStoreError, ObservationWrite,
     ProjectionPersistOutcome, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
-use tracing::field::{Field, Visit};
-use tracing::span::{Attributes, Id, Record};
-use tracing::{Dispatch, Event, Metadata, Subscriber};
 
 use crate::AdmissionWorkV1;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
@@ -960,10 +957,12 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
             .as_ref(),
         Some(rewritten_write.next_cursor())
     );
-    // Measured zero-work, from production data: the re-admitted fast-path
-    // pass accumulated exactly zero stored-row decodes, zero identity
-    // derivations, zero payload digests, and one runtime command — the
-    // frontier cursor read — on top of the first refusal's receipt.
+    // Measured zero-work, from production data: a covered-replay pass
+    // commits no transaction, so the durable receipt is byte-identical to
+    // the first refusal's — any accumulation here would mean the fast path
+    // wrote to the store on a re-admission, re-amplifying the hot loop the
+    // marker exists to silence. Per-pass work shape is proven above by the
+    // admission-work trace capture.
     assert_eq!(
         admission_work_for(
             &runtime,
@@ -971,8 +970,8 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
             rewritten.payload_reference().digest().as_str(),
         )
         .await,
-        accumulated_work(&[FIRST_REFUSAL_WORK, FAST_PATH_PASS_WORK]),
-        "the fast-path pass must add exactly {{0 decodes, 0 derivations, 0 digests, 1 command}}"
+        FIRST_REFUSAL_WORK,
+        "a covered-replay fast-path pass must leave the durable receipt unchanged"
     );
 
     // Production read journey: the same telemetry reaches operators through

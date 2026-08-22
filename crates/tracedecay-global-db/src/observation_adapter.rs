@@ -299,50 +299,6 @@ impl GlobalDbObservationStore {
         Ok(true)
     }
 
-    /// Accumulates one pass's [`AdmissionWorkV1`] receipt onto an existing
-    /// refusal marker row, for the refusal-answering shapes that commit no
-    /// coverage transaction of their own (covered replays and stale expected
-    /// cursors). Touches only the mutable telemetry columns; a pass whose
-    /// refusal recorded no marker (the fail-closed full-path replay shapes)
-    /// matches no row and leaves every ledger untouched.
-    async fn accumulate_admission_work(
-        &self,
-        observation_id: &CanonicalObservationIdV1,
-        refused_digest: &PayloadDigestV1,
-        work: &AdmissionWorkV1,
-    ) -> ObservationStoreResult<()> {
-        const OPERATION: &str = "accumulate admission work telemetry";
-        let transaction = self
-            .database
-            .begin_write_transaction(OPERATION)
-            .await
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        transaction
-            .execute(
-                "UPDATE observation_admission_refusals SET
-                    stored_rows_decoded = stored_rows_decoded + ?3,
-                    identity_derivations = identity_derivations + ?4,
-                    payload_digests = payload_digests + ?5,
-                    runtime_commands = runtime_commands + ?6
-                 WHERE observation_id = ?1 AND refused_payload_digest = ?2",
-                tracedecay_runtime_core::db::engine::params![
-                    observation_id.as_str(),
-                    refused_digest.as_str(),
-                    i64::from(work.stored_rows_decoded),
-                    i64::from(work.identity_derivations),
-                    i64::from(work.payload_digests),
-                    i64::from(work.runtime_commands)
-                ],
-            )
-            .await
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        Ok(())
-    }
-
     pub async fn converge_projection_predecessor(
         &self,
     ) -> ProjectionStoreResult<ProjectionPredecessorConvergence> {
@@ -388,17 +344,14 @@ impl ObservationStore for GlobalDbObservationStore {
             // record at end-of-file would be re-read, re-decoded, and
             // re-hashed by every later rescan forever. Converging is one
             // atomic authority transaction touching no record content.
-            let recorded = self
-                .record_refusal_with_coverage(&write, &retained_digest, &mut admission_work)
+            // A pass that records no new coverage writes nothing at all: the
+            // durable work receipt rides only on transactions the pass
+            // already commits, and per-hit visibility for covered replays
+            // comes from the zero-cost admission-work trace events. A write
+            // per re-admitted candidate would re-amplify the exact hot loop
+            // the refusal marker exists to silence.
+            self.record_refusal_with_coverage(&write, &retained_digest, &mut admission_work)
                 .await?;
-            if !recorded {
-                self.accumulate_admission_work(
-                    &observation_id,
-                    candidate.payload_reference().digest(),
-                    &admission_work,
-                )
-                .await?;
-            }
             return Err(ObservationStoreError::ObservationCollision {
                 observation_id: Box::new(observation_id),
                 existing_digest: Box::new(retained_digest),
@@ -451,21 +404,14 @@ impl ObservationStore for GlobalDbObservationStore {
             // authoritative state — rows, cursor, ledger — left untouched;
             // an already-covered candidate is a replayed verification probe
             // and is likewise left untouched.
-            let recorded = self
-                .record_refusal_with_coverage(
-                    &write,
-                    existing.observation().payload_reference().digest(),
-                    &mut admission_work,
-                )
-                .await?;
-            if !recorded {
-                self.accumulate_admission_work(
-                    &observation_id,
-                    candidate.payload_reference().digest(),
-                    &admission_work,
-                )
-                .await?;
-            }
+            // As on the marker fast path: no new coverage means no write of
+            // any kind, receipt included.
+            self.record_refusal_with_coverage(
+                &write,
+                existing.observation().payload_reference().digest(),
+                &mut admission_work,
+            )
+            .await?;
             return Err(ObservationStoreError::ObservationCollision {
                 observation_id: Box::new(observation_id),
                 existing_digest: Box::new(

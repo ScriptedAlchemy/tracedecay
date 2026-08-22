@@ -233,6 +233,12 @@ impl Database {
         &self,
         operation: &str,
     ) -> Result<DatabaseEngineReadSnapshot> {
+        tracing::trace!(
+            target: "tracedecay::observation_admission_work",
+            work = "runtime_command",
+            operation,
+            "begin engine read snapshot"
+        );
         self.begin_isolated_read_snapshot(operation).await
     }
 
