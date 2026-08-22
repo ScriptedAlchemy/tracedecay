@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
 
 use super::artifacts::{sha256_bytes, sha256_json, write_improvement_artifacts};
 use super::backend::{
@@ -729,7 +730,7 @@ async fn run_user_job_with_backend_publication(
 
 fn config_skip_reason(config: &AutomationConfig) -> Option<&'static str> {
     if !config.enabled {
-        return Some("automation_disabled");
+        return Some(AUTOMATION_DISABLED);
     }
     if config.host_mode == AutomationHostMode::DelegatedHost {
         return Some("delegated_host_mode");
