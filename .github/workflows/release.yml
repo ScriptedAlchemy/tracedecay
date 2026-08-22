@@ -187,6 +187,7 @@ jobs:
           python3 .release-automation/scripts/test-build-mcpb.py
           python3 .release-automation/scripts/test-resolve-installed-binary.py
           python3 .release-automation/scripts/test-check-packaged-mcp-stdio.py
+          python3 .release-automation/scripts/test-check-distribution-feature-wiring.py
           python3 .release-automation/scripts/test-resolve-release-source-profile.py
           python3 .release-automation/scripts/test-package-release-archive.py
           python3 .release-automation/scripts/test-prepare-release-runtime.py
