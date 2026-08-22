@@ -1618,6 +1618,45 @@ mod tests {
         assert!(matches!(error, CodeLexicalArtifactErrorV1::Unreserved(_)));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn artifact_identity_refuses_replacement_after_sqlite_open() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let artifact_path = directory.path().join("artifact.sqlite");
+        let replacement_path = directory.path().join("replacement.sqlite");
+        let connection = Connection::open(&artifact_path).expect("create artifact SQLite file");
+        connection
+            .pragma_update(None, "user_version", 1i64)
+            .expect("seed original SQLite header");
+        drop(connection);
+        std::fs::copy(&artifact_path, &replacement_path).expect("copy replacement SQLite file");
+        let replacement = Connection::open(&replacement_path).expect("open replacement SQLite");
+        replacement
+            .pragma_update(None, "user_version", 2i64)
+            .expect("mutate replacement SQLite header");
+        drop(replacement);
+
+        let opened = std::fs::File::open(&artifact_path).expect("retain original file handle");
+        super::verify_named_path_identity(&artifact_path, &opened)
+            .expect("named path initially identifies the retained file");
+        let served = Connection::open_with_flags(
+            &artifact_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("SQLite opens the retained artifact name");
+        std::fs::rename(&replacement_path, &artifact_path)
+            .expect("atomically replace the artifact after SQLite open");
+
+        assert!(matches!(
+            super::verify_named_path_identity(&artifact_path, &opened),
+            Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+        ));
+        let served_version: i64 = served
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("the opened SQLite connection remains bound to the original file");
+        assert_eq!(served_version, 1);
+    }
+
     #[test]
     fn typed_artifact_availability_never_becomes_an_empty_result() {
         assert!(matches!(
