@@ -77,6 +77,8 @@
 //! [`crate::RegisteredGlobalDb::run_observation_retention`].
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::ObservationSourceCursorV1;
+use tracedecay_store::observation::ObservationCoverageV1;
 
 use tracedecay_runtime_core::db::{
     Database, DatabaseEngineReadConnection, DatabaseWriteTransaction,
@@ -94,6 +96,7 @@ const OPERATION: &str = "observation evidence retention";
 /// `max_batch_size`, mirroring `project_registry::delete_code_projects`'s
 /// chunking pattern.
 const RETENTION_DML_CHUNK: usize = 500;
+const CURSOR_ADVANCE_SCAN_PAGE_ROWS: i64 = 500;
 
 /// Compact tombstone written over a released `retrieval_anchors.anchor_json`.
 const ANCHOR_RELEASED_MARKER: &str = "{\"__retention_released\":\"anchor\"}";
@@ -910,27 +913,15 @@ async fn run_cursor_advance_pass(
     let sql = "SELECT advance.rowid,
                 LENGTH(advance.source_json) + LENGTH(advance.scope_json)
                 + LENGTH(advance.coverage_json) + LENGTH(advance.reason)
-                + LENGTH(COALESCE(advance.receipt_id, '')) AS payload_len
+                + LENGTH(COALESCE(advance.receipt_id, '')) AS payload_len,
+                current.cursor_json, advance.coverage_json
          FROM source_cursor_advances AS advance
          JOIN source_cursors AS current
            ON current.source_json = advance.source_json
           AND current.scope_json = advance.scope_json
-         WHERE (
-             CAST(json_extract(current.cursor_json, '$.generation') AS INTEGER)
-               > CAST(json_extract(advance.coverage_json, '$.generation') AS INTEGER)
-             OR (
-                 CAST(json_extract(current.cursor_json, '$.generation') AS INTEGER)
-                   = CAST(json_extract(advance.coverage_json, '$.generation') AS INTEGER)
-                 AND COALESCE(
-                     json_extract(current.cursor_json, '$.ordering_domain'),
-                     'file_bytes'
-                 ) = json_extract(advance.coverage_json, '$.ordering_domain')
-                 AND CAST(json_extract(current.cursor_json, '$.byte_offset') AS INTEGER)
-                   > CAST(json_extract(advance.coverage_json, '$.range.end') AS INTEGER)
-             )
-         )
+         WHERE advance.rowid > ?1
          ORDER BY advance.rowid
-         LIMIT ?1";
+         LIMIT ?2";
     let transaction = if mode.is_apply() {
         Some(
             database
@@ -946,16 +937,41 @@ async fn run_cursor_advance_pass(
         RetentionQueryExecutor::Read(&reader),
         RetentionQueryExecutor::Transaction,
     );
-    let mut rows = query_executor
-        .query(sql, params![config.batch_limit()])
-        .await
-        .map_err(db_error)?;
     let mut targets = Vec::new();
-    while let Some(row) = rows.next().await.map_err(db_error)? {
-        targets.push(CursorAdvanceTarget {
-            rowid: row.get(0).map_err(db_error)?,
-            original_len: row.get::<i64>(1).map_err(db_error)?.max(0) as u64,
-        });
+    let target_limit = config.max_batch_size.max(1);
+    let mut scan_cursor = 0_i64;
+    loop {
+        let mut rows = query_executor
+            .query(sql, params![scan_cursor, CURSOR_ADVANCE_SCAN_PAGE_ROWS])
+            .await
+            .map_err(db_error)?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows.next().await.map_err(db_error)? {
+            page_rows += 1;
+            scan_cursor = row.get(0).map_err(db_error)?;
+            let current_json = row.get::<String>(2).map_err(db_error)?;
+            let coverage_json = row.get::<String>(3).map_err(db_error)?;
+            let current: ObservationSourceCursorV1 =
+                serde_json::from_str(&current_json).map_err(db_error)?;
+            let coverage: ObservationCoverageV1 =
+                serde_json::from_str(&coverage_json).map_err(db_error)?;
+            let superseded = current.generation() != coverage.generation()
+                || (current.ordering_domain() == coverage.ordering_domain()
+                    && current.position() > coverage.range().end());
+            if superseded {
+                targets.push(CursorAdvanceTarget {
+                    rowid: scan_cursor,
+                    original_len: row.get::<i64>(1).map_err(db_error)?.max(0) as u64,
+                });
+                if targets.len() == target_limit {
+                    break;
+                }
+            }
+        }
+        drop(rows);
+        if targets.len() == target_limit || page_rows < CURSOR_ADVANCE_SCAN_PAGE_ROWS {
+            break;
+        }
     }
     report.eligible = targets.len() as u64;
     report.bytes_reclaimed = targets.iter().map(|target| target.original_len).sum();
