@@ -890,7 +890,23 @@ async fn apply_provenance(
         )
         .await
         .map_err(|error| storage("insert projection provenance", error))?;
-    verify_provenance(conn, projection).await?;
+    match verify_provenance(conn, projection).await {
+        Ok(()) => {}
+        // The insert was a no-op because a row already holds this
+        // observation's provenance key with a different output binding: a
+        // deterministic collision with an existing output, not a broken write.
+        // Surface it as the typed output collision so the drain's convergence
+        // backstop records a durable skip; every other provenance failure —
+        // including a row that disagrees right after this insert claimed to
+        // write it — stays a hard error.
+        Err(ProjectionStoreError::ProvenanceCollision) if inserted == 0 => {
+            return Err(ProjectionStoreError::OutputCollision {
+                provider: message.provider.clone(),
+                message_id: message.message_id.clone(),
+            });
+        }
+        Err(error) => return Err(error),
+    }
     if inserted == 0 {
         return Ok(());
     }
