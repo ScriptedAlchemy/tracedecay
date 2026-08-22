@@ -469,6 +469,24 @@ fn validate_autonomous_consolidation_skill(skill: &ManagedSkill, checksum: &str)
     Ok(())
 }
 
+fn validate_overlap_partner(skill: &ManagedSkill, checksum: &str) -> Result<()> {
+    let id = &skill.metadata.id;
+    if skill.metadata.checksum != checksum {
+        return Err(config_error(format!(
+            "base_checksum for managed skill id '{id}' is stale"
+        )));
+    }
+    if skill.metadata.pinned {
+        return Err(config_error(format!(
+            "managed skill '{id}' is pinned and exempt from consolidation"
+        )));
+    }
+    if skill.metadata.state != ManagedSkillState::Active {
+        return Err(config_error(format!("managed skill '{id}' is not active")));
+    }
+    Ok(())
+}
+
 pub fn managed_skill_dir(profile_root: &Path, id: &str) -> Result<PathBuf> {
     validate_skill_id(id)?;
     Ok(managed_skill_root(profile_root).join(id))
@@ -730,7 +748,7 @@ pub(crate) async fn apply_managed_skill_overlap_archive(
     let source = load_managed_skill_unlocked(profile_root, source_id)?;
     validate_autonomous_consolidation_skill(&source, source_checksum)?;
     let overlap = load_managed_skill_unlocked(profile_root, overlap_id)?;
-    validate_autonomous_consolidation_skill(&overlap, overlap_checksum)?;
+    validate_overlap_partner(&overlap, overlap_checksum)?;
     validate_detected_skill_overlap_pair(&source, &overlap)?;
     let skill = apply_managed_skill_archive_unlocked(
         profile_root,

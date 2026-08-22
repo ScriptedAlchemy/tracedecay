@@ -61,6 +61,30 @@ fn consolidation_guard<'a>(
     Ok(skill)
 }
 
+fn overlap_partner_guard<'a>(
+    existing_skills: &'a BTreeMap<String, ManagedSkill>,
+    id: &str,
+    base_checksum: &str,
+) -> std::result::Result<&'a ManagedSkill, String> {
+    let skill = existing_skills
+        .get(id)
+        .ok_or_else(|| format!("archive overlap partner managed skill id '{id}' does not exist"))?;
+    if base_checksum != skill.metadata.checksum {
+        return Err(format!(
+            "base_checksum for managed skill id '{id}' is stale"
+        ));
+    }
+    if skill.metadata.pinned {
+        return Err(format!(
+            "managed skill '{id}' is pinned and exempt from consolidation"
+        ));
+    }
+    if skill.metadata.state != ManagedSkillState::Active {
+        return Err(format!("managed skill '{id}' is not active"));
+    }
+    Ok(skill)
+}
+
 fn required_consolidation_reason(value: Option<&Value>) -> std::result::Result<String, String> {
     let reason = required_proposal_string(value, "reason")?;
     if reason == SKILL_OVERLAP_REMOVAL_TOMBSTONE {
@@ -122,12 +146,7 @@ pub(super) fn skill_archive_from_proposal(
         .metadata
         .checksum
         .clone();
-    consolidation_guard(
-        existing_skills,
-        &overlap_skill_id,
-        &overlap_base_checksum,
-        "archive overlap partner",
-    )?;
+    overlap_partner_guard(existing_skills, &overlap_skill_id, &overlap_base_checksum)?;
     Ok(SkillArchiveProposal {
         skill_id: id,
         base_checksum,
@@ -403,6 +422,28 @@ mod tests {
         .collect()
     }
 
+    async fn persisted_archive_fixture_with_authored_partner(
+        profile_root: &Path,
+        partner_source: ManagedSkillSource,
+    ) -> BTreeMap<String, ManagedSkill> {
+        let partner =
+            create_managed_skill(profile_root, fixture_draft("workflow-a", partner_source))
+                .await
+                .unwrap();
+        let source = create_managed_skill(
+            profile_root,
+            fixture_draft("workflow-b", ManagedSkillSource::AutomationRun),
+        )
+        .await
+        .unwrap();
+        [
+            (partner.metadata.id.clone(), partner),
+            (source.metadata.id.clone(), source),
+        ]
+        .into_iter()
+        .collect()
+    }
+
     fn checksum(skills: &BTreeMap<String, ManagedSkill>, id: &str) -> String {
         skills[id].metadata.checksum.clone()
     }
@@ -555,6 +596,26 @@ mod tests {
             ),
             "managed skill 'archived-skill' is already archived",
         );
+    }
+
+    #[test]
+    fn archive_still_requires_an_automation_owned_source() {
+        let skills = consolidation_fixture();
+
+        for id in ["user-skill", "imported-skill"] {
+            assert_err_eq(
+                skill_archive_from_proposal(
+                    &json!({
+                        "action": "archive",
+                        "id": id,
+                        "base_checksum": checksum(&skills, id),
+                        "reason": "duplicate guidance"
+                    }),
+                    &skills,
+                ),
+                &format!("managed skill '{id}' is not automation-owned"),
+            );
+        }
     }
 
     #[test]
@@ -902,6 +963,42 @@ mod tests {
             .unwrap();
         assert_eq!(source.metadata.state, ManagedSkillState::Active);
         assert_eq!(source.metadata.archived_reason, None);
+    }
+
+    #[tokio::test]
+    async fn archive_accepts_user_and_import_authored_overlap_partners() {
+        for partner_source in [ManagedSkillSource::User, ManagedSkillSource::Import] {
+            let profile = tempfile::tempdir().unwrap();
+            let skills =
+                persisted_archive_fixture_with_authored_partner(profile.path(), partner_source)
+                    .await;
+            let partner_before = skills["workflow-a"].clone();
+            let archive = skill_archive_from_proposal(
+                &json!({
+                    "action": "archive",
+                    "id": "workflow-b",
+                    "base_checksum": checksum(&skills, "workflow-b"),
+                    "reason": "duplicate guidance"
+                }),
+                &skills,
+            )
+            .unwrap();
+
+            let archived = apply_skill_archive(profile.path(), &archive).await.unwrap();
+            let partner = load_managed_skill(profile.path(), "workflow-a")
+                .await
+                .unwrap();
+
+            assert_eq!(archived.metadata.state, ManagedSkillState::Archived);
+            assert_eq!(
+                archived.metadata.archived_reason.as_deref(),
+                Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
+            );
+            assert_eq!(partner, partner_before);
+            assert_eq!(partner.metadata.state, ManagedSkillState::Active);
+            assert_eq!(partner.metadata.provenance.source, partner_source);
+            assert!(!partner.metadata.pinned);
+        }
     }
 
     #[cfg(unix)]
