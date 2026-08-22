@@ -16,18 +16,24 @@ use super::CodeLexicalArtifactErrorV1;
 /// Revision 2 adds durable finalization/integrity state. Revision 1 artifacts
 /// are branch-only staging files and must fail as incompatible rather than be
 /// partially interpreted against this schema.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 2;
-const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v2\0";
+// Revision 3 replaces the branch-local computed finalization cursor with
+// native table keys. Resuming a bounded seal must seek an existing primary
+// key, never rebuild a sort key over the whole corpus.
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 3;
+const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v3\0";
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
-pub(super) const SECTION_NAMES: [&str; 8] = [
+pub(super) const SECTION_NAMES: [&str; 11] = [
     "source_pages",
-    "derived_integrity",
+    "document_integrity",
+    "import_integrity",
     "import_evidence",
     "rows",
     "term_postings",
     "exact_postings",
     "ngram_postings",
-    "statistics",
+    "field_stats",
+    "term_stats",
+    "vocabulary",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::ValueRef;
@@ -17,6 +18,7 @@ use tracedecay_domain::{
     CodeSearchChunkAnchorV1, CodeSearchChunkV1, ExactFieldV1, ExactTechnicalTermV1,
     FileOccurrenceId, ManifestDigest,
 };
+use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 
 use super::format::{
     ArtifactRowV1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactSectionDigestV1,
@@ -39,16 +41,218 @@ use super::super::{
     exact_field_for_kind,
 };
 
-const SECTION_QUERIES: [&str; 8] = [
-    "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor, printf('%020d', page_ordinal) AS finalization_key FROM source_pages",
-    "SELECT 'document', document_id, digest, printf('d%020d', document_id) AS finalization_key FROM document_integrity UNION ALL SELECT 'import', canonical, digest, printf('i%016X', length(canonical)) || hex(canonical) AS finalization_key FROM import_integrity",
-    "SELECT canonical, evidence, printf('%016X', length(canonical)) || hex(canonical) AS finalization_key FROM import_evidence",
-    "SELECT document_id, chunk_id, row, printf('%020d', document_id) AS finalization_key FROM rows",
-    "SELECT field, term, document_id, frequency, printf('%016X', length(CAST(field AS BLOB))) || hex(CAST(field AS BLOB)) || printf('%016X', length(CAST(term AS BLOB))) || hex(CAST(term AS BLOB)) || printf('%020d', document_id) AS finalization_key FROM term_postings",
-    "SELECT field, term, document_id, printf('%016X', length(CAST(field AS BLOB))) || hex(CAST(field AS BLOB)) || printf('%016X', length(term)) || hex(term) || printf('%020d', document_id) AS finalization_key FROM exact_postings",
-    "SELECT kind, ngram, document_id, printf('%020d%020d%020d', kind, ngram, document_id) AS finalization_key FROM ngram_postings",
-    "SELECT kind, field, term, value, CASE kind WHEN 'field' THEN 'f' WHEN 'term' THEN 't' WHEN 'vocabulary' THEN 'v' END || printf('%016X', length(CAST(field AS BLOB))) || hex(CAST(field AS BLOB)) || printf('%016X', length(CAST(term AS BLOB))) || hex(CAST(term AS BLOB)) AS finalization_key FROM (SELECT 'field' AS kind, field, '' AS term, total_length AS value FROM field_stats UNION ALL SELECT 'term', field, term, document_frequency FROM term_stats UNION ALL SELECT 'vocabulary', '', term, 0 FROM vocabulary)",
-];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FinalizationSectionV1 {
+    SourcePages,
+    DocumentIntegrity,
+    ImportIntegrity,
+    ImportEvidence,
+    Rows,
+    TermPostings,
+    ExactPostings,
+    NgramPostings,
+    FieldStatistics,
+    TermStatistics,
+    Vocabulary,
+}
+
+impl FinalizationSectionV1 {
+    const ALL: [Self; 11] = [
+        Self::SourcePages,
+        Self::DocumentIntegrity,
+        Self::ImportIntegrity,
+        Self::ImportEvidence,
+        Self::Rows,
+        Self::TermPostings,
+        Self::ExactPostings,
+        Self::NgramPostings,
+        Self::FieldStatistics,
+        Self::TermStatistics,
+        Self::Vocabulary,
+    ];
+
+    fn from_ordinal(ordinal: usize) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        Self::ALL.get(ordinal).copied().ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact finalization selected an unknown section".to_owned(),
+            )
+        })
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::SourcePages => "source_pages",
+            Self::DocumentIntegrity => "document_integrity",
+            Self::ImportIntegrity => "import_integrity",
+            Self::ImportEvidence => "import_evidence",
+            Self::Rows => "rows",
+            Self::TermPostings => "term_postings",
+            Self::ExactPostings => "exact_postings",
+            Self::NgramPostings => "ngram_postings",
+            Self::FieldStatistics => "field_stats",
+            Self::TermStatistics => "term_stats",
+            Self::Vocabulary => "vocabulary",
+        }
+    }
+
+    const fn full_query(self) -> &'static str {
+        match self {
+            Self::SourcePages => {
+                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages ORDER BY page_ordinal"
+            }
+            Self::DocumentIntegrity => {
+                "SELECT document_id, digest FROM document_integrity ORDER BY document_id"
+            }
+            Self::ImportIntegrity => {
+                "SELECT canonical, digest FROM import_integrity ORDER BY canonical"
+            }
+            Self::ImportEvidence => {
+                "SELECT canonical, evidence FROM import_evidence ORDER BY canonical"
+            }
+            Self::Rows => "SELECT document_id, chunk_id, row FROM rows ORDER BY document_id",
+            Self::TermPostings => {
+                "SELECT field, term, document_id, frequency FROM term_postings ORDER BY field, term, document_id"
+            }
+            Self::ExactPostings => {
+                "SELECT field, term, document_id FROM exact_postings ORDER BY field, term, document_id"
+            }
+            Self::NgramPostings => {
+                "SELECT kind, ngram, document_id FROM ngram_postings ORDER BY kind, ngram, document_id"
+            }
+            Self::FieldStatistics => "SELECT field, total_length FROM field_stats ORDER BY field",
+            Self::TermStatistics => {
+                "SELECT field, term, document_frequency FROM term_stats ORDER BY field, term"
+            }
+            Self::Vocabulary => "SELECT term FROM vocabulary ORDER BY term",
+        }
+    }
+
+    /// Bounded resumes seek a native table key, never a computed cursor.
+    const fn seek_query(self, after: bool) -> &'static str {
+        match (self, after) {
+            (Self::SourcePages, false) => {
+                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages ORDER BY page_ordinal LIMIT ?1"
+            }
+            (Self::SourcePages, true) => {
+                "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages WHERE page_ordinal > ?1 ORDER BY page_ordinal LIMIT ?2"
+            }
+            (Self::DocumentIntegrity, false) => {
+                "SELECT document_id, digest FROM document_integrity ORDER BY document_id LIMIT ?1"
+            }
+            (Self::DocumentIntegrity, true) => {
+                "SELECT document_id, digest FROM document_integrity WHERE document_id > ?1 ORDER BY document_id LIMIT ?2"
+            }
+            (Self::ImportIntegrity, false) => {
+                "SELECT canonical, digest FROM import_integrity ORDER BY canonical LIMIT ?1"
+            }
+            (Self::ImportIntegrity, true) => {
+                "SELECT canonical, digest FROM import_integrity WHERE canonical > ?1 ORDER BY canonical LIMIT ?2"
+            }
+            (Self::ImportEvidence, false) => {
+                "SELECT canonical, evidence FROM import_evidence ORDER BY canonical LIMIT ?1"
+            }
+            (Self::ImportEvidence, true) => {
+                "SELECT canonical, evidence FROM import_evidence WHERE canonical > ?1 ORDER BY canonical LIMIT ?2"
+            }
+            (Self::Rows, false) => {
+                "SELECT document_id, chunk_id, row FROM rows ORDER BY document_id LIMIT ?1"
+            }
+            (Self::Rows, true) => {
+                "SELECT document_id, chunk_id, row FROM rows WHERE document_id > ?1 ORDER BY document_id LIMIT ?2"
+            }
+            (Self::TermPostings, false) => {
+                "SELECT field, term, document_id, frequency FROM term_postings ORDER BY field, term, document_id LIMIT ?1"
+            }
+            (Self::TermPostings, true) => {
+                "SELECT field, term, document_id, frequency FROM term_postings WHERE (field, term, document_id) > (?1, ?2, ?3) ORDER BY field, term, document_id LIMIT ?4"
+            }
+            (Self::ExactPostings, false) => {
+                "SELECT field, term, document_id FROM exact_postings ORDER BY field, term, document_id LIMIT ?1"
+            }
+            (Self::ExactPostings, true) => {
+                "SELECT field, term, document_id FROM exact_postings WHERE (field, term, document_id) > (?1, ?2, ?3) ORDER BY field, term, document_id LIMIT ?4"
+            }
+            (Self::NgramPostings, false) => {
+                "SELECT kind, ngram, document_id FROM ngram_postings ORDER BY kind, ngram, document_id LIMIT ?1"
+            }
+            (Self::NgramPostings, true) => {
+                "SELECT kind, ngram, document_id FROM ngram_postings WHERE (kind, ngram, document_id) > (?1, ?2, ?3) ORDER BY kind, ngram, document_id LIMIT ?4"
+            }
+            (Self::FieldStatistics, false) => {
+                "SELECT field, total_length FROM field_stats ORDER BY field LIMIT ?1"
+            }
+            (Self::FieldStatistics, true) => {
+                "SELECT field, total_length FROM field_stats WHERE field > ?1 ORDER BY field LIMIT ?2"
+            }
+            (Self::TermStatistics, false) => {
+                "SELECT field, term, document_frequency FROM term_stats ORDER BY field, term LIMIT ?1"
+            }
+            (Self::TermStatistics, true) => {
+                "SELECT field, term, document_frequency FROM term_stats WHERE (field, term) > (?1, ?2) ORDER BY field, term LIMIT ?3"
+            }
+            (Self::Vocabulary, false) => "SELECT term FROM vocabulary ORDER BY term LIMIT ?1",
+            (Self::Vocabulary, true) => {
+                "SELECT term FROM vocabulary WHERE term > ?1 ORDER BY term LIMIT ?2"
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+enum PersistedFinalizationKeyV1 {
+    Integer(i64),
+    Blob(Vec<u8>),
+    Text(String),
+    TextTextInteger {
+        field: String,
+        term: String,
+        document_id: i64,
+    },
+    TextBlobInteger {
+        field: String,
+        term: Vec<u8>,
+        document_id: i64,
+    },
+    IntegerIntegerInteger {
+        kind: i64,
+        ngram: i64,
+        document_id: i64,
+    },
+    TextText {
+        field: String,
+        term: String,
+    },
+}
+
+impl PersistedFinalizationKeyV1 {
+    fn matches_section(&self, section: FinalizationSectionV1) -> bool {
+        matches!(
+            (self, section),
+            (
+                Self::Integer(_),
+                FinalizationSectionV1::SourcePages
+                    | FinalizationSectionV1::DocumentIntegrity
+                    | FinalizationSectionV1::Rows
+            ) | (
+                Self::Blob(_),
+                FinalizationSectionV1::ImportIntegrity | FinalizationSectionV1::ImportEvidence
+            ) | (
+                Self::TextTextInteger { .. },
+                FinalizationSectionV1::TermPostings
+            ) | (
+                Self::TextBlobInteger { .. },
+                FinalizationSectionV1::ExactPostings
+            ) | (
+                Self::IntegerIntegerInteger { .. },
+                FinalizationSectionV1::NgramPostings
+            ) | (
+                Self::Text(_),
+                FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary
+            ) | (Self::TextText { .. }, FinalizationSectionV1::TermStatistics)
+        )
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeLexicalArtifactBuildProgressV1 {
@@ -82,7 +286,7 @@ struct PersistedFinalizationStateV1 {
     phase: PersistedFinalizationPhaseV1,
     section_ordinal: u64,
     section_row_count: u64,
-    section_last_key: Option<String>,
+    section_last_key: Option<PersistedFinalizationKeyV1>,
     section_accumulator: Vec<u8>,
     completed_sections: Vec<CodeLexicalArtifactSectionDigestV1>,
     completed_rows: u64,
@@ -97,8 +301,29 @@ enum PersistedFinalizationPhaseV1 {
     Verify,
 }
 
+/// Stable identity of the private staging authority, captured from an exact
+/// no-follow file handle rather than mutable path metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StableArtifactFileIdentityV1 {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index_high: u32,
+    #[cfg(windows)]
+    file_index_low: u32,
+}
+
 pub struct CodeLexicalArtifactBuilderV1 {
     path: PathBuf,
+    /// Keeps the exact no-follow/private file handle alive while the SQLite
+    /// connection is in use. Every public transition rebinds the pathname to
+    /// this identity before it trusts the connection's contents.
+    _private_file: File,
+    file_identity: StableArtifactFileIdentityV1,
     connection: Connection,
     metadata: CodeLexicalProjectionMetadataV1,
     metadata_digest: ManifestDigest,
@@ -129,12 +354,12 @@ impl CodeLexicalArtifactBuilderV1 {
         let fixed_ledger_charge_bytes =
             validated_fixed_ledger_charge(&metadata, memory_budget_bytes)?;
         let path = path.as_ref();
-        if path.metadata().is_ok_and(|metadata| metadata.len() > 0) {
+        if path.try_exists().map_err(private_staging_error)? {
             return Err(CodeLexicalArtifactErrorV1::Contract(
                 "lexical artifact staging path already contains state".to_owned(),
             ));
         }
-        let connection = open_builder_connection(path)?;
+        let (connection, private_file, file_identity) = create_private_builder_connection(path)?;
         create_schema(&connection)?;
         let metadata_digest = metadata_digest(&metadata)?;
         let metadata_bytes = serde_json::to_vec(&metadata)
@@ -152,6 +377,8 @@ impl CodeLexicalArtifactBuilderV1 {
             .map_err(sqlite_error)?;
         Ok(Self {
             path: path.to_path_buf(),
+            _private_file: private_file,
+            file_identity,
             connection,
             metadata,
             metadata_digest,
@@ -176,12 +403,7 @@ impl CodeLexicalArtifactBuilderV1 {
         let fixed_ledger_charge_bytes =
             validated_fixed_ledger_charge(&expected_metadata, memory_budget_bytes)?;
         let path = path.as_ref();
-        if !path.is_file() {
-            return Err(CodeLexicalArtifactErrorV1::Missing(
-                "lexical artifact staging file is missing".to_owned(),
-            ));
-        }
-        let connection = open_builder_connection(path)?;
+        let (connection, private_file, file_identity) = open_private_builder_connection(path)?;
         require_integrity(&connection, control)?;
         let expected_digest = metadata_digest(&expected_metadata)?;
         verify_artifact_state_metadata(&connection, &expected_metadata, &expected_digest, control)?;
@@ -190,6 +412,8 @@ impl CodeLexicalArtifactBuilderV1 {
         checkpoint(control)?;
         Ok(Self {
             path: path.to_path_buf(),
+            _private_file: private_file,
+            file_identity,
             connection,
             metadata: expected_metadata,
             metadata_digest: expected_digest,
@@ -201,6 +425,7 @@ impl CodeLexicalArtifactBuilderV1 {
     pub fn progress(
         &self,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
+        self.verify_path_binding()?;
         progress(&self.connection)
     }
 
@@ -235,6 +460,7 @@ impl CodeLexicalArtifactBuilderV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
+        self.verify_path_binding()?;
         if read_receipt(&self.connection)?.is_some() {
             return Err(CodeLexicalArtifactErrorV1::Contract(
                 "finalized lexical artifacts do not accept more source pages".to_owned(),
@@ -305,6 +531,7 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         checkpoint(control)?;
+        self.verify_path_binding()?;
         verify_artifact_state_metadata(
             &self.connection,
             &self.metadata,
@@ -349,16 +576,10 @@ impl CodeLexicalArtifactBuilderV1 {
             checkpoint(control)?;
             let section_ordinal =
                 usize::try_from(state.section_ordinal).map_err(contract_number)?;
-            let section_name = SECTION_NAMES[section_ordinal];
-            let query = section_query(section_ordinal)?;
-            let rows = advance_section_rows(
-                &transaction,
-                section_name,
-                query,
-                &mut state,
-                remaining_work,
-                control,
-            )?;
+            let section = FinalizationSectionV1::from_ordinal(section_ordinal)?;
+            let section_name = section.name();
+            let rows =
+                advance_section_rows(&transaction, section, &mut state, remaining_work, control)?;
             if rows > 0 {
                 remaining_work = remaining_work.checked_sub(rows).ok_or_else(|| {
                     CodeLexicalArtifactErrorV1::Corrupt(
@@ -368,9 +589,11 @@ impl CodeLexicalArtifactBuilderV1 {
                 continue;
             }
 
-            let section = finish_persisted_section(section_name, &state)?;
+            let section_digest = finish_persisted_section(section_name, &state)?;
             match state.phase {
-                PersistedFinalizationPhaseV1::Build => state.completed_sections.push(section),
+                PersistedFinalizationPhaseV1::Build => {
+                    state.completed_sections.push(section_digest)
+                }
                 PersistedFinalizationPhaseV1::Verify => {
                     let expected =
                         state
@@ -382,7 +605,7 @@ impl CodeLexicalArtifactBuilderV1 {
                                         .to_owned(),
                                 )
                             })?;
-                    if &section != expected {
+                    if &section_digest != expected {
                         return Err(CodeLexicalArtifactErrorV1::Corrupt(
                             "lexical artifact changed between bounded finalization wakes"
                                 .to_owned(),
@@ -484,6 +707,7 @@ impl CodeLexicalArtifactBuilderV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<VerifiedCodeLexicalArtifactV1, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
+        self.verify_path_binding()?;
         if let Some(receipt) = read_receipt(&self.connection)? {
             verify_finalized_artifact(
                 &self.connection,
@@ -498,6 +722,88 @@ impl CodeLexicalArtifactBuilderV1 {
         Err(CodeLexicalArtifactErrorV1::Corrupt(
             "unsealed lexical artifacts require bounded finalization before verification"
                 .to_owned(),
+        ))
+    }
+
+    fn verify_path_binding(&self) -> Result<(), CodeLexicalArtifactErrorV1> {
+        verify_staging_file_binding(&self.path, &self.file_identity)
+    }
+}
+
+fn create_private_builder_connection(
+    path: &Path,
+) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
+    let private_file = create_private_file_retained(path)
+        .map_err(|failure| private_staging_error(failure.into_error()))?;
+    open_bound_builder_connection(path, private_file)
+}
+
+fn open_private_builder_connection(
+    path: &Path,
+) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
+    let private_file = open_private_file(path).map_err(private_staging_error)?;
+    open_bound_builder_connection(path, private_file)
+}
+
+fn open_bound_builder_connection(
+    path: &Path,
+    private_file: File,
+) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
+    let identity = stable_file_identity(&private_file)?;
+    let connection = open_builder_connection(path)?;
+    let rebound = open_private_file(path).map_err(private_staging_error)?;
+    if stable_file_identity(&rebound)? != identity {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact staging path changed while its SQLite connection opened".to_owned(),
+        ));
+    }
+    Ok((connection, private_file, identity))
+}
+
+fn stable_file_identity(
+    file: &File,
+) -> Result<StableArtifactFileIdentityV1, CodeLexicalArtifactErrorV1> {
+    let metadata = file.metadata().map_err(private_staging_error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        Ok(StableArtifactFileIdentityV1 {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        Ok(StableArtifactFileIdentityV1 {
+            volume_serial_number: metadata.volume_serial_number(),
+            file_index_high: metadata.file_index_high(),
+            file_index_low: metadata.file_index_low(),
+        })
+    }
+}
+
+fn verify_staging_file_binding(
+    path: &Path,
+    expected: &StableArtifactFileIdentityV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let current = open_private_file(path).map_err(private_staging_error)?;
+    if stable_file_identity(&current)? != *expected {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact staging path no longer names the opened private file".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn private_staging_error(error: std::io::Error) -> CodeLexicalArtifactErrorV1 {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        CodeLexicalArtifactErrorV1::Missing("lexical artifact staging file is missing".to_owned())
+    } else {
+        CodeLexicalArtifactErrorV1::Contract(format!(
+            "lexical artifact staging path must be an owner-private regular file without links: {error}"
         ))
     }
 }
@@ -1128,6 +1434,15 @@ fn validate_finalization_state(
             "persisted lexical artifact finalization sections are out of order".to_owned(),
         ));
     }
+    if let Some(key) = &state.section_last_key {
+        let section_ordinal = usize::try_from(state.section_ordinal).map_err(contract_number)?;
+        let section = FinalizationSectionV1::from_ordinal(section_ordinal)?;
+        if !key.matches_section(section) {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "persisted lexical artifact finalization key has the wrong native shape".to_owned(),
+            ));
+        }
+    }
     let completed_rows = state
         .completed_sections
         .iter()
@@ -1145,45 +1460,146 @@ fn validate_finalization_state(
     Ok(())
 }
 
-fn section_query(section_ordinal: usize) -> Result<&'static str, CodeLexicalArtifactErrorV1> {
-    SECTION_QUERIES
-        .get(section_ordinal)
-        .copied()
-        .ok_or_else(|| {
-            CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact finalization selected an unknown section".to_owned(),
-            )
-        })
-}
-
 fn advance_section_rows(
     transaction: &Transaction<'_>,
-    name: &str,
-    query: &str,
+    section: FinalizationSectionV1,
     state: &mut PersistedFinalizationStateV1,
     maximum_rows: usize,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let limit = i64::try_from(maximum_rows).map_err(contract_number)?;
-    let query = format!(
-        "SELECT * FROM ({query}) AS section_rows \
-         WHERE (?1 IS NULL OR finalization_key > ?1) \
-         ORDER BY finalization_key LIMIT ?2"
-    );
-    let mut statement = transaction.prepare(&query).map_err(sqlite_error)?;
+    let last_key = state.section_last_key.clone();
+    match (section, last_key.as_ref()) {
+        (FinalizationSectionV1::SourcePages, None)
+        | (FinalizationSectionV1::DocumentIntegrity, None)
+        | (FinalizationSectionV1::Rows, None)
+        | (FinalizationSectionV1::ImportIntegrity, None)
+        | (FinalizationSectionV1::ImportEvidence, None)
+        | (FinalizationSectionV1::TermPostings, None)
+        | (FinalizationSectionV1::ExactPostings, None)
+        | (FinalizationSectionV1::NgramPostings, None)
+        | (FinalizationSectionV1::FieldStatistics, None)
+        | (FinalizationSectionV1::TermStatistics, None)
+        | (FinalizationSectionV1::Vocabulary, None) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(false),
+            params![limit],
+            state,
+            control,
+        ),
+        (
+            FinalizationSectionV1::SourcePages
+            | FinalizationSectionV1::DocumentIntegrity
+            | FinalizationSectionV1::Rows,
+            Some(PersistedFinalizationKeyV1::Integer(value)),
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(true),
+            params![value, limit],
+            state,
+            control,
+        ),
+        (
+            FinalizationSectionV1::ImportIntegrity | FinalizationSectionV1::ImportEvidence,
+            Some(PersistedFinalizationKeyV1::Blob(value)),
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(true),
+            params![value, limit],
+            state,
+            control,
+        ),
+        (
+            FinalizationSectionV1::TermPostings,
+            Some(PersistedFinalizationKeyV1::TextTextInteger {
+                field,
+                term,
+                document_id,
+            }),
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(true),
+            params![field, term, document_id, limit],
+            state,
+            control,
+        ),
+        (
+            FinalizationSectionV1::ExactPostings,
+            Some(PersistedFinalizationKeyV1::TextBlobInteger {
+                field,
+                term,
+                document_id,
+            }),
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(true),
+            params![field, term, document_id, limit],
+            state,
+            control,
+        ),
+        (
+            FinalizationSectionV1::NgramPostings,
+            Some(PersistedFinalizationKeyV1::IntegerIntegerInteger {
+                kind,
+                ngram,
+                document_id,
+            }),
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(true),
+            params![kind, ngram, document_id, limit],
+            state,
+            control,
+        ),
+        (
+            FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary,
+            Some(PersistedFinalizationKeyV1::Text(value)),
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(true),
+            params![value, limit],
+            state,
+            control,
+        ),
+        (
+            FinalizationSectionV1::TermStatistics,
+            Some(PersistedFinalizationKeyV1::TextText { field, term }),
+        ) => advance_native_section_rows(
+            transaction,
+            section,
+            section.seek_query(true),
+            params![field, term, limit],
+            state,
+            control,
+        ),
+        _ => Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "persisted lexical artifact finalization key does not match its section".to_owned(),
+        )),
+    }
+}
+
+fn advance_native_section_rows<P: rusqlite::Params>(
+    transaction: &Transaction<'_>,
+    section: FinalizationSectionV1,
+    query: &str,
+    parameters: P,
+    state: &mut PersistedFinalizationStateV1,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    let mut statement = transaction.prepare(query).map_err(sqlite_error)?;
     let column_count = statement.column_count();
-    let data_column_count = column_count.checked_sub(1).ok_or_else(|| {
-        CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact finalization query is missing its keyset key".to_owned(),
-        )
-    })?;
-    let mut rows = statement
-        .query(params![state.section_last_key, limit])
-        .map_err(sqlite_error)?;
+    let mut rows = statement.query(parameters).map_err(sqlite_error)?;
     let mut advanced = 0usize;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
         checkpoint(control)?;
-        let key: String = row.get(data_column_count).map_err(sqlite_error)?;
+        let key = native_row_key(section, row)?;
         if state
             .section_last_key
             .as_ref()
@@ -1193,15 +1609,18 @@ fn advance_section_rows(
                 "lexical artifact finalization keyset did not advance".to_owned(),
             ));
         }
-        if name == "derived_integrity" {
-            verify_integrity_row(transaction, row)?;
+        if matches!(
+            section,
+            FinalizationSectionV1::DocumentIntegrity | FinalizationSectionV1::ImportIntegrity
+        ) {
+            verify_integrity_row(transaction, section, row)?;
         }
         absorb_section_row(
-            name,
+            section.name(),
             state.section_row_count,
             &mut state.section_accumulator,
             row,
-            data_column_count,
+            column_count,
         )?;
         state.section_last_key = Some(key);
         state.section_row_count = state.section_row_count.checked_add(1).ok_or_else(|| {
@@ -1223,35 +1642,89 @@ fn advance_section_rows(
     Ok(advanced)
 }
 
+fn native_row_key(
+    section: FinalizationSectionV1,
+    row: &rusqlite::Row<'_>,
+) -> Result<PersistedFinalizationKeyV1, CodeLexicalArtifactErrorV1> {
+    match section {
+        FinalizationSectionV1::SourcePages
+        | FinalizationSectionV1::DocumentIntegrity
+        | FinalizationSectionV1::Rows => Ok(PersistedFinalizationKeyV1::Integer(
+            row.get(0).map_err(sqlite_error)?,
+        )),
+        FinalizationSectionV1::ImportIntegrity | FinalizationSectionV1::ImportEvidence => Ok(
+            PersistedFinalizationKeyV1::Blob(row.get(0).map_err(sqlite_error)?),
+        ),
+        FinalizationSectionV1::TermPostings => Ok(PersistedFinalizationKeyV1::TextTextInteger {
+            field: row.get(0).map_err(sqlite_error)?,
+            term: row.get(1).map_err(sqlite_error)?,
+            document_id: row.get(2).map_err(sqlite_error)?,
+        }),
+        FinalizationSectionV1::ExactPostings => Ok(PersistedFinalizationKeyV1::TextBlobInteger {
+            field: row.get(0).map_err(sqlite_error)?,
+            term: row.get(1).map_err(sqlite_error)?,
+            document_id: row.get(2).map_err(sqlite_error)?,
+        }),
+        FinalizationSectionV1::NgramPostings => {
+            Ok(PersistedFinalizationKeyV1::IntegerIntegerInteger {
+                kind: row.get(0).map_err(sqlite_error)?,
+                ngram: row.get(1).map_err(sqlite_error)?,
+                document_id: row.get(2).map_err(sqlite_error)?,
+            })
+        }
+        FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary => Ok(
+            PersistedFinalizationKeyV1::Text(row.get(0).map_err(sqlite_error)?),
+        ),
+        FinalizationSectionV1::TermStatistics => Ok(PersistedFinalizationKeyV1::TextText {
+            field: row.get(0).map_err(sqlite_error)?,
+            term: row.get(1).map_err(sqlite_error)?,
+        }),
+    }
+}
+
 fn verify_integrity_row(
     transaction: &Transaction<'_>,
+    section: FinalizationSectionV1,
     row: &rusqlite::Row<'_>,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let kind: String = row.get(0).map_err(sqlite_error)?;
-    let expected: String = row.get(2).map_err(sqlite_error)?;
-    let actual = match (kind.as_str(), row.get_ref(1).map_err(sqlite_error)?) {
-        ("document", ValueRef::Integer(document)) if document >= 0 => {
-            document_integrity_digest(transaction, document)?
-        }
-        ("import", ValueRef::Blob(canonical)) => {
-            let evidence: Option<Vec<u8>> = transaction
-                .query_row(
-                    "SELECT evidence FROM import_evidence WHERE canonical = ?1",
-                    [canonical],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(sqlite_error)?;
-            let evidence = evidence.ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Corrupt(
-                    "lexical artifact import integrity receipt has no evidence".to_owned(),
-                )
-            })?;
-            import_integrity_digest(canonical, &evidence)?
-        }
+    let expected: String = row.get(1).map_err(sqlite_error)?;
+    let actual = match section {
+        FinalizationSectionV1::DocumentIntegrity => match row.get_ref(0).map_err(sqlite_error)? {
+            ValueRef::Integer(document) if document >= 0 => {
+                document_integrity_digest(transaction, document)?
+            }
+            _ => {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact document integrity receipt has an invalid key".to_owned(),
+                ));
+            }
+        },
+        FinalizationSectionV1::ImportIntegrity => match row.get_ref(0).map_err(sqlite_error)? {
+            ValueRef::Blob(canonical) => {
+                let evidence: Option<Vec<u8>> = transaction
+                    .query_row(
+                        "SELECT evidence FROM import_evidence WHERE canonical = ?1",
+                        [canonical],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(sqlite_error)?;
+                let evidence = evidence.ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact import integrity receipt has no evidence".to_owned(),
+                    )
+                })?;
+                import_integrity_digest(canonical, &evidence)?
+            }
+            _ => {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "lexical artifact import integrity receipt has an invalid key".to_owned(),
+                ));
+            }
+        },
         _ => {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact derived integrity receipt has an invalid key".to_owned(),
+                "lexical artifact integrity verification selected the wrong section".to_owned(),
             ));
         }
     };
@@ -1388,17 +1861,8 @@ fn verify_final_sections_against_source(
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let expected = [
         ("source_pages", source.page_count()),
-        (
-            "derived_integrity",
-            source
-                .total_chunks()
-                .checked_add(source.total_imports())
-                .ok_or_else(|| {
-                    CodeLexicalArtifactErrorV1::Contract(
-                        "lexical artifact final source cardinality overflowed".to_owned(),
-                    )
-                })?,
-        ),
+        ("document_integrity", source.total_chunks()),
+        ("import_integrity", source.total_imports()),
         ("import_evidence", source.total_imports()),
         ("rows", source.total_chunks()),
     ];
@@ -1869,42 +2333,42 @@ pub(super) fn compute_section_digests(
     connection: &Connection,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<Vec<CodeLexicalArtifactSectionDigestV1>, CodeLexicalArtifactErrorV1> {
-    SECTION_NAMES
+    FinalizationSectionV1::ALL
         .into_iter()
-        .zip(SECTION_QUERIES)
-        .map(|(name, query)| digest_query(connection, name, query, control))
+        .map(|section| digest_query(connection, section, control))
         .collect()
 }
 
 fn digest_query(
     connection: &Connection,
-    name: &str,
-    query: &str,
+    section: FinalizationSectionV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactErrorV1> {
     let mut row_count = 0u64;
-    let mut accumulator = initial_section_accumulator(name)?.to_vec();
-    let query = format!("SELECT * FROM ({query}) AS section_rows ORDER BY finalization_key");
-    let mut statement = connection.prepare(&query).map_err(sqlite_error)?;
+    let mut accumulator = initial_section_accumulator(section.name())?.to_vec();
+    let mut statement = connection
+        .prepare(section.full_query())
+        .map_err(sqlite_error)?;
     let column_count = statement.column_count();
-    let data_column_count = column_count.checked_sub(1).ok_or_else(|| {
-        CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact verification query is missing its keyset key".to_owned(),
-        )
-    })?;
     let mut rows = statement.query([]).map_err(sqlite_error)?;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
         if row_count.is_multiple_of(4_096) {
             checkpoint(control)?;
         }
-        absorb_section_row(name, row_count, &mut accumulator, row, data_column_count)?;
+        absorb_section_row(
+            section.name(),
+            row_count,
+            &mut accumulator,
+            row,
+            column_count,
+        )?;
         row_count = row_count.checked_add(1).ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract(
                 "lexical artifact section row count overflowed".to_owned(),
             )
         })?;
     }
-    finish_section(name, row_count, &accumulator)
+    finish_section(section.name(), row_count, &accumulator)
 }
 
 fn hash_value(hasher: &mut Sha256, value: ValueRef<'_>) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -2069,4 +2533,166 @@ fn require_integrity(
 
 fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Contract(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_finalization_resume_seeks_each_native_section_index() {
+        let connection = Connection::open_in_memory().expect("open artifact database");
+        create_schema(&connection).expect("create artifact schema");
+        connection
+            .execute(
+                "INSERT INTO source_pages(page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor) VALUES (0, 'page', 'cumulative', 1, 1, 1, 1, 'imports', X'00')",
+                [],
+            )
+            .expect("seed source page");
+        connection
+            .execute(
+                "INSERT INTO document_integrity(document_id, digest) VALUES (0, 'document')",
+                [],
+            )
+            .expect("seed document integrity");
+        connection
+            .execute(
+                "INSERT INTO import_integrity(canonical, digest) VALUES (X'01', 'import')",
+                [],
+            )
+            .expect("seed import integrity");
+        connection
+            .execute(
+                "INSERT INTO import_evidence(canonical, evidence) VALUES (X'01', X'01')",
+                [],
+            )
+            .expect("seed import evidence");
+        connection
+            .execute(
+                "INSERT INTO rows(document_id, chunk_id, row) VALUES (0, 'chunk', X'00')",
+                [],
+            )
+            .expect("seed row");
+        connection
+            .execute(
+                "INSERT INTO term_postings(field, term, document_id, frequency) VALUES ('field', 'term', 0, 1)",
+                [],
+            )
+            .expect("seed term posting");
+        connection
+            .execute(
+                "INSERT INTO exact_postings(field, term, document_id) VALUES ('field', X'01', 0)",
+                [],
+            )
+            .expect("seed exact posting");
+        connection
+            .execute(
+                "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (1, 1, 0)",
+                [],
+            )
+            .expect("seed ngram posting");
+        connection
+            .execute(
+                "INSERT INTO field_stats(field, total_length) VALUES ('field', 1)",
+                [],
+            )
+            .expect("seed field statistic");
+        connection
+            .execute(
+                "INSERT INTO term_stats(field, term, document_frequency) VALUES ('field', 'term', 1)",
+                [],
+            )
+            .expect("seed term statistic");
+        connection
+            .execute("INSERT INTO vocabulary(term) VALUES ('term')", [])
+            .expect("seed vocabulary");
+
+        for section in FinalizationSectionV1::ALL {
+            let plan = explain_native_seek_plan(&connection, section)
+                .expect("explain bounded finalization resume query");
+            assert!(
+                plan.iter().any(|detail| detail.contains("SEARCH")),
+                "{section:?} must seek an indexed native key, got {plan:?}"
+            );
+            assert!(
+                plan.iter().all(|detail| !detail.contains("SCAN")),
+                "{section:?} must not rescan the section on a resumed wake, got {plan:?}"
+            );
+            assert!(
+                plan.iter().all(|detail| !detail.contains("TEMP B-TREE")),
+                "{section:?} must not sort the section on a resumed wake, got {plan:?}"
+            );
+        }
+    }
+
+    fn explain_native_seek_plan(
+        connection: &Connection,
+        section: FinalizationSectionV1,
+    ) -> Result<Vec<String>, CodeLexicalArtifactErrorV1> {
+        let query = format!("EXPLAIN QUERY PLAN {}", section.seek_query(true));
+        let mut statement = connection.prepare(&query).map_err(sqlite_error)?;
+        let mut rows = match section {
+            FinalizationSectionV1::SourcePages
+            | FinalizationSectionV1::DocumentIntegrity
+            | FinalizationSectionV1::Rows => statement.query(params![0i64, 1i64]),
+            FinalizationSectionV1::ImportIntegrity | FinalizationSectionV1::ImportEvidence => {
+                statement.query(params![vec![0u8], 1i64])
+            }
+            FinalizationSectionV1::TermPostings => {
+                statement.query(params!["field", "term", 0i64, 1i64])
+            }
+            FinalizationSectionV1::TermStatistics => {
+                statement.query(params!["field", "term", 1i64])
+            }
+            FinalizationSectionV1::ExactPostings => {
+                statement.query(params!["field", vec![0u8], 0i64, 1i64])
+            }
+            FinalizationSectionV1::NgramPostings => {
+                statement.query(params![0i64, 0i64, 0i64, 1i64])
+            }
+            FinalizationSectionV1::FieldStatistics | FinalizationSectionV1::Vocabulary => {
+                statement.query(params!["", 1i64])
+            }
+        }
+        .map_err(sqlite_error)?;
+        let mut details = Vec::new();
+        while let Some(row) = rows.next().map_err(sqlite_error)? {
+            details.push(row.get(3).map_err(sqlite_error)?);
+        }
+        Ok(details)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_open_refuses_a_symlink_even_when_its_target_is_private() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("private staging directory");
+        let target = directory.path().join("target.sqlite");
+        drop(create_private_file_retained(&target).expect("create private target"));
+        let linked = directory.path().join("linked.sqlite");
+        symlink(&target, &linked).expect("link private target");
+
+        assert!(matches!(
+            open_private_builder_connection(&linked),
+            Err(CodeLexicalArtifactErrorV1::Contract(_))
+        ));
+    }
+
+    #[test]
+    fn staging_operations_refuse_same_name_replacement_after_open() {
+        let directory = tempfile::tempdir().expect("private staging directory");
+        let artifact = directory.path().join("artifact.sqlite");
+        let replacement = directory.path().join("replacement.sqlite");
+        let (connection, _retained, identity) =
+            create_private_builder_connection(&artifact).expect("open artifact");
+        drop(connection);
+        drop(create_private_file_retained(&replacement).expect("create replacement"));
+        std::fs::rename(&replacement, &artifact).expect("replace staged artifact");
+
+        assert!(matches!(
+            verify_staging_file_binding(&artifact, &identity),
+            Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+        ));
+    }
 }
