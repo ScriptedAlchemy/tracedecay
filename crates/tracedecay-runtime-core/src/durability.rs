@@ -76,7 +76,7 @@ pub enum StoreShardKind {
     /// A code-graph shard for one worktree, branch, or immutable snapshot.
     Code,
     /// One sealed lexical text artifact (`code-text-artifacts-v1/`): an
-    /// immutable, content-addressed SQLite file derived entirely from a
+    /// immutable, content-addressed `SQLite` file derived entirely from a
     /// sealed code-index generation. Not producible from a
     /// [`StoreShardScopeV1`]; publication names it directly.
     CodeTextArtifact,
