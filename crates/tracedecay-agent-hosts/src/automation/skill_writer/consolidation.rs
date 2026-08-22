@@ -410,7 +410,7 @@ mod tests {
     #[cfg(unix)]
     fn replace_usage_ledger_with_blocking_fifo(
         profile_root: &Path,
-    ) -> (std::fs::File, std::path::PathBuf) {
+    ) -> (std::thread::JoinHandle<std::fs::File>, std::path::PathBuf) {
         let ledger_path = skill_usage_ledger_path(profile_root);
         match std::fs::remove_file(&ledger_path) {
             Ok(()) => {}
@@ -425,12 +425,28 @@ mod tests {
                 .success(),
             "the production usage-ledger read must block on a real FIFO"
         );
-        let control = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&ledger_path)
-            .expect("open FIFO control handle without blocking");
-        (control, ledger_path)
+        let writer_path = ledger_path.clone();
+        let writer = std::thread::spawn(move || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(writer_path)
+                .expect("open FIFO writer after the production reader arrives")
+        });
+        (writer, ledger_path)
+    }
+
+    #[cfg(unix)]
+    async fn await_usage_ledger_reader(
+        writer: std::thread::JoinHandle<std::fs::File>,
+    ) -> std::fs::File {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !writer.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("production usage-ledger reader opens the FIFO");
+        writer.join().expect("FIFO writer thread joins")
     }
 
     #[test]
@@ -900,7 +916,7 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let archive = skill_archive_from_proposal(&proposal, &skills).unwrap();
-        let (fifo_control, ledger_path) = replace_usage_ledger_with_blocking_fifo(profile.path());
+        let (fifo_writer, ledger_path) = replace_usage_ledger_with_blocking_fifo(profile.path());
         let profile_root = profile.path().to_path_buf();
         let archive_for_task = archive.clone();
         let mut task =
@@ -933,8 +949,13 @@ mod tests {
             "the archive commit must durably carry its typed tombstone before \
              post-commit usage sync completes"
         );
+        let fifo_writer = await_usage_ledger_reader(fifo_writer).await;
+        assert!(
+            !task.is_finished(),
+            "archive remains blocked at the production usage-ledger read"
+        );
         task.abort();
-        drop(fifo_control);
+        drop(fifo_writer);
         assert!(
             tokio::time::timeout(std::time::Duration::from_secs(2), &mut task)
                 .await
@@ -968,7 +989,7 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let merge = skill_merge_from_proposal(&proposal, &skills).unwrap();
-        let (fifo_control, ledger_path) = replace_usage_ledger_with_blocking_fifo(profile.path());
+        let (fifo_writer, ledger_path) = replace_usage_ledger_with_blocking_fifo(profile.path());
         let profile_root = profile.path().to_path_buf();
         let merge_for_task = merge.clone();
         let mut task =
@@ -1008,8 +1029,13 @@ mod tests {
             "the merge commit must durably carry its typed tombstone before \
              post-commit usage sync completes"
         );
+        let fifo_writer = await_usage_ledger_reader(fifo_writer).await;
+        assert!(
+            !task.is_finished(),
+            "merge remains blocked at the production usage-ledger read"
+        );
         task.abort();
-        drop(fifo_control);
+        drop(fifo_writer);
         assert!(
             tokio::time::timeout(std::time::Duration::from_secs(2), &mut task)
                 .await
