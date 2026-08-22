@@ -48,9 +48,9 @@ mod tests {
     use super::handle_remote_status;
     use crate::config::lock_user_data_dir_test_env;
     use crate::daemon::remote_protocol::RemoteOperationalStatusProviderV1;
-    use crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv;
     use crate::mcp::tools::ToolResult;
     use crate::mcp::tools::binding::{McpToolDispatchGroup, dispatch_group_for_tool};
+    use crate::mcp::tools::handlers::dispatch_test_support::SelectorEnv;
     use crate::mcp::tools::handlers::{
         ToolCallRegistryOptions, handle_tool_call_with_registry_options,
     };
