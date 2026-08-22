@@ -181,7 +181,10 @@ assert_code_extraction_assets() {
   local extraction_package=$1
   local required
   local -a assets=(
+    "vendor/tree-sitter-rust/Cargo.package.toml"
     "vendor/tree-sitter-rust/LICENSE"
+    "vendor/tree-sitter-rust/bindings/rust/build.rs"
+    "vendor/tree-sitter-rust/bindings/rust/lib.rs"
     "vendor/tree-sitter-rust/queries/highlights.scm"
     "vendor/tree-sitter-rust/queries/injections.scm"
     "vendor/tree-sitter-rust/queries/tags.scm"
@@ -386,8 +389,12 @@ verify_feature_wiring \
   "$repo/crates/tracedecay-semantic/Cargo.toml" \
   "$semantic_package/Cargo.toml"
 
+mv -- \
+  "$code_extraction_package/vendor/tree-sitter-rust/Cargo.package.toml" \
+  "$code_extraction_package/vendor/tree-sitter-rust/Cargo.toml"
+
 patch_config="$work/packaged-crates.toml"
-python3 - "$metadata" "$packages" >"$patch_config" <<'PY'
+python3 - "$metadata" "$packages" "$code_extraction_package" >"$patch_config" <<'PY'
 import json
 import pathlib
 import sys
@@ -396,12 +403,15 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     metadata = json.load(handle)
 members = set(metadata["workspace_members"])
 packages = pathlib.Path(sys.argv[2])
+code_extraction_package = pathlib.Path(sys.argv[3])
 print("[patch.crates-io]")
 for package in sorted(metadata["packages"], key=lambda value: value["name"]):
     if package["id"] not in members or package["name"] == "tracedecay":
         continue
     path = packages / f'{package["name"]}-{package["version"]}'
     print(f'{json.dumps(package["name"])} = {{ path = {json.dumps(str(path))} }}')
+grammar = code_extraction_package / "vendor" / "tree-sitter-rust"
+print(f'"tree-sitter-rust" = {{ path = {json.dumps(str(grammar))} }}')
 PY
 
 echo "distribution acceptance: testing packaged patched Rust grammar"
