@@ -2303,39 +2303,10 @@ fn validate_sha256(value: &str, field: &'static str) -> Result<(), ObservationCo
     }
 }
 
-/// Test-only counter over the canonical identity-digest boundary.
-///
-/// Every identity derivation and every stored-row deserialization funnels
-/// through [`domain_digest`] (fresh derivation via
-/// [`CanonicalObservationIdV1::derive`], decode-time verification via
-/// `accepted_identity_digests`), so a thread-local count at this exact
-/// boundary proves whether a code path re-canonicalized and re-hashed
-/// identity material. Thread-local so parallel test binaries cannot bleed
-/// counts into each other.
-#[cfg(feature = "identity-digest-probe")]
-pub mod identity_digest_probe {
-    use std::cell::Cell;
-
-    thread_local! {
-        static DIGESTS: Cell<u64> = const { Cell::new(0) };
-    }
-
-    pub(super) fn record() {
-        DIGESTS.with(|digests| digests.set(digests.get() + 1));
-    }
-
-    /// Canonical identity digests computed on the current thread so far.
-    pub fn count() -> u64 {
-        DIGESTS.with(Cell::get)
-    }
-}
-
 fn domain_digest(
     domain: &[u8],
     value: &impl Serialize,
 ) -> Result<String, ObservationContractError> {
-    #[cfg(feature = "identity-digest-probe")]
-    identity_digest_probe::record();
     let bytes =
         canonical_json_bytes(value).map_err(|_| ObservationContractError::CanonicalEncoding)?;
     let mut hasher = Sha256::new();

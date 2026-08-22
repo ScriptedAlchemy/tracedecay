@@ -4,6 +4,7 @@ use tracedecay_domain::{
     DurableObservationV1, ObservationOrderingDomainV1, ObservationSourceCursorV1,
 };
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
+use tracedecay_store::observation::ObservationCoverageV1;
 
 use crate::global_db_operation_error;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
@@ -279,7 +280,7 @@ fn is_new_generation_frontier(
 ) -> bool {
     stored.ordering_domain() == ObservationOrderingDomainV1::FileBytes
         && committed.ordering_domain() == ObservationOrderingDomainV1::FileBytes
-        && stored.generation() > committed.generation()
+        && stored.generation() != committed.generation()
         && stored.position() == 0
 }
 
@@ -336,26 +337,30 @@ async fn cursor_has_exact_advance_receipt(
 ) -> tracedecay_runtime_core::errors::Result<bool> {
     let mut rows = conn
         .query(
-            "SELECT 1 FROM source_cursor_advances
-             WHERE source_json = ?1 AND scope_json = ?2
-               AND CAST(json_extract(coverage_json, '$.generation') AS TEXT) = ?3
-               AND json_extract(coverage_json, '$.ordering_domain') = ?4
-               AND CAST(json_extract(coverage_json, '$.range.end') AS TEXT) = ?5
-             LIMIT 1",
-            params![
-                source_json,
-                scope_json,
-                cursor.generation().generation_id().to_string(),
-                cursor.ordering_domain().as_str(),
-                cursor.position().to_string()
-            ],
+            "SELECT coverage_json FROM source_cursor_advances
+             WHERE source_json = ?1 AND scope_json = ?2",
+            params![source_json, scope_json],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    rows.next()
+    while let Some(row) = rows
+        .next()
         .await
-        .map(|row| row.is_some())
-        .map_err(|error| global_db_operation_error(OPERATION, error))
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        let coverage_json = row
+            .get::<String>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let coverage: ObservationCoverageV1 =
+            decode_authority_json(&coverage_json, "source cursor advance coverage JSON")?;
+        if coverage.generation() == cursor.generation()
+            && coverage.ordering_domain() == cursor.ordering_domain()
+            && coverage.range().end() == cursor.position()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(super) async fn validate_observation_cursor_coverage(

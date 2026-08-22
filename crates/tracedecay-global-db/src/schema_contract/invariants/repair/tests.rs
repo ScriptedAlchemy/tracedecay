@@ -10,7 +10,8 @@
 
 use serde_json::Value;
 use tracedecay_domain::{
-    DurableObservationV1, ObservationSourceCursorV1, ObservationSourceRangeV1,
+    DurableObservationV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+    ObservationSourceRangeV1,
 };
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCoverageV1};
@@ -125,6 +126,72 @@ async fn repair_preserves_receipted_nondurable_cursor_progress() {
         .expect("repair must accept receipted progress");
 
     assert_eq!(stored_cursors(&conn).await, vec![advanced]);
+}
+
+/// Source generations are opaque `u64` identities, not SQLite signed
+/// integers. An exact receipt for a generation above `i64::MAX` must still
+/// authorize its current frontier on reopen.
+#[tokio::test]
+async fn repair_preserves_exact_opaque_u64_generation_receipt() {
+    let (_directory, conn) = open_registered().await;
+    let (_, committed) = seed_observation(&conn, 0, "opaque-generation").await;
+    let generation = ObservationSourceGenerationV1::new(u64::MAX).unwrap();
+    let advanced = ObservationSourceCursorV1::for_ordering(
+        committed.source().clone(),
+        committed.scope().clone(),
+        generation,
+        committed.ordering_domain(),
+        50,
+    )
+    .unwrap();
+    write_cursor(&conn, &advanced).await;
+    let coverage = ObservationCoverageV1::new(
+        generation,
+        advanced.ordering_domain(),
+        ObservationSourceRangeV1::new(0, advanced.position()).unwrap(),
+    );
+    conn.execute(
+        "INSERT INTO source_cursor_advances(source_json, scope_json, coverage_json, reason)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            serde_json::to_string(advanced.source()).unwrap(),
+            serde_json::to_string(advanced.scope()).unwrap(),
+            serde_json::to_string(&coverage).unwrap(),
+            ObservationCoverageReason::AdmissionRefused.as_str()
+        ],
+    )
+    .await
+    .expect("seed opaque-generation source cursor advance receipt");
+
+    repair_committed_source_cursors(&conn, 0)
+        .await
+        .expect("repair must accept an exact opaque-generation receipt");
+
+    assert_eq!(stored_cursors(&conn).await, vec![advanced]);
+}
+
+/// A replacement generation identity is different, not greater. A zero
+/// frontier in a numerically smaller opaque generation must not be pulled
+/// backward into the last committed generation during reopen repair.
+#[tokio::test]
+async fn repair_preserves_numerically_smaller_replacement_generation_frontier() {
+    let (_directory, conn) = open_registered().await;
+    let (_, committed) = seed_observation(&conn, 0, "replacement-generation").await;
+    let replacement = ObservationSourceCursorV1::for_ordering(
+        committed.source().clone(),
+        committed.scope().clone(),
+        ObservationSourceGenerationV1::new(1).unwrap(),
+        committed.ordering_domain(),
+        0,
+    )
+    .unwrap();
+    write_cursor(&conn, &replacement).await;
+
+    repair_committed_source_cursors(&conn, 0)
+        .await
+        .expect("repair must preserve an opaque replacement generation frontier");
+
+    assert_eq!(stored_cursors(&conn).await, vec![replacement]);
 }
 
 /// Cursor rows are keyed by serialized scope JSON. A scope written by a build
