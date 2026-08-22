@@ -1216,6 +1216,112 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
 }
 
 #[test]
+fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
+    let mut source_text = String::with_capacity(1_500_000);
+    for ordinal in 0..24_000_u32 {
+        source_text.push_str(&format!(
+            "pub fn bounded_item_{ordinal}() -> u32 {{ {ordinal} }}\n"
+        ));
+    }
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request_with_source(
+                "file.lexical-large-page",
+                1_257_500,
+                "commit.lexical-large-page",
+                "tree.lexical-large-page",
+                &source_text,
+            ),
+            &ActiveControl,
+        )
+        .expect("large generation publishes");
+    let expected_chunks = generation
+        .admitted_chunks()
+        .expect("published generation retains exact chunks")
+        .len() as u64;
+    assert!(expected_chunks > 64, "fixture must require multiple pages");
+    let sealed = generation.encode_sealed().expect("large generation seals");
+    let file_digest =
+        id::<ManifestDigest>(&format!("sha256:{}", hex::encode(Sha256::digest(&sealed))));
+    let control = MutableCancellationControl::default();
+    let mut source = VerifiedSealedLexicalPageSourceV1::open_content_addressed(
+        Cursor::new(sealed.clone()),
+        u64::try_from(sealed.len()).expect("sealed length"),
+        file_digest.clone(),
+        32,
+        64 * 1024,
+        &control,
+    )
+    .expect("a valid large file must not be rejected by its page bound");
+    assert!(
+        source.staging_window_bytes() > 4 * 1024 * 1024,
+        "the authenticated one-file artifact must exceed four MiB"
+    );
+
+    let mut emitted_chunks = 0_u64;
+    let mut emitted_pages = 0_u64;
+    let persisted = loop {
+        let page = match source.next_page(&control).expect("bounded page") {
+            VerifiedSealedLexicalPageReadV1::Page(page) => page,
+            VerifiedSealedLexicalPageReadV1::Complete(_) => {
+                panic!("large fixture must have more than three pages")
+            }
+        };
+        assert!(page.chunk_count() <= 32);
+        assert!(page.payload_bytes() <= 64 * 1024);
+        emitted_chunks += page.chunk_count();
+        emitted_pages += 1;
+        if emitted_pages == 3 {
+            break page
+                .next_cursor()
+                .persisted_bytes()
+                .expect("accepted progress persists");
+        }
+    };
+    control.cancel();
+    let error = source
+        .next_page(&control)
+        .expect_err("cancellation must not admit another page");
+    assert!(matches!(
+        error,
+        CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+    ));
+    control.resume();
+    let cursor =
+        tracedecay_code_index::production::VerifiedSealedLexicalCursorV1::restore_persisted(
+            &persisted,
+        )
+        .expect("progress cursor restores");
+    let mut resumed = VerifiedSealedLexicalPageSourceV1::open_content_addressed_at(
+        Cursor::new(sealed.clone()),
+        u64::try_from(sealed.len()).expect("sealed length"),
+        file_digest,
+        cursor,
+        32,
+        64 * 1024,
+        &control,
+    )
+    .expect("resumed large source opens");
+    let receipt = loop {
+        match resumed.next_page(&control).expect("resumed bounded page") {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                assert!(page.chunk_count() <= 32);
+                assert!(page.payload_bytes() <= 64 * 1024);
+                emitted_chunks += page.chunk_count();
+                emitted_pages += 1;
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+        }
+    };
+    assert_eq!(emitted_chunks, expected_chunks);
+    assert_eq!(receipt.total_chunks(), expected_chunks);
+    assert_eq!(receipt.page_count(), emitted_pages);
+}
+
+#[test]
 fn verified_sealed_lexical_source_refuses_a_foreign_state_digest() {
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)

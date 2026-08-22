@@ -701,7 +701,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 "sealed generation state digest does not match the admitted source".to_owned(),
             ));
         }
-        validate_decode_window(layout.maximum_file_bytes, maximum_page_bytes)?;
         let cursor = VerifiedSealedLexicalCursorV1::initial(
             layout.state_digest.clone(),
             layout.first_file_offset,
@@ -747,7 +746,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             Some(&expected_file_digest),
             control,
         )?;
-        validate_decode_window(layout.maximum_file_bytes, maximum_page_bytes)?;
         let cursor = VerifiedSealedLexicalCursorV1::initial(
             layout.state_digest.clone(),
             layout.first_file_offset,
@@ -1730,18 +1728,6 @@ fn read_next_file_bytes<R: Read + Seek>(
         }
         reader.consume(consumed);
     }
-}
-
-fn validate_decode_window(
-    maximum_file_bytes: u64,
-    maximum_page_bytes: usize,
-) -> Result<(), CodeIndexProductionErrorV1> {
-    if maximum_file_bytes > u64::try_from(maximum_page_bytes).unwrap_or(u64::MAX) {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "one sealed lexical file exceeds the bounded decode window".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeIndexProductionErrorV1> {
