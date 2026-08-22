@@ -100,6 +100,10 @@ const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 /// text artifact. One page is one bounded unit of background build progress.
 const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
+/// Rows digested by one scheduler finalization operation. The builder persists
+/// its exact section/row cursor after this bounded slice, avoiding both a
+/// corpus-sized wake and one scheduler wake per individual SQLite row.
+const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
 
 pub(in crate::daemon) fn scoped_code_index_store_root(
     store_root: &Path,
@@ -2158,9 +2162,16 @@ impl LatestCompleteCodeIndexV1 {
         if remaining == 0 {
             return Ok(false);
         }
+        let finalization_rows = remaining
+            .checked_mul(TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1)
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "code text artifact finalization work budget overflowed".to_owned(),
+                )
+            })?;
         let finalized = artifact_build
             .builder
-            .advance_finalization(source_receipt, remaining, &control)
+            .advance_finalization(source_receipt, finalization_rows, &control)
             .map_err(map_text_artifact_error)?;
         if !matches!(
             finalized,
