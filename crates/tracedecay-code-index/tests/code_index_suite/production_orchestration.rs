@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use sha2::{Digest, Sha256};
 use tracedecay_code_extraction::incremental::ParseLimits;
 use tracedecay_code_index::{
     chunks::{CodeIndexImportEvidenceV1, ExtractionAdmittedCodeSearchChunkV1, content_digest},
@@ -1049,6 +1050,148 @@ fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellat
     assert_eq!(
         receipt.format_revision(),
         SEALED_GENERATION_FORMAT_REVISION_V1
+    );
+}
+
+#[test]
+fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
+    let first_source = "import type { Beta } from \"./beta\";\nexport function alpha(value: Beta) { return value; }\n";
+    let second_source = "export type Beta = number;\nexport function beta() { return 2; }\n";
+    let mut request = request_with_source(
+        "file.lexical-resume.alpha",
+        1_255_000,
+        "commit.lexical-resume",
+        "tree.lexical-resume",
+        first_source,
+    );
+    request.snapshot.files[0].logical_path = "src/alpha.ts".to_owned();
+    request.snapshot.files[0].language = Some(id::<LanguageId>("typescript"));
+    let second_file = SanitizedCodeFileV1 {
+        file_occurrence_id: id::<FileOccurrenceId>("file.lexical-resume.beta"),
+        logical_path: "src/beta.ts".to_owned(),
+        language: Some(id::<LanguageId>("typescript")),
+        content_digest: content_digest(second_source.as_bytes()),
+        disposition: SnapshotFileDispositionV1::Present,
+    };
+    request.snapshot.files.push(second_file.clone());
+    request.snapshot.content_identity =
+        content_digest(format!("{first_source}{second_source}").as_bytes());
+    request.captured_files.push(CodeIndexCapturedFileV1 {
+        file_occurrence_id: second_file.file_occurrence_id.clone(),
+        sanitized_bytes: second_source.as_bytes().to_vec(),
+        sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+    });
+    request.changed_files.clear();
+    request.changed_files.insert("src/alpha.ts".to_owned());
+    request.changed_files.insert("src/beta.ts".to_owned());
+    request
+        .snapshot
+        .validate()
+        .expect("two-file TypeScript snapshot is canonical");
+
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(request, &ActiveControl)
+        .expect("generation publishes");
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let file_digest =
+        id::<ManifestDigest>(&format!("sha256:{}", hex::encode(Sha256::digest(&sealed))));
+
+    let mut initial = VerifiedSealedLexicalPageSourceV1::open_content_addressed(
+        Cursor::new(sealed.clone()),
+        u64::try_from(sealed.len()).expect("sealed length"),
+        file_digest.clone(),
+        64,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect("content-addressed source opens");
+    let first = match initial.next_page(&ActiveControl).expect("first page") {
+        VerifiedSealedLexicalPageReadV1::Page(page) => page,
+        VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must emit a first page"),
+    };
+    assert_eq!(first.page_ordinal(), 0);
+    assert_eq!(
+        first.chunks()[0].chunk().anchor.file_occurrence_id,
+        id::<FileOccurrenceId>("file.lexical-resume.alpha")
+    );
+    let persisted = first
+        .next_cursor()
+        .persisted_bytes()
+        .expect("accepted cursor persists");
+    let cursor =
+        tracedecay_code_index::production::VerifiedSealedLexicalCursorV1::restore_persisted(
+            &persisted,
+        )
+        .expect("persisted cursor restores");
+
+    let mut resumed = VerifiedSealedLexicalPageSourceV1::open_content_addressed_at(
+        Cursor::new(sealed.clone()),
+        u64::try_from(sealed.len()).expect("sealed length"),
+        file_digest,
+        cursor.clone(),
+        64,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect("persisted cursor reopens the source");
+    let resumed_page = match resumed.next_page(&ActiveControl).expect("resumed page") {
+        VerifiedSealedLexicalPageReadV1::Page(page) => page,
+        VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must emit a resumed page"),
+    };
+    assert_eq!(resumed_page.page_ordinal(), 1);
+    resumed_page
+        .verify_transition(Some(&cursor))
+        .expect("resumed page must continue the persisted cursor");
+    assert_eq!(
+        resumed_page.chunks()[0].chunk().anchor.file_occurrence_id,
+        id::<FileOccurrenceId>("file.lexical-resume.beta"),
+        "resuming must begin at the next file instead of emitting the accepted prefix"
+    );
+
+    let mut corrupted: serde_json::Value =
+        serde_json::from_slice(&persisted).expect("cursor serialization is JSON");
+    corrupted[1] = serde_json::Value::from(99_u64);
+    let corrupted = serde_json::to_vec(&corrupted).expect("corrupted cursor serializes");
+    assert!(
+        tracedecay_code_index::production::VerifiedSealedLexicalCursorV1::restore_persisted(
+            &corrupted
+        )
+        .is_err(),
+        "altering a persisted cursor must fail before it can direct a source"
+    );
+
+    let foreign = owner
+        .build_and_publish(
+            request_with_source(
+                "file.lexical-resume.foreign",
+                1_255_100,
+                "commit.lexical-resume.foreign",
+                "tree.lexical-resume.foreign",
+                "export function foreign() { return 3; }\n",
+            ),
+            &ActiveControl,
+        )
+        .expect("foreign generation publishes")
+        .encode_sealed()
+        .expect("foreign generation seals");
+    let foreign_digest =
+        id::<ManifestDigest>(&format!("sha256:{}", hex::encode(Sha256::digest(&foreign))));
+    let error = VerifiedSealedLexicalPageSourceV1::open_content_addressed_at(
+        Cursor::new(foreign.clone()),
+        u64::try_from(foreign.len()).expect("foreign sealed length"),
+        foreign_digest,
+        cursor,
+        64,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect_err("a cursor minted for another source must fail closed");
+    assert!(
+        error.to_string().contains("cursor") && error.to_string().contains("source"),
+        "unexpected foreign cursor error: {error}"
     );
 }
 
