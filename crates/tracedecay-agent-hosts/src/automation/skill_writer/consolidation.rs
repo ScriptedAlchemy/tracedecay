@@ -168,9 +168,9 @@ pub(super) fn skill_merge_from_proposal(
     })
 }
 
-/// Applies a merge as one checksum-fenced, crash-recoverable lifecycle
-/// transaction. The source stays on disk in `Archived` state, preserving its
-/// provenance without leaving an intermediate revision behind.
+/// Applies an archive as one checksum-fenced, crash-recoverable lifecycle
+/// transaction whose committed revision durably carries the typed
+/// skill-overlap removal tombstone as its archived reason.
 pub(super) async fn apply_skill_archive(
     profile_root: &Path,
     archive: &SkillArchiveProposal,
@@ -184,6 +184,9 @@ pub(super) async fn apply_skill_archive(
     .await
 }
 
+/// Applies a merge as one checksum-fenced, crash-recoverable lifecycle
+/// transaction. The source stays on disk in `Archived` state, preserving its
+/// provenance without leaving an intermediate revision behind.
 pub(super) async fn apply_skill_merge(
     profile_root: &Path,
     merge: &SkillMergeProposal,
