@@ -6,18 +6,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_code_index::chunks::{
-    DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1, content_digest,
+    CodeIndexImportEvidenceV1, DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1,
+    content_digest,
 };
 use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
-    CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalPageReadV1,
-    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1,
+    CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
+    CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
+    CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+    VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -26,21 +27,21 @@ use tracedecay_code_index::projection::{
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ComponentRevision, ContentDigest,
-    EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactAdmissionValidator,
-    ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileOccurrenceId,
-    FreshnessCompatibilityV1, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
-    PrincipalId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1,
-    ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, QueryNormalizationRevision,
-    RepositoryDirtyStateV1, RepositoryId, RetrievalBudget, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SensitivityDecision,
-    SensitivityLevelV1, SingleRootScopeV1, SnapshotFileDispositionV1, SourceFreshness,
-    SourceInstanceKey, SourceNamespace, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
-    ValidatedCodeFileV1, VectorWatermark,
+    EphemeralSanitizedQueryViewV1, ExactAdmissionProof, ExactAdmissionRuleRevision,
+    ExactAdmissionValidator, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
+    FileOccurrenceId, FreshnessCompatibilityV1, LanguageDescriptorRevision, ManifestDigest,
+    PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1,
+    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
+    QueryNormalizationRevision, RepositoryDirtyStateV1, RepositoryId, RetrievalBudget,
+    RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverOutcome,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    ScoreDomainId, SensitivityDecision, SensitivityLevelV1, SingleRootScopeV1,
+    SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey, SourceNamespace, SourceSpan,
+    SymbolOccurrenceId, TemporalModeV1, UtcMicros, ValidatedCodeFileV1, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
+    ExactLaneRetriever, ExactLiteralV1,
 };
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
@@ -189,6 +190,37 @@ impl CodeIndexExecutionControlV1 for CancelAtObservation {
 
     fn is_deadline_exceeded(&self) -> bool {
         false
+    }
+}
+
+/// A bounded work budget that exhausts after a fixed number of deadline
+/// observations, mirroring the production activations that failed with
+/// "the read port exceeded its bounded work budget".
+struct BudgetExhaustedAtObservation {
+    exhaustion_observation: usize,
+    observations: AtomicUsize,
+}
+
+impl BudgetExhaustedAtObservation {
+    fn new(exhaustion_observation: usize) -> Self {
+        Self {
+            exhaustion_observation,
+            observations: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl CodeIndexExecutionControlV1 for BudgetExhaustedAtObservation {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        let observations = self
+            .observations
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        observations >= self.exhaustion_observation
     }
 }
 
@@ -1183,7 +1215,9 @@ fn disk_artifact_cancellation_rolls_back_import_append_and_reopen_verification()
 }
 
 /// Count the staged lexical rows and their distinct chunk identities so a
-/// double-advanced row is visible as a cardinality mismatch.
+/// double-advanced row is visible as a cardinality mismatch. The guarded
+/// production failure is quoted verbatim so a regression reproduces the
+/// exact activation error it protects against.
 fn staged_row_cardinality(artifact_path: &Path) -> (u64, u64) {
     let connection = rusqlite::Connection::open(artifact_path).expect("inspect staging artifact");
     let (rows, distinct): (i64, i64) = connection
@@ -1193,6 +1227,11 @@ fn staged_row_cardinality(artifact_path: &Path) -> (u64, u64) {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("staged row cardinality");
+    assert_eq!(
+        rows, distinct,
+        "guarded production activation failure: 'code-index retained generation did not \
+         activate because lexical projection row was advanced more than once'"
+    );
     (
         u64::try_from(rows).expect("staged row count"),
         u64::try_from(distinct).expect("distinct staged row count"),
@@ -1248,11 +1287,38 @@ fn disk_artifact_budget_refusal_precedes_progress_and_resumes_the_same_source() 
         "a ledger refusal must precede every progress mutation"
     );
 
-    // The same refusal on the rebuild path runs inside `next_page_if` and
-    // must leave the sealed source's cursor and hash authorities unchanged.
+    // On the rebuild path the source's one-decoded-file staging window is
+    // charged before any page is staged: a budget the window itself
+    // exhausts refuses up front and never touches the source.
     let mut source = fixture.open_source(1);
+    let window = source.staging_window_bytes();
+    assert!(window > 0, "a real sealed source stages a nonzero window");
+    let mut window_refused = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        directory.path().join("window-refused.sqlite"),
+        metadata.clone(),
+        fixed + window,
+    )
+    .expect("create window-exhausted builder");
     assert!(matches!(
-        refused.rebuild_and_finalize(&mut source, &control),
+        window_refused.rebuild_and_finalize(&mut source, &control),
+        Err(CodeLexicalArtifactErrorV1::Contract(_))
+    ));
+    assert_eq!(
+        source.cursor().next_page_ordinal(),
+        0,
+        "an exhausted staging window must refuse before the source stages anything"
+    );
+
+    // A per-page ledger refusal runs inside `next_page_if` and must leave
+    // the sealed source's cursor and hash authorities unchanged.
+    let mut page_refused = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        directory.path().join("page-refused.sqlite"),
+        metadata.clone(),
+        fixed + window + first_page_charge - 1,
+    )
+    .expect("create one-byte-under rebuild builder");
+    assert!(matches!(
+        page_refused.rebuild_and_finalize(&mut source, &control),
         Err(CodeLexicalArtifactErrorV1::Contract(_))
     ));
     assert_eq!(
@@ -1261,7 +1327,7 @@ fn disk_artifact_budget_refusal_precedes_progress_and_resumes_the_same_source() 
         "a refused page must not advance the sealed lexical source"
     );
     assert_eq!(
-        refused
+        page_refused
             .progress()
             .expect("post-refusal progress")
             .next_page_ordinal,
@@ -1280,12 +1346,13 @@ fn disk_artifact_budget_refusal_precedes_progress_and_resumes_the_same_source() 
         .expect("the boundary budget admits the measured page exactly");
 
     // The refused source instance RESUMES: a builder whose budget admits
-    // every page seals the very same source, and every row advances once.
+    // the staging window and every page seals the very same source, and
+    // every row advances once.
     let sealed_path = directory.path().join("sealed.sqlite");
     let mut sealed = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
         &sealed_path,
         metadata,
-        fixed + max_page_charge,
+        fixed + window + max_page_charge,
     )
     .expect("create admitting builder");
     let verified = sealed
@@ -1372,6 +1439,394 @@ fn disk_artifact_rows_advance_once_across_retry_replay_and_cancellation() {
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
     )
     .expect("once-advanced artifact reopens with full verification");
+}
+
+#[test]
+fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
+    // Stage0a on `5ddd16271`: repeated activation failures (~00:12:14,
+    // 00:13:14, 00:15:14, 00:19:14 UTC) and no generation sealed after ~11
+    // minutes. The earlier activation failed with "the read port exceeded
+    // its bounded work budget" and later retries with "code-index retained
+    // generation did not activate because lexical projection row was
+    // advanced more than once". This regression drives the same retry shape
+    // through the real sealed source: every exhausted window must stay a
+    // typed, resumable interruption that never advances a row twice, and
+    // the retried activation must seal instead of terminally blocking.
+    let (fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
+    let metadata = fixture.metadata.clone();
+    let control = ArtifactControl { cancelled: false };
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("bounded-budget-resume.sqlite");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
+        .expect("create artifact");
+    for page in &pages {
+        builder.append_page(page, &control).expect("append page");
+    }
+    let staged = builder.progress().expect("staged progress");
+
+    // Repeated bounded-budget activations, each exhausting deeper into the
+    // seal replay like the production retries.
+    for (round, exhaustion_observation) in [2usize, 4, 7, 11].into_iter().enumerate() {
+        let exhausted = BudgetExhaustedAtObservation::new(exhaustion_observation);
+        let mut replay_source = fixture.open_source(1);
+        let outcome = builder.rebuild_and_finalize(&mut replay_source, &exhausted);
+        assert!(
+            matches!(
+                outcome,
+                Err(CodeLexicalArtifactErrorV1::Interrupted(
+                    CodeIndexInterruptionV1::DeadlineExceeded
+                ))
+            ),
+            "round {round}: an exhausted bounded work budget must stay a resumable typed \
+             interruption, never a terminal activation failure"
+        );
+        assert_eq!(
+            builder.progress().expect("progress after exhausted round"),
+            staged,
+            "round {round}: an exhausted bounded work budget must not mutate staged progress"
+        );
+        staged_row_cardinality(&artifact_path);
+        builder
+            .append_page(&pages[0], &control)
+            .expect("page replay stays idempotent between exhausted activation rounds");
+    }
+
+    // The retried activation RESUMES and seals.
+    let mut final_source = fixture.open_source(1);
+    let verified = builder
+        .rebuild_and_finalize(&mut final_source, &control)
+        .expect(
+            "bounded read work must resume and seal; activation must not terminally block on \
+         'the read port exceeded its bounded work budget'",
+        );
+    let (rows, _) = staged_row_cardinality(&artifact_path);
+    assert_eq!(rows, source_receipt.total_chunks());
+
+    // The published read port resumes the same way: an exhausted
+    // verification is a typed interruption and the retried open serves
+    // lexical reads.
+    let exhausted_open = BudgetExhaustedAtObservation::new(3);
+    assert!(matches!(
+        CodeLexicalArtifactReaderV1::open_with_control(
+            &artifact_path,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &exhausted_open,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Interrupted(_))
+    ));
+    let reader = CodeLexicalArtifactReaderV1::open(
+        &artifact_path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+    )
+    .expect(
+        "the reopened read port must resume instead of terminally failing its bounded work budget",
+    );
+    let mut request = lexical_request("render", &["render"], &[], &[], 0, 8);
+    request.generation = metadata.generation.clone();
+    let RetrieverOutcome::Complete(batch) = LexicalLane::new(reader)
+        .retrieve_lexical(&request)
+        .expect("the resumed read port serves lexical reads")
+    else {
+        panic!("the resumed lexical read must complete");
+    };
+    assert!(!batch.candidates.is_empty());
+}
+
+#[test]
+fn disk_artifact_same_source_instance_resumes_after_accepted_page_failure() {
+    // A cancellation that lands AFTER at least one page was accepted leaves
+    // the source cursor mid-stream. The retried seal must replay the very
+    // same source instance (not a fresh one) and advance every row exactly
+    // once; a page-zero precondition that terminally blocks the retry is
+    // the production activation stall.
+    let (fixture, _, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
+    let metadata = fixture.metadata.clone();
+    let control = ArtifactControl { cancelled: false };
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let mut resumed_after_acceptance = false;
+    for cancellation_observation in 3..=96 {
+        let artifact_path = directory
+            .path()
+            .join(format!("same-source-{cancellation_observation}.sqlite"));
+        let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
+            .expect("create artifact");
+        let mut source = fixture.open_source(1);
+        let cancellation = CancelAtObservation::new(cancellation_observation);
+        match builder.rebuild_and_finalize(&mut source, &cancellation) {
+            Err(CodeLexicalArtifactErrorV1::Interrupted(_)) => {}
+            Ok(_) => break,
+            Err(error) => panic!("interrupted seal replay must stay typed: {error:?}"),
+        }
+        if source.cursor().next_page_ordinal() == 0 {
+            continue;
+        }
+        // The failure landed after page acceptance: the SAME instance must
+        // resume and seal.
+        resumed_after_acceptance = true;
+        let verified = builder.rebuild_and_finalize(&mut source, &control).expect(
+            "the same source instance must resume after an accepted-page failure \
+             instead of terminally blocking on the page-zero precondition",
+        );
+        assert_eq!(verified.total_chunks(), source_receipt.total_chunks());
+        let (rows, _) = staged_row_cardinality(&artifact_path);
+        assert_eq!(rows, source_receipt.total_chunks());
+        break;
+    }
+    assert!(
+        resumed_after_acceptance,
+        "the cancellation sweep must observe at least one failure after page acceptance"
+    );
+}
+
+/// A test authority that denies a configured set of literal byte strings and
+/// delegates everything else to the central authority.
+#[derive(Clone)]
+struct DenyingExactAuthority {
+    central: CentralExactAdmissionAuthorityV1,
+    denied: BTreeSet<Vec<u8>>,
+}
+
+impl ExactAdmissionValidator for DenyingExactAuthority {
+    fn admit(
+        &self,
+        field: ExactFieldV1,
+        candidate_bytes: &[u8],
+        request: &RetrievalRequest,
+    ) -> Result<Option<ExactAdmissionProof>, RetrievalError> {
+        if self.denied.contains(candidate_bytes) {
+            return Ok(None);
+        }
+        self.central.admit(field, candidate_bytes, request)
+    }
+}
+
+impl ExactAdmissionAuthority for DenyingExactAuthority {
+    fn parse_literals(
+        &self,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        request: &RetrievalRequest,
+    ) -> Vec<ExactLiteralV1> {
+        self.central.parse_literals(query_view, request)
+    }
+}
+
+#[test]
+fn artifact_exact_reader_prefers_admitted_matches_over_denied_best() {
+    // Admission must precede heap eligibility: with cap=1, a raw-best
+    // document whose matched literals are all denied must be excluded so
+    // the next admitted document is returned, never a Contract failure.
+    let fixture = real_lexical_source_fixture_with_files(3);
+    let metadata = fixture.metadata.clone();
+    let generation = metadata.generation.clone();
+    let control = ArtifactControl { cancelled: false };
+    let (pages, _) = drain_verified_pages(&fixture, 128);
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("denied-best.sqlite");
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata).expect("create artifact");
+    for page in &pages {
+        builder.append_page(page, &control).expect("append page");
+    }
+    let mut final_source = fixture.open_source(128);
+    let verified = builder
+        .rebuild_and_finalize(&mut final_source, &control)
+        .expect("rebuild and finalize artifact");
+    let reader = CodeLexicalArtifactReaderV1::open(
+        &artifact_path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+    )
+    .expect("verify and reopen artifact");
+
+    // `render_01`'s document matches four phrases (all denied); `render_02`'s
+    // matches three, one of which stays admitted.
+    let exact_query = r#""return value" "widget-kit" "render_01" "function render_01" "render_02""#;
+    let authority = DenyingExactAuthority {
+        central: CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>(
+            "exact-rules.v1",
+        )),
+        denied: BTreeSet::from([
+            b"return value".to_vec(),
+            b"widget-kit".to_vec(),
+            b"render_01".to_vec(),
+            b"function render_01".to_vec(),
+        ]),
+    };
+    let base = base_request(exact_query, 1);
+    let exact_query_view = query_view(exact_query);
+    let exact_request = ExactLaneRequest {
+        literals: authority.parse_literals(&exact_query_view, &base),
+        base,
+        query_view: &exact_query_view,
+        generation,
+        budget: budget(1),
+    };
+    let RetrieverOutcome::Complete(batch) = reader
+        .exact_adapter(authority)
+        .read_exact_postings(&exact_request)
+        .expect("a denied raw-best match must not fail the exact batch")
+    else {
+        panic!("the exact artifact port must complete");
+    };
+    assert_eq!(
+        batch.candidates.len(),
+        1,
+        "cap=1 must return exactly the admitted document"
+    );
+    let evidence = &batch.evidence_by_occurrence[&batch.candidates[0].source_occurrence_id];
+    assert_eq!(evidence.admission_proof.original_bytes, b"render_02");
+    assert!(
+        evidence
+            .matched_literals
+            .iter()
+            .any(|literal| literal.original_bytes == b"render_02"),
+        "the returned document carries the admitted literal"
+    );
+}
+
+#[test]
+fn disk_artifact_fixed_ledger_charge_covers_simultaneous_metadata_copies() {
+    // Create, open, and rebuild hold two metadata structures plus one
+    // serialized JSON copy at once; the fixed charge must grow at least
+    // that fast when the metadata grows.
+    let fixture = real_lexical_source_fixture_with_files(1);
+    let small = fixture.metadata.clone();
+    let mut large = small.clone();
+    let mut payload_delta = 0usize;
+    for ordinal in 0..512usize {
+        let file = format!("file.metadata-heavy.{ordinal:04}");
+        let path = format!("src/metadata_heavy/module_{ordinal:04}.rs");
+        payload_delta += file.len() + path.len();
+        large
+            .logical_paths
+            .insert(id::<FileOccurrenceId>(&file), path);
+    }
+    let serialized_small = serde_json::to_vec(&small).expect("serialize small metadata");
+    let serialized_large = serde_json::to_vec(&large).expect("serialize large metadata");
+    let serialized_delta = serialized_large.len() - serialized_small.len();
+
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let small_fixed =
+        CodeLexicalArtifactBuilderV1::create(directory.path().join("metadata-small.sqlite"), small)
+            .expect("create small-metadata builder")
+            .fixed_ledger_charge_bytes();
+    let large_builder = CodeLexicalArtifactBuilderV1::create(
+        directory.path().join("metadata-large.sqlite"),
+        large.clone(),
+    )
+    .expect("create large-metadata builder");
+    let large_fixed = large_builder.fixed_ledger_charge_bytes();
+    drop(large_builder);
+    let fixed_delta = large_fixed - small_fixed;
+    assert!(
+        fixed_delta >= payload_delta * 2 + serialized_delta,
+        "the fixed ledger charge must cover both retained metadata structures and the \
+         serialized copy: grew {fixed_delta} bytes for {payload_delta} payload bytes and \
+         {serialized_delta} serialized bytes"
+    );
+
+    // Boundary: a budget the metadata itself exhausts refuses at creation.
+    assert!(matches!(
+        CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+            directory.path().join("metadata-exhausted.sqlite"),
+            large.clone(),
+            large_fixed,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Contract(_))
+    ));
+    // Clones shrink string capacities to their lengths, so the boundary is
+    // probed with the same clone shape the charge was measured on.
+    CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        directory.path().join("metadata-boundary.sqlite"),
+        large.clone(),
+        large_fixed + 1,
+    )
+    .expect("one byte above the fixed charge must admit the builder");
+}
+
+#[test]
+fn sealed_page_retained_bytes_include_digest_identities() {
+    // The page carries six heap-owned digest strings (page, cumulative, and
+    // two digests on each of the next and previous cursors). The retained
+    // accounting must equal the payload recomputation PLUS those digests;
+    // an accounting that only counts chunk and import payloads undercounts
+    // every ledger charge derived from it.
+    let (_, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
+    let sha256_digest_len = "sha256:".len() + 64;
+    for page in &pages {
+        let chunk_bytes = page.chunks().iter().fold(
+            page.chunk_capacity()
+                .saturating_mul(std::mem::size_of::<ExtractionAdmittedCodeSearchChunkV1>()),
+            |bytes, admitted| {
+                let chunk = admitted.chunk();
+                let exact_term_bytes = chunk.exact_terms.iter().fold(
+                    chunk
+                        .exact_terms
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<ExactTechnicalTermV1>()),
+                    |bytes, term| {
+                        bytes
+                            + term.original_bytes().len()
+                            + term.canonical_bytes().len()
+                            + term
+                                .symbol_occurrence_id()
+                                .map_or(0, |occurrence| occurrence.as_str().len())
+                    },
+                );
+                let subtoken_bytes = chunk.subtokens.iter().fold(
+                    chunk
+                        .subtokens
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<String>()),
+                    |bytes, subtoken| bytes + subtoken.capacity(),
+                );
+                bytes
+                    + chunk.id.as_str().len()
+                    + chunk.anchor.generation_id.as_str().len()
+                    + chunk.anchor.file_occurrence_id.as_str().len()
+                    + chunk
+                        .anchor
+                        .symbol_occurrence_id
+                        .as_ref()
+                        .map_or(0, |occurrence| occurrence.as_str().len())
+                    + chunk
+                        .anchor
+                        .parent_chunk_id
+                        .as_ref()
+                        .map_or(0, |parent| parent.as_str().len())
+                    + chunk.content_digest.as_str().len()
+                    + chunk.language_descriptor_revision.as_str().len()
+                    + chunk.chunker_revision.as_str().len()
+                    + chunk.sanitizer_revision.as_str().len()
+                    + chunk.sensitivity.policy_revision.as_str().len()
+                    + exact_term_bytes
+                    + subtoken_bytes
+                    + chunk.sanitized_text.as_str().len()
+            },
+        );
+        let payload_bytes = page.imports().iter().fold(
+            chunk_bytes
+                + page
+                    .import_capacity()
+                    .saturating_mul(std::mem::size_of::<CodeIndexImportEvidenceV1>()),
+            |bytes, evidence| {
+                bytes
+                    + evidence.logical_path.capacity()
+                    + evidence.file_occurrence_id.as_str().len()
+                    + evidence.module_specifier.capacity()
+                    + evidence.imported_name.as_ref().map_or(0, String::capacity)
+                    + evidence.local_name.as_ref().map_or(0, String::capacity)
+            },
+        );
+        assert_eq!(
+            page.retained_owned_bytes(),
+            payload_bytes + 6 * sha256_digest_len,
+            "page {} retained bytes must include its six digest identity strings",
+            page.page_ordinal()
+        );
+    }
 }
 
 #[test]
@@ -1496,12 +1951,23 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
             .expect("one-shot lexical lane"),
     );
     assert_eq!(
-        artifact_lane.candidates, memory_lane.candidates,
-        "K=7 lexical candidates must match the one-shot projection exactly"
+        artifact_lane, memory_lane,
+        "the K=7 lexical lane batch (candidates, evidence, coverage, continuation) must \
+         match the one-shot projection exactly; a pre-capped port must not surface as \
+         eligible=K/capped=0/exhausted"
     );
     assert_eq!(
-        artifact_lane.evidence_by_occurrence, memory_lane.evidence_by_occurrence,
-        "K=7 lexical evidence must match the one-shot projection exactly"
+        artifact_lane.coverage.capped,
+        artifact_lane.coverage.eligible - 7,
+        "lane coverage must preserve the port's truncation surplus"
+    );
+    assert!(
+        !artifact_lane
+            .continuation
+            .as_ref()
+            .expect("lexical lane continuation")
+            .exhausted,
+        "a capped lexical search must not be reported exhausted"
     );
     assert_eq!(
         lexical_port
@@ -1556,12 +2022,23 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
             .expect("one-shot exact lane"),
     );
     assert_eq!(
-        artifact_exact.candidates, memory_exact.candidates,
-        "K=7 exact candidates must match the one-shot projection exactly"
+        artifact_exact, memory_exact,
+        "the K=7 exact lane batch (candidates, evidence, coverage, continuation) must \
+         match the one-shot projection exactly; a pre-capped port must not surface as \
+         eligible=K/capped=0/exhausted"
     );
     assert_eq!(
-        artifact_exact.evidence_by_occurrence, memory_exact.evidence_by_occurrence,
-        "K=7 exact evidence must match the one-shot projection exactly"
+        artifact_exact.coverage.capped,
+        artifact_exact.coverage.eligible - 7,
+        "exact lane coverage must preserve the port's truncation surplus"
+    );
+    assert!(
+        !artifact_exact
+            .continuation
+            .as_ref()
+            .expect("exact lane continuation")
+            .exhausted,
+        "a capped exact search must not be reported exhausted"
     );
 }
 
