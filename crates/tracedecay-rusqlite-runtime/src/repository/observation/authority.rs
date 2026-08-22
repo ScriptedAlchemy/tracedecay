@@ -11,6 +11,9 @@ use tracedecay_store::{
 };
 
 use super::super::support::{decode, encode, invalid};
+use super::cursor_authority::{
+    READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL, cursor_advance_ledger_row_matches,
+};
 
 pub(super) fn persist_sanitization_receipt(
     connection: &rusqlite::Connection,
@@ -51,8 +54,7 @@ pub(super) fn cursor_advance_receipt_matches(
 ) -> rusqlite::Result<bool> {
     let stored = connection
         .query_row(
-            "SELECT reason, receipt_id FROM source_cursor_advances
-             WHERE source_json = ?1 AND scope_json = ?2 AND coverage_json = ?3",
+            READ_CURSOR_ADVANCE_SQL,
             params![source_json, scope_json, encode(&advance.coverage())?],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
@@ -60,9 +62,11 @@ pub(super) fn cursor_advance_receipt_matches(
     let expected_receipt_id = advance
         .sanitization_receipt()
         .map(|receipt| receipt.receipt().receipt_id().as_str());
-    if stored.as_ref().is_none_or(|(reason, receipt_id)| {
-        reason != advance.reason().as_str() || receipt_id.as_deref() != expected_receipt_id
-    }) {
+    if !cursor_advance_ledger_row_matches(
+        stored.as_ref(),
+        advance.reason().as_str(),
+        expected_receipt_id,
+    ) {
         return Ok(false);
     }
     if let Some(receipt) = advance.sanitization_receipt() {
@@ -269,8 +273,7 @@ pub(super) fn read_cursor(
 ) -> rusqlite::Result<Option<ObservationSourceCursorV1>> {
     connection
         .query_row(
-            "SELECT cursor_json FROM source_cursors
-             WHERE source_json = ?1 AND scope_json = ?2",
+            READ_SOURCE_CURSOR_SQL,
             params![source_json, scope_json],
             |row| row.get::<_, String>(0),
         )

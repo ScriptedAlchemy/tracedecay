@@ -19,12 +19,14 @@ use tracedecay_store::{
 use super::support::{decode, encode, invalid};
 
 mod authority;
+pub mod cursor_authority;
 mod rows;
 
 use authority::{
     cursor_advance_receipt_matches, persist_repository_provenance, persist_retrieval_anchor,
     persist_sanitization_receipt, read_cursor, verify_observation_authority,
 };
+use cursor_authority::{COMMIT_SOURCE_CURSOR_SQL, RECORD_CURSOR_ADVANCE_SQL};
 use rows::{
     OBSERVATION_ROW_PROJECTION, decode_nonnegative, decode_observation_row, encoded_observation_row,
 };
@@ -146,10 +148,7 @@ impl ObservationExecutor {
             write.repository_provenance_attachment(),
         )?;
         savepoint.execute(
-            "INSERT INTO source_cursors (source_json, scope_json, cursor_json)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(source_json, scope_json) DO UPDATE SET
-                cursor_json = excluded.cursor_json",
+            COMMIT_SOURCE_CURSOR_SQL,
             params![source_json, scope_json, committed_cursor_json],
         )?;
         savepoint.execute(
@@ -182,10 +181,7 @@ impl ObservationExecutor {
         }
         let coverage_json = encode(&advance.coverage())?;
         savepoint.execute(
-            "INSERT INTO source_cursor_advances (
-                source_json, scope_json, coverage_json, reason, receipt_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(source_json, scope_json, coverage_json) DO NOTHING",
+            RECORD_CURSOR_ADVANCE_SQL,
             params![
                 source_json,
                 scope_json,
@@ -200,10 +196,7 @@ impl ObservationExecutor {
             return Err(invalid("source cursor advance identity collision"));
         }
         savepoint.execute(
-            "INSERT INTO source_cursors (source_json, scope_json, cursor_json)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(source_json, scope_json) DO UPDATE SET
-                cursor_json = excluded.cursor_json",
+            COMMIT_SOURCE_CURSOR_SQL,
             params![source_json, scope_json, encode(advance.next_cursor())?],
         )?;
         Ok(())

@@ -31,6 +31,10 @@ use tracedecay_store::{
 
 use tracedecay_runtime_core::db::{Database, DatabaseRuntimeClientV1};
 use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure;
+use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
+    COMMIT_SOURCE_CURSOR_SQL, READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL,
+    RECORD_CURSOR_ADVANCE_SQL, cursor_advance_ledger_row_matches,
+};
 
 /// The closed dispatch boundary between this adapter and the authoritative
 /// store runtime. Every stored-record read and every runtime write the
@@ -117,9 +121,11 @@ impl<R> GlobalDbObservationStore<R> {
     /// frontier is re-verified INSIDE the transaction (exact compare-and-set
     /// against the durable cursor), the advance-ledger row must carry the
     /// `admission_refused` reason with no receipt, and the cursor moves to
-    /// the advance's next position — mirroring the runtime cursor-advance
-    /// authority statement for statement. No record content is decoded,
-    /// derived, or hashed.
+    /// the advance's next position — executed through the one canonical
+    /// cursor-advance statement set
+    /// (`tracedecay_rusqlite_runtime::repository::observation_cursor_authority`)
+    /// that the runtime write path also executes. No record content is
+    /// decoded, derived, or hashed.
     async fn record_refusal_with_coverage(
         &self,
         write: &AnchoredObservationWrite,
@@ -168,8 +174,7 @@ impl<R> GlobalDbObservationStore<R> {
         // still be the caller's expected frontier.
         let mut cursor_rows = transaction
             .query(
-                "SELECT cursor_json FROM source_cursors
-                 WHERE source_json = ?1 AND scope_json = ?2",
+                READ_SOURCE_CURSOR_SQL,
                 tracedecay_runtime_core::db::engine::params![
                     source_json.as_str(),
                     scope_json.as_str()
@@ -217,23 +222,20 @@ impl<R> GlobalDbObservationStore<R> {
             .map_err(|error| runtime_storage_error(OPERATION, error))?;
         transaction
             .execute(
-                "INSERT INTO source_cursor_advances (
-                    source_json, scope_json, coverage_json, reason, receipt_id
-                 ) VALUES (?1, ?2, ?3, ?4, NULL)
-                 ON CONFLICT(source_json, scope_json, coverage_json) DO NOTHING",
+                RECORD_CURSOR_ADVANCE_SQL,
                 tracedecay_runtime_core::db::engine::params![
                     source_json.as_str(),
                     scope_json.as_str(),
                     coverage_json.as_str(),
-                    ObservationCoverageReason::AdmissionRefused.as_str()
+                    ObservationCoverageReason::AdmissionRefused.as_str(),
+                    None::<&str>
                 ],
             )
             .await
             .map_err(|error| runtime_storage_error(OPERATION, error))?;
         let mut ledger_rows = transaction
             .query(
-                "SELECT reason, receipt_id FROM source_cursor_advances
-                 WHERE source_json = ?1 AND scope_json = ?2 AND coverage_json = ?3",
+                READ_CURSOR_ADVANCE_SQL,
                 tracedecay_runtime_core::db::engine::params![
                     source_json.as_str(),
                     scope_json.as_str(),
@@ -259,14 +261,11 @@ impl<R> GlobalDbObservationStore<R> {
         // A coverage row that names any other reason or a receipt is a real
         // cursor-advance failure: roll the WHOLE transaction back so the
         // marker is not visible either — no orphan, by construction.
-        if ledger
-            != Some((
-                ObservationCoverageReason::AdmissionRefused
-                    .as_str()
-                    .to_owned(),
-                None,
-            ))
-        {
+        if !cursor_advance_ledger_row_matches(
+            ledger.as_ref(),
+            ObservationCoverageReason::AdmissionRefused.as_str(),
+            None,
+        ) {
             transaction
                 .rollback()
                 .await
@@ -275,10 +274,7 @@ impl<R> GlobalDbObservationStore<R> {
         }
         transaction
             .execute(
-                "INSERT INTO source_cursors (source_json, scope_json, cursor_json)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(source_json, scope_json) DO UPDATE SET
-                    cursor_json = excluded.cursor_json",
+                COMMIT_SOURCE_CURSOR_SQL,
                 tracedecay_runtime_core::db::engine::params![
                     source_json.as_str(),
                     scope_json.as_str(),
