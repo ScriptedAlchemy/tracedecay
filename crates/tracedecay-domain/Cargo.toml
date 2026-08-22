@@ -7,13 +7,6 @@ license = "MIT"
 description = "Pure domain contracts for TraceDecay V2"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
-[features]
-# Test-only observability hook: counts canonical identity digests (the
-# canonicalize-then-SHA256 work in `domain_digest`) on the current thread so
-# store-level tests can prove a terminally refused record is never re-decoded
-# or re-derived. Never enable in production builds.
-identity-digest-probe = []
-
 [dependencies]
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }

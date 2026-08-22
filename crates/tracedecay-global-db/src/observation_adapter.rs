@@ -157,12 +157,6 @@ impl GlobalDbObservationStore {
             .map_err(|error| runtime_storage_error(OPERATION, error))?;
         let next_cursor_json = serde_json::to_string(advance.next_cursor())
             .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        let expected_cursor_json = write
-            .expected_cursor()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-
         let transaction = self
             .database
             .begin_write_transaction(OPERATION)
@@ -181,15 +175,23 @@ impl GlobalDbObservationStore {
             )
             .await
             .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        let durable_cursor_json = cursor_rows
+        let durable_cursor = cursor_rows
             .next()
             .await
             .map_err(|error| runtime_storage_error(OPERATION, error))?
-            .map(|row| row.get::<String>(0))
-            .transpose()
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
+            .map(|row| {
+                let encoded = row
+                    .get::<String>(0)
+                    .map_err(|error| runtime_storage_error(OPERATION, error))?;
+                serde_json::from_str::<ClaudeSourceCursorV1>(&encoded)
+                    .map_err(|error| runtime_storage_error(OPERATION, error))
+            })
+            .transpose()?;
         drop(cursor_rows);
-        if durable_cursor_json != expected_cursor_json {
+        // Compare the typed cursor authority, not its incidental JSON wire
+        // spelling. Legacy/default-equivalent encodings are the same CAS
+        // value; malformed cursor state stays a hard storage error above.
+        if durable_cursor.as_ref() != write.expected_cursor() {
             transaction
                 .rollback()
                 .await
@@ -867,9 +869,10 @@ fn read_runtime_retrieval_anchor_by_alias(
 
 /// Whether a refused candidate stands at the sequential scan frontier: the
 /// durable cursor has NOT covered its range, the caller's expected cursor
-/// matches the durable one (so an advance is a pure forward move, never a
-/// regression), and the record either continues the current generation
-/// contiguously or restarts a new generation from position zero. Coverage is
+/// matches the durable one, and the record either continues the current
+/// generation contiguously or restarts a replacement generation from position
+/// zero. Generation values are opaque source identities, not ordered counters.
+/// Coverage is
 /// recorded only for this shape — the one production ingest actually loops
 /// on; gaps and stale views prove the caller is not the scan frontier.
 fn refused_scan_frontier(
@@ -886,13 +889,15 @@ fn refused_scan_frontier(
         return false;
     }
     match write.expected_cursor() {
-        Some(cursor)
-            if cursor.generation() == identity.generation()
-                && cursor.ordering_domain() == identity.ordering_domain() =>
-        {
-            cursor.position() == identity.position().start()
+        Some(cursor) if cursor.generation() == identity.generation() => {
+            cursor.ordering_domain() == identity.ordering_domain()
+                && cursor.position() == identity.position().start()
         }
-        Some(_) | None => identity.position().start() == 0,
+        Some(cursor) => {
+            cursor.ordering_domain() == identity.ordering_domain()
+                && identity.position().start() == 0
+        }
+        None => identity.position().start() == 0,
     }
 }
 
