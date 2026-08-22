@@ -20,84 +20,6 @@ use super::managed_skill_validation::{
     validate_managed_skill, validate_managed_skill_update, validate_skill_id,
 };
 
-#[cfg(test)]
-#[derive(Clone)]
-pub(super) struct PostCommitUsageSyncTestGate {
-    // Scopes the gate to one test's skill store so concurrent tests touching
-    // other stores neither trip the gate nor wake its owner spuriously.
-    profile_root: PathBuf,
-    entered: std::sync::Arc<tokio::sync::Notify>,
-    release: std::sync::Arc<tokio::sync::Notify>,
-}
-
-#[cfg(test)]
-static POST_COMMIT_USAGE_SYNC_TEST_GATE: std::sync::Mutex<Option<PostCommitUsageSyncTestGate>> =
-    std::sync::Mutex::new(None);
-
-#[cfg(test)]
-static POST_COMMIT_USAGE_SYNC_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-pub(super) struct PostCommitUsageSyncTestGuard {
-    gate: PostCommitUsageSyncTestGate,
-    _serial: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl PostCommitUsageSyncTestGuard {
-    pub(super) async fn entered(&self) {
-        self.gate.entered.notified().await;
-    }
-}
-
-#[cfg(test)]
-impl Drop for PostCommitUsageSyncTestGuard {
-    fn drop(&mut self) {
-        self.gate.release.notify_waiters();
-        let mut active = POST_COMMIT_USAGE_SYNC_TEST_GATE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *active = None;
-    }
-}
-
-#[cfg(test)]
-pub(super) fn install_post_commit_usage_sync_test_gate(
-    profile_root: &Path,
-) -> PostCommitUsageSyncTestGuard {
-    let serial = POST_COMMIT_USAGE_SYNC_TEST_SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let gate = PostCommitUsageSyncTestGate {
-        profile_root: profile_root.to_path_buf(),
-        entered: std::sync::Arc::new(tokio::sync::Notify::new()),
-        release: std::sync::Arc::new(tokio::sync::Notify::new()),
-    };
-    let mut active = POST_COMMIT_USAGE_SYNC_TEST_GATE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert!(active.replace(gate.clone()).is_none());
-    drop(active);
-    PostCommitUsageSyncTestGuard {
-        gate,
-        _serial: serial,
-    }
-}
-
-#[cfg(test)]
-async fn wait_for_post_commit_usage_sync_test_gate(profile_root: &Path) {
-    let gate = POST_COMMIT_USAGE_SYNC_TEST_GATE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    if let Some(gate) = gate
-        && gate.profile_root == profile_root
-    {
-        gate.entered.notify_one();
-        gate.release.notified().await;
-    }
-}
-
 pub fn managed_skill_root(profile_root: &Path) -> PathBuf {
     profile_root.join("agent_managed").join("skills")
 }
@@ -421,8 +343,6 @@ pub async fn apply_managed_skill_consolidation(
     revisions.push(&source);
     persist_skill_transaction_unlocked(profile_root, &revisions)?;
     drop(lock);
-    #[cfg(test)]
-    wait_for_post_commit_usage_sync_test_gate(profile_root).await;
     for skill in &revisions {
         if let Err(error) = super::skill_usage::sync_skill_usage_metadata(profile_root, skill).await
         {
@@ -780,8 +700,6 @@ fn apply_managed_skill_update_fields(
 }
 
 async fn record_skill_patch_best_effort(profile_root: &Path, skill: &ManagedSkill, target: &str) {
-    #[cfg(test)]
-    wait_for_post_commit_usage_sync_test_gate(profile_root).await;
     if let Err(error) = super::skill_usage::record_skill_usage_event(
         profile_root,
         super::skill_usage::SkillUsageEvent {

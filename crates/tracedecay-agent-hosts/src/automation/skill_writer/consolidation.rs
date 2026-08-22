@@ -252,9 +252,9 @@ pub(super) fn applied_consolidation_record(
 mod tests {
     use super::super::super::managed_skills::{
         ManagedSkillDraft, ManagedSkillProvenance, ManagedSupportFile, apply_managed_skill_update,
-        create_managed_skill, default_managed_skill_targets,
-        install_post_commit_usage_sync_test_gate, load_managed_skill,
+        create_managed_skill, default_managed_skill_targets, load_managed_skill,
     };
+    use super::super::super::skill_usage::skill_usage_ledger_path;
     use super::super::skill_proposal_action;
     use super::*;
 
@@ -783,8 +783,18 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn archive_persists_tombstone_before_postcommit_usage_sync_can_be_cancelled() {
+    /// Replaces the usage ledger file with a directory so every post-commit
+    /// usage sync fails at its real filesystem boundary. The typed tombstone
+    /// must then come from the commit transaction alone.
+    fn break_usage_sync(profile_root: &Path) {
+        let ledger_path = skill_usage_ledger_path(profile_root);
+        std::fs::remove_file(&ledger_path).unwrap();
+        std::fs::create_dir(&ledger_path).unwrap();
+        assert!(ledger_path.is_dir());
+    }
+
+    #[tokio::test]
+    async fn archive_commit_durably_carries_tombstone_despite_usage_sync_failure() {
         let profile = tempfile::tempdir().unwrap();
         let skills = persisted_consolidation_fixture(profile.path()).await;
         let proposal = json!({
@@ -794,15 +804,17 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let archive = skill_archive_from_proposal(&proposal, &skills).unwrap();
-        let gate = install_post_commit_usage_sync_test_gate(profile.path());
-        let profile_root = profile.path().to_path_buf();
-        let archive_for_task = archive.clone();
-        let task =
-            tokio::spawn(
-                async move { apply_skill_archive(&profile_root, &archive_for_task).await },
-            );
+        break_usage_sync(profile.path());
 
-        gate.entered().await;
+        let archived = apply_skill_archive(profile.path(), &archive)
+            .await
+            .expect("committed archive must succeed despite best-effort sync failure");
+
+        assert_eq!(archived.metadata.state, ManagedSkillState::Archived);
+        assert_eq!(
+            archived.metadata.archived_reason.as_deref(),
+            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
+        );
         let committed = load_managed_skill(profile.path(), "workflow-b")
             .await
             .unwrap();
@@ -810,23 +822,18 @@ mod tests {
         assert_eq!(
             committed.metadata.archived_reason.as_deref(),
             Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE),
-            "the archive commit must durably carry its typed tombstone before usage sync"
+            "the archive commit must durably carry its typed tombstone even when \
+             post-commit usage sync never succeeds"
         );
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        assert_eq!(
-            load_managed_skill(profile.path(), "workflow-b")
-                .await
-                .unwrap()
-                .metadata
-                .archived_reason
-                .as_deref(),
-            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
+        assert!(
+            skill_usage_ledger_path(profile.path()).is_dir(),
+            "usage sync must not have replaced the broken ledger, so the \
+             tombstone cannot have come from the sync phase"
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn merge_persists_tombstone_before_postcommit_usage_sync_can_be_cancelled() {
+    #[tokio::test]
+    async fn merge_commit_durably_carries_tombstone_despite_usage_sync_failure() {
         let profile = tempfile::tempdir().unwrap();
         let skills = persisted_consolidation_fixture(profile.path()).await;
         let proposal = json!({
@@ -838,21 +845,18 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let merge = skill_merge_from_proposal(&proposal, &skills).unwrap();
-        let gate = install_post_commit_usage_sync_test_gate(profile.path());
-        let profile_root = profile.path().to_path_buf();
-        let merge_for_task = merge.clone();
-        let task =
-            tokio::spawn(async move { apply_skill_merge(&profile_root, &merge_for_task).await });
+        break_usage_sync(profile.path());
 
-        gate.entered().await;
+        let (source, _target) = apply_skill_merge(profile.path(), &merge)
+            .await
+            .expect("committed merge must succeed despite best-effort sync failure");
+
+        assert_eq!(source.metadata.state, ManagedSkillState::Archived);
+        assert_eq!(source.metadata.absorbed_into.as_deref(), Some("workflow-a"));
         let committed_source = load_managed_skill(profile.path(), "workflow-b")
             .await
             .unwrap();
-        assert_eq!(
-            committed_source.metadata.state,
-            ManagedSkillState::Archived,
-            "the cancellation gate must run after the merge commit"
-        );
+        assert_eq!(committed_source.metadata.state, ManagedSkillState::Archived);
         assert_eq!(
             committed_source.metadata.absorbed_into.as_deref(),
             Some("workflow-a")
@@ -860,18 +864,13 @@ mod tests {
         assert_eq!(
             committed_source.metadata.archived_reason.as_deref(),
             Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE),
-            "the merge commit must durably carry its typed tombstone before usage sync"
+            "the merge commit must durably carry its typed tombstone even when \
+             post-commit usage sync never succeeds"
         );
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        assert_eq!(
-            load_managed_skill(profile.path(), "workflow-b")
-                .await
-                .unwrap()
-                .metadata
-                .archived_reason
-                .as_deref(),
-            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
+        assert!(
+            skill_usage_ledger_path(profile.path()).is_dir(),
+            "usage sync must not have replaced the broken ledger, so the \
+             tombstone cannot have come from the sync phase"
         );
     }
 
