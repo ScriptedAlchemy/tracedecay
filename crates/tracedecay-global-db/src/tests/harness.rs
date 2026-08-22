@@ -123,7 +123,7 @@ impl RegisteredGlobalDbTestRuntime {
     pub async fn profile(
         profile_root: impl AsRef<std::path::Path>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
-        Self::open(profile_root.as_ref(), None).await
+        Self::open(profile_root.as_ref(), None, None).await
     }
 
     pub async fn project(
@@ -133,12 +133,37 @@ impl RegisteredGlobalDbTestRuntime {
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         let project_root = project_root.as_ref();
         std::fs::create_dir_all(project_root)?;
-        Self::open(profile_root.as_ref(), Some((project_root, project_id))).await
+        Self::open(
+            profile_root.as_ref(),
+            Some((project_root, project_id)),
+            None,
+        )
+        .await
+    }
+
+    /// Publishes a project fixture under identity minted and persisted by the
+    /// production profile authority instead of deriving identity from its
+    /// database path.
+    pub async fn project_for_profile_identity(
+        profile_root: impl AsRef<std::path::Path>,
+        project_root: impl AsRef<std::path::Path>,
+        project_id: tracedecay_domain::ProjectId,
+        profile_identity: tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
+        let project_root = project_root.as_ref();
+        std::fs::create_dir_all(project_root)?;
+        Self::open(
+            profile_root.as_ref(),
+            Some((project_root, project_id)),
+            Some(profile_identity),
+        )
+        .await
     }
 
     async fn open(
         profile_root: &std::path::Path,
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
+        profile_identity: Option<tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         crate::register_test_schema_installer();
         // A profile root is a profile-identity root in production and must be
@@ -162,10 +187,11 @@ impl RegisteredGlobalDbTestRuntime {
                     message: error.to_string(),
                 }
             })?;
-        let (profile_registered, profile_owner) = open_registered_test_database_with(
+        let (profile_registered, profile_owner) = open_registered_test_database_with_identity(
             &tracedecay_sessions::runtime::user_sessions_db_path(profile_root),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
             RegisteredTestWriteAuthority::DaemonScoped,
+            profile_identity.clone(),
         )
         .await?;
         bind_test_session_relation_graph_with_registry(&profile_registered, &graph_registry)?;
@@ -180,12 +206,13 @@ impl RegisteredGlobalDbTestRuntime {
                     profile_root,
                     &marker,
                 )?;
-                let (registered, owner) = open_registered_test_database_with(
+                let (registered, owner) = open_registered_test_database_with_identity(
                     &layout.sessions_db_path,
                     tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
                         project_id,
                     },
                     RegisteredTestWriteAuthority::DaemonScoped,
+                    profile_identity,
                 )
                 .await?;
                 bind_test_session_relation_graph_with_registry(&registered, &graph_registry)?;
@@ -300,6 +327,25 @@ impl RegisteredGlobalDbTestRuntime {
             tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "bind registered project test database".to_owned(),
                 message: "registered project database is unavailable".to_owned(),
+            }
+        })
+    }
+
+    /// Issues the fresh registered client a second production mount would
+    /// receive while the retained project owner remains ready.
+    pub fn issue_project_database_lease_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbLeaseV1> {
+        let owner = self._project_owner.as_ref().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "issue registered project test database client".to_owned(),
+                message: "registered project database owner is unavailable".to_owned(),
+            }
+        })?;
+        owner.issue_lease().map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "issue registered project test database client".to_owned(),
+                message: format!("{error:?}"),
             }
         })
     }
@@ -1197,14 +1243,21 @@ async fn open_registered_test_database_with(
     write_authority: RegisteredTestWriteAuthority,
 ) -> tracedecay_runtime_core::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
 {
+    open_registered_test_database_with_identity(path, scope, write_authority, None).await
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+async fn open_registered_test_database_with_identity(
+    path: &std::path::Path,
+    scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
+    write_authority: RegisteredTestWriteAuthority,
+    profile_identity: Option<tracedecay_runtime_core::db::TestRuntimeProfileIdentityV1>,
+) -> tracedecay_runtime_core::errors::Result<(RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1)>
+{
     crate::register_test_schema_installer();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
-        path,
-        "open registered global-db test runtime",
-    )?;
     // The exact test-runtime resolver refuses `Initialize` for a store that is
     // already on disk (and `Existing` for one that is not). Fixtures reach this
     // helper both ways — a fresh profile root, and a shard some earlier stage of
@@ -1214,25 +1267,67 @@ async fn open_registered_test_database_with(
     } else {
         tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize
     };
-    let fixture = tracedecay_runtime_core::db::Database::publish_registered_test_runtime_with_retirement_control(
-        path, &authority, mode, scope,
-    )
-    .await?;
-    let (database_owner, _runtime, _retirement) = fixture.into_parts();
-    let database = RegisteredGlobalDbOwnerV1::admit_and_attach(database_owner).await?;
-    // The physical fixture is already opened in the mode requested above.
-    // Issuance preserves that capability; neither test branch manufactures a
-    // second raw authority after publication.
-    let registered = match write_authority {
-        RegisteredTestWriteAuthority::Fixture | RegisteredTestWriteAuthority::DaemonScoped => {
-            database.issue_lease().map_err(|failure| {
-                tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "issue registered global-db test database lease".to_owned(),
-                    message: format!("{failure:?}"),
+    let fixture = match write_authority {
+        RegisteredTestWriteAuthority::Fixture => {
+            let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+                path,
+                "open registered global-db test runtime",
+            )?;
+            match profile_identity {
+                Some(profile_identity) => {
+                    tracedecay_runtime_core::db::Database::publish_registered_test_runtime_with_retirement_control_for_profile_identity(
+                        path,
+                        &authority,
+                        mode,
+                        profile_identity,
+                        scope,
+                    )
+                    .await?
                 }
-            })?
+                None => {
+                    tracedecay_runtime_core::db::Database::publish_registered_test_runtime_with_retirement_control(
+                        path, &authority, mode, scope,
+                    )
+                    .await?
+                }
+            }
+        }
+        RegisteredTestWriteAuthority::DaemonScoped => {
+            let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_owned_runtime(
+                path,
+                "open registered global-db daemon-scoped test runtime",
+            )?;
+            match profile_identity {
+                Some(profile_identity) => {
+                    tracedecay_runtime_core::db::Database::publish_registered_daemon_test_runtime_with_retirement_control_for_profile_identity(
+                        path,
+                        &authority,
+                        mode,
+                        profile_identity,
+                        scope,
+                    )
+                    .await?
+                }
+                None => {
+                    tracedecay_runtime_core::db::Database::publish_registered_daemon_test_runtime_with_retirement_control(
+                        path, &authority, mode, scope,
+                    )
+                    .await?
+                }
+            }
         }
     };
+    let (database_owner, _runtime, _retirement) = fixture.into_parts();
+    let database = RegisteredGlobalDbOwnerV1::admit_and_attach(database_owner).await?;
+    // The physical fixture is already opened with the requested authority.
+    // Issuance preserves that capability; neither branch manufactures a
+    // second raw authority after publication.
+    let registered = database.issue_lease().map_err(|failure| {
+        tracedecay_runtime_core::errors::TraceDecayError::Database {
+            operation: "issue registered global-db test database lease".to_owned(),
+            message: format!("{failure:?}"),
+        }
+    })?;
     Ok((registered, database))
 }
 

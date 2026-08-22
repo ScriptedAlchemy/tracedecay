@@ -5,10 +5,10 @@ use std::sync::{Arc, OnceLock};
 
 use tracedecay_runtime_core::{
     db::{
-        Database, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot, DatabaseOwnerErrorV1,
-        DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1, DatabaseOwnerWeakLeaseIssuerErrorV1,
-        DatabaseOwnerWeakLeaseIssuerV1, DatabaseRuntimeClientV1, DatabaseStorageTelemetryHandle,
-        DatabaseWriteTransaction,
+        Database, DatabaseAuthority, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot,
+        DatabaseOwnerErrorV1, DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1,
+        DatabaseOwnerWeakLeaseIssuerErrorV1, DatabaseOwnerWeakLeaseIssuerV1,
+        DatabaseRuntimeClientV1, DatabaseStorageTelemetryHandle, DatabaseWriteTransaction,
         engine::{Executor, IntoParams, QueryExecutor, Rows},
     },
     errors::TraceDecayError,
@@ -752,6 +752,9 @@ impl RegisteredGlobalDb {
                 "registered database client is read-only",
             ));
         }
+        self.database
+            .write_authority()?
+            .require_active_write_scope("open registered global database writer")?;
         Ok(RegisteredGlobalDbWriterConnection {
             database: &self.database,
         })
@@ -760,11 +763,16 @@ impl RegisteredGlobalDb {
     pub async fn begin_write_transaction(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<RegisteredGlobalDbWriteTransaction<'_>> {
+        let authority = self.database.write_authority()?;
+        authority.require_active_write_scope("begin registered global database transaction")?;
         let transaction = self
             .database
             .begin_write_transaction("begin registered global database transaction")
             .await?;
-        Ok(RegisteredGlobalDbWriteTransaction { transaction })
+        Ok(RegisteredGlobalDbWriteTransaction {
+            transaction,
+            authority,
+        })
     }
 
     pub fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
@@ -972,6 +980,11 @@ impl RegisteredGlobalDb {
     ) -> tracedecay_runtime_core::errors::Result<
         super::observation::retention::ObservationRetentionReport,
     > {
+        if matches!(mode, super::observation::retention::RetentionMode::Apply) {
+            self.database
+                .write_authority()?
+                .require_active_write_scope("run registered observation retention")?;
+        }
         super::observation::retention::run_observation_retention(
             &self.database,
             generation,
@@ -1036,6 +1049,7 @@ impl RegisteredGlobalDbWriterConnection<'_> {
 
 pub struct RegisteredGlobalDbWriteTransaction<'a> {
     transaction: DatabaseWriteTransaction<'a>,
+    authority: DatabaseAuthority,
 }
 
 impl QueryExecutor for RegisteredGlobalDbWriteTransaction<'_> {
@@ -1158,6 +1172,20 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
     }
 
     pub async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
+        if let Err(error) = self
+            .authority
+            .require_active_write_scope("commit registered global database transaction")
+        {
+            let rollback = self.transaction.rollback().await;
+            return match rollback {
+                Ok(()) => Err(engine_error(error)),
+                Err(rollback_error) => Err(
+                    tracedecay_runtime_core::db::engine::Error::invalid_operation(format!(
+                        "{error}; rollback after authority loss failed: {rollback_error}"
+                    )),
+                ),
+            };
+        }
         self.transaction.commit().await.map_err(engine_error)
     }
 
