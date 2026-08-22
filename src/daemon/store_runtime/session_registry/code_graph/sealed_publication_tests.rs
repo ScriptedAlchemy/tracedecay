@@ -39,7 +39,7 @@ fn git(root: &Path, args: &[&str]) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sealed_generation_publishes_and_republishes_as_the_verified_code_graph() {
+async fn sealed_generation_publishes_and_republishes_without_eager_replay_payload() {
     let temporary = tempfile::tempdir().expect("temporary fixture parent");
     let root = temporary
         .path()
@@ -108,6 +108,19 @@ async fn sealed_generation_publishes_and_republishes_as_the_verified_code_graph(
         .project_memory(project_id.clone(), [canonical_project.clone()])
         .await
         .expect("project graph database");
+    let replay_root = project_database
+        .database_path()
+        .with_extension("graph-replay");
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_private_directory(&replay_root)
+        .expect("private graph replay root");
+    let digest = pointer
+        .state_digest
+        .strip_prefix("sha256:")
+        .expect("sha256 state digest");
+    let foreign_destination = replay_root.join(format!("generation-{digest}.json"));
+    std::fs::create_dir(&foreign_destination).expect("foreign digest-named directory");
+    let sentinel = foreign_destination.join("sentinel");
+    std::fs::write(&sentinel, b"foreign replay evidence").expect("foreign replay sentinel");
 
     let runtime = registry
         .retain_code_graph_runtime(
@@ -135,6 +148,31 @@ async fn sealed_generation_publishes_and_republishes_as_the_verified_code_graph(
     assert_eq!(snapshot.generation(), &expected_generation);
     let head = snapshot.verified_head().clone();
     drop(snapshot);
+    assert_eq!(
+        std::fs::read(&sentinel).expect("foreign replay evidence survives first publication"),
+        b"foreign replay evidence"
+    );
+    let first_publish_payload_bytes = std::fs::read_dir(&replay_root)
+        .expect("read graph replay root after first publication")
+        .map(|entry| entry.expect("graph replay entry"))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("generation-")
+                && entry
+                    .file_type()
+                    .expect("graph replay entry type")
+                    .is_file()
+        })
+        .map(|entry| {
+            entry
+                .metadata()
+                .expect("graph replay payload metadata")
+                .len()
+        })
+        .sum::<u64>();
+    assert_eq!(first_publish_payload_bytes, 0);
 
     // A retained-seat retry of the same sealed artifact resumes to the same
     // verified head instead of conflicting with its own journaled replay.
@@ -155,4 +193,29 @@ async fn sealed_generation_publishes_and_republishes_as_the_verified_code_graph(
         .expect("a repeated activation must resume the exact publication");
     assert_eq!(resumed.generation(), &expected_generation);
     assert_eq!(resumed.verified_head(), &head);
+    assert_eq!(
+        std::fs::read(&sentinel).expect("foreign replay evidence survives active republish"),
+        b"foreign replay evidence"
+    );
+    let active_republish_payload_bytes = std::fs::read_dir(&replay_root)
+        .expect("read graph replay root after active republish")
+        .map(|entry| entry.expect("graph replay entry"))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("generation-")
+                && entry
+                    .file_type()
+                    .expect("graph replay entry type")
+                    .is_file()
+        })
+        .map(|entry| {
+            entry
+                .metadata()
+                .expect("graph replay payload metadata")
+                .len()
+        })
+        .sum::<u64>();
+    assert_eq!(active_republish_payload_bytes, 0);
 }
