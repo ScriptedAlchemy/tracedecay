@@ -437,7 +437,7 @@ fn finish_staged_artifact(
             .expect("finalize staged lexical artifact")
         {
             CodeLexicalArtifactFinalizationStepV1::Pending { .. } => {}
-            CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => return receipt,
+            CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => return *receipt,
         }
     }
 }

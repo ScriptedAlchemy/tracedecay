@@ -72,7 +72,7 @@ pub enum CodeLexicalArtifactFinalizationStepV1 {
         completed_sections: u64,
         completed_rows: u64,
     },
-    Ready(VerifiedCodeLexicalArtifactV1),
+    Ready(Box<VerifiedCodeLexicalArtifactV1>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -301,7 +301,9 @@ impl CodeLexicalArtifactBuilderV1 {
         let staged = verify_staged_source_receipt(&self.connection, source)?;
         if let Some(receipt) = read_receipt(&self.connection)? {
             verify_sealed_receipt_header(&receipt, &self.metadata_digest, source, &staged)?;
-            return Ok(CodeLexicalArtifactFinalizationStepV1::Ready(receipt));
+            return Ok(CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(
+                receipt,
+            )));
         }
 
         if load_finalization_state(&self.connection)?.is_none() {
@@ -409,7 +411,9 @@ impl CodeLexicalArtifactBuilderV1 {
             .map_err(sqlite_error)?;
         checkpoint(control)?;
         transaction.commit().map_err(sqlite_error)?;
-        Ok(CodeLexicalArtifactFinalizationStepV1::Ready(receipt))
+        Ok(CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(
+            receipt,
+        )))
     }
 
     pub fn finalize(
