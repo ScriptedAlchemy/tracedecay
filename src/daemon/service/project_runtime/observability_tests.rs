@@ -1139,6 +1139,89 @@ async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
 }
 
 #[tokio::test]
+async fn runtimeless_last_alias_drop_keeps_the_store_retiring_until_the_drain_confirms() {
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let (_project, project_id, database, _runtime) =
+        runtime("observability-runtimeless-drop").await;
+    let registry = StoreObservabilityRegistryV1::default();
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: project_id.as_str().to_owned(),
+        process_boot_id: "daemon:runtimeless-drop".to_owned(),
+        producer_revision: "producer.v1".to_owned(),
+        configuration_revision: digest('6').as_str().to_owned(),
+        policy_revision: digest('7').as_str().to_owned(),
+    };
+    let producer = BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 8)
+        .expect("producer");
+    let registered = registry
+        .acquire_or_start(&database, &store_mount(&digest('0'), &identity), || {
+            Ok(producer)
+        })
+        .expect("registered observability producer");
+    // Owners that record through the mounted producer retain frontends past
+    // the alias handle's lifetime; this one keeps the shared core open.
+    let retained = registered.producer();
+    std::thread::spawn(move || drop(registered))
+        .join()
+        .expect("drop the last alias handle outside any tokio runtime");
+    assert_eq!(
+        retained
+            .try_emit(envelope(&project_id, "runtimeless:retained"))
+            .expect("retained frontend still emits through the open core"),
+        ObservabilityEmissionOutcomeV1::Enqueued
+    );
+
+    // The store entry must stay retiring: the drain never ran, so vacating
+    // it would let a second producer start while the first still writes.
+    let overlap_identity = ObservabilityProducerIdentityV1 {
+        process_boot_id: "daemon:runtimeless-drop-overlap".to_owned(),
+        ..identity.clone()
+    };
+    let overlap_mount = store_mount(&digest('0'), &overlap_identity);
+    let refused = registry.acquire_or_start(&database, &overlap_mount, || {
+        panic!("a runtimeless drop must not vacate the store entry into a duplicate producer")
+    });
+    assert!(matches!(
+        refused,
+        Err(StoreObservabilityMountErrorV1::Retiring)
+    ));
+
+    // That refused mount ran on a live runtime, so the deferred drain is now
+    // in flight; only its confirmed close releases the store entry.
+    let replacement_identity = ObservabilityProducerIdentityV1 {
+        process_boot_id: "daemon:runtimeless-drop-replacement".to_owned(),
+        ..identity.clone()
+    };
+    let replacement_mount = store_mount(&digest('0'), &replacement_identity);
+    let replacement = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let attempt = registry.acquire_or_start(&database, &replacement_mount, || {
+                BoundedObservabilityProducerV1::start(
+                    database.clone(),
+                    replacement_identity.clone(),
+                    1,
+                )
+                .map_err(StoreObservabilityMountErrorV1::Unavailable)
+            });
+            match attempt {
+                Ok(replacement) => break replacement,
+                Err(StoreObservabilityMountErrorV1::Retiring) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected replacement result: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("deferred drain confirms and releases the store");
+    assert_eq!(
+        retained
+            .try_emit(envelope(&project_id, "runtimeless:after-drain"))
+            .expect_err("the confirmed drain closes the retained frontend"),
+        "observability_producer_closed"
+    );
+    replacement.shutdown().await.expect("replacement shutdown");
+}
+
+#[tokio::test]
 async fn registered_shutdown_reports_a_blocked_producer_flush() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) =
