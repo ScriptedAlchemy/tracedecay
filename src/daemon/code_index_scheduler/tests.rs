@@ -2674,12 +2674,25 @@ fn oversized_activation_hint_is_clamped_to_bounded_text_work() {
     published(scheduler.reconcile_now().expect("publish generation"));
     let latest = scheduler.latest_complete().expect("latest generation");
 
+    assert!(matches!(
+        latest.activate_text_serving(),
+        Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+    ));
     assert!(
-        latest
-            .advance_text_serving(usize::MAX)
-            .expect("oversized hint must not overflow finalization accounting"),
-        "the small fixture must complete under the canonical bounded work clamp"
+        latest.text_serving_needs_work(),
+        "typed warming must preserve the resumable artifact build"
     );
+    let mut passes = 0_usize;
+    while !latest
+        .advance_text_serving(usize::MAX)
+        .expect("oversized hints must remain bounded and resumable")
+    {
+        passes += 1;
+        assert!(
+            passes < 10_000,
+            "bounded artifact activation did not converge"
+        );
+    }
     assert!(latest.text_serving_is_ready());
 }
 
