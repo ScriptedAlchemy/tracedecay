@@ -771,7 +771,8 @@ async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
 #[tokio::test]
 async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finishes() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let (_project, project_id, database) = runtime("observability-retiring-two-aliases").await;
+    let (_project, project_id, database, _runtime) =
+        runtime("observability-retiring-two-aliases").await;
     let registry = StoreObservabilityRegistryV1::default();
     let configuration_provenance_revision = digest('0');
     let producer = BoundedObservabilityProducerV1::start(
