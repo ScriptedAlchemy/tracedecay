@@ -1772,6 +1772,7 @@ fn text_artifact_receipt_is_durable(
     Ok(true)
 }
 
+#[cfg(test)]
 fn stage_collectable_text_artifacts(
     store_root: &Path,
     transaction: &CodeTextArtifactRetentionTransactionV1,
