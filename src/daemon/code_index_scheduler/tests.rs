@@ -4,6 +4,7 @@ use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_application::retrieval::{
     CodeFacetDimension, CodeFacetRequest, CodeNavigationRequest, CodeTimelineRequest,
@@ -2457,6 +2458,69 @@ fn active_text_artifact_path(store_root: &Path) -> PathBuf {
         .join(artifact_file)
 }
 
+fn rewrite_active_text_artifact_format_revision(store_root: &Path, revision: u64) -> PathBuf {
+    use crate::retention::code_index_generations::{
+        DurablePublicationPointerV1, durable_generation_index_digest,
+    };
+
+    let pointer_path = store_root.join("active-code-generation-v1.json");
+    let mut pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(&pointer_path).expect("read durable publication pointer"),
+    )
+    .expect("decode durable publication pointer");
+    let entry = pointer
+        .generation_index
+        .iter_mut()
+        .find(|entry| entry.generation_id == pointer.generation_id)
+        .expect("active generation entry");
+    let descriptor = entry
+        .text_artifact
+        .as_mut()
+        .expect("active text artifact descriptor");
+    let old_path = store_root
+        .join("code-text-artifacts-v1")
+        .join(&descriptor.artifact_file);
+    {
+        let connection = rusqlite::Connection::open(&old_path).expect("open published artifact");
+        let revision = i64::try_from(revision).expect("artifact revision fits SQLite INTEGER");
+        assert_eq!(
+            connection
+                .execute("UPDATE artifact_state SET format_revision = ?1", [revision],)
+                .expect("rewrite artifact format revision"),
+            1
+        );
+    }
+    let artifact_bytes = std::fs::read(&old_path).expect("read rewritten artifact");
+    let artifact_hex = Sha256::digest(&artifact_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let artifact_file = format!("text-artifact-{artifact_hex}.bin");
+    let rewritten_path = old_path
+        .parent()
+        .expect("artifact root")
+        .join(&artifact_file);
+    std::fs::rename(&old_path, &rewritten_path).expect("rename rewritten artifact");
+    descriptor.artifact_file = artifact_file;
+    descriptor.artifact_digest =
+        ManifestDigest::new(format!("sha256:{artifact_hex}")).expect("rewritten artifact digest");
+    descriptor.artifact_size_bytes =
+        u64::try_from(artifact_bytes.len()).expect("artifact length fits u64");
+    pointer.generation_index_digest = Some(
+        durable_generation_index_digest(
+            &pointer.generation_index,
+            pointer.generation_index_truncated,
+        )
+        .expect("rewritten generation index digest"),
+    );
+    std::fs::write(
+        pointer_path,
+        serde_json::to_vec(&pointer).expect("encode rewritten publication pointer"),
+    )
+    .expect("write rewritten publication pointer");
+    rewritten_path
+}
+
 #[test]
 fn missing_durable_text_artifact_is_withdrawn_and_rebuilt() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn rebuilt() {}\n")]);
@@ -2539,6 +2603,116 @@ fn corrupt_durable_text_artifact_is_quarantined_and_rebuilt() {
     let repaired =
         std::fs::read(active_text_artifact_path(store.path())).expect("repaired artifact bytes");
     assert_ne!(repaired, vec![0xa5; artifact_len]);
+}
+
+#[test]
+fn incompatible_published_text_artifact_is_withdrawn_and_rebuilt() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn migrated() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        while !latest
+            .advance_text_serving(64)
+            .expect("build current-format text artifact")
+        {}
+    }
+    let incompatible_path = rewrite_active_text_artifact_format_revision(store.path(), 1);
+
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let latest = scheduler.latest_complete().expect("restored generation");
+    let mut passes = 0_usize;
+    while !latest
+        .advance_text_serving(64)
+        .expect("withdraw incompatible head and rebuild")
+    {
+        passes += 1;
+        assert!(
+            passes < 10_000,
+            "incompatible artifact rebuild did not converge"
+        );
+    }
+
+    assert!(latest.query_owners_are_warm());
+    assert_ne!(active_text_artifact_path(store.path()), incompatible_path);
+    assert!(
+        incompatible_path.is_file(),
+        "an incompatible immutable artifact remains bounded orphan evidence for retention"
+    );
+}
+
+#[test]
+fn incompatible_partial_text_artifact_is_discarded_and_rebuilt() {
+    let source = (0..256)
+        .map(|index| format!("pub fn staged_{index}() -> usize {{ {index} }}\n"))
+        .collect::<String>();
+    let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        assert!(
+            !latest
+                .advance_text_serving(1)
+                .expect("start bounded text artifact build"),
+            "one page must leave resumable staging state"
+        );
+    }
+    let artifacts_root = store.path().join("code-text-artifacts-v1");
+    let staging_path = std::fs::read_dir(&artifacts_root)
+        .expect("read artifacts root")
+        .map(|entry| entry.expect("artifact entry").path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".staging"))
+        })
+        .expect("partial staging database");
+    {
+        let connection =
+            rusqlite::Connection::open(&staging_path).expect("open partial staging database");
+        assert_eq!(
+            connection
+                .execute("UPDATE artifact_state SET format_revision = 1", [],)
+                .expect("rewrite staging format revision"),
+            1
+        );
+    }
+
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let latest = scheduler.latest_complete().expect("restored generation");
+    let mut passes = 0_usize;
+    while !latest
+        .advance_text_serving(64)
+        .expect("discard incompatible staging and rebuild")
+    {
+        passes += 1;
+        assert!(
+            passes < 10_000,
+            "incompatible staging rebuild did not converge"
+        );
+    }
+
+    assert!(latest.query_owners_are_warm());
+    assert!(active_text_artifact_path(store.path()).is_file());
 }
 
 #[test]
