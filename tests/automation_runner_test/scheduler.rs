@@ -1232,6 +1232,9 @@ fn config_requires_interval_secs_for_configured_interval_schedule() {
 
 #[test]
 fn config_validates_scheduler_idle_and_lock_bounds() {
+    // Fresh scheduled defaults validate at the domain layer first, so a zero
+    // idle or lock duration is rejected as a non-canonical task duration
+    // before the per-field automation checks can name the exact field.
     let patch = AutomationConfigPatch {
         memory_curator: AutomationTaskPatch {
             min_idle_secs: Some(Some(0)),
@@ -1239,11 +1242,12 @@ fn config_validates_scheduler_idle_and_lock_bounds() {
         },
         ..AutomationConfigPatch::default()
     };
+    let error = effective_config(&AutomationConfig::default(), Some(&patch))
+        .unwrap_err()
+        .to_string();
     assert!(
-        effective_config(&AutomationConfig::default(), Some(&patch))
-            .unwrap_err()
-            .to_string()
-            .contains("min_idle_secs")
+        error.contains("automation task duration"),
+        "zero min_idle_secs must be rejected as a task duration: {error}"
     );
 
     let patch = AutomationConfigPatch {
@@ -1253,12 +1257,28 @@ fn config_validates_scheduler_idle_and_lock_bounds() {
         },
         ..AutomationConfigPatch::default()
     };
+    let error = effective_config(&AutomationConfig::default(), Some(&patch))
+        .unwrap_err()
+        .to_string();
     assert!(
-        effective_config(&AutomationConfig::default(), Some(&patch))
-            .unwrap_err()
-            .to_string()
-            .contains("stale_lock_secs")
+        error.contains("automation task duration"),
+        "zero stale_lock_secs must be rejected as a task duration: {error}"
     );
+
+    // Nonzero bounds on the same fields remain accepted, so the rejection
+    // above is about the zero value rather than the fields themselves.
+    let patch = AutomationConfigPatch {
+        memory_curator: AutomationTaskPatch {
+            min_idle_secs: Some(Some(600)),
+            stale_lock_secs: Some(Some(3_600)),
+            ..AutomationTaskPatch::default()
+        },
+        ..AutomationConfigPatch::default()
+    };
+    let config =
+        effective_config(&AutomationConfig::default(), Some(&patch)).expect("nonzero bounds");
+    assert_eq!(config.tasks.memory_curator.min_idle_secs, Some(600));
+    assert_eq!(config.tasks.memory_curator.stale_lock_secs, Some(3_600));
 }
 
 #[cfg(any(unix, windows))]
