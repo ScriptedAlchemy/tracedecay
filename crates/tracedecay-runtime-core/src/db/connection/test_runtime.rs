@@ -29,6 +29,66 @@ pub enum TestDatabaseRuntimeMode {
     ReadOnly,
 }
 
+/// Exact production-minted profile identity supplied to a test runtime.
+///
+/// Production-shaped daemon fixtures must construct this value from the
+/// persisted profile identity authority. The runtime-core fixture never mints,
+/// derives, or replaces that authority on their behalf.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TestRuntimeProfileIdentityV1 {
+    brain_id: BrainId,
+    profile_id: UserProfileId,
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+impl TestRuntimeProfileIdentityV1 {
+    #[must_use]
+    pub fn new(brain_id: BrainId, profile_id: UserProfileId) -> Self {
+        Self {
+            brain_id,
+            profile_id,
+        }
+    }
+
+    #[must_use]
+    pub fn brain_id(&self) -> &BrainId {
+        &self.brain_id
+    }
+
+    #[must_use]
+    pub fn profile_id(&self) -> &UserProfileId {
+        &self.profile_id
+    }
+
+    fn into_parts(self) -> (BrainId, UserProfileId) {
+        (self.brain_id, self.profile_id)
+    }
+}
+
+/// Exact shard family a fixture publication constructs.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum TestRuntimeShardFamilyV1 {
+    Code,
+    ProfileMemory,
+    Registered(TestDatabaseRuntimeScope),
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+impl TestRuntimeShardFamilyV1 {
+    fn shard(self, identity: TestRuntimeProfileIdentityV1) -> Result<StoreShardIdV1> {
+        let (brain_id, profile_id) = identity.into_parts();
+        match self {
+            Self::Code => test_code_shard(brain_id, profile_id),
+            Self::ProfileMemory => Ok(StoreShardIdV1::profile_memory(brain_id, profile_id)),
+            Self::Registered(scope) => test_registered_shard(brain_id, profile_id, scope),
+        }
+    }
+}
+
 /// Exact shard family published by an isolated registered-store fixture.
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -233,6 +293,9 @@ impl StoreRuntimeResolver for ExactTestRuntimeResolver {
 }
 
 impl Database {
+    /// Publishes a standalone runtime-core fixture using a deterministic,
+    /// path-scoped identity that is not production-persisted. Cross-profile
+    /// daemon fixtures must use an explicit production-minted identity seam.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     pub async fn publish_test_runtime(
@@ -246,11 +309,18 @@ impl Database {
                 operation: "publish test database runtime".to_owned(),
             });
         }
-        Self::publish_fixture_runtime(db_path, authority, mode, test_code_shard()?).await
+        Self::publish_fixture_runtime(
+            db_path,
+            authority,
+            mode,
+            TestRuntimeShardFamilyV1::Code,
+            None,
+        )
+        .await
     }
 
-    /// Publishes an isolated profile-memory fixture through the exact shard
-    /// identity used by the production fact and graph lifecycle.
+    /// Publishes an isolated profile-memory fixture with the runtime-core-only
+    /// path-scoped identity fallback.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     pub async fn publish_profile_memory_test_runtime(
@@ -264,9 +334,14 @@ impl Database {
                 operation: "publish profile-memory test database runtime".to_owned(),
             });
         }
-        let published =
-            Self::publish_fixture_runtime(db_path, authority, mode, test_profile_memory_shard()?)
-                .await?;
+        let published = Self::publish_fixture_runtime(
+            db_path,
+            authority,
+            mode,
+            TestRuntimeShardFamilyV1::ProfileMemory,
+            None,
+        )
+        .await?;
         match mode {
             TestDatabaseRuntimeMode::Initialize | TestDatabaseRuntimeMode::Existing => {
                 crate::db::migrations::ensure_schema_current(&published.0).await?;
@@ -276,8 +351,9 @@ impl Database {
         Ok(published)
     }
 
-    /// Publishes an isolated registered-store fixture with the exact typed
-    /// shard family consumed by the test.
+    /// Publishes an isolated registered-store fixture with the runtime-core-only
+    /// path-scoped identity fallback. Production-shaped fixtures must use
+    /// [`Self::publish_registered_test_runtime_for_profile_identity`].
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     pub async fn publish_registered_test_runtime(
@@ -292,11 +368,45 @@ impl Database {
                 operation: "publish registered test database runtime".to_owned(),
             });
         }
-        Self::publish_fixture_runtime(db_path, authority, mode, test_registered_shard(scope)?).await
+        Self::publish_fixture_runtime(
+            db_path,
+            authority,
+            mode,
+            TestRuntimeShardFamilyV1::Registered(scope),
+            None,
+        )
+        .await
     }
 
-    /// Publishes a fresh registered fixture while retaining only the exact
-    /// registry control required to test typed client-lease retirement.
+    /// Publishes a registered fixture under an identity already minted and
+    /// persisted by the production profile identity authority.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    pub async fn publish_registered_test_runtime_for_profile_identity(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        identity: TestRuntimeProfileIdentityV1,
+        scope: TestDatabaseRuntimeScope,
+    ) -> Result<(Self, bool)> {
+        if authority.role() != super::DatabaseAuthorityRole::Test {
+            return Err(TraceDecayError::Database {
+                message: "registered test runtime requires explicit test authority".to_owned(),
+                operation: "publish registered test database runtime".to_owned(),
+            });
+        }
+        Self::publish_fixture_runtime(
+            db_path,
+            authority,
+            mode,
+            TestRuntimeShardFamilyV1::Registered(scope),
+            Some(identity),
+        )
+        .await
+    }
+
+    /// Publishes a fresh registered fixture with the runtime-core-only
+    /// path-scoped identity fallback while retaining exact retirement control.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     pub async fn publish_registered_test_runtime_with_retirement_control(
@@ -311,18 +421,61 @@ impl Database {
                 operation: "publish registered test runtime".to_owned(),
             });
         }
+        Self::publish_registered_test_runtime_with_retirement_control_inner(
+            db_path, authority, mode, None, scope,
+        )
+        .await
+    }
+
+    /// Publishes a retirement-controlled registered fixture under an identity
+    /// already minted and persisted by the production profile authority.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    pub async fn publish_registered_test_runtime_with_retirement_control_for_profile_identity(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        identity: TestRuntimeProfileIdentityV1,
+        scope: TestDatabaseRuntimeScope,
+    ) -> Result<RegisteredTestRuntimeFixtureV1> {
+        Self::publish_registered_test_runtime_with_retirement_control_inner(
+            db_path,
+            authority,
+            mode,
+            Some(identity),
+            scope,
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    async fn publish_registered_test_runtime_with_retirement_control_inner(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        identity: Option<TestRuntimeProfileIdentityV1>,
+        scope: TestDatabaseRuntimeScope,
+    ) -> Result<RegisteredTestRuntimeFixtureV1> {
+        if authority.role() != super::DatabaseAuthorityRole::Test {
+            return Err(TraceDecayError::Database {
+                message: "registered test runtime requires explicit test authority".to_owned(),
+                operation: "publish registered test runtime".to_owned(),
+            });
+        }
+        let publication = Self::publish_fixture_runtime_publication(
+            db_path,
+            authority,
+            mode,
+            TestRuntimeShardFamilyV1::Registered(scope),
+            identity,
+        )
+        .await?;
         let FixtureRuntimePublication {
             owner,
             runtime,
             registry,
             authority,
-        } = Self::publish_fixture_runtime_publication(
-            db_path,
-            authority,
-            mode,
-            test_registered_shard(scope)?,
-        )
-        .await?;
+        } = publication;
         let binding = runtime.binding().clone();
         let locator = runtime.locator().verified().clone();
         Ok(RegisteredTestRuntimeFixtureV1 {
@@ -368,7 +521,14 @@ impl Database {
                 operation: "publish maintenance test database runtime".to_owned(),
             });
         }
-        Self::publish_fixture_runtime(db_path, authority, mode, test_code_shard()?).await
+        Self::publish_fixture_runtime(
+            db_path,
+            authority,
+            mode,
+            TestRuntimeShardFamilyV1::Code,
+            None,
+        )
+        .await
     }
 
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -376,11 +536,17 @@ impl Database {
         db_path: &Path,
         authority: &DatabaseAuthority,
         mode: TestDatabaseRuntimeMode,
-        target_shard: StoreShardIdV1,
+        shard_family: TestRuntimeShardFamilyV1,
+        identity: Option<TestRuntimeProfileIdentityV1>,
     ) -> Result<(Self, bool)> {
-        let FixtureRuntimePublication { owner, .. } =
-            Self::publish_fixture_runtime_publication(db_path, authority, mode, target_shard)
-                .await?;
+        let FixtureRuntimePublication { owner, .. } = Self::publish_fixture_runtime_publication(
+            db_path,
+            authority,
+            mode,
+            shard_family,
+            identity,
+        )
+        .await?;
         let database = owner.issue_lease().map_err(|error| {
             test_runtime_error("issue test database client lease", format!("{error:?}"))
         })?;
@@ -392,12 +558,18 @@ impl Database {
         db_path: &Path,
         authority: &DatabaseAuthority,
         mode: TestDatabaseRuntimeMode,
-        target_shard: StoreShardIdV1,
+        shard_family: TestRuntimeShardFamilyV1,
+        identity: Option<TestRuntimeProfileIdentityV1>,
     ) -> Result<FixtureRuntimePublication> {
-        let graph_shard_check = target_shard == test_code_shard()?;
+        let graph_shard_check = shard_family == TestRuntimeShardFamilyV1::Code;
         let authority = authority.hold_for(db_path, "publish test database runtime")?;
         authority.require_active_write_scope("publish test database runtime")?;
         let path = authority.canonical_database_path().to_path_buf();
+        let identity = match identity {
+            Some(identity) => identity,
+            None => isolated_test_runtime_identity(&path)?,
+        };
+        let target_shard = shard_family.shard(identity)?;
         let profile_shard = StoreShardIdV1::profile(
             target_shard.brain_id.clone(),
             target_shard.profile_id.clone(),
@@ -563,19 +735,24 @@ fn exact_test_runtime_locator(
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-fn test_runtime_identity() -> Result<(BrainId, UserProfileId)> {
-    let brain_id = BrainId::try_from("brain.test-runtime".to_owned())
+fn isolated_test_runtime_identity(
+    canonical_database_path: &Path,
+) -> Result<TestRuntimeProfileIdentityV1> {
+    let mut digest = Sha256::new();
+    digest.update(b"tracedecay.isolated-test-runtime.identity.v1\0");
+    digest.update(canonical_database_path.as_os_str().as_encoded_bytes());
+    let digest = hex::encode(digest.finalize());
+    let brain_id = BrainId::try_from(format!("brain.{}", &digest[..32]))
         .map_err(|error| test_runtime_error("construct test brain identity", error.to_string()))?;
     let profile_id =
-        UserProfileId::try_from("profile.test-runtime".to_owned()).map_err(|error| {
+        UserProfileId::try_from(format!("profile.{}", &digest[32..])).map_err(|error| {
             test_runtime_error("construct test profile identity", error.to_string())
         })?;
-    Ok((brain_id, profile_id))
+    Ok(TestRuntimeProfileIdentityV1::new(brain_id, profile_id))
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-pub(super) fn test_code_shard() -> Result<StoreShardIdV1> {
-    let (brain_id, profile_id) = test_runtime_identity()?;
+fn test_code_shard(brain_id: BrainId, profile_id: UserProfileId) -> Result<StoreShardIdV1> {
     Ok(StoreShardIdV1::code(
         brain_id,
         profile_id,
@@ -594,14 +771,11 @@ pub(super) fn test_code_shard() -> Result<StoreShardIdV1> {
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-fn test_profile_memory_shard() -> Result<StoreShardIdV1> {
-    let (brain_id, profile_id) = test_runtime_identity()?;
-    Ok(StoreShardIdV1::profile_memory(brain_id, profile_id))
-}
-
-#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-fn test_registered_shard(scope: TestDatabaseRuntimeScope) -> Result<StoreShardIdV1> {
-    let (brain_id, profile_id) = test_runtime_identity()?;
+fn test_registered_shard(
+    brain_id: BrainId,
+    profile_id: UserProfileId,
+    scope: TestDatabaseRuntimeScope,
+) -> Result<StoreShardIdV1> {
     let shard = match scope {
         TestDatabaseRuntimeScope::Profile => StoreShardIdV1::profile(brain_id, profile_id),
         TestDatabaseRuntimeScope::ProfileMemory => {
@@ -651,6 +825,36 @@ fn test_runtime_open_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn caller_supplied_profile_identity_controls_registered_fixture_binding() {
+        let root = tempfile::tempdir().expect("registered fixture root");
+        let path = root.path().join("sessions.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "explicit fixture identity")
+            .expect("acquire fixture authority");
+        let identity = TestRuntimeProfileIdentityV1::new(
+            BrainId::new("brain.explicit-fixture").expect("fixture brain identity"),
+            UserProfileId::new("profile.explicit-fixture").expect("fixture profile identity"),
+        );
+
+        let (database, _) = Database::publish_registered_test_runtime_for_profile_identity(
+            &path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+            identity.clone(),
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .expect("publish explicitly identified fixture");
+
+        assert_eq!(
+            database.registered_binding().shard_id,
+            StoreShardIdV1::profile_sessions(
+                identity.brain_id().clone(),
+                identity.profile_id().clone(),
+            )
+        );
+    }
 
     #[test]
     fn test_runtime_open_failure_preserves_typed_reset_required() {
