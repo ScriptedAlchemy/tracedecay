@@ -154,6 +154,55 @@ async fn refused_observation_shape_resets_scoped_and_readmits() {
     );
 }
 
+/// A retained admission-refusal terminal names an observation row by id and
+/// digest. After a scoped reset recreates the observation authority empty,
+/// a leftover terminal would falsely suppress the re-ingested record whose
+/// rewritten payload happens to match the stale refusal signature — so the
+/// scoped reset must clear the refusal authority with the rest.
+#[tokio::test]
+async fn scoped_reset_clears_retained_admission_refusals() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        raw.pragma_update(None, "foreign_keys", false)
+            .expect("disable foreign keys for fixture seeding");
+        raw.execute_batch(
+            "INSERT INTO observation_admission_refusals
+                (observation_id, refused_payload_digest, retained_payload_digest, refused_at)
+             VALUES ('observation.legacy', 'digest.refused', 'digest.retained', 1);",
+        )
+        .expect("seed one retained admission refusal");
+        install_legacy_observation_shape(&raw);
+    }
+
+    let report = {
+        let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+        reset_refused_observation_authority(&mut raw)
+            .expect("scoped reset of the refused authority")
+    };
+    assert!(
+        report
+            .reset_tables
+            .iter()
+            .any(|table| table == "observation_admission_refusals"),
+        "the refusal authority must be part of the scoped reset: {report:?}"
+    );
+
+    let raw = rusqlite::Connection::open(&database_path).unwrap();
+    assert!(
+        table_exists(&raw, "observation_admission_refusals"),
+        "the refusal authority must be recreated at the canonical shape"
+    );
+    assert_eq!(
+        count(&raw, "observation_admission_refusals"),
+        0,
+        "a scoped reset must leave no stale refusal terminal that could \
+         falsely suppress re-ingested records"
+    );
+}
+
 #[tokio::test]
 async fn healthy_observation_authority_refuses_the_scoped_reset() {
     let directory = TempDir::new().unwrap();

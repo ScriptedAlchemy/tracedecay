@@ -763,7 +763,9 @@ struct CatchUpRecordReceipt {
 /// One real catch-up pass over raw persisted source input: read the durable
 /// cursor, decode only the records the cursor does not cover, and persist
 /// each decoded candidate exactly as ingest would, accounting every identity
-/// digest at the domain boundary.
+/// digest at the domain boundary. Mirrors production provider ingest by
+/// ABORTING the pass on a persist error — an identity collision ends the
+/// pass, it does not skip to the next record.
 async fn run_catch_up_pass(
     store: &crate::GlobalDbObservationStore,
     session_id: &SessionId,
@@ -805,6 +807,7 @@ async fn run_catch_up_pass(
         let digests_after_persist = tracedecay_domain::observation::identity_digest_probe::count();
         let (reads_after, classifications_after, revision_probes_after, command_digests_after) =
             probe.snapshot();
+        let aborted = result.is_err();
         receipts.push(CatchUpRecordReceipt {
             result,
             construction_identity_digests: digests_before_persist - digests_before_construction,
@@ -816,6 +819,9 @@ async fn run_catch_up_pass(
                 command_digests_after - command_digests,
             ),
         });
+        if aborted {
+            break;
+        }
     }
     (decoded, receipts)
 }
@@ -1281,11 +1287,13 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
         Ok(ObservationPersistOutcome::Committed(_))
     ));
 
-    // Pass 1: gen-2 rescan of the rewritten file. Record zero collides and is
-    // terminally refused; the scan continues and commits record one.
+    // Pass 1: gen-2 rescan of the rewritten file. Record zero collides, is
+    // terminally refused, and — like production ingest — ABORTS the pass. The
+    // refusal's own coverage advance lets the follow-up pass move on to
+    // record one and converge.
     let (decoded, receipts) =
         run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
-    assert_eq!(decoded, 2);
+    assert_eq!(decoded, 1, "the collision aborts the pass");
     assert!(matches!(
         receipts[0].result,
         Err(ObservationStoreError::ObservationCollision {
@@ -1293,8 +1301,11 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
             ..
         })
     ));
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-resume").await;
+    assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
     assert!(matches!(
-        receipts[1].result,
+        receipts[0].result,
         Ok(ObservationPersistOutcome::Committed(_))
     ));
     let refused = decode_raw_source_record(
@@ -1485,7 +1496,7 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
     ));
     let (decoded, receipts) =
         run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
-    assert_eq!(decoded, 2);
+    assert_eq!(decoded, 1, "the collision aborts the pass like production");
     assert!(matches!(
         receipts[0].result,
         Err(ObservationStoreError::ObservationCollision {
@@ -1493,8 +1504,11 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
             ..
         })
     ));
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-resume").await;
+    assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
     assert!(matches!(
-        receipts[1].result,
+        receipts[0].result,
         Ok(ObservationPersistOutcome::Committed(_))
     ));
     let refused = decode_raw_source_record(
@@ -1526,13 +1540,15 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
         "retention must reclaim the superseded admission_refused advance row"
     );
 
-    // The file changes again: a REAL gen-3 rescan re-reads BOTH raw lines and
-    // re-admits the refused record through the ingest pipeline itself.
+    // The file changes again: a REAL gen-3 rescan re-reads the raw source and
+    // re-admits the refused record through the ingest pipeline itself. The
+    // fast path answers from the terminal, converges coverage with one typed
+    // cursor-advance write, and aborts the pass like production.
     let (decoded, receipts) =
         run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3").await;
     assert_eq!(
-        decoded, 2,
-        "a rescan after a real file change re-reads the raw source"
+        decoded, 1,
+        "a rescan after a real file change re-reads the raw source and aborts on the collision"
     );
     let refused_readmit = &receipts[0];
     assert!(
@@ -1557,9 +1573,10 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
     );
     assert_eq!(
         refused_readmit.persist_probe_deltas,
-        (0, 0, 0, 0),
-        "the store must not read the stored row, classify, probe revisions, or \
-         digest commands for the post-retention raw-source re-admit"
+        (0, 0, 0, 1),
+        "the re-admit must not read the stored row, classify, or probe revisions; \
+         its single command digest is the typed coverage advance converging the \
+         new generation, not record work"
     );
     // The suppression above was answered by the retained refusal terminal:
     // it must have survived cursor-advance retention.
@@ -1568,9 +1585,12 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
         1,
         "the refusal terminal must survive cursor-advance retention"
     );
-    // The pass still converges: the appended record lands and covers the new
-    // generation, so the NEXT pass reopens zero source records.
-    assert!(receipts[1].result.is_ok(), "{:?}", receipts[1].result);
+    // The resumed pass commits the appended record past the converged
+    // coverage, and the NEXT pass reopens zero source records.
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-resume").await;
+    assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
+    assert!(receipts[0].result.is_ok(), "{:?}", receipts[0].result);
     let digests_before = tracedecay_domain::observation::identity_digest_probe::count();
     let (decoded, _) = run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-b").await;
     assert_eq!(decoded, 0, "the converged rescan reopens no source records");
@@ -1584,6 +1604,548 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
         raw_observation_json(&runtime, refused.observation_id().as_str()).await,
         retained_row,
         "the retained observation row must stay byte-identical"
+    );
+}
+
+/// EOF gate: the refused record is the LAST record of its file, and
+/// production ingest ABORTS a pass on the collision, so no following
+/// committed record can ever advance coverage on its behalf. Across
+/// production retention, a new generation, and a full restart, the refusal
+/// fast path itself must converge each new scan frontier so later passes
+/// reopen nothing — zero decode, zero identity derivation, zero hashing.
+#[tokio::test]
+async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
+    use crate::observation::retention::{ObservationRetentionConfig, RetentionMode};
+
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.terminal-refusal.eof").unwrap();
+    // The refused record is the ONLY record: nothing follows it, ever.
+    let original_lines = vec![(
+        (0, 1),
+        raw_source_line(&session_id, "record.eof.0", (0, 1), "original eof record"),
+    )];
+    let rewritten_lines = vec![(
+        (0, 1),
+        raw_source_line(&session_id, "record.eof.0", (0, 1), "rewritten eof record"),
+    )];
+
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
+    assert_eq!(decoded, 1);
+    assert!(matches!(
+        receipts[0].result,
+        Ok(ObservationPersistOutcome::Committed(_))
+    ));
+
+    // Gen-2 rescan: the EOF record collides and the pass aborts. The refusal
+    // records terminal + coverage, so the SAME generation never reopens it.
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
+    assert_eq!(decoded, 1);
+    assert!(matches!(
+        receipts[0].result,
+        Err(ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        })
+    ));
+    let refused = decode_raw_source_record(
+        &session_id,
+        &rewritten_lines[0].1,
+        2,
+        (0, 1),
+        "receipt.catch-up.gen2.0",
+    );
+    let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
+    let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
+    assert_eq!(
+        decoded, 0,
+        "the refused EOF coverage holds within its generation"
+    );
+
+    // Production retention runs (the EOF advance is the frontier itself, so
+    // it is not reclaimable yet — the terminal must not depend on that).
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    database
+        .run_observation_retention(
+            None,
+            &ObservationRetentionConfig::default(),
+            RetentionMode::Apply,
+            tracedecay_application::clock::now_micros().0,
+        )
+        .await
+        .expect("apply observation retention");
+
+    // Gen-3 rescan (file touched again): the re-admit is answered from the
+    // terminal AND converges the new generation's coverage, so this exact
+    // decode happens once per real file change — never again for gen 3.
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3").await;
+    assert_eq!(decoded, 1);
+    let readmit = &receipts[0];
+    assert!(
+        matches!(
+            readmit.result,
+            Err(ObservationStoreError::ObservationCollision {
+                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+                ..
+            })
+        ),
+        "{:?}",
+        readmit.result
+    );
+    assert_eq!(
+        readmit.persist_identity_digests, 0,
+        "the EOF re-admit must not decode, canonicalize, or hash the terminal row"
+    );
+    assert_eq!(
+        readmit.persist_probe_deltas,
+        (0, 0, 0, 1),
+        "the EOF re-admit converges coverage with exactly one typed advance and no record work"
+    );
+    let digests_before = tracedecay_domain::observation::identity_digest_probe::count();
+    let (decoded, _) = run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-b").await;
+    assert_eq!(
+        decoded, 0,
+        "later gen-3 passes must never reopen the refused EOF record"
+    );
+    assert_eq!(
+        tracedecay_domain::observation::identity_digest_probe::count() - digests_before,
+        0,
+        "later gen-3 passes perform zero decode/canonicalize/SHA work"
+    );
+
+    // Retention now reclaims the superseded gen-2 advance; the terminal and
+    // the converged coverage survive.
+    database
+        .run_observation_retention(
+            None,
+            &ObservationRetentionConfig::default(),
+            RetentionMode::Apply,
+            tracedecay_application::clock::now_micros().0,
+        )
+        .await
+        .expect("apply observation retention");
+    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+
+    // Restart: coverage and terminal are durable; nothing reopens.
+    drop(store);
+    drop(runtime);
+    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let reopened_store = reopened
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let digests_before = tracedecay_domain::observation::identity_digest_probe::count();
+    let (decoded, _) =
+        run_catch_up_pass(&reopened_store, &session_id, 3, &rewritten_lines, "gen3-c").await;
+    assert_eq!(
+        decoded, 0,
+        "restarted rescans must never reopen the refused EOF record"
+    );
+    assert_eq!(
+        tracedecay_domain::observation::identity_digest_probe::count() - digests_before,
+        0
+    );
+    assert_eq!(
+        raw_observation_json(&reopened, refused.observation_id().as_str()).await,
+        retained_row,
+        "the retained observation row must stay byte-identical"
+    );
+}
+
+/// Atomicity gate: the refusal marker commits before its cursor advance, so a
+/// failure between the two — the injected cursor-advance failure state, here
+/// seeded durably as exactly what such a crash leaves behind — produces a
+/// marker with unconverged coverage. That orphan must be self-repairing: the
+/// next frontier pass answers from the marker AND repairs coverage, so the
+/// record is reopened at most once and never again.
+#[tokio::test]
+async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.terminal-refusal.orphan").unwrap();
+    let original_lines = vec![(
+        (0, 1),
+        raw_source_line(&session_id, "record.orphan.0", (0, 1), "original record"),
+    )];
+    let rewritten_lines = vec![(
+        (0, 1),
+        raw_source_line(&session_id, "record.orphan.0", (0, 1), "rewritten record"),
+    )];
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
+    assert_eq!(decoded, 1);
+    assert!(matches!(
+        receipts[0].result,
+        Ok(ObservationPersistOutcome::Committed(_))
+    ));
+
+    // Injected cursor-advance failure: the marker transaction committed, the
+    // advance did not. Seed exactly that durable state — the refusal marker
+    // exists while the cursor still sits at generation 1.
+    let refused = decode_raw_source_record(
+        &session_id,
+        &rewritten_lines[0].1,
+        2,
+        (0, 1),
+        "receipt.catch-up.gen2.0",
+    );
+    let retained = decode_raw_source_record(
+        &session_id,
+        &original_lines[0].1,
+        1,
+        (0, 1),
+        "receipt.catch-up.gen1.0",
+    );
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "INSERT INTO observation_admission_refusals
+                (observation_id, refused_payload_digest, retained_payload_digest, refused_at)
+             VALUES (?1, ?2, ?3, 1)",
+            params![
+                refused.observation_id().as_str(),
+                refused.payload_reference().digest().as_str(),
+                retained.payload_reference().digest().as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
+
+    // The next frontier pass re-admits the record from raw source: the
+    // orphaned marker must answer it AND repair the missing coverage.
+    let (decoded, receipts) =
+        run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
+    assert_eq!(decoded, 1);
+    let repair = &receipts[0];
+    assert!(
+        matches!(
+            repair.result,
+            Err(ObservationStoreError::ObservationCollision {
+                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+                ..
+            })
+        ),
+        "{:?}",
+        repair.result
+    );
+    assert_eq!(
+        repair.persist_identity_digests, 0,
+        "the orphan-marker re-admit must not decode, canonicalize, or hash the terminal row"
+    );
+    assert_eq!(
+        repair.persist_probe_deltas,
+        (0, 0, 0, 1),
+        "the orphan-marker re-admit repairs coverage with exactly one typed advance"
+    );
+
+    // Coverage is repaired: later passes never reopen the record, even after
+    // a restart, and no duplicate marker rows appear.
+    let digests_before = tracedecay_domain::observation::identity_digest_probe::count();
+    let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
+    assert_eq!(decoded, 0, "repaired coverage must not reopen the record");
+    assert_eq!(
+        tracedecay_domain::observation::identity_digest_probe::count() - digests_before,
+        0
+    );
+    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    drop(store);
+    drop(runtime);
+    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let reopened_store = reopened
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let (decoded, _) =
+        run_catch_up_pass(&reopened_store, &session_id, 2, &rewritten_lines, "gen2-c").await;
+    assert_eq!(decoded, 0);
+    assert_eq!(
+        raw_observation_json(&reopened, refused.observation_id().as_str()).await,
+        retained_row,
+        "the retained observation row must stay byte-identical"
+    );
+}
+
+/// Narrow-collision gate: a durable provenance row that names the SAME output
+/// as the drain now derives but disagrees on its content — corrupt digest,
+/// receipt, or anchor — is corrupt provenance authority, not an
+/// existing-output collision. It must stay a hard `ProvenanceCollision` with
+/// the queue item retained and the checkpoint unmoved; only a row binding a
+/// DIFFERENT output converges to the durable skip.
+#[tokio::test]
+async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
+    // Learn the derived output binding from a clean drain of the identical
+    // fixture in a scratch store (the derivation is deterministic).
+    let scratch = TempDir::new().unwrap();
+    let scratch_runtime = HostAdmissionTestRuntimeV1::profile(scratch.path())
+        .await
+        .unwrap();
+    let scratch_store = scratch_runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.provenance.corrupt-binding").unwrap();
+    let (scratch_observation, scratch_write) = collision_candidate(
+        &session_id,
+        "record.corrupt-binding",
+        1,
+        "corrupt binding canary",
+        "receipt.corrupt-binding",
+        None,
+    );
+    assert!(matches!(
+        scratch_store
+            .persist_observation(scratch_write)
+            .await
+            .unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    assert!(matches!(
+        scratch_store
+            .project_observation(scratch_observation.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::Projected(_)
+    ));
+    let clean_rows = provenance_rows(&scratch_runtime).await;
+    assert_eq!(clean_rows.len(), 1);
+    let (_, _, _, _, derived_provider, derived_message_id, _, _) = clean_rows[0].clone();
+    // Capture the clean drain's projected session and message rows verbatim.
+    let scratch_database = scratch_runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered scratch database");
+    let scratch_snapshot = scratch_database.read_snapshot().await.unwrap();
+    let mut rows = scratch_snapshot
+        .query(
+            "SELECT provider, session_id, project_key, project_path, title, started_at,
+                    ended_at, transcript_path, metadata_json, parent_session_id, is_subagent,
+                    agent_id, parent_tool_use_id
+             FROM sessions",
+            (),
+        )
+        .await
+        .unwrap();
+    let session_row = rows.next().await.unwrap().expect("projected session row");
+    let projected_session: (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<String>,
+        Option<String>,
+    ) = (
+        session_row.get(0).unwrap(),
+        session_row.get(1).unwrap(),
+        session_row.get(2).unwrap(),
+        session_row.get(3).unwrap(),
+        session_row.get(4).unwrap(),
+        session_row.get(5).unwrap(),
+        session_row.get(6).unwrap(),
+        session_row.get(7).unwrap(),
+        session_row.get(8).unwrap(),
+        session_row.get(9).unwrap(),
+        session_row.get(10).unwrap(),
+        session_row.get(11).unwrap(),
+        session_row.get(12).unwrap(),
+    );
+    drop(rows);
+    let mut rows = scratch_snapshot
+        .query(
+            "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
+                    model, tool_names, source_path, source_offset, metadata_json
+             FROM session_messages",
+            (),
+        )
+        .await
+        .unwrap();
+    let message_row = rows.next().await.unwrap().expect("projected message row");
+    let projected_message: (
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    ) = (
+        message_row.get(0).unwrap(),
+        message_row.get(1).unwrap(),
+        message_row.get(2).unwrap(),
+        message_row.get(3).unwrap(),
+        message_row.get(4).unwrap(),
+        message_row.get(5).unwrap(),
+        message_row.get(6).unwrap(),
+        message_row.get(7).unwrap(),
+        message_row.get(8).unwrap(),
+        message_row.get(9).unwrap(),
+        message_row.get(10).unwrap(),
+        message_row.get(11).unwrap(),
+        message_row.get(12).unwrap(),
+    );
+    drop(rows);
+
+    // Main store: the SAME observation with its projected output rows already
+    // durable — but the provenance row naming that SAME output carries a
+    // corrupt digest. This is discordant provenance authority, not an
+    // existing-output collision.
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let (observation, write) = collision_candidate(
+        &session_id,
+        "record.corrupt-binding",
+        1,
+        "corrupt binding canary",
+        "receipt.corrupt-binding",
+        None,
+    );
+    assert!(matches!(
+        store.persist_observation(write).await.unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let anchor_id = tracedecay_domain::derive_exact_observation_anchor_id(
+        observation.scope(),
+        observation.observation_id(),
+    )
+    .unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "INSERT INTO sessions
+                (provider, session_id, project_key, project_path, title, started_at, ended_at,
+                 transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
+                 parent_tool_use_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                projected_session.0.as_str(),
+                projected_session.1.as_str(),
+                projected_session.2.as_str(),
+                projected_session.3.as_str(),
+                projected_session.4.as_deref(),
+                projected_session.5,
+                projected_session.6,
+                projected_session.7.as_deref(),
+                projected_session.8.as_deref(),
+                projected_session.9.as_deref(),
+                projected_session.10,
+                projected_session.11.as_deref(),
+                projected_session.12.as_deref(),
+            ],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO session_messages
+                (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
+                 tool_names, source_path, source_offset, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                projected_message.0.as_str(),
+                projected_message.1.as_str(),
+                projected_message.2.as_str(),
+                projected_message.3.as_str(),
+                projected_message.4,
+                projected_message.5,
+                projected_message.6.as_str(),
+                projected_message.7.as_deref(),
+                projected_message.8.as_deref(),
+                projected_message.9.as_deref(),
+                projected_message.10.as_deref(),
+                projected_message.11,
+                projected_message.12.as_deref(),
+            ],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO observation_projection_provenance
+                (projector_version, observation_id, output_ordinal, receipt_id,
+                 output_provider, output_message_id, output_digest, message_created,
+                 retrieval_anchor_id)
+             VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, 1, ?7)",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str(),
+                observation.receipt().receipt().receipt_id().as_str(),
+                derived_provider.as_str(),
+                derived_message_id.as_str(),
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                anchor_id.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let seeded_rows = provenance_rows(&runtime).await;
+
+    let error = store
+        .project_observation(observation.observation_id())
+        .await
+        .expect_err("corrupt provenance naming the derived output must stay a hard error");
+    assert!(
+        matches!(
+            error,
+            tracedecay_store::ProjectionStoreError::ProvenanceCollision
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        store.next_queued_observation().await.unwrap().as_ref(),
+        Some(observation.observation_id()),
+        "corrupt provenance must not be silently skipped past"
+    );
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        0,
+        "the checkpoint must not move over corrupt provenance"
+    );
+    assert_eq!(
+        provenance_rows(&runtime).await,
+        seeded_rows,
+        "the corrupt row is evidence and must stay untouched"
     );
 }
 
