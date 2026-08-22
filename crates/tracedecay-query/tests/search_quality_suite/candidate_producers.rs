@@ -1448,10 +1448,16 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
     // minutes. The earlier activation failed with "the read port exceeded
     // its bounded work budget" and later retries with "code-index retained
     // generation did not activate because lexical projection row was
-    // advanced more than once". This regression drives the same retry shape
-    // through the real sealed source: every exhausted window must stay a
-    // typed, resumable interruption that never advances a row twice, and
-    // the retried activation must seal instead of terminally blocking.
+    // advanced more than once". A fresh beta.33 dogfood reproduced the same
+    // lane: daemon PID 32033 still `warming` after ~56 minutes,
+    // `latest_generation_id: null`, graph `exact_scope_generation_not_ready`,
+    // pre-embedding (no model.onnx/generation/graph-replay FD), ~135% CPU
+    // across 115 threads, and VmRSS 6.88GB — past every advertised memory
+    // ceiling. This regression drives the same retry shape through the real
+    // sealed source: every exhausted window must stay a typed, resumable
+    // interruption that never advances a row twice, the retry storm must
+    // not grow the staged artifact or the enforced ledger claim, and the
+    // retried activation must seal instead of burning unbounded work.
     let (fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
     let metadata = fixture.metadata.clone();
     let control = ArtifactControl { cancelled: false };
@@ -1463,6 +1469,27 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
         builder.append_page(page, &control).expect("append page");
     }
     let staged = builder.progress().expect("staged progress");
+    let staged_file_bytes = std::fs::metadata(&artifact_path)
+        .expect("staged artifact metadata")
+        .len();
+    // The enforced ledger claim must hold for every real page while the
+    // retry storm runs: unbounded RSS growth under warming is exactly what
+    // the beta.33 evidence shows an unenforced claim permits.
+    let source_window = fixture.open_source(1).staging_window_bytes();
+    let max_page_charge = pages
+        .iter()
+        .map(|page| {
+            builder
+                .page_ledger_charge_bytes(page)
+                .expect("page ledger charge")
+        })
+        .max()
+        .expect("fixture pages");
+    assert!(
+        builder.fixed_ledger_charge_bytes() + source_window + max_page_charge
+            <= CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        "the whole warming replay must fit the enforced build memory claim"
+    );
 
     // Repeated bounded-budget activations, each exhausting deeper into the
     // seal replay like the production retries.
@@ -1486,6 +1513,15 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
             "round {round}: an exhausted bounded work budget must not mutate staged progress"
         );
         staged_row_cardinality(&artifact_path);
+        // A retry storm must not accumulate: an interrupted replay rolls
+        // back to the identical staged artifact, byte for byte.
+        assert_eq!(
+            std::fs::metadata(&artifact_path)
+                .expect("staged artifact metadata after exhausted round")
+                .len(),
+            staged_file_bytes,
+            "round {round}: an exhausted replay must not grow the staged artifact"
+        );
         builder
             .append_page(&pages[0], &control)
             .expect("page replay stays idempotent between exhausted activation rounds");
