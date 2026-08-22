@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.36](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.35...v0.1.0-beta.36) (2026-08-22)
+
+
+### Features
+
+* **automation:** add crate-owned run label vocabulary ([70ba894](https://github.com/ScriptedAlchemy/tracedecay/commit/70ba8946b1ab3599f215a421fc636d7a49ed9c22))
+* **automation:** emit typed tombstone label on skill consolidations ([8cb732e](https://github.com/ScriptedAlchemy/tracedecay/commit/8cb732e84ae26fe6af6792d6f581149eb0d7f516))
+* **automation:** wire typed skill-overlap tombstone label into production consolidation records ([4eb0f20](https://github.com/ScriptedAlchemy/tracedecay/commit/4eb0f20465ac4cb8878691a6a8758982eb8f3868))
+
+
+### Bug Fixes
+
+* **automation:** validate skill overlap tombstones ([6973717](https://github.com/ScriptedAlchemy/tracedecay/commit/6973717199dde18956e08b11e97a5e466876b918))
+* **catalog:** unpin eight existing application-surface operations ([40d72f0](https://github.com/ScriptedAlchemy/tracedecay/commit/40d72f0cc2132350924b4a71f38457d4e645fea5))
+* **catalog:** unpin eight existing application-surface operations ([d0697b4](https://github.com/ScriptedAlchemy/tracedecay/commit/d0697b431a87ec89f5891aa4b1d8ca86a748b894))
+* **global-db:** clear admission refusals in the scoped authority reset ([8a2849d](https://github.com/ScriptedAlchemy/tracedecay/commit/8a2849db732eb681c8d1d652b71b2afc4ed9de7c))
+* **global-db:** converge only different-output provenance collisions ([5e32f13](https://github.com/ScriptedAlchemy/tracedecay/commit/5e32f131d20e4c9b4f32fab3200cfed70c342587))
+* **global-db:** converge refusal coverage on fast-path re-admits ([211b968](https://github.com/ScriptedAlchemy/tracedecay/commit/211b968b911a85d94d2e7f91683a53340aa9a406))
+* **global-db:** durable terminal coverage for observation collisions ([4868b1b](https://github.com/ScriptedAlchemy/tracedecay/commit/4868b1b997b01309ba0b4d033854c272bfbf4f84))
+* **global-db:** record refusal marker and coverage atomically ([e198d80](https://github.com/ScriptedAlchemy/tracedecay/commit/e198d80781c2b5046199e01341fd8300a3bbdbbb))
+* **runtime-core:** bind test runtimes to profile identity ([39137d1](https://github.com/ScriptedAlchemy/tracedecay/commit/39137d18044805c412a2d3b1273da134c3c3012a))
+* **runtime-core:** bind test runtimes to profile identity ([626369a](https://github.com/ScriptedAlchemy/tracedecay/commit/626369a95aa87264682e115878f777d98fbaa46c))
+* **runtime-core:** derive test runtime identity per fixture root ([5d1d70e](https://github.com/ScriptedAlchemy/tracedecay/commit/5d1d70e3ae8fb663c8a4d5e8567f373fb519871e))
+
 ## [0.1.0-beta.35](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.34...v0.1.0-beta.35) (2026-08-22)
 
 
