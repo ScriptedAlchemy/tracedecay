@@ -1050,17 +1050,45 @@ async fn write_effect_converging_collisions(
                 observation = observation.observation_id().as_str(),
                 "projection output collided; recording a durable skip disposition"
             );
-            conn.execute_batch(&format!(
-                "ROLLBACK TO {PROJECTION_COLLISION_SAVEPOINT}; \
-                 RELEASE {PROJECTION_COLLISION_SAVEPOINT};"
-            ))
-            .await
-            .map_err(|error| storage("rollback projection collision savepoint", error))?;
-            *effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
-            write.run(conn, sequence, observation, effect).await
+            converge_collided_effect(conn, write, sequence, observation, effect).await
+        }
+        // A provenance collision with an existing output is the same
+        // deterministic condition surfaced one layer lower: rows already
+        // durable under this observation's provenance key disagree with what
+        // the projector now derives. Retrying can never succeed, so wedging
+        // the sequential queue behind it starves every later observation.
+        // Converge exactly like an output collision: the existing rows stay
+        // untouched and the observation lands as a durable, auditable skip.
+        Err(ProjectionStoreError::ProvenanceCollision) => {
+            tracing::warn!(
+                observation = observation.observation_id().as_str(),
+                "projection provenance collided with an existing output; \
+                 recording a durable skip disposition"
+            );
+            converge_collided_effect(conn, write, sequence, observation, effect).await
         }
         Err(error) => Err(error),
     }
+}
+
+/// Shared collision convergence: roll the guarded write back, substitute the
+/// durable `OutputCollision` skip, and re-run so the drain or rebuild
+/// checkpoints past the collided observation without touching existing rows.
+async fn converge_collided_effect(
+    conn: &impl Executor,
+    write: &CollisionGuardedWrite<'_>,
+    sequence: u64,
+    observation: &DurableObservationV1,
+    effect: &mut ObservationProjection,
+) -> ProjectionStoreResult<()> {
+    conn.execute_batch(&format!(
+        "ROLLBACK TO {PROJECTION_COLLISION_SAVEPOINT}; \
+         RELEASE {PROJECTION_COLLISION_SAVEPOINT};"
+    ))
+    .await
+    .map_err(|error| storage("rollback projection collision savepoint", error))?;
+    *effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
+    write.run(conn, sequence, observation, effect).await
 }
 
 enum RebuildAdvance {
