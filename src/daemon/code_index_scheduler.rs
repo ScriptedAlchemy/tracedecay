@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use same_file::Handle;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_application::now_micros;
@@ -28,7 +29,9 @@ use tracedecay_domain::{
     SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1,
     WorktreeId, canonical_sha256,
 };
-use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
+use tracedecay_private_fs::{
+    framed_log::DirectorySyncPolicy, open_private_file, validate_private_directory,
+};
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
     ResidentMemoryKeyV1, ResidentMemoryReservationV1,
@@ -1717,10 +1720,16 @@ impl DaemonCodeTextArtifactStoreV1 {
         sealed_identity: &DurableSealedCodeGenerationIdentityV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<DurableCodeTextArtifactDescriptorV1, RetrievalPortError> {
-        let artifact_hex = sha256_file_hex(staging_path, control)?;
-        let artifact_size_bytes = std::fs::metadata(staging_path)
-            .map_err(text_artifact_unavailable)?
-            .len();
+        let artifacts_root = code_text_artifacts_root(&self.store_root);
+        ensure_private_text_artifacts_root(&artifacts_root)?;
+        // Publication and artifact retention share this canonical store lock.
+        // Hold it from the first staging observation until pointer attachment
+        // is durable so retention cannot unlink a newly visible artifact from
+        // a plan made before the descriptor was attached.
+        let lock = acquire_code_generation_store_lock(&self.store_root)
+            .map_err(text_artifact_unavailable)?;
+        let (artifact_hex, artifact_size_bytes) =
+            sha256_private_file_hex_and_size(staging_path, control)?;
         let descriptor = DurableCodeTextArtifactDescriptorV1 {
             generation_id: generation.manifest().generation_id.clone(),
             artifact_file: format!("text-artifact-{artifact_hex}.bin"),
@@ -1728,35 +1737,33 @@ impl DaemonCodeTextArtifactStoreV1 {
                 .map_err(text_artifact_unavailable)?,
             artifact_size_bytes,
         };
-        let artifacts_root = code_text_artifacts_root(&self.store_root);
-        std::fs::create_dir_all(&artifacts_root).map_err(text_artifact_unavailable)?;
         let final_path = artifacts_root.join(&descriptor.artifact_file);
-        if final_path.exists() {
-            // A digest-derived name is not proof that an existing filesystem
-            // object contains the named bytes. Verify the stable destination
-            // before withdrawing staging evidence; a symlink, non-regular
-            // object, truncated file, or same-name collision fails closed.
-            let metadata = final_path
-                .symlink_metadata()
-                .map_err(text_artifact_unavailable)?;
-            if !metadata.file_type().is_file() || metadata.len() != artifact_size_bytes {
-                return Err(RetrievalPortError::Contract(
-                    "existing code text artifact does not match its content address".to_owned(),
-                ));
+        match final_path.symlink_metadata() {
+            Ok(_) => {
+                // A digest-derived name is not proof that an existing filesystem
+                // object contains the named bytes. Verify the stable destination
+                // before withdrawing staging evidence; a symlink, non-regular
+                // object, truncated file, or same-name collision fails closed.
+                let (existing_hex, existing_size_bytes) =
+                    sha256_private_file_hex_and_size(&final_path, control)?;
+                if existing_size_bytes != artifact_size_bytes {
+                    return Err(RetrievalPortError::Contract(
+                        "existing code text artifact does not match its content address".to_owned(),
+                    ));
+                }
+                if existing_hex != artifact_hex {
+                    return Err(RetrievalPortError::Contract(
+                        "existing code text artifact contains different bytes".to_owned(),
+                    ));
+                }
+                std::fs::remove_file(staging_path).map_err(text_artifact_unavailable)?;
             }
-            let existing_hex = sha256_file_hex(&final_path, control)?;
-            if existing_hex != artifact_hex {
-                return Err(RetrievalPortError::Contract(
-                    "existing code text artifact contains different bytes".to_owned(),
-                ));
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::rename(staging_path, &final_path).map_err(text_artifact_unavailable)?;
             }
-            std::fs::remove_file(staging_path).map_err(text_artifact_unavailable)?;
-        } else {
-            std::fs::rename(staging_path, &final_path).map_err(text_artifact_unavailable)?;
+            Err(error) => return Err(text_artifact_unavailable(error)),
         }
         DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
-            .map_err(text_artifact_unavailable)?;
-        let lock = acquire_code_generation_store_lock(&self.store_root)
             .map_err(text_artifact_unavailable)?;
         let pointer = self
             .publication
@@ -2159,7 +2166,7 @@ impl LatestCompleteCodeIndexV1 {
                     )
                 })?;
             let artifacts_root = code_text_artifacts_root(store.store_root());
-            std::fs::create_dir_all(&artifacts_root).map_err(text_artifact_unavailable)?;
+            ensure_private_text_artifacts_root(&artifacts_root)?;
             let staging_path = artifacts_root.join(format!(".text-artifact-{sealed_hex}.staging"));
             let mut source = store.open_sealed_source(&sealed_identity, &control)?;
             let builder_budget = text_artifact_builder_budget(source.staging_window_bytes())?;
@@ -3684,12 +3691,44 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// Cancellation is checked before opening and after every bounded read, so a
 /// shutdown or superseding generation cannot strand publication in a
 /// corpus-sized uninterruptible hash.
-fn sha256_file_hex(
+fn sha256_private_file_hex_and_size(
     path: &Path,
     control: &dyn CodeIndexExecutionControlV1,
-) -> Result<String, RetrievalPortError> {
+) -> Result<(String, u64), RetrievalPortError> {
     checkpoint_text_artifact_control(control)?;
-    let mut file = std::fs::File::open(path).map_err(text_artifact_unavailable)?;
+    let named_metadata = path.symlink_metadata().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RetrievalPortError::AuthorityUnavailable(
+                "code text artifact file is missing".to_owned(),
+            )
+        } else {
+            text_artifact_unavailable(error)
+        }
+    })?;
+    if !named_metadata.file_type().is_file() {
+        return Err(RetrievalPortError::Contract(
+            "code text artifact path is not a regular file".to_owned(),
+        ));
+    }
+    let mut file = open_private_file(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RetrievalPortError::AuthorityUnavailable(
+                "code text artifact file disappeared before open".to_owned(),
+            )
+        } else {
+            RetrievalPortError::Contract(format!(
+                "code text artifact file is not owner-private: {error}"
+            ))
+        }
+    })?;
+    let file_metadata = file.metadata().map_err(text_artifact_unavailable)?;
+    if !file_metadata.is_file() || file_metadata.len() != named_metadata.len() {
+        return Err(RetrievalPortError::Contract(
+            "code text artifact file identity changed before hashing".to_owned(),
+        ));
+    }
+    let identity = Handle::from_file(file.try_clone().map_err(text_artifact_unavailable)?)
+        .map_err(text_artifact_unavailable)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
@@ -3700,7 +3739,31 @@ fn sha256_file_hex(
         hasher.update(&buffer[..read]);
         checkpoint_text_artifact_control(control)?;
     }
-    Ok(hex::encode(hasher.finalize()))
+    let current_metadata = path.symlink_metadata().map_err(text_artifact_unavailable)?;
+    let current_identity = Handle::from_path(path).map_err(text_artifact_unavailable)?;
+    if !current_metadata.file_type().is_file()
+        || current_metadata.len() != file_metadata.len()
+        || current_identity != identity
+    {
+        return Err(RetrievalPortError::Contract(
+            "code text artifact named file changed while hashing".to_owned(),
+        ));
+    }
+    Ok((hex::encode(hasher.finalize()), file_metadata.len()))
+}
+
+fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortError> {
+    match tracedecay_private_fs::create_private_directory(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            validate_private_directory(path).map_err(|error| {
+                RetrievalPortError::Contract(format!(
+                    "code text artifacts root is not owner-private: {error}"
+                ))
+            })
+        }
+        Err(error) => Err(text_artifact_unavailable(error)),
+    }
 }
 
 fn checkpoint_text_artifact_control(

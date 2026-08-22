@@ -2436,6 +2436,293 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
     );
 }
 
+#[test]
+fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
+    use std::sync::{Condvar, Mutex, mpsc};
+    use std::thread;
+
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        execute_code_generation_retention, plan_code_generation_retention,
+    };
+
+    struct PauseAfterExistingArtifactRead {
+        checkpoints: std::sync::atomic::AtomicUsize,
+        state: Mutex<(bool, bool)>,
+        ready: Condvar,
+    }
+
+    impl PauseAfterExistingArtifactRead {
+        fn wait_until_paused(&self) {
+            let mut state = self.state.lock().expect("publication pause state");
+            while !state.0 {
+                state = self.ready.wait(state).expect("wait for publication pause");
+            }
+        }
+
+        fn resume(&self) {
+            let mut state = self.state.lock().expect("publication pause state");
+            state.1 = true;
+            self.ready.notify_all();
+        }
+    }
+
+    impl CodeIndexExecutionControlV1 for PauseAfterExistingArtifactRead {
+        fn is_cancelled(&self) -> bool {
+            // One short staging file and one short existing artifact each
+            // checkpoint before open and after their single bounded read. The
+            // fourth checkpoint is therefore after the destination's bytes
+            // were verified but before publication can attach its descriptor.
+            if self
+                .checkpoints
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                == 3
+            {
+                let mut state = self.state.lock().expect("publication pause state");
+                state.0 = true;
+                self.ready.notify_all();
+                while !state.1 {
+                    state = self.ready.wait(state).expect("wait to resume publication");
+                }
+            }
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_artifact() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let artifact_store = latest.text_artifact_store.clone();
+    let generation = latest.generation().clone();
+    let sealed_identity = artifact_store
+        .sealed_identity(&generation.manifest().generation_id)
+        .expect("sealed generation identity");
+    let sealed_hex = sealed_identity
+        .digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .expect("sealed SHA-256 digest");
+    let artifacts_root = store.path().join("code-text-artifacts-v1");
+    tracedecay_private_fs::create_private_directory(&artifacts_root)
+        .expect("create private artifacts root");
+    let staging = artifacts_root.join(format!(".text-artifact-{sealed_hex}.staging"));
+    let artifact_bytes = b"already content-addressed artifact";
+    let mut staging_file =
+        tracedecay_private_fs::create_private_file(&staging).expect("create private staging file");
+    std::io::Write::write_all(&mut staging_file, artifact_bytes).expect("write staging artifact");
+    drop(staging_file);
+    let artifact_hex = hex::encode(Sha256::digest(artifact_bytes));
+    let artifact_file = format!("text-artifact-{artifact_hex}.bin");
+    let artifact_path = artifacts_root.join(&artifact_file);
+    let mut artifact_file_handle = tracedecay_private_fs::create_private_file(&artifact_path)
+        .expect("create private orphan artifact");
+    std::io::Write::write_all(&mut artifact_file_handle, artifact_bytes)
+        .expect("write orphan artifact");
+    drop(artifact_file_handle);
+
+    let control = Arc::new(PauseAfterExistingArtifactRead {
+        checkpoints: std::sync::atomic::AtomicUsize::new(0),
+        state: Mutex::new((false, false)),
+        ready: Condvar::new(),
+    });
+    let publish_control = Arc::clone(&control);
+    let publisher = thread::spawn(move || {
+        artifact_store.publish(
+            &staging,
+            &generation,
+            &sealed_identity,
+            publish_control.as_ref(),
+        )
+    });
+    control.wait_until_paused();
+
+    let plan = plan_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .expect("plan the orphan artifact observed before attachment");
+    let retention_root = store.path().to_path_buf();
+    let (retention_done_tx, retention_done_rx) = mpsc::sync_channel(1);
+    let retention = thread::spawn(move || {
+        let result = execute_code_generation_retention(
+            &retention_root,
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(73),
+            None,
+        );
+        retention_done_tx
+            .send(result)
+            .expect("report retention completion");
+    });
+
+    // Unfixed publication owns no store lock here, so retention completes and
+    // unlinks the destination. Fixed publication holds the canonical lock and
+    // keeps retention blocked until its pointer attachment is durable.
+    let early_retention = retention_done_rx.recv_timeout(Duration::from_secs(2));
+    control.resume();
+    let descriptor = publisher
+        .join()
+        .expect("publication thread")
+        .expect("publish text artifact");
+    let retention_result = match early_retention {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => retention_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("retention completes after publication releases the store lock"),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("retention thread disconnected before reporting its outcome")
+        }
+    };
+    retention.join().expect("retention thread");
+
+    assert_eq!(descriptor.artifact_file, artifact_file);
+    assert!(
+        artifact_path.is_file(),
+        "a successful descriptor must always retain its content-addressed bytes"
+    );
+    assert!(
+        retention_result.is_err(),
+        "the stale orphan plan must be rejected after pointer attachment"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn text_artifact_builder_creates_an_owner_private_artifacts_root() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn private_artifact() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+
+    let _ = latest
+        .advance_text_serving(1)
+        .expect("start text-artifact build");
+
+    let mode = std::fs::symlink_metadata(store.path().join("code-text-artifacts-v1"))
+        .expect("artifacts-root metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "the artifact namespace must be owner-private");
+}
+
+#[cfg(unix)]
+#[test]
+fn text_artifact_publish_rejects_a_permissive_artifacts_root() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct NeverCancelled;
+
+    impl CodeIndexExecutionControlV1 for NeverCancelled {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn private_publish() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let artifact_store = latest.text_artifact_store.clone();
+    let generation = latest.generation();
+    let sealed_identity = artifact_store
+        .sealed_identity(&generation.manifest().generation_id)
+        .expect("sealed generation identity");
+    let artifacts_root = store.path().join("code-text-artifacts-v1");
+    std::fs::create_dir(&artifacts_root).expect("create artifacts root");
+    std::fs::set_permissions(&artifacts_root, std::fs::Permissions::from_mode(0o755))
+        .expect("make artifacts root permissive");
+    let staging = artifacts_root.join("artifact.staging");
+    std::fs::write(&staging, b"private artifact bytes").expect("write staging artifact");
+
+    assert!(
+        matches!(
+            artifact_store.publish(&staging, generation, &sealed_identity, &NeverCancelled),
+            Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
+        ),
+        "publication must fail closed instead of accepting a permissive artifact namespace"
+    );
+    assert!(staging.is_file(), "refusal must preserve staging evidence");
+}
+
+#[cfg(unix)]
+#[test]
+fn text_artifact_publish_rejects_a_symlink_artifacts_root() {
+    use std::os::unix::fs::symlink;
+
+    struct NeverCancelled;
+
+    impl CodeIndexExecutionControlV1 for NeverCancelled {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn symlink_publish() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let artifact_store = latest.text_artifact_store.clone();
+    let generation = latest.generation();
+    let sealed_identity = artifact_store
+        .sealed_identity(&generation.manifest().generation_id)
+        .expect("sealed generation identity");
+    let foreign_root = TempDir::new().expect("foreign artifact root");
+    let artifacts_root = store.path().join("code-text-artifacts-v1");
+    symlink(foreign_root.path(), &artifacts_root).expect("create artifact-root symlink");
+    let staging = artifacts_root.join("artifact.staging");
+    std::fs::write(&staging, b"foreign artifact bytes").expect("write foreign staging artifact");
+
+    assert!(
+        matches!(
+            artifact_store.publish(&staging, generation, &sealed_identity, &NeverCancelled),
+            Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
+        ),
+        "publication must not traverse a symlink artifact namespace"
+    );
+    assert!(
+        staging.is_file(),
+        "refusal must preserve foreign staging bytes"
+    );
+}
+
 fn active_text_artifact_path(store_root: &Path) -> PathBuf {
     let pointer: serde_json::Value = serde_json::from_slice(
         &std::fs::read(store_root.join("active-code-generation-v1.json"))
@@ -2899,18 +3186,139 @@ fn text_artifact_hash_honors_cancellation_between_bounded_reads() {
 
     let directory = TempDir::new().expect("hash fixture root");
     let staging = directory.path().join("artifact.staging");
-    std::fs::write(&staging, vec![7_u8; 3 * 64 * 1024]).expect("write hash fixture");
+    let mut staging_file =
+        tracedecay_private_fs::create_private_file(&staging).expect("create hash fixture");
+    std::io::Write::write_all(&mut staging_file, &vec![7_u8; 3 * 64 * 1024])
+        .expect("write hash fixture");
+    drop(staging_file);
     let control = CancelAfterFirstRead {
         checkpoints: std::sync::atomic::AtomicUsize::new(0),
     };
 
     assert_eq!(
-        super::sha256_file_hex(&staging, &control),
+        super::sha256_private_file_hex_and_size(&staging, &control).map(|(digest, _)| digest),
         Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
     );
     assert!(
         staging.is_file(),
         "cancelled publication hashing must preserve resumable staging bytes"
+    );
+}
+
+#[test]
+fn text_artifact_hash_rejects_non_regular_staging_paths() {
+    struct NeverCancelled;
+
+    impl CodeIndexExecutionControlV1 for NeverCancelled {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    let directory = TempDir::new().expect("hash fixture root");
+    let staging_directory = directory.path().join("artifact.staging");
+    std::fs::create_dir(&staging_directory).expect("create non-regular staging path");
+
+    assert!(
+        matches!(
+            super::sha256_private_file_hex_and_size(&staging_directory, &NeverCancelled),
+            Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
+        ),
+        "publication hashing must reject a non-regular staging path as unsafe input"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn text_artifact_hash_rejects_symlink_staging_paths() {
+    use std::os::unix::fs::symlink;
+
+    struct NeverCancelled;
+
+    impl CodeIndexExecutionControlV1 for NeverCancelled {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    let directory = TempDir::new().expect("hash fixture root");
+    let target = directory.path().join("artifact-target.bin");
+    let staging = directory.path().join("artifact.staging");
+    std::fs::write(&target, b"artifact bytes").expect("write symlink target");
+    symlink(&target, &staging).expect("create staging symlink");
+
+    assert!(
+        matches!(
+            super::sha256_private_file_hex_and_size(&staging, &NeverCancelled),
+            Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
+        ),
+        "publication hashing must not follow a staging symlink"
+    );
+    assert!(
+        target.is_file(),
+        "refusing the symlink preserves its target"
+    );
+}
+
+#[test]
+fn text_artifact_hash_rejects_a_named_file_replaced_during_hashing() {
+    struct ReplaceAfterFirstRead {
+        checkpoints: std::sync::atomic::AtomicUsize,
+        path: PathBuf,
+        replacement: PathBuf,
+    }
+
+    impl CodeIndexExecutionControlV1 for ReplaceAfterFirstRead {
+        fn is_cancelled(&self) -> bool {
+            if self
+                .checkpoints
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                == 1
+            {
+                std::fs::rename(&self.replacement, &self.path)
+                    .expect("atomically replace the named staging file");
+            }
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    let directory = TempDir::new().expect("hash fixture root");
+    let staging = directory.path().join("artifact.staging");
+    let replacement = directory.path().join("replacement.bin");
+    let mut staging_file =
+        tracedecay_private_fs::create_private_file(&staging).expect("create staging file");
+    std::io::Write::write_all(&mut staging_file, &vec![7_u8; 2 * 64 * 1024])
+        .expect("write original staging file");
+    drop(staging_file);
+    let mut replacement_file = tracedecay_private_fs::create_private_file(&replacement)
+        .expect("create replacement file");
+    std::io::Write::write_all(&mut replacement_file, &vec![9_u8; 2 * 64 * 1024])
+        .expect("write replacement file");
+    drop(replacement_file);
+    let control = ReplaceAfterFirstRead {
+        checkpoints: std::sync::atomic::AtomicUsize::new(0),
+        path: staging.clone(),
+        replacement,
+    };
+
+    assert!(
+        matches!(
+            super::sha256_private_file_hex_and_size(&staging, &control),
+            Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
+        ),
+        "the hashed handle must still be the regular file named by the staging path"
     );
 }
 
