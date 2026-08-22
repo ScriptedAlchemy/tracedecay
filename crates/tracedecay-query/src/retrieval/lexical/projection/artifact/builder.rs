@@ -319,9 +319,7 @@ struct StableArtifactFileIdentityV1 {
     #[cfg(windows)]
     volume_serial_number: u32,
     #[cfg(windows)]
-    file_index_high: u32,
-    #[cfg(windows)]
-    file_index_low: u32,
+    file_index: u64,
 }
 
 pub struct CodeLexicalArtifactBuilderV1 {
@@ -770,11 +768,11 @@ fn open_bound_builder_connection(
 fn stable_file_identity(
     file: &File,
 ) -> Result<StableArtifactFileIdentityV1, CodeLexicalArtifactErrorV1> {
-    let metadata = file.metadata().map_err(private_staging_error)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
 
+        let metadata = file.metadata().map_err(private_staging_error)?;
         Ok(StableArtifactFileIdentityV1 {
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -782,12 +780,12 @@ fn stable_file_identity(
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
+        let information = tracedecay_runtime_core::windows_file::information(file)
+            .map_err(private_staging_error)?;
 
         Ok(StableArtifactFileIdentityV1 {
-            volume_serial_number: metadata.volume_serial_number(),
-            file_index_high: metadata.file_index_high(),
-            file_index_low: metadata.file_index_low(),
+            volume_serial_number: information.volume_serial_number,
+            file_index: information.file_index,
         })
     }
 }
