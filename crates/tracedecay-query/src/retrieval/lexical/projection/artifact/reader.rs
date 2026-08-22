@@ -514,32 +514,6 @@ impl DocumentQueryV1 {
             parameters: vec![Value::Text(field), Value::Blob(term)],
         }
     }
-
-    fn ngram(kind: i64, ngram: u32) -> Self {
-        Self {
-            sql: Some(
-                "SELECT document_id FROM ngram_postings WHERE kind = ? AND ngram = ?".to_owned(),
-            ),
-            parameters: vec![Value::Integer(kind), Value::Integer(i64::from(ngram))],
-        }
-    }
-
-    fn intersect(&mut self, right: Self) {
-        let Some(right_sql) = right.sql else {
-            self.sql = None;
-            self.parameters.clear();
-            return;
-        };
-        let Some(left_sql) = self.sql.take() else {
-            self.sql = Some(right_sql);
-            self.parameters = right.parameters;
-            return;
-        };
-        self.sql = Some(format!(
-            "SELECT document_id FROM ({left_sql}) INTERSECT SELECT document_id FROM ({right_sql})"
-        ));
-        self.parameters.extend(right.parameters);
-    }
 }
 
 /// The query engine, rather than an in-process bitmap, owns duplicate removal
@@ -599,12 +573,27 @@ const ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1: usize = 16;
 fn ngram_document_query(kind: i64, bytes: &[u8]) -> DocumentQueryV1 {
     let ngrams = query_ngrams(bytes)
         .into_iter()
-        .take(ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1);
-    let mut query = DocumentQueryV1::empty();
-    for ngram in ngrams {
-        query.intersect(DocumentQueryV1::ngram(kind, ngram));
+        .take(ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1)
+        .collect::<Vec<_>>();
+    if ngrams.is_empty() {
+        return DocumentQueryV1::empty();
     }
-    query
+    let placeholders = std::iter::repeat_n("?", ngrams.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut parameters = Vec::with_capacity(ngrams.len() + 2);
+    parameters.push(Value::Integer(kind));
+    parameters.extend(ngrams.iter().map(|ngram| Value::Integer(i64::from(*ngram))));
+    parameters.push(Value::Integer(ngrams.len() as i64));
+    DocumentQueryV1 {
+        sql: Some(format!(
+            "SELECT document_id FROM ngram_postings \
+             WHERE kind = ? AND ngram IN ({placeholders}) \
+             GROUP BY document_id HAVING COUNT(DISTINCT ngram) = ? \
+             ORDER BY document_id"
+        )),
+        parameters,
+    }
 }
 
 impl<'a> ArtifactQueryV1<'a> {
@@ -1552,7 +1541,7 @@ mod tests {
 
         assert_eq!(
             query.parameters.len(),
-            ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1 * 2
+            ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1 + 2
         );
         assert_eq!(streamed_documents(&connection, &query), vec![1]);
     }
