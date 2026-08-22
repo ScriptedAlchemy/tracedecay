@@ -968,6 +968,67 @@ async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
 }
 
 #[tokio::test]
+async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("git-pr-context-cold-graph");
+    fs::create_dir_all(project.join("src")).unwrap();
+    run_git_in(&project, &["init", "-b", "main"]);
+    fs::write(project.join("src/lib.rs"), "pub fn before() {}\n").unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "initial"]);
+    run_git_in(&project, &["switch", "-c", "feature"]);
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn before() {}\npub fn after() {}\n",
+    )
+    .unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "change source"]);
+
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-git-pr-context-cold-graph",
+    )
+    .await
+    .unwrap();
+    let result = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "format": "json",
+        }),
+        ToolCallRegistryOptions::default(),
+    )
+    .await
+    .expect("cold verified graph must not suppress available Git evidence");
+    assert_ne!(result.semantic_error(), Some(true));
+    let payload = serde_json::from_str::<Value>(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("PR context JSON text"),
+    )
+    .expect("parse PR context JSON");
+
+    assert_eq!(payload["base"], "main");
+    assert_eq!(payload["head"], "HEAD");
+    assert_eq!(payload["files_changed"], 1);
+    assert_eq!(payload["changes"][0]["path"], "src/lib.rs");
+    assert_eq!(payload["changes"][0]["status"], "modified");
+    assert_eq!(payload["analysis_coverage"]["complete"], false);
+    assert_eq!(
+        payload["verified_graph_evidence"]["reason_code"],
+        "verified-code-graph-read-unavailable"
+    );
+    assert_eq!(payload["verified_graph_evidence"]["status"], "unavailable");
+
+    cg.close();
+}
+
+#[tokio::test]
 async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
