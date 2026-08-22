@@ -142,6 +142,14 @@ pub(super) fn stage_project_graph_replay_unlink(
             std::fs::rename(&path, &staged)
                 .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
             sync_replay_root(replay_root)?;
+            // Renaming can legitimately advance ctime. Establish the stable
+            // post-rename fingerprint from the still-open inode, then prove
+            // that the staged path resolves to that exact handle.
+            let fingerprint = staged_fingerprint(
+                &file
+                    .metadata()
+                    .map_err(|error| GraphDbError::unavailable(error.to_string()))?,
+            )?;
             if !staged_identity_matches(&staged, &file, &fingerprint)? {
                 return Err(GraphDbError::Conflict);
             }
