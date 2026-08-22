@@ -1942,6 +1942,52 @@ async fn initialize_root_routing_delegates_config_gated_git_auto_init() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn initialize_root_routing_rejects_user_home_git_auto_init() {
+    let _profile = crate::config::PinnedUserDataDir::new();
+    let home = dirs::home_dir()
+        .expect("test home")
+        .canonicalize()
+        .expect("canonical test home");
+    let git_status = std::process::Command::new(crate::git::git_program())
+        .args(["init", "-q"])
+        .current_dir(&home)
+        .status()
+        .expect("git init test home");
+    assert!(git_status.success(), "git init should succeed");
+
+    let fallback = TempDir::new().expect("fallback temp dir");
+    let mut handshake = test_handshake_defaults();
+    handshake.project_path = Some(fallback.path().to_path_buf());
+    handshake.allow_initialize_root_routing = true;
+    handshake.client_identity = test_client_identity_for(home.clone());
+    let store_administration = super::StoreAdministration::default();
+    let line = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "roots": [{
+                "uri": format!("file://{}", home.display()),
+                "name": "user-home"
+            }]
+        }
+    })
+    .to_string();
+
+    let route = super::apply_daemon_initialize_route(&mut handshake, &line, &store_administration)
+        .await
+        .expect("daemon initialize routing should remain healthy");
+
+    assert!(
+        route.is_none(),
+        "user home must not become an auto-init route"
+    );
+    assert_eq!(handshake.project_path.as_deref(), Some(fallback.path()));
+    assert!(!handshake.allow_init);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn serve_proxies_when_socket_already_exists() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");

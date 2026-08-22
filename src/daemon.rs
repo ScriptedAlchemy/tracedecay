@@ -1189,6 +1189,9 @@ async fn resolve_daemon_initialize_route(
         for root in &roots {
             let mut candidate = root.canonicalize().unwrap_or_else(|_| root.clone());
             loop {
+                if crate::config::is_protected_auto_project_root(&candidate) {
+                    break;
+                }
                 if registry
                     .project_registry_context_by_alias(&candidate)
                     .await
@@ -1204,6 +1207,9 @@ async fn resolve_daemon_initialize_route(
                 }
             }
             if let Some(identity) = crate::worktree::git_repo_identity(root) {
+                if crate::config::is_protected_auto_project_root(&identity.worktree_root) {
+                    continue;
+                }
                 if registry
                     .project_registry_context_by_identity(
                         &identity.worktree_root,
@@ -1231,12 +1237,17 @@ async fn resolve_daemon_initialize_route(
 
     for root in roots {
         if let Some(project_path) = crate::config::discover_project_root(&root) {
-            return Some(InitializeRouteMetadata {
-                project_path,
-                allow_init: false,
-            });
+            if !crate::config::is_protected_auto_project_root(&project_path) {
+                return Some(InitializeRouteMetadata {
+                    project_path,
+                    allow_init: false,
+                });
+            }
         }
         if let Some(identity) = crate::worktree::git_repo_identity(&root) {
+            if crate::config::is_protected_auto_project_root(&identity.worktree_root) {
+                continue;
+            }
             let allow_init = crate::config::load_sync_config(&identity.worktree_root).auto_init;
             return Some(InitializeRouteMetadata {
                 project_path: identity.worktree_root,

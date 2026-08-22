@@ -195,7 +195,8 @@ fn proxy_serve_handshake(
     let auto_init_candidate = project_path.as_deref().or(original_cwd);
     let auto_init_root = auto_init_candidate
         .filter(|candidate| !initialized && crate::config::load_sync_config(candidate).auto_init)
-        .and_then(crate::worktree::git_worktree_root);
+        .and_then(crate::worktree::git_worktree_root)
+        .filter(|root| !crate::config::is_protected_auto_project_root(root));
     if let Some(root) = auto_init_root.as_ref() {
         project_path = Some(root.clone());
     }
@@ -249,6 +250,25 @@ mod tests {
 
         let handshake = proxy_serve_handshake(None, Some(cwd.path()), false)
             .expect("build projectless proxy handshake");
+
+        assert_eq!(handshake.project_path, None);
+        assert!(!handshake.allow_init);
+        assert!(handshake.allow_initialize_root_routing);
+    }
+
+    #[test]
+    fn user_home_git_cwd_does_not_become_a_daemon_project() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let home = dirs::home_dir().expect("test home");
+        let status = std::process::Command::new(crate::git::git_program())
+            .args(["init", "-q"])
+            .current_dir(&home)
+            .status()
+            .expect("git init test home");
+        assert!(status.success());
+
+        let handshake = proxy_serve_handshake(None, Some(&home), false)
+            .expect("build protected-home proxy handshake");
 
         assert_eq!(handshake.project_path, None);
         assert!(!handshake.allow_init);

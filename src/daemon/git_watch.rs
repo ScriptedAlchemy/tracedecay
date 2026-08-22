@@ -317,6 +317,7 @@ impl GitWatcher {
             for record in projects {
                 let root = PathBuf::from(&record.canonical_root);
                 if root.is_dir()
+                    && !crate::config::is_protected_auto_project_root(&root)
                     && root.join(".git").exists()
                     && TraceDecay::has_initialized_store_with_options(&root, &open_options).await
                 {

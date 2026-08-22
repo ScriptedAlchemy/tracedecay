@@ -39,6 +39,20 @@ pub async fn discover_project_root_with_identity(
         .then_some(candidate)
 }
 
+/// Returns true for broad filesystem locations that must never be admitted by
+/// automatic project discovery. Explicit user commands may still inspect or
+/// manage these paths, but background MCP routing and Git watchers must not
+/// turn them into code projects.
+pub(crate) fn is_protected_auto_project_root(path: &std::path::Path) -> bool {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if path.parent().is_none() {
+        return true;
+    }
+    dirs::home_dir()
+        .map(|home| home.canonicalize().unwrap_or(home))
+        .is_some_and(|home| path == home)
+}
+
 #[cfg(test)]
 pub struct PinnedUserDataDir {
     _lock: std::sync::MutexGuard<'static, ()>,

@@ -333,6 +333,26 @@ async fn spawn_skips_recent_registry_rows_without_an_initialized_store() {
         .await
         .expect("register stale directory-only project");
 
+    let home = dirs::home_dir().expect("test home");
+    git(&home, &["init", "-q"]);
+    crate::storage::write_enrollment_marker(
+        &home,
+        &crate::storage::EnrollmentMarker {
+            project_id: "proj_protected_home_watch".to_string(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .expect("write protected-home enrollment marker");
+    let home_layout = crate::storage::resolve_layout_for_current_profile(&home)
+        .expect("resolve protected-home project layout");
+    std::fs::create_dir_all(home_layout.graph_db_path.parent().unwrap())
+        .expect("create protected-home graph directory");
+    std::fs::write(&home_layout.graph_db_path, b"").expect("create protected-home graph marker");
+    global_db
+        .upsert_code_project("proj_protected_home_watch", &home, None, None, Some("main"))
+        .await
+        .expect("register protected-home project");
+
     let watcher = GitWatcher::new(fast_watch_config());
     watcher.spawn(Some(global_db_path)).await;
 
@@ -349,6 +369,10 @@ async fn spawn_skips_recent_registry_rows_without_an_initialized_store() {
     assert!(
         !watched.contains(&invalid.path().canonicalize().unwrap()),
         "a stale registry row for an existing non-project directory must not start a watcher"
+    );
+    assert!(
+        !watched.contains(&home.canonicalize().unwrap()),
+        "the user home must never start a watcher even when stale metadata looks initialized"
     );
 
     watcher.shutdown().await;
