@@ -733,6 +733,13 @@ fn pr_context_edge_bytes(
         .saturating_add("calls".len())
 }
 
+fn graph_enrichment_is_transient(error: &TraceDecayError) -> bool {
+    matches!(
+        error.project_route_context(),
+        Some(("code-graph-unavailable" | "code-graph-stale", true, _))
+    )
+}
+
 /// Handles `tracedecay_pr_context` tool calls.
 pub(crate) async fn handle_pr_context<F>(
     cg: &TraceDecay,
@@ -820,7 +827,9 @@ where
     let stage_started = std::time::Instant::now();
     let graph = match graph.await {
         Ok(graph) => graph,
-        Err(error) if encoded_cursor.is_some() => return Err(error),
+        Err(error) if encoded_cursor.is_some() || !graph_enrichment_is_transient(&error) => {
+            return Err(error);
+        }
         Err(error) => {
             stage_timings.insert("graph".to_owned(), json!(elapsed_micros(stage_started)));
             let test_files_changed = changes
