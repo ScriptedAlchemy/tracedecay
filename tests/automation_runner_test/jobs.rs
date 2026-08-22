@@ -16,6 +16,7 @@ use tracedecay_agent_hosts::automation::jobs::{
 use tracedecay_agent_hosts::automation::scheduler::{
     AutomationSchedule, cron_is_due, parse_schedule,
 };
+use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
 
 fn sample_job(id: &str) -> AutomationJob {
     AutomationJob {
@@ -923,7 +924,7 @@ async fn disabled_automation_skip_precedes_existing_per_job_lock() {
     .unwrap();
 
     assert_eq!(backend.calls(), 0);
-    assert_eq!(run.report["reason"], json!("automation_disabled"));
+    assert_eq!(run.report["reason"], json!(AUTOMATION_DISABLED));
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
 }
 
@@ -969,7 +970,7 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
     let (run, guard) = retained.into_parts();
     let run = run.unwrap();
     assert_eq!(backend.calls(), 0);
-    assert_eq!(run.report["reason"], json!("automation_disabled"));
+    assert_eq!(run.report["reason"], json!(AUTOMATION_DISABLED));
     assert!(
         load_run_records(&dashboard_root, 10)
             .await
@@ -989,7 +990,7 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
             .unwrap()
             .expect("the same config skip must return its exact diagnostic");
 
-    assert_eq!(first.report["reason"], json!("automation_disabled"));
+    assert_eq!(first.report["reason"], json!(AUTOMATION_DISABLED));
     assert_ne!(first.run_id, occurrence);
     assert_eq!(repeated.run_id, first.run_id);
     assert_eq!(repeated.ledger_record, first.ledger_record);
