@@ -29,6 +29,34 @@ pub enum TestDatabaseRuntimeMode {
     ReadOnly,
 }
 
+/// Exact shard family a fixture publication constructs.
+///
+/// The fixture brain/profile identity is never hardcoded here: it is derived
+/// from the held authority's canonical database path inside
+/// [`Database::publish_fixture_runtime_publication`], so distinct profile
+/// roots never share one fixture identity. Consumers that need the published
+/// identity must read it from the returned binding
+/// ([`Database::registered_binding`] or [`StoreRuntimeClientLease::binding`]).
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum TestRuntimeShardFamilyV1 {
+    Code,
+    ProfileMemory,
+    Registered(TestDatabaseRuntimeScope),
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+impl TestRuntimeShardFamilyV1 {
+    fn shard(&self, brain_id: BrainId, profile_id: UserProfileId) -> Result<StoreShardIdV1> {
+        match self {
+            Self::Code => test_code_shard(brain_id, profile_id),
+            Self::ProfileMemory => Ok(StoreShardIdV1::profile_memory(brain_id, profile_id)),
+            Self::Registered(scope) => test_registered_shard(brain_id, profile_id, scope.clone()),
+        }
+    }
+}
+
 /// Exact shard family published by an isolated registered-store fixture.
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -246,7 +274,8 @@ impl Database {
                 operation: "publish test database runtime".to_owned(),
             });
         }
-        Self::publish_fixture_runtime(db_path, authority, mode, test_code_shard()?).await
+        Self::publish_fixture_runtime(db_path, authority, mode, TestRuntimeShardFamilyV1::Code)
+            .await
     }
 
     /// Publishes an isolated profile-memory fixture through the exact shard
@@ -264,9 +293,13 @@ impl Database {
                 operation: "publish profile-memory test database runtime".to_owned(),
             });
         }
-        let published =
-            Self::publish_fixture_runtime(db_path, authority, mode, test_profile_memory_shard()?)
-                .await?;
+        let published = Self::publish_fixture_runtime(
+            db_path,
+            authority,
+            mode,
+            TestRuntimeShardFamilyV1::ProfileMemory,
+        )
+        .await?;
         match mode {
             TestDatabaseRuntimeMode::Initialize | TestDatabaseRuntimeMode::Existing => {
                 crate::db::migrations::ensure_schema_current(&published.0).await?;
@@ -292,7 +325,13 @@ impl Database {
                 operation: "publish registered test database runtime".to_owned(),
             });
         }
-        Self::publish_fixture_runtime(db_path, authority, mode, test_registered_shard(scope)?).await
+        Self::publish_fixture_runtime(
+            db_path,
+            authority,
+            mode,
+            TestRuntimeShardFamilyV1::Registered(scope),
+        )
+        .await
     }
 
     /// Publishes a fresh registered fixture while retaining only the exact
@@ -320,7 +359,7 @@ impl Database {
             db_path,
             authority,
             mode,
-            test_registered_shard(scope)?,
+            TestRuntimeShardFamilyV1::Registered(scope),
         )
         .await?;
         let binding = runtime.binding().clone();
@@ -368,7 +407,8 @@ impl Database {
                 operation: "publish maintenance test database runtime".to_owned(),
             });
         }
-        Self::publish_fixture_runtime(db_path, authority, mode, test_code_shard()?).await
+        Self::publish_fixture_runtime(db_path, authority, mode, TestRuntimeShardFamilyV1::Code)
+            .await
     }
 
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -376,10 +416,10 @@ impl Database {
         db_path: &Path,
         authority: &DatabaseAuthority,
         mode: TestDatabaseRuntimeMode,
-        target_shard: StoreShardIdV1,
+        shard_family: TestRuntimeShardFamilyV1,
     ) -> Result<(Self, bool)> {
         let FixtureRuntimePublication { owner, .. } =
-            Self::publish_fixture_runtime_publication(db_path, authority, mode, target_shard)
+            Self::publish_fixture_runtime_publication(db_path, authority, mode, shard_family)
                 .await?;
         let database = owner.issue_lease().map_err(|error| {
             test_runtime_error("issue test database client lease", format!("{error:?}"))
@@ -392,12 +432,14 @@ impl Database {
         db_path: &Path,
         authority: &DatabaseAuthority,
         mode: TestDatabaseRuntimeMode,
-        target_shard: StoreShardIdV1,
+        shard_family: TestRuntimeShardFamilyV1,
     ) -> Result<FixtureRuntimePublication> {
-        let graph_shard_check = target_shard == test_code_shard()?;
+        let graph_shard_check = shard_family == TestRuntimeShardFamilyV1::Code;
         let authority = authority.hold_for(db_path, "publish test database runtime")?;
         authority.require_active_write_scope("publish test database runtime")?;
         let path = authority.canonical_database_path().to_path_buf();
+        let (brain_id, profile_id) = test_runtime_identity(&path)?;
+        let target_shard = shard_family.shard(brain_id, profile_id)?;
         let profile_shard = StoreShardIdV1::profile(
             target_shard.brain_id.clone(),
             target_shard.profile_id.clone(),
@@ -562,20 +604,33 @@ fn exact_test_runtime_locator(
     ))
 }
 
+/// Derives the fixture brain/profile identity from the canonical database
+/// path the held authority resolved.
+///
+/// The canonical path is the durable key of a fixture root, so republishing
+/// the same fixture always reconstructs the same identity while distinct
+/// profile roots always receive distinct identities. This mirrors the
+/// production shape (`brain.<32 hex>` / `profile.<32 hex>` persisted per
+/// profile root) without granting fixtures a shared cross-root identity, and
+/// keeps every production foreign-shard check (profile-authority mismatch,
+/// profile-pin shard validation, runtime identity conflicts) intact.
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-fn test_runtime_identity() -> Result<(BrainId, UserProfileId)> {
-    let brain_id = BrainId::try_from("brain.test-runtime".to_owned())
+fn test_runtime_identity(canonical_database_path: &Path) -> Result<(BrainId, UserProfileId)> {
+    let mut digest = Sha256::new();
+    digest.update(b"tracedecay.test-runtime.identity.v1\0");
+    digest.update(canonical_database_path.as_os_str().as_encoded_bytes());
+    let digest = hex::encode(digest.finalize());
+    let brain_id = BrainId::try_from(format!("brain.{}", &digest[..32]))
         .map_err(|error| test_runtime_error("construct test brain identity", error.to_string()))?;
     let profile_id =
-        UserProfileId::try_from("profile.test-runtime".to_owned()).map_err(|error| {
+        UserProfileId::try_from(format!("profile.{}", &digest[32..64])).map_err(|error| {
             test_runtime_error("construct test profile identity", error.to_string())
         })?;
     Ok((brain_id, profile_id))
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-pub(super) fn test_code_shard() -> Result<StoreShardIdV1> {
-    let (brain_id, profile_id) = test_runtime_identity()?;
+fn test_code_shard(brain_id: BrainId, profile_id: UserProfileId) -> Result<StoreShardIdV1> {
     Ok(StoreShardIdV1::code(
         brain_id,
         profile_id,
@@ -594,14 +649,11 @@ pub(super) fn test_code_shard() -> Result<StoreShardIdV1> {
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-fn test_profile_memory_shard() -> Result<StoreShardIdV1> {
-    let (brain_id, profile_id) = test_runtime_identity()?;
-    Ok(StoreShardIdV1::profile_memory(brain_id, profile_id))
-}
-
-#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-fn test_registered_shard(scope: TestDatabaseRuntimeScope) -> Result<StoreShardIdV1> {
-    let (brain_id, profile_id) = test_runtime_identity()?;
+fn test_registered_shard(
+    brain_id: BrainId,
+    profile_id: UserProfileId,
+    scope: TestDatabaseRuntimeScope,
+) -> Result<StoreShardIdV1> {
     let shard = match scope {
         TestDatabaseRuntimeScope::Profile => StoreShardIdV1::profile(brain_id, profile_id),
         TestDatabaseRuntimeScope::ProfileMemory => {
@@ -651,6 +703,78 @@ fn test_runtime_open_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn distinct_profile_roots_publish_distinct_fixture_identities() {
+        let first_root = tempfile::tempdir().expect("first fixture profile root");
+        let second_root = tempfile::tempdir().expect("second fixture profile root");
+        let first_path = first_root.path().join("graph.db");
+        let second_path = second_root.path().join("graph.db");
+        let first_authority =
+            DatabaseAuthority::acquire_test(&first_path, "first distinct fixture identity")
+                .expect("acquire first fixture authority");
+        let second_authority =
+            DatabaseAuthority::acquire_test(&second_path, "second distinct fixture identity")
+                .expect("acquire second fixture authority");
+
+        let (first, _) = Database::publish_test_runtime(
+            &first_path,
+            &first_authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("publish first fixture runtime");
+        let (second, _) = Database::publish_test_runtime(
+            &second_path,
+            &second_authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("publish second fixture runtime");
+
+        let first_shard = &first.registered_binding().shard_id;
+        let second_shard = &second.registered_binding().shard_id;
+        assert_ne!(
+            (&first_shard.brain_id, &first_shard.profile_id),
+            (&second_shard.brain_id, &second_shard.profile_id),
+            "distinct profile roots must not share one fixture brain/profile identity"
+        );
+        assert_ne!(
+            first_shard.brain_id.as_str(),
+            "brain.test-runtime",
+            "fixture brain identity must not be the shared hardcoded literal"
+        );
+        assert_ne!(
+            first_shard.profile_id.as_str(),
+            "profile.test-runtime",
+            "fixture profile identity must not be the shared hardcoded literal"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_fixture_path_republishes_one_stable_identity() {
+        let root = tempfile::tempdir().expect("stable fixture profile root");
+        let path = root.path().join("graph.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "stable fixture identity")
+            .expect("acquire stable fixture authority");
+
+        let (first, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .expect("publish stable fixture runtime");
+        let shard_id = first.registered_binding().shard_id.clone();
+        drop(first);
+
+        let (second, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
+                .await
+                .expect("republish stable fixture runtime");
+        assert_eq!(
+            &shard_id,
+            &second.registered_binding().shard_id,
+            "republishing one fixture path must preserve its exact shard identity"
+        );
+    }
 
     #[test]
     fn test_runtime_open_failure_preserves_typed_reset_required() {

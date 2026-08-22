@@ -1,6 +1,6 @@
 use std::sync::atomic::AtomicBool;
 
-use super::test_runtime::test_code_shard;
+use super::test_runtime::TestRuntimeShardFamilyV1;
 use super::{
     Arc, Database, DatabaseAuthority, DatabaseOwnerErrorV1, DatabaseOwnerWeakLeaseIssuerErrorV1,
     TestDatabaseRuntimeMode, TestDatabaseRuntimeScope, adaptive_cache_sizes,
@@ -137,10 +137,10 @@ async fn publish_fixture_owner_runtime(
     db_path: &std::path::Path,
     authority: &DatabaseAuthority,
     mode: TestDatabaseRuntimeMode,
-    target_shard: tracedecay_store::StoreShardIdV1,
+    shard_family: TestRuntimeShardFamilyV1,
 ) -> crate::errors::Result<DatabaseOwnerV1> {
     Ok(
-        Database::publish_fixture_runtime_publication(db_path, authority, mode, target_shard)
+        Database::publish_fixture_runtime_publication(db_path, authority, mode, shard_family)
             .await?
             .owner,
     )
@@ -248,7 +248,7 @@ async fn database_owner_issues_client_leases_over_one_stable_database_inner() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -277,7 +277,7 @@ async fn repeated_authorized_opens_share_one_writer_lane() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -299,7 +299,7 @@ async fn database_owner_leases_preserve_registered_identity() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -325,7 +325,7 @@ async fn retained_daemon_database_refuses_writes_after_scope_drops() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -372,7 +372,7 @@ async fn authority_revalidated_batch_uses_the_canonical_long_lease_writer() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -408,7 +408,7 @@ async fn authority_revalidated_batch_rolls_back_when_the_batch_fails() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -446,7 +446,7 @@ async fn twelve_handles_serialize_isolated_writer_connections() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -499,7 +499,7 @@ async fn retained_reader_never_observes_uncommitted_writer_state() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -551,7 +551,7 @@ async fn memory_transactions_serialize_and_commit_through_the_final_writer() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -605,7 +605,7 @@ async fn cancelled_write_transaction_rolls_back_before_releasing_lane() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -667,7 +667,7 @@ async fn owner_leases_never_derive_a_second_database_from_a_symlink_alias() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -689,7 +689,7 @@ async fn owner_leases_never_derive_a_second_database_from_a_case_alias() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -708,7 +708,7 @@ async fn checkpoint_waits_for_shared_writer_lane() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -735,7 +735,7 @@ async fn retained_database_guard_keeps_authority_alive_for_query_connection() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -767,7 +767,7 @@ async fn owner_leases_share_the_canonical_read_and_write_boundaries() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -1398,7 +1398,7 @@ async fn owner_reservation_restore_faults_when_the_exact_attachment_is_missing_o
         &temp.path().join("missing.db"),
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -1418,7 +1418,7 @@ async fn owner_reservation_restore_faults_when_the_exact_attachment_is_missing_o
         &stale_path,
         &stale_authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -1505,7 +1505,7 @@ async fn read_only_owner_issuance_preserves_the_published_access_policy() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -1514,7 +1514,7 @@ async fn read_only_owner_issuance_preserves_the_published_access_policy() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::ReadOnly,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -1577,7 +1577,7 @@ async fn read_write_database_snapshot_uses_the_canonical_writer_runtime() {
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
@@ -1656,7 +1656,7 @@ async fn paired_target_composition_refusal_preserves_exact_inputs_for_ready_rest
         &path,
         &authority,
         TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
+        TestRuntimeShardFamilyV1::Code,
     )
     .await
     .unwrap();
