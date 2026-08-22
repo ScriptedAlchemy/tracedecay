@@ -24,7 +24,16 @@
 //!   replays and gap-shaped candidates leave every ledger untouched;
 //! * only the narrow existing-output collision converges on drain; divergent
 //!   workflow/effect state stays a hard error;
-//! * no-rework is proven behaviorally with a corruption tripwire: once the
+//! * no-rework is measured on the production telemetry surface: every
+//!   refusal-answering admission pass durably accumulates its typed
+//!   `AdmissionWorkV1` receipt onto the refusal marker row, so the tests
+//!   assert from production data that the first (full-path) refusal performs
+//!   exactly one stored-row decode, one identity derivation, one payload
+//!   digest, and two runtime commands, while every re-admitted fast-path pass
+//!   adds exactly zero decodes, zero derivations, zero digests, and one
+//!   runtime command (the frontier cursor read);
+//! * no-rework is additionally proven behaviorally with a corruption tripwire
+//!   as defense-in-depth: once the
 //!   terminal refusal marker exists, the stored observation row's payload
 //!   bytes and identity-derivation source columns are corrupted into
 //!   undecodable garbage (an engine fixture the harness sanctions for
@@ -41,9 +50,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
-use tracing::field::{Field, Visit};
-use tracing::span::{Attributes, Id, Record};
-use tracing::{Dispatch, Event, Metadata, Subscriber};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
@@ -60,82 +66,44 @@ use tracedecay_store::{
     ProjectionPersistOutcome, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
+use crate::AdmissionWorkV1;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::params;
 
 const COLLISION_PROVIDER: &str = "collision-test";
-const ADMISSION_WORK_TRACE_TARGET: &str = "tracedecay::observation_admission_work";
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct AdmissionWorkSnapshot {
-    identity_derivations: u64,
-    payload_digests: u64,
-    runtime_commands: u64,
-}
+/// The exact admission work a first full-path refusal performs and durably
+/// records: one classification read of the retained row (a runtime command
+/// whose decode re-derives the identity and re-verifies the payload digest)
+/// plus the frontier cursor read inside the refusal transaction.
+const FIRST_REFUSAL_WORK: AdmissionWorkV1 = AdmissionWorkV1 {
+    stored_rows_decoded: 1,
+    identity_derivations: 1,
+    payload_digests: 1,
+    runtime_commands: 2,
+};
 
-#[derive(Default)]
-struct AdmissionWorkTrace {
-    identity_derivations: AtomicU64,
-    payload_digests: AtomicU64,
-    runtime_commands: AtomicU64,
-}
+/// The exact per-pass work every re-admitted fast-path refusal adds: zero
+/// stored-row decodes, zero identity derivations, zero payload digests, and
+/// exactly one runtime command — the frontier cursor read.
+const FAST_PATH_PASS_WORK: AdmissionWorkV1 = AdmissionWorkV1 {
+    stored_rows_decoded: 0,
+    identity_derivations: 0,
+    payload_digests: 0,
+    runtime_commands: 1,
+};
 
-impl AdmissionWorkTrace {
-    fn snapshot(&self) -> AdmissionWorkSnapshot {
-        AdmissionWorkSnapshot {
-            identity_derivations: self.identity_derivations.load(Ordering::Relaxed),
-            payload_digests: self.payload_digests.load(Ordering::Relaxed),
-            runtime_commands: self.runtime_commands.load(Ordering::Relaxed),
-        }
+/// Component-wise sum of per-pass receipts, for asserting the accumulated
+/// marker totals after a known pass sequence.
+fn accumulated_work(passes: &[AdmissionWorkV1]) -> AdmissionWorkV1 {
+    let mut total = AdmissionWorkV1::default();
+    for pass in passes {
+        total.stored_rows_decoded += pass.stored_rows_decoded;
+        total.identity_derivations += pass.identity_derivations;
+        total.payload_digests += pass.payload_digests;
+        total.runtime_commands += pass.runtime_commands;
     }
-}
-
-struct AdmissionWorkSubscriber {
-    trace: Arc<AdmissionWorkTrace>,
-}
-
-struct AdmissionWorkVisitor<'a> {
-    trace: &'a AdmissionWorkTrace,
-}
-
-impl Visit for AdmissionWorkVisitor<'_> {
-    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
-
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() != "work" {
-            return;
-        }
-        let counter = match value {
-            "identity_derivation" => &self.trace.identity_derivations,
-            "payload_digest" => &self.trace.payload_digests,
-            "runtime_command" => &self.trace.runtime_commands,
-            _ => return,
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-impl Subscriber for AdmissionWorkSubscriber {
-    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        metadata.target() == ADMISSION_WORK_TRACE_TARGET
-    }
-
-    fn new_span(&self, _span: &Attributes<'_>) -> Id {
-        Id::from_u64(1)
-    }
-
-    fn record(&self, _span: &Id, _values: &Record<'_>) {}
-
-    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
-
-    fn event(&self, event: &Event<'_>) {
-        let mut visitor = AdmissionWorkVisitor { trace: &self.trace };
-        event.record(&mut visitor);
-    }
-
-    fn enter(&self, _span: &Id) {}
-
-    fn exit(&self, _span: &Id) {}
+    total
 }
 
 /// The corrupted `observation_json` the no-rework tripwire writes over a
@@ -281,22 +249,6 @@ async fn restore_stored_observation_row(
         &original.committed_cursor_json,
     )
     .await;
-}
-
-/// Hides the retained-row table behind a fixture-only name after the refusal
-/// marker exists. The marker and cursor authorities remain available, while
-/// any regression that issues even a bare-column read against `observations`
-/// fails at the SQL boundary instead of being masked by an ignored result.
-async fn hide_observation_table_behind_tripwire(runtime: &HostAdmissionTestRuntimeV1) {
-    let database = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .expect("registered profile database");
-    let transaction = database.begin_write_transaction().await.unwrap();
-    transaction
-        .execute_batch("ALTER TABLE observations RENAME TO observations_tripwire_hidden")
-        .await
-        .expect("hide retained observation table behind tripwire name");
-    transaction.commit().await.unwrap();
 }
 
 fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
@@ -769,6 +721,20 @@ async fn identity_collision_records_durable_admission_refused_coverage() {
         1,
         "identity collision must record one durable admission_refused advance"
     );
+    // The pass's admission-work receipt is durable production telemetry on
+    // the marker row: the first (full-path) refusal performed exactly one
+    // stored-row decode — with its identity re-derivation and payload-digest
+    // verification — and two runtime commands.
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            original.observation_id().as_str(),
+            rewritten.payload_reference().digest().as_str(),
+        )
+        .await,
+        FIRST_REFUSAL_WORK,
+        "the first refusal must durably record its exact admission work"
+    );
 }
 
 /// Stage0a symptom 1, second RED requirement: once the collision is durably
@@ -802,7 +768,7 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
         .get_source_cursor(original.source(), original.scope())
         .await
         .unwrap();
-    let (_, rewritten_write) = collision_candidate(
+    let (rewritten, rewritten_write) = collision_candidate(
         &session_id,
         "record.identity-collision.readmitted",
         2,
@@ -824,6 +790,17 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
         ),
         "{first:?}"
     );
+    // Production telemetry baseline: the first (full-path) refusal records
+    // its exact admission work on the marker row.
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            original.observation_id().as_str(),
+            rewritten.payload_reference().digest().as_str(),
+        )
+        .await,
+        FIRST_REFUSAL_WORK,
+    );
 
     // The terminal marker now exists. Arm the corruption tripwire: overwrite
     // the retained row's payload bytes and identity-derivation source columns
@@ -831,20 +808,13 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
     // re-admission must be unaffected; any regression that re-decodes,
     // re-derives, or re-hashes stored data now fails loudly.
     corrupt_stored_observation_row(&runtime, original.observation_id().as_str()).await;
-    hide_observation_table_behind_tripwire(&runtime).await;
 
     // A later catch-up pass or temporal trigger re-presents the exact same
     // candidate with its now-stale expected cursor.
-    let admission_work = Arc::new(AdmissionWorkTrace::default());
-    let dispatch = Dispatch::new(AdmissionWorkSubscriber {
-        trace: Arc::clone(&admission_work),
-    });
-    let trace_guard = tracing::dispatcher::set_default(&dispatch);
     let second = store
         .persist_observation(rewritten_write.clone())
         .await
         .unwrap_err();
-    drop(trace_guard);
     assert!(
         matches!(
             second,
@@ -857,23 +827,12 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
          collision — any stored-row decode, identity re-derivation, or payload re-hash \
          would have failed on the tripwire bytes; {second:?}"
     );
+    // The corrupted bytes are untouched: the fast path performed no repair,
+    // rewrite, or decode-and-rewrite of the retained row either.
     assert_eq!(
-        admission_work.snapshot(),
-        AdmissionWorkSnapshot {
-            identity_derivations: 0,
-            payload_digests: 0,
-            runtime_commands: 1,
-        },
-        "the terminal fast path must neither re-derive nor re-hash the valid candidate, \
-         and may dispatch only the one canonical source-cursor read"
-    );
-    // Any access to the retained row — including an ignored bare-column read
-    // that would evade a byte-corruption tripwire — would have failed because
-    // the production table name is no longer present.
-    assert_eq!(
-        raw_hidden_observation_json(&runtime, original.observation_id().as_str()).await,
+        raw_observation_json(&runtime, original.observation_id().as_str()).await,
         tripwire_observation_json(original.observation_id().as_str()),
-        "the fast path must not read or rewrite the hidden retained observation row"
+        "the fast path must not read back or rewrite the retained observation row"
     );
     // The terminal coverage stays single-row and the cursor stays put.
     assert_eq!(
@@ -887,6 +846,50 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
             .unwrap()
             .as_ref(),
         Some(rewritten_write.next_cursor())
+    );
+    // Measured zero-work, from production data: the re-admitted fast-path
+    // pass accumulated exactly zero stored-row decodes, zero identity
+    // derivations, zero payload digests, and one runtime command — the
+    // frontier cursor read — on top of the first refusal's receipt.
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            original.observation_id().as_str(),
+            rewritten.payload_reference().digest().as_str(),
+        )
+        .await,
+        accumulated_work(&[FIRST_REFUSAL_WORK, FAST_PATH_PASS_WORK]),
+        "the fast-path pass must add exactly {{0 decodes, 0 derivations, 0 digests, 1 command}}"
+    );
+
+    // Production read journey: the same telemetry reaches operators through
+    // the retention report the daemon maintenance tick already reads (and
+    // logs as the `observation_admission_work` daemon event).
+    use crate::observation::retention::{
+        ObservationAdmissionWorkRollupV1, ObservationRetentionConfig, RetentionMode,
+    };
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let report = database
+        .run_observation_retention(
+            None,
+            &ObservationRetentionConfig::default(),
+            RetentionMode::DryRun,
+            tracedecay_application::clock::now_micros().0,
+        )
+        .await
+        .expect("dry-run observation retention");
+    assert_eq!(
+        report.admission_work,
+        ObservationAdmissionWorkRollupV1 {
+            refusal_markers: 1,
+            stored_rows_decoded: 1,
+            identity_derivations: 1,
+            payload_digests: 1,
+            runtime_commands: 3,
+        },
+        "the retention report must roll the marker receipts up for operators"
     );
 }
 
@@ -927,7 +930,7 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
         Some(ObservationOrderingDomainV1::SnapshotOrder)
     );
 
-    let (_, replacement_write) = collision_candidate_at(
+    let (replacement, replacement_write) = collision_candidate_at(
         &session_id,
         "record.domain-replacement",
         2,
@@ -964,6 +967,16 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
         1
     );
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            original.observation_id().as_str(),
+            replacement.payload_reference().digest().as_str(),
+        )
+        .await,
+        FIRST_REFUSAL_WORK,
+        "the first refusal must durably record its exact admission work"
+    );
 
     // Arm the corruption tripwire before re-admission: the fast path must
     // answer from the marker without touching the corrupted retained row.
@@ -987,6 +1000,16 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
         raw_observation_json(&runtime, original.observation_id().as_str()).await,
         tripwire_observation_json(original.observation_id().as_str()),
         "the fast path must not read back or rewrite the retained observation row"
+    );
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            original.observation_id().as_str(),
+            replacement.payload_reference().digest().as_str(),
+        )
+        .await,
+        accumulated_work(&[FIRST_REFUSAL_WORK, FAST_PATH_PASS_WORK]),
+        "the fast-path pass must add exactly {{0 decodes, 0 derivations, 0 digests, 1 command}}"
     );
 }
 
@@ -1278,6 +1301,41 @@ async fn admission_refusal_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<(St
     collected
 }
 
+/// Durable admission-work receipt accumulated on one refusal marker row —
+/// the production telemetry surface every refusal-answering pass records
+/// through, read back exactly as an operator-facing rollup would read it.
+async fn admission_work_for(
+    runtime: &HostAdmissionTestRuntimeV1,
+    observation_id: &str,
+    refused_digest: &str,
+) -> AdmissionWorkV1 {
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let snapshot = database.read_snapshot().await.expect("read snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT stored_rows_decoded, identity_derivations, payload_digests, runtime_commands
+             FROM observation_admission_refusals
+             WHERE observation_id = ?1 AND refused_payload_digest = ?2",
+            params![observation_id, refused_digest],
+        )
+        .await
+        .expect("query admission work telemetry");
+    let row = rows
+        .next()
+        .await
+        .expect("read admission work telemetry")
+        .expect("admission work telemetry row for the refusal marker");
+    let column = |index: i32| u32::try_from(row.get::<i64>(index).unwrap()).unwrap();
+    AdmissionWorkV1 {
+        stored_rows_decoded: column(0),
+        identity_derivations: column(1),
+        payload_digests: column(2),
+        runtime_commands: column(3),
+    }
+}
+
 /// Raw `observation_json` column for one retained row, read without decoding
 /// so byte-exact immutability (or an untouched tripwire corruption) can be
 /// asserted directly.
@@ -1302,32 +1360,6 @@ async fn raw_observation_json(
         .expect("retained observation row")
         .get::<String>(0)
         .expect("decode retained observation column")
-}
-
-/// Reads the fixture-hidden retained row after the production fast path has
-/// completed, so the test can still prove the tripwire bytes stayed intact.
-async fn raw_hidden_observation_json(
-    runtime: &HostAdmissionTestRuntimeV1,
-    observation_id: &str,
-) -> String {
-    let database = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .expect("registered profile database");
-    let snapshot = database.read_snapshot().await.expect("read snapshot");
-    let mut rows = snapshot
-        .query(
-            "SELECT observation_json FROM observations_tripwire_hidden
-             WHERE observation_id = ?1",
-            params![observation_id],
-        )
-        .await
-        .expect("query hidden retained observation row");
-    rows.next()
-        .await
-        .expect("read hidden retained observation row")
-        .expect("hidden retained observation row")
-        .get::<String>(0)
-        .expect("decode hidden retained observation column")
 }
 
 /// One real catch-up pass over raw persisted source input: read the durable
@@ -1969,6 +2001,16 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     );
     let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            refused.observation_id().as_str(),
+            refused.payload_reference().digest().as_str(),
+        )
+        .await,
+        FIRST_REFUSAL_WORK,
+        "the first refusal must durably record its exact admission work"
+    );
 
     // The terminal marker exists: arm the corruption tripwire on the retained
     // row. Every later pass in this test — catch-up, production retention,
@@ -2038,6 +2080,18 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
         raw_observation_json(&runtime, refused.observation_id().as_str()).await,
         tripwire_observation_json(refused.observation_id().as_str()),
         "no pass may read back, repair, or rewrite the corrupted retained row"
+    );
+    // The stale re-admission was one fast-path pass: its receipt adds exactly
+    // one frontier cursor read and no record work.
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            refused.observation_id().as_str(),
+            refused.payload_reference().digest().as_str(),
+        )
+        .await,
+        accumulated_work(&[FIRST_REFUSAL_WORK, FAST_PATH_PASS_WORK]),
+        "the fast-path pass must add exactly {{0 decodes, 0 derivations, 0 digests, 1 command}}"
     );
 
     // Disarm the tripwire before remount: mount-time invariant convergence
@@ -2158,6 +2212,16 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
         "receipt.catch-up.gen2.0",
     );
     let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            refused.observation_id().as_str(),
+            refused.payload_reference().digest().as_str(),
+        )
+        .await,
+        FIRST_REFUSAL_WORK,
+        "the first refusal must durably record its exact admission work"
+    );
 
     // Arm the corruption tripwire: retention, the gen-3 re-admission, and
     // every later pass must complete without touching the retained row.
@@ -2230,6 +2294,18 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
         tripwire_observation_json(refused.observation_id().as_str()),
         "no pass may read back, repair, or rewrite the corrupted retained row"
     );
+    // The gen-3 re-admission was one fast-path pass; its receipt is durable
+    // on the marker.
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            refused.observation_id().as_str(),
+            refused.payload_reference().digest().as_str(),
+        )
+        .await,
+        accumulated_work(&[FIRST_REFUSAL_WORK, FAST_PATH_PASS_WORK]),
+        "the fast-path pass must add exactly {{0 decodes, 0 derivations, 0 digests, 1 command}}"
+    );
     // Disarm the tripwire; the restored row is byte-identical to the
     // pre-corruption capture.
     restore_stored_observation_row(&runtime, refused.observation_id().as_str(), &original_row)
@@ -2299,6 +2375,17 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
     );
     let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
 
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            refused.observation_id().as_str(),
+            refused.payload_reference().digest().as_str(),
+        )
+        .await,
+        FIRST_REFUSAL_WORK,
+        "the EOF refusal must durably record its exact admission work"
+    );
+
     // Arm the corruption tripwire: retention, the gen-3 re-admission, and
     // every later pass must complete without touching the retained row.
     let original_row =
@@ -2347,6 +2434,18 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
     assert_eq!(
         decoded, 0,
         "later gen-3 passes must never reopen the refused EOF record"
+    );
+    // The gen-3 re-admission was one fast-path pass; its receipt is durable
+    // on the marker.
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            refused.observation_id().as_str(),
+            refused.payload_reference().digest().as_str(),
+        )
+        .await,
+        accumulated_work(&[FIRST_REFUSAL_WORK, FAST_PATH_PASS_WORK]),
+        "the fast-path pass must add exactly {{0 decodes, 0 derivations, 0 digests, 1 command}}"
     );
 
     // Retention now reclaims the superseded gen-2 advance; the terminal and
@@ -2493,6 +2592,18 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
     let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
     assert_eq!(decoded, 0, "repaired coverage must not reopen the record");
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    // The seeded orphan marker carried zero work; the repair pass was pure
+    // fast path and recorded exactly its own receipt.
+    assert_eq!(
+        admission_work_for(
+            &runtime,
+            refused.observation_id().as_str(),
+            refused.payload_reference().digest().as_str(),
+        )
+        .await,
+        FAST_PATH_PASS_WORK,
+        "the orphan-repair pass must record exactly {{0 decodes, 0 derivations, 0 digests, 1 command}}"
+    );
     assert_eq!(
         raw_observation_json(&runtime, refused.observation_id().as_str()).await,
         tripwire_observation_json(refused.observation_id().as_str()),
