@@ -741,6 +741,7 @@ mod transaction_tests {
     use super::*;
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
+    use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 
     fn skill(id: &str, body: &str) -> ManagedSkill {
         ManagedSkillDraft {
@@ -776,6 +777,7 @@ mod transaction_tests {
         next_a.body_markdown = "# A\nnew".to_string();
         next_a.refresh_checksum();
         let mut next_b = original_b.clone();
+        next_b.metadata.archived_reason = Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE.to_string());
         next_b.set_state(ManagedSkillState::Archived);
         let root = managed_skill_root(profile);
         let nonce = 7;
@@ -799,6 +801,10 @@ mod transaction_tests {
         let loaded_b = load_managed_skill(profile, "skill-b").await.unwrap();
         assert_eq!(loaded_a.body_markdown, "# A\nnew");
         assert_eq!(loaded_b.metadata.state, ManagedSkillState::Archived);
+        assert_eq!(
+            loaded_b.metadata.archived_reason.as_deref(),
+            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
+        );
         assert!(!root.join(SKILL_TRANSACTION_JOURNAL).exists());
         assert!(
             journal
@@ -857,6 +863,75 @@ mod transaction_tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("source and target must differ"));
+    }
+
+    #[tokio::test]
+    async fn archive_authority_rejects_the_reserved_overlap_tombstone() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let original = skill("unrelated-archive", "# Unrelated archive");
+        save_managed_skill(profile, &original).await.unwrap();
+
+        let error = apply_managed_skill_archive(
+            profile,
+            &original.metadata.id,
+            &original.metadata.checksum,
+            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE.to_string()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("reserved skill-overlap tombstone")
+        );
+        assert_eq!(
+            load_managed_skill(profile, &original.metadata.id)
+                .await
+                .unwrap(),
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn consolidation_authority_rejects_the_reserved_overlap_tombstone() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let target = skill("unrelated-target", "# Unrelated target");
+        let source = skill("unrelated-source", "# Unrelated source");
+        save_managed_skill(profile, &target).await.unwrap();
+        save_managed_skill(profile, &source).await.unwrap();
+
+        let error = apply_managed_skill_consolidation(
+            profile,
+            Some(&target.metadata.id),
+            Some(&target.metadata.checksum),
+            None,
+            &source.metadata.id,
+            &source.metadata.checksum,
+            SKILL_OVERLAP_REMOVAL_TOMBSTONE,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("reserved skill-overlap tombstone")
+        );
+        assert_eq!(
+            load_managed_skill(profile, &target.metadata.id)
+                .await
+                .unwrap(),
+            target
+        );
+        assert_eq!(
+            load_managed_skill(profile, &source.metadata.id)
+                .await
+                .unwrap(),
+            source
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
