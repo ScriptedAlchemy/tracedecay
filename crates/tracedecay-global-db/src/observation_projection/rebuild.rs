@@ -1050,17 +1050,166 @@ async fn write_effect_converging_collisions(
                 observation = observation.observation_id().as_str(),
                 "projection output collided; recording a durable skip disposition"
             );
-            conn.execute_batch(&format!(
-                "ROLLBACK TO {PROJECTION_COLLISION_SAVEPOINT}; \
-                 RELEASE {PROJECTION_COLLISION_SAVEPOINT};"
-            ))
-            .await
-            .map_err(|error| storage("rollback projection collision savepoint", error))?;
-            *effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
-            write.run(conn, sequence, observation, effect).await
+            converge_collided_effect(conn, write, sequence, observation, effect).await
         }
         Err(error) => Err(error),
     }
+}
+
+/// Collision convergence: roll the guarded write back, substitute the durable
+/// `OutputCollision` skip, and re-run so the drain or rebuild checkpoints past
+/// the collided observation.
+///
+/// A live drain additionally reconciles any provenance rows already durable
+/// under the collided observation's key: the skip authority contract
+/// (`schema_contract::invariants`) defines a valid skip as zero provenance
+/// rows plus exactly one disposition, so a stale row left behind by an
+/// earlier projection era must not survive next to the skip it contradicts.
+/// The projected-output ownership cache is re-aggregated for every output the
+/// removed rows touched.
+async fn converge_collided_effect(
+    conn: &impl Executor,
+    write: &CollisionGuardedWrite<'_>,
+    sequence: u64,
+    observation: &DurableObservationV1,
+    effect: &mut ObservationProjection,
+) -> ProjectionStoreResult<()> {
+    conn.execute_batch(&format!(
+        "ROLLBACK TO {PROJECTION_COLLISION_SAVEPOINT}; \
+         RELEASE {PROJECTION_COLLISION_SAVEPOINT};"
+    ))
+    .await
+    .map_err(|error| storage("rollback projection collision savepoint", error))?;
+    if matches!(write, CollisionGuardedWrite::Drain) {
+        reconcile_collided_observation_provenance(conn, observation).await?;
+    }
+    *effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
+    write.run(conn, sequence, observation, effect).await
+}
+
+/// Removes provenance rows durable under the collided observation's key and
+/// re-aggregates the temp ownership cache for the outputs they bound.
+async fn reconcile_collided_observation_provenance(
+    conn: &impl Executor,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<()> {
+    let observation_id = observation.observation_id().as_str();
+    let mut affected = Vec::new();
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT output_provider, output_message_id
+             FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+        )
+        .await
+        .map_err(|error| storage("read collided projection provenance", error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read collided projection provenance", error))?
+    {
+        affected.push((
+            row.get::<String>(0)
+                .map_err(|error| storage("read collided projection provenance", error))?,
+            row.get::<String>(1)
+                .map_err(|error| storage("read collided projection provenance", error))?,
+        ));
+    }
+    drop(rows);
+    if affected.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM observation_projection_provenance
+         WHERE projector_version = ?1 AND observation_id = ?2",
+        params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+    )
+    .await
+    .map_err(|error| storage("remove collided projection provenance", error))?;
+    for (output_provider, output_message_id) in affected {
+        conn.execute(
+            "DELETE FROM temp.observation_projection_output_state
+             WHERE projector_version = ?1
+               AND output_provider = ?2 AND output_message_id = ?3",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                output_provider.as_str(),
+                output_message_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("reset collided projection output state", error))?;
+        conn.execute(
+            "INSERT INTO temp.observation_projection_output_state (
+                projector_version, output_provider, output_message_id,
+                canonical_observation_id, latest_observation_id, latest_sequence,
+                projector_owned, owner_count
+             )
+             SELECT groups.projector_version, groups.output_provider, groups.output_message_id,
+                    CASE WHEN groups.projector_owned = 1 THEN (
+                        SELECT provenance.observation_id
+                        FROM observation_projection_provenance AS provenance
+                        JOIN observations AS observation
+                          ON observation.observation_id = provenance.observation_id
+                        WHERE provenance.projector_version = groups.projector_version
+                          AND provenance.output_provider = groups.output_provider
+                          AND provenance.output_message_id = groups.output_message_id
+                        ORDER BY observation.sequence DESC, provenance.observation_id DESC
+                        LIMIT 1
+                    ) ELSE (
+                        SELECT provenance.observation_id
+                        FROM observation_projection_provenance AS provenance
+                        JOIN observations AS observation
+                          ON observation.observation_id = provenance.observation_id
+                        WHERE provenance.projector_version = groups.projector_version
+                          AND provenance.output_provider = groups.output_provider
+                          AND provenance.output_message_id = groups.output_message_id
+                        ORDER BY observation.sequence ASC, provenance.observation_id ASC
+                        LIMIT 1
+                    ) END,
+                    (
+                        SELECT provenance.observation_id
+                        FROM observation_projection_provenance AS provenance
+                        JOIN observations AS observation
+                          ON observation.observation_id = provenance.observation_id
+                        WHERE provenance.projector_version = groups.projector_version
+                          AND provenance.output_provider = groups.output_provider
+                          AND provenance.output_message_id = groups.output_message_id
+                        ORDER BY observation.sequence DESC, provenance.observation_id DESC
+                        LIMIT 1
+                    ),
+                    (
+                        SELECT observation.sequence
+                        FROM observation_projection_provenance AS provenance
+                        JOIN observations AS observation
+                          ON observation.observation_id = provenance.observation_id
+                        WHERE provenance.projector_version = groups.projector_version
+                          AND provenance.output_provider = groups.output_provider
+                          AND provenance.output_message_id = groups.output_message_id
+                        ORDER BY observation.sequence DESC, provenance.observation_id DESC
+                        LIMIT 1
+                    ),
+                    groups.projector_owned, groups.owner_count
+             FROM (
+                SELECT projector_version, output_provider, output_message_id,
+                       MAX(message_created) AS projector_owned,
+                       COUNT(*) AS owner_count
+                FROM observation_projection_provenance
+                WHERE projector_version = ?1
+                  AND output_provider = ?2 AND output_message_id = ?3
+                GROUP BY projector_version, output_provider, output_message_id
+             ) AS groups",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                output_provider.as_str(),
+                output_message_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("reaggregate collided projection output state", error))?;
+    }
+    Ok(())
 }
 
 enum RebuildAdvance {
