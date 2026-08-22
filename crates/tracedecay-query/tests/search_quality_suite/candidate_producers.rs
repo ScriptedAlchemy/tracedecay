@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Cursor;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -42,6 +43,7 @@ use tracedecay_query::retrieval::exact::{
     ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::lexical::{
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1, CodeLexicalProjectionAdapterV1,
     CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
@@ -49,6 +51,7 @@ use tracedecay_query::retrieval::lexical::{
     LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1,
     MAX_LEXICAL_QUERY_TERM_BYTES_V1,
 };
+use tracedecay_query::retrieval::ports::{ExactTermPostingReadPort, LexicalPostingReadPort};
 
 struct ArtifactControl {
     cancelled: bool,
@@ -214,16 +217,48 @@ impl RealLexicalSourceFixture {
 }
 
 fn real_lexical_source_fixture() -> RealLexicalSourceFixture {
+    real_lexical_source_fixture_with_files(1)
+}
+
+/// One real production corpus with `file_count` TypeScript files. The first
+/// file keeps the original single-file identity; the rest share its token
+/// shape (identical per-field token counts) under distinct symbols so BM25
+/// scores tie across files without content-identical chunks.
+fn real_lexical_source_fixture_with_files(file_count: usize) -> RealLexicalSourceFixture {
+    assert!(file_count >= 1, "fixture needs at least one file");
     let repository = id::<RepositoryId>("repository.artifact");
     let sanitizer_revision = id::<SanitizerRevision>("sanitizer.v1");
-    let source = b"import type { Widget } from \"widget-kit\";\nexport function render(value: Widget) { return value; }\n";
-    let file = SanitizedCodeFileV1 {
-        file_occurrence_id: id::<FileOccurrenceId>("file.artifact"),
-        logical_path: "src/artifact.ts".to_owned(),
-        language: Some(id("typescript")),
-        content_digest: content_digest(source),
-        disposition: SnapshotFileDispositionV1::Present,
-    };
+    let identity_source = b"import type { Widget } from \"widget-kit\";\nexport function render(value: Widget) { return value; }\n";
+    let sources: Vec<(SanitizedCodeFileV1, Vec<u8>)> = (0..file_count)
+        .map(|ordinal| {
+            let (file_id, logical_path, source) = if ordinal == 0 {
+                (
+                    "file.artifact".to_owned(),
+                    "src/artifact.ts".to_owned(),
+                    identity_source.to_vec(),
+                )
+            } else {
+                // Zero-padded ordinals keep lexicographic file order equal to
+                // generation order, which snapshot intake requires.
+                (
+                    format!("file.artifact.{ordinal:02}"),
+                    format!("src/artifact_{ordinal:02}.ts"),
+                    format!(
+                        "import type {{ Widget }} from \"widget-kit\";\nexport function render_{ordinal:02}(value: Widget) {{ return value; }}\n"
+                    )
+                    .into_bytes(),
+                )
+            };
+            let file = SanitizedCodeFileV1 {
+                file_occurrence_id: id::<FileOccurrenceId>(&file_id),
+                logical_path,
+                language: Some(id("typescript")),
+                content_digest: content_digest(&source),
+                disposition: SnapshotFileDispositionV1::Present,
+            };
+            (file, source)
+        })
+        .collect();
     let snapshot = SanitizedCodeSnapshotV1 {
         repository: repository.clone(),
         worktree: None,
@@ -231,18 +266,24 @@ fn real_lexical_source_fixture() -> RealLexicalSourceFixture {
         source_revision: None,
         sanitizer_revision: sanitizer_revision.clone(),
         sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.artifact")],
-        content_identity: content_digest(source),
+        content_identity: content_digest(identity_source),
         captured_at: UtcMicros(1_000_000),
-        files: vec![file.clone()],
+        files: sources.iter().map(|(file, _)| file.clone()).collect(),
     };
     let request = CodeIndexBuildRequestV1 {
         snapshot,
-        captured_files: vec![CodeIndexCapturedFileV1 {
-            file_occurrence_id: file.file_occurrence_id.clone(),
-            sanitized_bytes: source.to_vec(),
-            sensitivity_level: SensitivityLevelV1::Public,
-        }],
-        changed_files: BTreeSet::from([file.logical_path.clone()]),
+        captured_files: sources
+            .iter()
+            .map(|(file, source)| CodeIndexCapturedFileV1 {
+                file_occurrence_id: file.file_occurrence_id.clone(),
+                sanitized_bytes: source.clone(),
+                sensitivity_level: SensitivityLevelV1::Public,
+            })
+            .collect(),
+        changed_files: sources
+            .iter()
+            .map(|(file, _)| file.logical_path.clone())
+            .collect::<BTreeSet<_>>(),
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
@@ -315,6 +356,22 @@ fn real_verified_pages_with_maximum_page_chunks(
     VerifiedSealedLexicalSourceReceiptV1,
 ) {
     let fixture = real_lexical_source_fixture();
+    let (pages, receipt) = drain_verified_pages(&fixture, maximum_page_chunks);
+    assert!(!pages.is_empty(), "production source emits lexical pages");
+    assert!(
+        pages.iter().any(|page| !page.imports().is_empty()),
+        "production source emits parser-validated import evidence"
+    );
+    (fixture, pages, receipt)
+}
+
+fn drain_verified_pages(
+    fixture: &RealLexicalSourceFixture,
+    maximum_page_chunks: usize,
+) -> (
+    Vec<VerifiedSealedLexicalPageV1>,
+    VerifiedSealedLexicalSourceReceiptV1,
+) {
     let control = ArtifactControl { cancelled: false };
     let mut source = fixture.open_source(maximum_page_chunks);
     let mut pages = Vec::new();
@@ -324,12 +381,7 @@ fn real_verified_pages_with_maximum_page_chunks(
             VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
         }
     };
-    assert!(!pages.is_empty(), "production source emits lexical pages");
-    assert!(
-        pages.iter().any(|page| !page.imports().is_empty()),
-        "production source emits parser-validated import evidence"
-    );
-    (fixture, pages, receipt)
+    (pages, receipt)
 }
 
 fn real_verified_pages() -> (
@@ -1128,6 +1180,389 @@ fn disk_artifact_cancellation_rolls_back_import_append_and_reopen_verification()
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
     )
     .expect("cancelled verification must not alter the sealed artifact");
+}
+
+/// Count the staged lexical rows and their distinct chunk identities so a
+/// double-advanced row is visible as a cardinality mismatch.
+fn staged_row_cardinality(artifact_path: &Path) -> (u64, u64) {
+    let connection = rusqlite::Connection::open(artifact_path).expect("inspect staging artifact");
+    let (rows, distinct): (i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT chunk_id) FROM rows",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("staged row cardinality");
+    (
+        u64::try_from(rows).expect("staged row count"),
+        u64::try_from(distinct).expect("distinct staged row count"),
+    )
+}
+
+#[test]
+fn disk_artifact_budget_refusal_precedes_progress_and_resumes_the_same_source() {
+    let (fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
+    let metadata = fixture.metadata.clone();
+    let control = ArtifactControl { cancelled: false };
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+
+    // Measure the real deterministic ledger charges with a default builder.
+    let probe = CodeLexicalArtifactBuilderV1::create(
+        directory.path().join("charge-probe.sqlite"),
+        metadata.clone(),
+    )
+    .expect("create charge probe");
+    let fixed = probe.fixed_ledger_charge_bytes();
+    let first_page_charge = probe
+        .page_ledger_charge_bytes(&pages[0])
+        .expect("first page ledger charge");
+    let max_page_charge = pages
+        .iter()
+        .map(|page| {
+            probe
+                .page_ledger_charge_bytes(page)
+                .expect("page ledger charge")
+        })
+        .max()
+        .expect("fixture pages");
+    assert!(first_page_charge > 0, "a real page must carry ledger cost");
+
+    // A budget exactly one byte under the first page's charge refuses the
+    // append before any progress mutation.
+    let mut refused = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        directory.path().join("refused.sqlite"),
+        metadata.clone(),
+        fixed + first_page_charge - 1,
+    )
+    .expect("create one-byte-under builder");
+    assert!(matches!(
+        refused.append_page(&pages[0], &control),
+        Err(CodeLexicalArtifactErrorV1::Contract(_))
+    ));
+    assert_eq!(
+        refused
+            .progress()
+            .expect("refused progress")
+            .next_page_ordinal,
+        0,
+        "a ledger refusal must precede every progress mutation"
+    );
+
+    // The same refusal on the rebuild path runs inside `next_page_if` and
+    // must leave the sealed source's cursor and hash authorities unchanged.
+    let mut source = fixture.open_source(1);
+    assert!(matches!(
+        refused.rebuild_and_finalize(&mut source, &control),
+        Err(CodeLexicalArtifactErrorV1::Contract(_))
+    ));
+    assert_eq!(
+        source.cursor().next_page_ordinal(),
+        0,
+        "a refused page must not advance the sealed lexical source"
+    );
+    assert_eq!(
+        refused
+            .progress()
+            .expect("post-refusal progress")
+            .next_page_ordinal,
+        0
+    );
+
+    // At exactly the measured charge the same page is admitted.
+    let mut boundary = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        directory.path().join("boundary.sqlite"),
+        metadata.clone(),
+        fixed + first_page_charge,
+    )
+    .expect("create boundary-budget builder");
+    boundary
+        .append_page(&pages[0], &control)
+        .expect("the boundary budget admits the measured page exactly");
+
+    // The refused source instance RESUMES: a builder whose budget admits
+    // every page seals the very same source, and every row advances once.
+    let sealed_path = directory.path().join("sealed.sqlite");
+    let mut sealed = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        &sealed_path,
+        metadata,
+        fixed + max_page_charge,
+    )
+    .expect("create admitting builder");
+    let verified = sealed
+        .rebuild_and_finalize(&mut source, &control)
+        .expect("the refused source must resume instead of blocking");
+    assert_eq!(verified.total_chunks(), source_receipt.total_chunks());
+    let (rows, distinct) = staged_row_cardinality(&sealed_path);
+    assert_eq!(
+        rows,
+        source_receipt.total_chunks(),
+        "every lexical row advances exactly once"
+    );
+    assert_eq!(rows, distinct, "no lexical row may advance twice");
+}
+
+#[test]
+fn disk_artifact_rows_advance_once_across_retry_replay_and_cancellation() {
+    let (fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
+    let metadata = fixture.metadata.clone();
+    assert!(pages.len() > 1, "fixture must emit several pages");
+    let control = ArtifactControl { cancelled: false };
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("once-advance.sqlite");
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata).expect("create artifact");
+
+    let mut appended_chunks = 0u64;
+    for page in &pages {
+        // Cancellation mid-append rolls back without advancing any row.
+        let cancellation = CancelAtObservation::new(2);
+        assert!(matches!(
+            builder.append_page(page, &cancellation),
+            Err(CodeLexicalArtifactErrorV1::Interrupted(_))
+        ));
+        assert_eq!(
+            staged_row_cardinality(&artifact_path).0,
+            appended_chunks,
+            "a cancelled append must not advance any row"
+        );
+        // The retried append advances each of the page's rows exactly once.
+        builder
+            .append_page(page, &control)
+            .expect("append page after cancellation");
+        appended_chunks += page.chunk_count();
+        let (rows, distinct) = staged_row_cardinality(&artifact_path);
+        assert_eq!(rows, appended_chunks, "a retried append advances once");
+        assert_eq!(rows, distinct, "no retried row may advance twice");
+        // An idempotent replay of the same page advances nothing.
+        builder
+            .append_page(page, &control)
+            .expect("replayed page is idempotent");
+        assert_eq!(
+            staged_row_cardinality(&artifact_path).0,
+            appended_chunks,
+            "a replayed page must not advance any row"
+        );
+    }
+    assert_eq!(appended_chunks, source_receipt.total_chunks());
+
+    // A cancelled seal replay rolls back its derived rebuild atomically.
+    let mut cancelled_source = fixture.open_source(1);
+    let replay_cancellation = CancelAtObservation::new(3);
+    assert!(matches!(
+        builder.rebuild_and_finalize(&mut cancelled_source, &replay_cancellation),
+        Err(CodeLexicalArtifactErrorV1::Interrupted(_))
+    ));
+    assert_eq!(
+        staged_row_cardinality(&artifact_path).0,
+        appended_chunks,
+        "a cancelled seal replay must not advance any row"
+    );
+
+    // The retried replay still lands every row exactly once and seals.
+    let mut final_source = fixture.open_source(1);
+    let verified = builder
+        .rebuild_and_finalize(&mut final_source, &control)
+        .expect("rebuild and finalize artifact");
+    let (rows, distinct) = staged_row_cardinality(&artifact_path);
+    assert_eq!(rows, source_receipt.total_chunks());
+    assert_eq!(rows, distinct);
+    CodeLexicalArtifactReaderV1::open(
+        &artifact_path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+    )
+    .expect("once-advanced artifact reopens with full verification");
+}
+
+#[test]
+fn disk_artifact_ledger_charges_stay_page_local_across_corpus_scaling() {
+    let control = ArtifactControl { cancelled: false };
+    let mut max_charges = Vec::new();
+    let mut chunk_totals = Vec::new();
+    for (index, file_count) in [2usize, 20usize].into_iter().enumerate() {
+        let fixture = real_lexical_source_fixture_with_files(file_count);
+        let metadata = fixture.metadata.clone();
+        let (pages, receipt) = drain_verified_pages(&fixture, 1);
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let artifact_path = directory.path().join(format!("scaling-{index}.sqlite"));
+        let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata)
+            .expect("create artifact");
+        let max_charge = pages
+            .iter()
+            .map(|page| {
+                builder
+                    .page_ledger_charge_bytes(page)
+                    .expect("page ledger charge")
+            })
+            .max()
+            .expect("corpus pages");
+        assert!(
+            builder.fixed_ledger_charge_bytes() + max_charge
+                <= CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+            "the real corpus must fit the enforced build memory budget"
+        );
+        for page in &pages {
+            builder.append_page(page, &control).expect("append page");
+        }
+        let mut final_source = fixture.open_source(1);
+        let verified = builder
+            .rebuild_and_finalize(&mut final_source, &control)
+            .expect("rebuild and finalize artifact");
+        assert_eq!(verified.total_chunks(), receipt.total_chunks());
+        let (rows, distinct) = staged_row_cardinality(&artifact_path);
+        assert_eq!(rows, receipt.total_chunks());
+        assert_eq!(rows, distinct);
+        max_charges.push(max_charge);
+        chunk_totals.push(receipt.total_chunks());
+    }
+    assert_eq!(
+        chunk_totals[1],
+        chunk_totals[0] * 10,
+        "the large corpus must really be ten times the small corpus"
+    );
+    assert!(
+        max_charges[1] <= max_charges[0].saturating_mul(2),
+        "the per-page ledger charge must track page content, not corpus size: {} vs {} bytes",
+        max_charges[1],
+        max_charges[0]
+    );
+}
+
+#[test]
+fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage() {
+    let fixture = real_lexical_source_fixture_with_files(9);
+    let metadata = fixture.metadata.clone();
+    let generation = metadata.generation.clone();
+    let control = ArtifactControl { cancelled: false };
+    let (pages, _) = drain_verified_pages(&fixture, 128);
+    let chunks = pages
+        .iter()
+        .flat_map(|page| page.chunks().iter().cloned())
+        .collect::<Vec<_>>();
+    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), chunks)
+        .expect("one-shot lexical projection");
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("top-k.sqlite");
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata).expect("create artifact");
+    for page in &pages {
+        builder.append_page(page, &control).expect("append page");
+    }
+    let mut final_source = fixture.open_source(128);
+    let verified = builder
+        .rebuild_and_finalize(&mut final_source, &control)
+        .expect("rebuild and finalize artifact");
+    let reader = CodeLexicalArtifactReaderV1::open(
+        &artifact_path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+    )
+    .expect("verify and reopen artifact");
+
+    // Every file scores identical token counts for "widget", so the K=7 cut
+    // runs straight through a score tie and must fall back to the lane's
+    // stable occurrence order.
+    let mut request = lexical_request("widget", &["widget"], &[], &[], 0, 7);
+    request.generation = generation.clone();
+    let RetrieverOutcome::Complete(lexical_port) = reader
+        .read_lexical_postings(&request)
+        .expect("artifact lexical port read")
+    else {
+        panic!("artifact lexical port must complete");
+    };
+    assert!(
+        lexical_port.coverage.eligible > 7,
+        "fixture must overflow the K=7 cap"
+    );
+    assert_eq!(
+        lexical_port.candidates.len(),
+        7,
+        "the artifact port hydrates at most K candidates"
+    );
+    assert_eq!(
+        lexical_port.coverage.capped,
+        lexical_port.coverage.eligible - 7,
+        "the surplus above K is reported as capped coverage"
+    );
+
+    let artifact_lane = complete(
+        LexicalLane::new(reader.clone())
+            .retrieve_lexical(&request)
+            .expect("artifact lexical lane"),
+    );
+    let memory_lane = complete(
+        LexicalLane::new(one_shot.clone())
+            .retrieve_lexical(&request)
+            .expect("one-shot lexical lane"),
+    );
+    assert_eq!(
+        artifact_lane.candidates, memory_lane.candidates,
+        "K=7 lexical candidates must match the one-shot projection exactly"
+    );
+    assert_eq!(
+        artifact_lane.evidence_by_occurrence, memory_lane.evidence_by_occurrence,
+        "K=7 lexical evidence must match the one-shot projection exactly"
+    );
+    assert_eq!(
+        lexical_port
+            .candidates
+            .iter()
+            .map(|candidate| &candidate.source_occurrence_id)
+            .collect::<Vec<_>>(),
+        artifact_lane
+            .candidates
+            .iter()
+            .map(|candidate| &candidate.source_occurrence_id)
+            .collect::<Vec<_>>(),
+        "the port's bounded selection already uses the lane's canonical tie order"
+    );
+
+    // Exact-lane parity under the same K=7: every document matches the
+    // quoted literal once, so the cut again runs through a tie.
+    let authority =
+        CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>("exact-rules.v1"));
+    let exact_query = r#""return value""#;
+    let base = base_request(exact_query, 7);
+    let exact_query_view = query_view(exact_query);
+    let exact_request = ExactLaneRequest {
+        literals: authority.parse_literals(&exact_query_view, &base),
+        base,
+        query_view: &exact_query_view,
+        generation,
+        budget: budget(7),
+    };
+    let RetrieverOutcome::Complete(exact_port) = reader
+        .exact_adapter(authority.clone())
+        .read_exact_postings(&exact_request)
+        .expect("artifact exact port read")
+    else {
+        panic!("artifact exact port must complete");
+    };
+    assert!(
+        exact_port.coverage.eligible > 7,
+        "fixture must overflow the exact K=7 cap"
+    );
+    assert_eq!(exact_port.candidates.len(), 7);
+    assert_eq!(exact_port.coverage.capped, exact_port.coverage.eligible - 7);
+
+    let artifact_exact = complete(
+        ExactLane::new(authority.clone(), reader.exact_adapter(authority.clone()))
+            .retrieve_exact(&exact_request)
+            .expect("artifact exact lane"),
+    );
+    let memory_exact = complete(
+        ExactLane::new(authority.clone(), one_shot.exact_adapter(authority))
+            .retrieve_exact(&exact_request)
+            .expect("one-shot exact lane"),
+    );
+    assert_eq!(
+        artifact_exact.candidates, memory_exact.candidates,
+        "K=7 exact candidates must match the one-shot projection exactly"
+    );
+    assert_eq!(
+        artifact_exact.evidence_by_occurrence, memory_exact.evidence_by_occurrence,
+        "K=7 exact evidence must match the one-shot projection exactly"
+    );
 }
 
 #[test]
