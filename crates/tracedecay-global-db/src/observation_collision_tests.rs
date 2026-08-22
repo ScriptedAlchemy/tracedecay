@@ -65,12 +65,49 @@ use tracedecay_store::{
     ObservationProjectionStore, ObservationStore, ObservationStoreError, ObservationWrite,
     ProjectionPersistOutcome, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::{Dispatch, Event, Metadata, Subscriber};
 
 use crate::AdmissionWorkV1;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::params;
 
 const COLLISION_PROVIDER: &str = "collision-test";
+
+/// The exact admission work a first full-path refusal performs and durably
+/// records: one classification read of the retained row (a runtime command
+/// whose decode re-derives the identity and re-verifies the payload digest)
+/// plus the frontier cursor read inside the refusal transaction.
+const FIRST_REFUSAL_WORK: AdmissionWorkV1 = AdmissionWorkV1 {
+    stored_rows_decoded: 1,
+    identity_derivations: 1,
+    payload_digests: 1,
+    runtime_commands: 2,
+};
+
+/// The exact per-pass work every re-admitted fast-path refusal adds: zero
+/// stored-row decodes, zero identity derivations, zero payload digests, and
+/// exactly one runtime command — the frontier cursor read.
+const FAST_PATH_PASS_WORK: AdmissionWorkV1 = AdmissionWorkV1 {
+    stored_rows_decoded: 0,
+    identity_derivations: 0,
+    payload_digests: 0,
+    runtime_commands: 1,
+};
+
+/// Component-wise sum of per-pass receipts, for asserting the accumulated
+/// marker totals after a known pass sequence.
+fn accumulated_work(passes: &[AdmissionWorkV1]) -> AdmissionWorkV1 {
+    let mut total = AdmissionWorkV1::default();
+    for pass in passes {
+        total.stored_rows_decoded += pass.stored_rows_decoded;
+        total.identity_derivations += pass.identity_derivations;
+        total.payload_digests += pass.payload_digests;
+        total.runtime_commands += pass.runtime_commands;
+    }
+    total
+}
 
 /// The exact admission work a first full-path refusal performs and durably
 /// records: one classification read of the retained row (a runtime command

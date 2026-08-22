@@ -195,6 +195,27 @@ impl CodeIndexExecutionControlV1 for CancelAtObservation {
     }
 }
 
+#[derive(Default)]
+struct CancelAfterAcceptedPage {
+    page_accepted: std::sync::atomic::AtomicBool,
+}
+
+impl CancelAfterAcceptedPage {
+    fn mark_page_accepted(&self) {
+        self.page_accepted.store(true, Ordering::SeqCst);
+    }
+}
+
+impl CodeIndexExecutionControlV1 for CancelAfterAcceptedPage {
+    fn is_cancelled(&self) -> bool {
+        self.page_accepted.load(Ordering::SeqCst)
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
 /// A bounded work budget that exhausts after a fixed number of deadline
 /// observations, mirroring the production activations that failed with
 /// "the read port exceeded its bounded work budget".
@@ -2039,39 +2060,43 @@ fn disk_artifact_same_source_instance_resumes_after_accepted_page_failure() {
     let metadata = fixture.metadata.clone();
     let control = ArtifactControl { cancelled: false };
     let directory = tempfile::tempdir().expect("artifact tempdir");
-    let mut resumed_after_acceptance = false;
-    for cancellation_observation in 3..=96 {
-        let artifact_path = directory
-            .path()
-            .join(format!("same-source-{cancellation_observation}.sqlite"));
-        let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
-            .expect("create artifact");
-        let mut source = fixture.open_source(1);
-        let cancellation = CancelAtObservation::new(cancellation_observation);
-        match builder.rebuild_and_finalize(&mut source, &cancellation) {
-            Err(CodeLexicalArtifactErrorV1::Interrupted(_)) => {}
-            Ok(_) => break,
-            Err(error) => panic!("interrupted seal replay must stay typed: {error:?}"),
-        }
-        if source.cursor().next_page_ordinal() == 0 {
-            continue;
-        }
-        // The failure landed after page acceptance: the SAME instance must
-        // resume and seal.
-        resumed_after_acceptance = true;
-        let verified = builder.rebuild_and_finalize(&mut source, &control).expect(
-            "the same source instance must resume after an accepted-page failure \
-             instead of terminally blocking on the page-zero precondition",
-        );
-        assert_eq!(verified.total_chunks(), source_receipt.total_chunks());
-        let (rows, _) = staged_row_cardinality(&artifact_path);
-        assert_eq!(rows, source_receipt.total_chunks());
-        break;
-    }
-    assert!(
-        resumed_after_acceptance,
-        "the cancellation sweep must observe at least one failure after page acceptance"
+    let artifact_path = directory.path().join("same-source.sqlite");
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata).expect("create artifact");
+    let mut source = fixture.open_source(1);
+    let cancellation = CancelAfterAcceptedPage::default();
+
+    let first_page = source
+        .next_page_if(&cancellation, |page| {
+            builder.append_page(page, &cancellation)?;
+            cancellation.mark_page_accepted();
+            Ok::<(), CodeLexicalArtifactErrorV1>(())
+        })
+        .expect("stage the first verified page")
+        .expect("admit the first verified page");
+    assert!(matches!(
+        first_page,
+        VerifiedSealedLexicalPageReadV1::Page(_)
+    ));
+    assert_eq!(source.cursor().next_page_ordinal(), 1);
+
+    assert!(matches!(
+        builder.rebuild_and_finalize(&mut source, &cancellation),
+        Err(CodeLexicalArtifactErrorV1::Interrupted(
+            CodeIndexInterruptionV1::Cancelled
+        ))
+    ));
+    assert_eq!(source.cursor().next_page_ordinal(), 1);
+
+    // The failure landed after page acceptance: the SAME instance must
+    // resume and seal.
+    let verified = builder.rebuild_and_finalize(&mut source, &control).expect(
+        "the same source instance must resume after an accepted-page failure \
+         instead of terminally blocking on the page-zero precondition",
     );
+    assert_eq!(verified.total_chunks(), source_receipt.total_chunks());
+    let (rows, _) = staged_row_cardinality(&artifact_path);
+    assert_eq!(rows, source_receipt.total_chunks());
 }
 
 /// A test authority that denies a configured set of literal byte strings and
