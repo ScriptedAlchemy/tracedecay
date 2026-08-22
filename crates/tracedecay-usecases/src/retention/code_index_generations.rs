@@ -688,7 +688,12 @@ pub fn prepare_next_code_generation_retention_cancellable(
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
-    recover_code_generation_retention(store_root, vector_readable_sources, graph_replay_pool_root)?;
+    recover_code_generation_retention_cancellable(
+        store_root,
+        vector_readable_sources,
+        graph_replay_pool_root,
+        is_cancelled,
+    )?;
     plan_next_code_generation_retention_cancellable(
         store_root,
         vector_readable_sources,
@@ -1164,6 +1169,35 @@ pub fn execute_code_generation_retention(
     completed_at: UtcMicros,
     graph_replay_pool_root: Option<&Path>,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
+    execute_code_generation_retention_cancellable(
+        store_root,
+        plan,
+        mode,
+        completed_at,
+        graph_replay_pool_root,
+        &|| false,
+    )
+}
+
+/// Apply a fully verified retention plan while preserving the caller's
+/// cancellation authority through the bounded artifact re-verification step.
+///
+/// The plan is immutable evidence, but its content-addressed artifact files
+/// are verified again under the store lock immediately before quarantine. A
+/// shutdown must be able to stop that full-file read before any candidate is
+/// renamed or any deletion receipt is published. Existing callers retain the
+/// non-cancellable wrapper above until their control path is wired through.
+pub fn execute_code_generation_retention_cancellable(
+    store_root: &Path,
+    plan: CodeGenerationRetentionPlanV1,
+    mode: CodeGenerationRetentionModeV1,
+    completed_at: UtcMicros,
+    graph_replay_pool_root: Option<&Path>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
+    if is_cancelled() {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
     if mode == CodeGenerationRetentionModeV1::DryRun {
         return Ok(CodeGenerationRetentionReportV1 {
             plan,
@@ -1183,6 +1217,9 @@ pub fn execute_code_generation_retention(
 
     let vector_readable_sources = plan.vector_readable_sources.clone();
     let _store_lock = acquire_code_generation_store_lock(store_root)?;
+    if is_cancelled() {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
     if transaction_path(store_root).exists() || text_artifact_transaction_path(store_root).exists()
     {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
@@ -1273,7 +1310,12 @@ pub fn execute_code_generation_retention(
         if plan.collectable_text_artifacts.is_empty() {
             (Vec::new(), None)
         } else {
-            execute_text_artifact_retention_under_store_lock(store_root, &plan, completed_at)?
+            execute_text_artifact_retention_under_store_lock(
+                store_root,
+                &plan,
+                completed_at,
+                is_cancelled,
+            )?
         };
 
     Ok(CodeGenerationRetentionReportV1 {
@@ -1290,12 +1332,39 @@ pub fn recover_code_generation_retention(
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     graph_replay_pool_root: Option<&Path>,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
+    recover_code_generation_retention_cancellable(
+        store_root,
+        vector_readable_sources,
+        graph_replay_pool_root,
+        &|| false,
+    )
+}
+
+/// Recover a prior retention transaction without converting cancellation into
+/// a successful maintenance pass. Recovery is journaled, so a cancellation
+/// before either transaction family starts leaves the durable journal for the
+/// next attempt rather than clearing partial evidence.
+pub fn recover_code_generation_retention_cancellable(
+    store_root: &Path,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    graph_replay_pool_root: Option<&Path>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if is_cancelled() {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
     let _store_lock = acquire_code_generation_store_lock(store_root)?;
+    if is_cancelled() {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
     recover_pending_transaction_unlocked(
         store_root,
         vector_readable_sources,
         graph_replay_pool_root,
     )?;
+    if is_cancelled() {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
     recover_pending_text_artifact_transaction_unlocked(store_root)
 }
 
@@ -1307,24 +1376,67 @@ pub fn run_code_generation_retention(
     completed_at: UtcMicros,
     graph_replay_pool_root: Option<&Path>,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
+    run_code_generation_retention_cancellable(
+        store_root,
+        vector_readable_sources,
+        rollback_floor,
+        mode,
+        completed_at,
+        graph_replay_pool_root,
+        &|| false,
+    )
+}
+
+/// Plan, recover, and apply with one cancellation authority. The old wrapper
+/// preserves current callers while daemon maintenance is integrated with this
+/// control boundary.
+pub fn run_code_generation_retention_cancellable(
+    store_root: &Path,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    rollback_floor: usize,
+    mode: CodeGenerationRetentionModeV1,
+    completed_at: UtcMicros,
+    graph_replay_pool_root: Option<&Path>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
     // Apply must sweep the same census dry-run reports (bounded by the batch
     // cap), not the single-unit "next" plan: that truncation exists for daemon
     // maintenance, which calls `prepare_next_…` directly so one graph writer
     // transaction never holds more than one collection unit.
     let plan = match mode {
         CodeGenerationRetentionModeV1::Apply => {
-            recover_code_generation_retention(
+            recover_code_generation_retention_cancellable(
                 store_root,
                 vector_readable_sources,
                 graph_replay_pool_root,
+                is_cancelled,
             )?;
-            plan_code_generation_retention(store_root, vector_readable_sources, rollback_floor)?
+            plan_code_generation_retention_with_verification_cancellable(
+                store_root,
+                vector_readable_sources,
+                rollback_floor,
+                GenerationDigestVerificationV1::Full,
+                is_cancelled,
+            )?
         }
         CodeGenerationRetentionModeV1::DryRun => {
-            plan_code_generation_retention(store_root, vector_readable_sources, rollback_floor)?
+            plan_code_generation_retention_with_verification_cancellable(
+                store_root,
+                vector_readable_sources,
+                rollback_floor,
+                GenerationDigestVerificationV1::Full,
+                is_cancelled,
+            )?
         }
     };
-    execute_code_generation_retention(store_root, plan, mode, completed_at, graph_replay_pool_root)
+    execute_code_generation_retention_cancellable(
+        store_root,
+        plan,
+        mode,
+        completed_at,
+        graph_replay_pool_root,
+        is_cancelled,
+    )
 }
 
 pub fn observe_code_generation_retention(
@@ -1413,6 +1525,7 @@ fn execute_text_artifact_retention_under_store_lock(
     store_root: &Path,
     plan: &CodeGenerationRetentionPlanV1,
     completed_at: UtcMicros,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<
     (
         Vec<CodeTextArtifactRetentionCandidateV1>,
@@ -1420,6 +1533,9 @@ fn execute_text_artifact_retention_under_store_lock(
     ),
     CodeGenerationRetentionErrorV1,
 > {
+    if is_cancelled() {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
     let deleted_artifacts = plan.collectable_text_artifacts.clone();
     let receipt = build_text_artifact_receipt(plan, deleted_artifacts.clone(), completed_at)?;
     let transaction = CodeTextArtifactRetentionTransactionV1 {
@@ -1429,12 +1545,21 @@ fn execute_text_artifact_retention_under_store_lock(
     };
     persist_text_artifact_transaction(store_root, &transaction)?;
     let result = (|| {
-        stage_collectable_text_artifacts(store_root, &transaction)?;
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
+        stage_collectable_text_artifacts_cancellable(store_root, &transaction, is_cancelled)?;
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
         if read_active_pointer(store_root)? != transaction.active_pointer {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(
                 "active generation changed while text-artifact candidates were quarantined"
                     .to_owned(),
             ));
+        }
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
         write_text_artifact_receipt(store_root, &receipt)?;
         cleanup_committed_text_artifact_transaction(store_root, &transaction)?;
@@ -1651,6 +1776,14 @@ fn stage_collectable_text_artifacts(
     store_root: &Path,
     transaction: &CodeTextArtifactRetentionTransactionV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
+    stage_collectable_text_artifacts_cancellable(store_root, transaction, &|| false)
+}
+
+fn stage_collectable_text_artifacts_cancellable(
+    store_root: &Path,
+    transaction: &CodeTextArtifactRetentionTransactionV1,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
     let artifacts_root = code_text_artifacts_root(store_root);
     let stage_root = text_artifact_transaction_stage_root(store_root, &transaction.receipt);
     std::fs::create_dir_all(&stage_root).map_err(storage)?;
@@ -1660,6 +1793,9 @@ fn stage_collectable_text_artifacts(
         )
     })?)?;
     for candidate in &transaction.receipt.deleted_artifacts {
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
         validate_text_artifact_candidate(candidate)?;
         let source = artifacts_root.join(&candidate.artifact_file);
         let staged = stage_root.join(&candidate.artifact_file);
@@ -1685,8 +1821,11 @@ fn stage_collectable_text_artifacts(
                         digest,
                         candidate.size_bytes,
                         GenerationDigestVerificationV1::Full,
-                        &|| false,
+                        is_cancelled,
                     )?;
+                }
+                if is_cancelled() {
+                    return Err(CodeGenerationRetentionErrorV1::Cancelled);
                 }
                 std::fs::rename(&source, &staged).map_err(storage)?;
                 sync_directory(&artifacts_root)?;
@@ -4644,6 +4783,67 @@ mod tests {
     }
 
     #[test]
+    fn cancellable_artifact_apply_stops_rehash_before_quarantine_and_retries() {
+        let (store, generations) = fixture_store(1);
+        let active = generations.last().expect("active generation");
+        let bytes = vec![b'x'; 3 * 64 * 1024];
+        let orphan = text_artifact_for_bytes(&active.id, &bytes);
+        let orphan_path = write_text_artifact(&store, &orphan, &bytes);
+        let plan = plan_code_generation_retention(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        )
+        .expect("plan fully verified artifact collection");
+        assert_eq!(plan.collectable_text_artifacts.len(), 1);
+
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let error = execute_code_generation_retention_cancellable(
+            store.path(),
+            plan.clone(),
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(15),
+            None,
+            &|| checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 6,
+        )
+        .expect_err("cancellation must interrupt the under-lock artifact rehash");
+
+        assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
+        assert!(
+            checks.load(std::sync::atomic::Ordering::SeqCst) >= 7,
+            "the cancellation fires after at least one rehash chunk"
+        );
+        assert_eq!(
+            std::fs::read(&orphan_path).expect("cancelled candidate remains canonical"),
+            bytes,
+            "cancellation before rename must preserve the complete artifact"
+        );
+        assert!(
+            !text_artifact_transaction_path(store.path()).exists(),
+            "the rolled-back pre-receipt journal must not strand a retry"
+        );
+        assert!(
+            !store.path().join(TEXT_ARTIFACT_RECEIPTS_DIRECTORY).exists(),
+            "cancellation during rehash must not publish a deletion receipt"
+        );
+
+        let report = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(16),
+            None,
+        )
+        .expect("the unchanged plan retries after cancellation");
+        assert_eq!(report.deleted_text_artifacts.len(), 1);
+        assert!(
+            !orphan_path.exists(),
+            "only the successful retry may remove the candidate"
+        );
+        assert!(report.text_artifact_receipt.is_some());
+    }
+
+    #[test]
     fn text_artifact_retention_uses_bounded_restartable_batches() {
         let (store, _generations) = fixture_store(1);
         let artifacts_root = code_text_artifacts_root(store.path());
@@ -4851,6 +5051,58 @@ mod tests {
             !text_artifact_transaction_path(store.path()).exists(),
             "recovery must clear the committed artifact journal"
         );
+    }
+
+    #[test]
+    fn cancellable_recovery_preserves_pending_artifact_journal_for_retry() {
+        let (store, generations) = fixture_store(1);
+        let active = generations.last().expect("active generation");
+        let orphan = text_artifact_for_bytes(&active.id, b"recover after cancellation");
+        let orphan_path = write_text_artifact(&store, &orphan, b"recover after cancellation");
+        let plan = plan_code_generation_retention(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        )
+        .expect("plan artifact transaction");
+        let receipt = build_text_artifact_receipt(
+            &plan,
+            plan.collectable_text_artifacts.clone(),
+            UtcMicros(17),
+        )
+        .expect("build artifact receipt");
+        let transaction = CodeTextArtifactRetentionTransactionV1 {
+            schema: TEXT_ARTIFACT_TRANSACTION_SCHEMA.to_owned(),
+            active_pointer: plan.active_pointer.clone(),
+            receipt,
+        };
+        persist_text_artifact_transaction(store.path(), &transaction)
+            .expect("journal artifact retention");
+        stage_collectable_text_artifacts(store.path(), &transaction)
+            .expect("quarantine uncommitted candidate");
+        assert!(!orphan_path.exists());
+
+        let error = recover_code_generation_retention_cancellable(
+            store.path(),
+            &BTreeSet::new(),
+            None,
+            &|| true,
+        )
+        .expect_err("cancelled recovery must preserve its durable journal");
+        assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
+        assert!(
+            text_artifact_transaction_path(store.path()).is_file(),
+            "a cancelled recovery leaves the transaction resumable"
+        );
+        assert!(
+            !orphan_path.exists(),
+            "cancelled recovery performs no rollback"
+        );
+
+        recover_code_generation_retention(store.path(), &BTreeSet::new(), None)
+            .expect("the next recovery resumes the pending rollback");
+        assert!(orphan_path.is_file());
+        assert!(!text_artifact_transaction_path(store.path()).exists());
     }
 
     fn pad_generation_file(
