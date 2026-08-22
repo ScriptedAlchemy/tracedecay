@@ -41,7 +41,7 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
         .expect("mount scheduler");
     let canonical_project = project.canonicalize().expect("canonical project");
 
-    let (scope, epoch, shutting_down, reconcile_in_progress) = {
+    let (scope, scheduler, hints, epoch, shutting_down, reconcile_in_progress) = {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted.get(&canonical_project).expect("mounted worktree");
         let reference = worktree
@@ -60,6 +60,8 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
                 Some(reference),
             )
             .expect("resolved scope"),
+            Arc::clone(&worktree.scheduler),
+            Arc::clone(&worktree.hints),
             Arc::clone(&worktree.epoch),
             Arc::clone(&worktree.shutting_down),
             Arc::clone(&worktree.reconcile_in_progress),
@@ -86,8 +88,20 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
         0,
         "the non-invalidating read must retain one authoritative follow-up wake"
     );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_hint_count(),
+        None,
+        "the cold latest-generation wake must require an authoritative overflow reconcile"
+    );
 
     registry.clear_pending_wake_for_scope(&scope).await;
+    hints
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
     let query_control =
         DaemonCodeIndexControlV1::new(Arc::clone(&epoch), Arc::clone(&shutting_down));
     assert!(
@@ -97,6 +111,14 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
     assert!(
         !query_control.is_cancelled(),
         "a cold search may wake the owner but must not supersede its snapshot"
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_hint_count(),
+        None,
+        "the cold query wake must require an authoritative overflow reconcile"
     );
 
     let invalidation_control = DaemonCodeIndexControlV1::new(epoch, shutting_down);
