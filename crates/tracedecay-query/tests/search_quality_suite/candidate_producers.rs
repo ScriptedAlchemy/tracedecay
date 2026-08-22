@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::{
     CodeIndexImportEvidenceV1, DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1,
     content_digest,
@@ -15,10 +16,11 @@ use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry}
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
     CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
-    CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
-    CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-    VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
-    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
+    CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
+    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+    CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalPageReadV1,
+    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
+    VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -46,11 +48,11 @@ use tracedecay_query::retrieval::exact::{
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1, CodeLexicalProjectionAdapterV1,
-    CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
+    CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
+    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1,
-    MAX_LEXICAL_QUERY_TERM_BYTES_V1,
+    MAX_LEXICAL_QUERY_TERM_BYTES_V1, VerifiedCodeLexicalArtifactV1,
 };
 use tracedecay_query::retrieval::ports::{ExactTermPostingReadPort, LexicalPostingReadPort};
 
@@ -199,6 +201,45 @@ impl CodeIndexExecutionControlV1 for CancelAtObservation {
 struct BudgetExhaustedAtObservation {
     exhaustion_observation: usize,
     observations: AtomicUsize,
+}
+
+/// Mutates the named artifact only at a production reader control checkpoint.
+/// The reader must keep serving the already-open verified file or refuse the
+/// replaced pathname; it must never hash one file and serve another.
+struct ReplaceArtifactAtObservation {
+    target: PathBuf,
+    replacement: PathBuf,
+    replacement_observation: usize,
+    observations: AtomicUsize,
+}
+
+impl ReplaceArtifactAtObservation {
+    fn new(target: PathBuf, replacement: PathBuf, replacement_observation: usize) -> Self {
+        Self {
+            target,
+            replacement,
+            replacement_observation,
+            observations: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl CodeIndexExecutionControlV1 for ReplaceArtifactAtObservation {
+    fn is_cancelled(&self) -> bool {
+        let observation = self
+            .observations
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        if observation == self.replacement_observation {
+            std::fs::rename(&self.replacement, &self.target)
+                .expect("atomically replace the named artifact during reader control");
+        }
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
 }
 
 impl BudgetExhaustedAtObservation {
@@ -422,6 +463,63 @@ fn real_verified_pages() -> (
     VerifiedSealedLexicalSourceReceiptV1,
 ) {
     real_verified_pages_with_maximum_page_chunks(128)
+}
+
+fn finish_staged_artifact(
+    builder: &mut CodeLexicalArtifactBuilderV1,
+    source_receipt: &VerifiedSealedLexicalSourceReceiptV1,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> VerifiedCodeLexicalArtifactV1 {
+    loop {
+        match builder
+            .advance_finalization(source_receipt, 4_096, control)
+            .expect("finalize staged lexical artifact")
+        {
+            CodeLexicalArtifactFinalizationStepV1::Pending { .. } => {}
+            CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => return *receipt,
+        }
+    }
+}
+
+/// Fixture-only source driver retained for legacy regression setup. Production
+/// finalization receives the source receipt and never owns a source reader.
+trait TestArtifactSourceStaging {
+    fn rebuild_and_finalize<R: std::io::Read + std::io::Seek>(
+        &mut self,
+        source: &mut VerifiedSealedLexicalPageSourceV1<R>,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<VerifiedCodeLexicalArtifactV1, CodeLexicalArtifactErrorV1>;
+}
+
+impl TestArtifactSourceStaging for CodeLexicalArtifactBuilderV1 {
+    fn rebuild_and_finalize<R: std::io::Read + std::io::Seek>(
+        &mut self,
+        source: &mut VerifiedSealedLexicalPageSourceV1<R>,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<VerifiedCodeLexicalArtifactV1, CodeLexicalArtifactErrorV1> {
+        let receipt = loop {
+            let staged_pages = self.progress()?.next_page_ordinal;
+            let admitted = source
+                .next_page_if(control, |page| {
+                    if page.page_ordinal() < staged_pages {
+                        Ok(())
+                    } else {
+                        self.append_page(page, control).map(|_| ())
+                    }
+                })
+                .map_err(|error| match error {
+                    CodeIndexProductionErrorV1::Interrupted(interruption) => {
+                        CodeLexicalArtifactErrorV1::Interrupted(interruption)
+                    }
+                    error => CodeLexicalArtifactErrorV1::Corrupt(error.to_string()),
+                })?;
+            match admitted? {
+                VerifiedSealedLexicalPageReadV1::Page(_) => {}
+                VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+            }
+        };
+        Ok(finish_staged_artifact(self, &receipt, control))
+    }
 }
 
 pub(crate) fn id<T>(value: &str) -> T
@@ -799,7 +897,13 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
         }
     }
     let verified = {
-        let mut resumed = CodeLexicalArtifactBuilderV1::open_or_resume(&artifact_path, metadata)
+        let mut resumed =
+            CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &artifact_path,
+                metadata,
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+                &control,
+            )
             .expect("resume artifact");
         let replay = resumed
             .append_page(&pages[0], &control)
@@ -810,12 +914,20 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
             .rebuild_and_finalize(&mut final_source, &control)
             .expect("rebuild and finalize artifact from verified source")
     };
-    let reader = CodeLexicalArtifactReaderV1::open(
+    let artifact_bytes = std::fs::read(&artifact_path).expect("read finalized artifact");
+    let artifact_digest = ManifestDigest::new(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(&artifact_bytes))
+    ))
+    .expect("artifact content digest");
+    let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
         &artifact_path,
-        &verified,
+        &artifact_digest,
+        u64::try_from(artifact_bytes.len()).expect("artifact length fits u64"),
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
     )
-    .expect("verify and reopen artifact");
+    .expect("verify and reopen content-addressed artifact");
     assert!(reader.retained_owned_bytes() <= CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1);
     let occurrence = reader
         .occurrence_by_chunk(&chunks.last().expect("real source chunk").chunk().id)
@@ -832,7 +944,14 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
         verified.import_dictionary_digest()
     );
 
-    let mut request = lexical_request("render", &["render"], &[], &[], 1, 8);
+    let mut request = lexical_request(
+        "rendre return value",
+        &["rendre"],
+        &[],
+        &["return value"],
+        2,
+        8,
+    );
     request.generation = generation;
     let artifact = LexicalLane::new(reader)
         .retrieve_lexical(&request)
@@ -841,6 +960,358 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
         .retrieve_lexical(&request)
         .expect("one-shot lexical query");
     assert_eq!(artifact, expected);
+}
+
+#[test]
+fn content_addressed_reader_rejects_atomic_same_size_replacement() {
+    let (fixture, pages, source_receipt) = real_verified_pages();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("content-addressed.sqlite");
+    let replacement_path = directory.path().join("replacement.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
+        .expect("create artifact");
+    for page in &pages {
+        builder.append_page(page, &control).expect("append page");
+    }
+    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
+    let original_bytes = std::fs::read(&artifact_path).expect("read verified artifact bytes");
+    std::fs::copy(&artifact_path, &replacement_path).expect("copy replacement artifact");
+    let replacement = rusqlite::Connection::open(&replacement_path)
+        .expect("open replacement artifact for header-only mutation");
+    replacement
+        .pragma_update(None, "user_version", 42i64)
+        .expect("change only replacement SQLite header");
+    drop(replacement);
+    let replacement_bytes =
+        std::fs::read(&replacement_path).expect("read replacement artifact bytes");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    assert_ne!(
+        replacement_bytes, original_bytes,
+        "replacement must differ while retaining the durable file length"
+    );
+    let original_digest = ManifestDigest::new(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(&original_bytes))
+    ))
+    .expect("original content address");
+    let replacement_control =
+        ReplaceArtifactAtObservation::new(artifact_path.clone(), replacement_path, 2);
+
+    assert!(matches!(
+        CodeLexicalArtifactReaderV1::open_content_addressed(
+            &artifact_path,
+            &original_digest,
+            u64::try_from(original_bytes.len()).expect("artifact length fits u64"),
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &replacement_control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+    ));
+    assert_eq!(
+        verified.file_size_bytes(),
+        u64::try_from(original_bytes.len()).expect("artifact length fits u64")
+    );
+}
+
+#[test]
+fn reader_rejects_incompatible_artifact_state_before_receipt_decode() {
+    let (fixture, pages, source_receipt) = real_verified_pages();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("incompatible-state.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
+        .expect("create artifact");
+    for page in &pages {
+        builder.append_page(page, &control).expect("append page");
+    }
+    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
+    let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
+    connection
+        .execute(
+            "UPDATE artifact_state SET format_revision = format_revision + 1 WHERE singleton = 1",
+            [],
+        )
+        .expect("write incompatible artifact state revision");
+    drop(connection);
+
+    assert!(matches!(
+        CodeLexicalArtifactReaderV1::open_with_control(
+            &artifact_path,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Incompatible(_))
+    ));
+}
+
+#[test]
+fn disk_artifact_finalization_resumes_after_restart_without_source_replay() {
+    let (mut fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
+    let metadata = fixture.metadata.clone();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("resumable-finalization.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create");
+    for page in &pages {
+        builder
+            .append_page(page, &control)
+            .expect("stage source page");
+    }
+    let staged = builder.progress().expect("staged source progress");
+
+    assert!(matches!(
+        builder
+            .advance_finalization(&source_receipt, 1, &control)
+            .expect("first bounded finalization step"),
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. }
+    ));
+    drop(builder);
+
+    // The restart must continue from SQLite state. Clearing this fixture's
+    // only raw copy makes a source replay impossible in the finalization path.
+    fixture.sealed.clear();
+    let mut resumed = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("resume staged artifact");
+    let interrupted = CancelAtObservation::new(3);
+    assert!(matches!(
+        resumed.advance_finalization(&source_receipt, 2, &interrupted),
+        Err(CodeLexicalArtifactErrorV1::Interrupted(_))
+    ));
+    assert_eq!(
+        resumed
+            .progress()
+            .expect("source progress after interruption"),
+        staged,
+        "finalization never replays or mutates staged source pages"
+    );
+    drop(resumed);
+
+    let mut resumed = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        fixture.metadata,
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("resume interrupted finalization");
+    let verified = loop {
+        match resumed
+            .advance_finalization(&source_receipt, 2, &control)
+            .expect("bounded finalization resumes")
+        {
+            CodeLexicalArtifactFinalizationStepV1::Pending { .. } => {}
+            CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => break receipt,
+        }
+    };
+    assert_eq!(verified.total_chunks(), source_receipt.total_chunks());
+    assert_eq!(
+        staged_row_cardinality(&artifact_path).0,
+        source_receipt.total_chunks()
+    );
+}
+
+#[test]
+fn disk_artifact_controlled_reopen_cancels_receipt_scan_and_resumes() {
+    let (fixture, pages, source_receipt) = real_verified_pages();
+    let metadata = fixture.metadata.clone();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("controlled-reopen.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create");
+    for page in &pages {
+        builder
+            .append_page(page, &control)
+            .expect("stage source page");
+    }
+    drop(builder);
+
+    // The ninth checkpoint is while the fixed 16KiB all-zero receipt
+    // reservation is scanned. Reopen must yield rather than treating the
+    // staged artifact as available after the scheduler's epoch expires.
+    let interrupted = CancelAtObservation::new(9);
+    assert!(matches!(
+        CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+            &artifact_path,
+            metadata.clone(),
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+            &interrupted,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Interrupted(_))
+    ));
+
+    let resumed = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("resume after controlled reopen cancellation");
+    let progress = resumed.progress().expect("resumed source progress");
+    assert_eq!(progress.next_page_ordinal, source_receipt.page_count());
+    assert_eq!(progress.completed_chunks, source_receipt.total_chunks());
+    assert_eq!(
+        progress.completed_payload_bytes,
+        source_receipt.total_payload_bytes()
+    );
+    assert_eq!(progress.completed_imports, source_receipt.total_imports());
+    assert_eq!(
+        progress.completed_import_payload_bytes,
+        source_receipt.import_payload_bytes()
+    );
+    assert_eq!(
+        progress.import_dictionary_digest,
+        Some(source_receipt.import_dictionary_digest().clone())
+    );
+    assert_eq!(
+        progress.cumulative_source_digest,
+        Some(source_receipt.cumulative_digest().clone())
+    );
+    assert_eq!(
+        progress.next_cursor,
+        pages.last().map(|page| page.next_cursor().clone()),
+        "cancellable reopen must leave durable source staging untouched"
+    );
+}
+
+#[test]
+fn disk_artifact_base_schema_is_incompatible_before_resume_queries() {
+    let (fixture, pages, _) = real_verified_pages();
+    let metadata = fixture.metadata.clone();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("legacy-staging-schema.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create");
+    builder
+        .append_page(&pages[0], &control)
+        .expect("stage current-format source page");
+    drop(builder);
+
+    // Model the prior branch-local staging schema: it has neither the durable
+    // finalization state nor the mutation epoch. A future builder must reject
+    // its declared revision before probing either newly required table.
+    let connection = rusqlite::Connection::open(&artifact_path).expect("open legacy mutation");
+    connection
+        .execute(
+            "UPDATE artifact_state SET format_revision = 1 WHERE singleton = 1",
+            [],
+        )
+        .expect("write legacy artifact revision");
+    connection
+        .execute_batch("DROP TABLE finalization_state; DROP TABLE content_epoch;")
+        .expect("remove future-only staging tables");
+    drop(connection);
+
+    assert!(matches!(
+        CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+            &artifact_path,
+            metadata,
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+            &control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Incompatible(_))
+    ));
+}
+
+#[test]
+fn disk_artifact_finalization_refuses_inter_wake_mutation() {
+    let (fixture, pages, source_receipt) = real_verified_pages();
+    let metadata = fixture.metadata.clone();
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("inter-wake-mutation.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata).expect("create");
+    for page in &pages {
+        builder
+            .append_page(page, &control)
+            .expect("stage source page");
+    }
+    let staged = builder.progress().expect("staged source progress");
+
+    assert!(matches!(
+        builder
+            .advance_finalization(&source_receipt, 1, &control)
+            .expect("start bounded finalization"),
+        CodeLexicalArtifactFinalizationStepV1::Pending { .. }
+    ));
+    let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
+    connection
+        .execute(
+            "UPDATE rows SET row = row WHERE document_id = (SELECT MIN(document_id) FROM rows)",
+            [],
+        )
+        .expect("perform a structurally valid inter-wake mutation");
+    drop(connection);
+
+    assert!(matches!(
+        builder.advance_finalization(&source_receipt, 1, &control),
+        Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+    ));
+    assert_eq!(
+        builder.progress().expect("source progress after refusal"),
+        staged,
+        "a changed artifact must not self-attest through later bounded wakes"
+    );
+}
+
+#[test]
+fn disk_artifact_rejects_noncanonical_receipt_reservation_tail() {
+    let (fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("noncanonical-receipt.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
+        .expect("create artifact");
+    for page in &pages {
+        builder
+            .append_page(page, &control)
+            .expect("stage source page");
+    }
+    let verified = loop {
+        match builder
+            .advance_finalization(&source_receipt, 128, &control)
+            .expect("finalize staged artifact")
+        {
+            CodeLexicalArtifactFinalizationStepV1::Pending { .. } => {}
+            CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => break receipt,
+        }
+    };
+    let connection = rusqlite::Connection::open(&artifact_path).expect("open sealed artifact");
+    let mut receipt: Vec<u8> = connection
+        .query_row(
+            "SELECT receipt FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read receipt reservation");
+    let tail = receipt.len().checked_sub(1).expect("reserved receipt byte");
+    receipt[tail] = 1;
+    connection
+        .execute(
+            "UPDATE artifact_state SET receipt = ?1 WHERE singleton = 1",
+            [receipt],
+        )
+        .expect("write noncanonical receipt tail");
+    drop(connection);
+
+    assert!(matches!(
+        CodeLexicalArtifactReaderV1::open_with_control(
+            &artifact_path,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &control,
+        ),
+        Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+    ));
 }
 
 #[test]
@@ -880,7 +1351,7 @@ fn disk_artifact_mandatory_verifier_rejects_tampered_real_source_chain() {
 
 #[test]
 fn disk_artifact_seal_is_terminal_and_refuses_page_replay() {
-    let (fixture, pages, _) = real_verified_pages();
+    let (fixture, pages, source_receipt) = real_verified_pages();
     let metadata = fixture.metadata.clone();
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("terminal-seal.sqlite");
@@ -890,14 +1361,24 @@ fn disk_artifact_seal_is_terminal_and_refuses_page_replay() {
     for page in &pages {
         builder.append_page(page, &control).expect("append page");
     }
-    let mut final_source = fixture.open_source(128);
-    builder
-        .rebuild_and_finalize(&mut final_source, &control)
-        .expect("rebuild and finalize artifact");
+    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
+    let progress_before = builder.progress().expect("sealed progress");
     assert!(matches!(
         builder.append_page(&pages[0], &control),
         Err(CodeLexicalArtifactErrorV1::Contract(_))
     ));
+    assert_eq!(
+        builder.progress().expect("progress after rejected replay"),
+        progress_before,
+        "a sealed artifact must reject an append without changing source progress"
+    );
+    assert_eq!(
+        builder
+            .finalize(&source_receipt, &control)
+            .expect("sealed receipt remains intact"),
+        verified,
+        "a rejected append must not mutate the sealed receipt"
+    );
 }
 
 #[test]
@@ -940,9 +1421,6 @@ fn disk_artifact_first_finalize_rejects_self_attesting_derived_mutation() {
     connection
         .execute("DELETE FROM term_postings", [])
         .expect("remove derived term postings before first seal");
-    connection
-        .execute("DELETE FROM import_evidence", [])
-        .expect("remove derived import evidence before first seal");
     let integrity: String = connection
         .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
         .expect("SQLite integrity check");
@@ -950,35 +1428,51 @@ fn disk_artifact_first_finalize_rejects_self_attesting_derived_mutation() {
     drop(connection);
 
     assert!(matches!(
-        builder.finalize(&source_receipt, &control),
+        builder.advance_finalization(&source_receipt, 128, &control),
         Err(CodeLexicalArtifactErrorV1::Corrupt(_))
     ));
-    let mut final_source = fixture.open_source(128);
-    builder
-        .rebuild_and_finalize(&mut final_source, &control)
-        .expect("verified replay rebuilds mutated derived state before sealing");
-    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect rebuilt artifact");
+
+    // A corrupted staging file must fail closed. Recovery explicitly restages
+    // trusted pages into a fresh artifact; bounded finalization never replays
+    // the source just to overwrite mutable derived rows.
+    let recovered_path = directory.path().join("recovered-preseal-artifact.sqlite");
+    let mut recovered = CodeLexicalArtifactBuilderV1::create(&recovered_path, fixture.metadata)
+        .expect("create fresh recovery artifact");
+    for page in &pages {
+        recovered
+            .append_page(page, &control)
+            .expect("restage trusted page");
+    }
+    let verified = finish_staged_artifact(&mut recovered, &source_receipt, &control);
+    CodeLexicalArtifactReaderV1::open_with_control(
+        &recovered_path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("freshly staged artifact verifies");
+    let connection = rusqlite::Connection::open(&recovered_path).expect("inspect recovery");
     let rebuilt_row: Vec<u8> = connection
         .query_row(
             "SELECT row FROM rows ORDER BY document_id LIMIT 1",
             [],
             |row| row.get(0),
         )
-        .expect("rebuilt artifact row");
+        .expect("recovered artifact row");
     let rebuilt_term_postings: i64 = connection
         .query_row("SELECT COUNT(*) FROM term_postings", [], |row| row.get(0))
-        .expect("rebuilt term posting count");
+        .expect("recovered term posting count");
     let rebuilt_imports: i64 = connection
         .query_row("SELECT COUNT(*) FROM import_evidence", [], |row| row.get(0))
-        .expect("rebuilt import evidence count");
+        .expect("recovered import evidence count");
     assert_eq!(rebuilt_row, original_row);
     assert_eq!(rebuilt_term_postings, original_term_postings);
     assert_eq!(rebuilt_imports, original_imports);
 }
 
 #[test]
-fn disk_artifact_rebuild_restores_canonical_artifact_state_before_return() {
-    let (fixture, pages, _) = real_verified_pages();
+fn disk_artifact_finalization_rejects_mutated_artifact_state() {
+    let (fixture, pages, source_receipt) = real_verified_pages();
     let metadata = fixture.metadata.clone();
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory
@@ -1001,8 +1495,8 @@ fn disk_artifact_rebuild_restores_canonical_artifact_state_before_return() {
     let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
     connection
         .execute(
-            "UPDATE artifact_state SET format_revision = ?1, metadata = ?2, metadata_digest = ?3 WHERE singleton = 1",
-            rusqlite::params![2u32, forged_metadata, forged_digest.as_str()],
+            "UPDATE artifact_state SET metadata = ?1, metadata_digest = ?2 WHERE singleton = 1",
+            rusqlite::params![forged_metadata, forged_digest.as_str()],
         )
         .expect("mutate structurally valid pre-seal artifact state");
     let integrity: String = connection
@@ -1011,18 +1505,10 @@ fn disk_artifact_rebuild_restores_canonical_artifact_state_before_return() {
     assert_eq!(integrity, "ok");
     drop(connection);
 
-    let mut final_source = fixture.open_source(128);
-    let verified = builder
-        .rebuild_and_finalize(&mut final_source, &control)
-        .expect("authoritative replay restores the singleton state");
-    let reader = CodeLexicalArtifactReaderV1::open_with_control(
-        &artifact_path,
-        &verified,
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        &control,
-    )
-    .expect("returned receipt must reopen immediately");
-    assert_eq!(reader.metadata(), &fixture.metadata);
+    assert!(matches!(
+        builder.advance_finalization(&source_receipt, 4_096, &control),
+        Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+    ));
 }
 
 #[test]
@@ -1069,10 +1555,11 @@ fn disk_artifact_corruption_is_sticky_across_finalize_and_reopen_retries() {
             Err(CodeLexicalArtifactErrorV1::Corrupt(_))
         ));
         assert!(matches!(
-            CodeLexicalArtifactReaderV1::open(
+            CodeLexicalArtifactReaderV1::open_with_control(
                 &artifact_path,
                 &verified,
                 CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+                &control,
             ),
             Err(CodeLexicalArtifactErrorV1::Corrupt(_))
         ));
@@ -1119,8 +1606,13 @@ fn disk_artifact_progress_persists_exact_source_cursor_and_replay() {
     assert_eq!(appended.next_cursor.as_ref(), Some(&expected_cursor));
     drop(builder);
 
-    let mut resumed = CodeLexicalArtifactBuilderV1::open_or_resume(&artifact_path, metadata)
-        .expect("resume artifact");
+    let mut resumed = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &artifact_path,
+        metadata,
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("resume artifact");
     assert_eq!(
         resumed
             .progress()
@@ -1206,10 +1698,11 @@ fn disk_artifact_cancellation_rolls_back_import_append_and_reopen_verification()
         ),
         Err(CodeLexicalArtifactErrorV1::Interrupted(_))
     ));
-    CodeLexicalArtifactReaderV1::open(
+    CodeLexicalArtifactReaderV1::open_with_control(
         &artifact_path,
         &verified,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
     )
     .expect("cancelled verification must not alter the sealed artifact");
 }
@@ -1239,7 +1732,7 @@ fn staged_row_cardinality(artifact_path: &Path) -> (u64, u64) {
 }
 
 #[test]
-fn disk_artifact_budget_refusal_precedes_progress_and_resumes_the_same_source() {
+fn disk_artifact_budget_refusal_precedes_progress_and_accepts_boundary() {
     let (fixture, pages, source_receipt) = real_verified_pages_with_maximum_page_chunks(1);
     let metadata = fixture.metadata.clone();
     let control = ArtifactControl { cancelled: false };
@@ -1268,12 +1761,16 @@ fn disk_artifact_budget_refusal_precedes_progress_and_resumes_the_same_source() 
 
     // A budget exactly one byte under the first page's charge refuses the
     // append before any progress mutation.
+    let refused_path = directory.path().join("refused.sqlite");
     let mut refused = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
-        directory.path().join("refused.sqlite"),
+        &refused_path,
         metadata.clone(),
         fixed + first_page_charge - 1,
     )
     .expect("create one-byte-under builder");
+    let bytes_before = std::fs::metadata(&refused_path)
+        .expect("fresh staging artifact metadata")
+        .len();
     assert!(matches!(
         refused.append_page(&pages[0], &control),
         Err(CodeLexicalArtifactErrorV1::Contract(_))
@@ -1286,53 +1783,19 @@ fn disk_artifact_budget_refusal_precedes_progress_and_resumes_the_same_source() 
         0,
         "a ledger refusal must precede every progress mutation"
     );
-
-    // On the rebuild path the source's one-decoded-file staging window is
-    // charged before any page is staged: a budget the window itself
-    // exhausts refuses up front and never touches the source.
-    let mut source = fixture.open_source(1);
-    let window = source.staging_window_bytes();
-    assert!(window > 0, "a real sealed source stages a nonzero window");
-    let mut window_refused = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
-        directory.path().join("window-refused.sqlite"),
-        metadata.clone(),
-        fixed + window,
-    )
-    .expect("create window-exhausted builder");
-    assert!(matches!(
-        window_refused.rebuild_and_finalize(&mut source, &control),
-        Err(CodeLexicalArtifactErrorV1::Contract(_))
-    ));
     assert_eq!(
-        source.cursor().next_page_ordinal(),
-        0,
-        "an exhausted staging window must refuse before the source stages anything"
+        std::fs::metadata(&refused_path)
+            .expect("refused staging artifact metadata")
+            .len(),
+        bytes_before,
+        "preflight refusal must not allocate or persist projection rows"
     );
-
-    // A per-page ledger refusal runs inside `next_page_if` and must leave
-    // the sealed source's cursor and hash authorities unchanged.
-    let mut page_refused = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
-        directory.path().join("page-refused.sqlite"),
-        metadata.clone(),
-        fixed + window + first_page_charge - 1,
-    )
-    .expect("create one-byte-under rebuild builder");
-    assert!(matches!(
-        page_refused.rebuild_and_finalize(&mut source, &control),
-        Err(CodeLexicalArtifactErrorV1::Contract(_))
-    ));
-    assert_eq!(
-        source.cursor().next_page_ordinal(),
-        0,
-        "a refused page must not advance the sealed lexical source"
-    );
-    assert_eq!(
-        page_refused
-            .progress()
-            .expect("post-refusal progress")
-            .next_page_ordinal,
-        0
-    );
+    let connection = rusqlite::Connection::open(&refused_path).expect("inspect refusal state");
+    let rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM rows", [], |row| row.get(0))
+        .expect("row count after refusal");
+    assert_eq!(rows, 0, "preflight refusal must precede row staging");
+    drop(connection);
 
     // At exactly the measured charge the same page is admitted.
     let mut boundary = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
@@ -1345,19 +1808,22 @@ fn disk_artifact_budget_refusal_precedes_progress_and_resumes_the_same_source() 
         .append_page(&pages[0], &control)
         .expect("the boundary budget admits the measured page exactly");
 
-    // The refused source instance RESUMES: a builder whose budget admits
-    // the staging window and every page seals the very same source, and
-    // every row advances once.
+    // Once the caller has held a verified page within its own source
+    // reservation, the builder needs only its fixed charge and this page's
+    // transient bound. Every staged row then advances exactly once.
     let sealed_path = directory.path().join("sealed.sqlite");
     let mut sealed = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
         &sealed_path,
         metadata,
-        fixed + window + max_page_charge,
+        fixed + max_page_charge,
     )
     .expect("create admitting builder");
-    let verified = sealed
-        .rebuild_and_finalize(&mut source, &control)
-        .expect("the refused source must resume instead of blocking");
+    for page in &pages {
+        sealed
+            .append_page(page, &control)
+            .expect("page fits the independently reserved source window");
+    }
+    let verified = finish_staged_artifact(&mut sealed, &source_receipt, &control);
     assert_eq!(verified.total_chunks(), source_receipt.total_chunks());
     let (rows, distinct) = staged_row_cardinality(&sealed_path);
     assert_eq!(
@@ -1433,10 +1899,11 @@ fn disk_artifact_rows_advance_once_across_retry_replay_and_cancellation() {
     let (rows, distinct) = staged_row_cardinality(&artifact_path);
     assert_eq!(rows, source_receipt.total_chunks());
     assert_eq!(rows, distinct);
-    CodeLexicalArtifactReaderV1::open(
+    CodeLexicalArtifactReaderV1::open_with_control(
         &artifact_path,
         &verified,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
     )
     .expect("once-advanced artifact reopens with full verification");
 }
@@ -1469,9 +1936,6 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
         builder.append_page(page, &control).expect("append page");
     }
     let staged = builder.progress().expect("staged progress");
-    let staged_file_bytes = std::fs::metadata(&artifact_path)
-        .expect("staged artifact metadata")
-        .len();
     // The enforced ledger claim must hold for every real page while the
     // retry storm runs: unbounded RSS growth under warming is exactly what
     // the beta.33 evidence shows an unenforced claim permits.
@@ -1491,12 +1955,16 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
         "the whole warming replay must fit the enforced build memory claim"
     );
 
-    // Repeated bounded-budget activations, each exhausting deeper into the
-    // seal replay like the production retries.
-    for (round, exhaustion_observation) in [2usize, 4, 7, 11].into_iter().enumerate() {
-        let exhausted = BudgetExhaustedAtObservation::new(exhaustion_observation);
-        let mut replay_source = fixture.open_source(1);
-        let outcome = builder.rebuild_and_finalize(&mut replay_source, &exhausted);
+    // Repeated bounded finalization steps can interrupt without replaying
+    // source or duplicating rows. Their SQLite cursor is deliberately
+    // durable, so retries are not required to preserve the staging file's
+    // byte size.
+    for round in 0..4 {
+        // The fifth checkpoint is the first one after the finalization marker
+        // is durable. Earlier refusal is intentionally mutation-free and does
+        // not freeze append admission.
+        let exhausted = BudgetExhaustedAtObservation::new(5);
+        let outcome = builder.advance_finalization(&source_receipt, usize::MAX, &exhausted);
         assert!(
             matches!(
                 outcome,
@@ -1513,28 +1981,17 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
             "round {round}: an exhausted bounded work budget must not mutate staged progress"
         );
         staged_row_cardinality(&artifact_path);
-        // A retry storm must not accumulate: an interrupted replay rolls
-        // back to the identical staged artifact, byte for byte.
-        assert_eq!(
-            std::fs::metadata(&artifact_path)
-                .expect("staged artifact metadata after exhausted round")
-                .len(),
-            staged_file_bytes,
-            "round {round}: an exhausted replay must not grow the staged artifact"
+        assert!(
+            matches!(
+                builder.append_page(&pages[0], &control),
+                Err(CodeLexicalArtifactErrorV1::Contract(_))
+            ),
+            "round {round}: finalization makes staged source pages immutable"
         );
-        builder
-            .append_page(&pages[0], &control)
-            .expect("page replay stays idempotent between exhausted activation rounds");
     }
 
     // The retried activation RESUMES and seals.
-    let mut final_source = fixture.open_source(1);
-    let verified = builder
-        .rebuild_and_finalize(&mut final_source, &control)
-        .expect(
-            "bounded read work must resume and seal; activation must not terminally block on \
-         'the read port exceeded its bounded work budget'",
-        );
+    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
     let (rows, _) = staged_row_cardinality(&artifact_path);
     assert_eq!(rows, source_receipt.total_chunks());
 
@@ -1551,10 +2008,11 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
         ),
         Err(CodeLexicalArtifactErrorV1::Interrupted(_))
     ));
-    let reader = CodeLexicalArtifactReaderV1::open(
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
         &artifact_path,
         &verified,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
     )
     .expect(
         "the reopened read port must resume instead of terminally failing its bounded work budget",
@@ -1669,10 +2127,11 @@ fn artifact_exact_reader_prefers_admitted_matches_over_denied_best() {
     let verified = builder
         .rebuild_and_finalize(&mut final_source, &control)
         .expect("rebuild and finalize artifact");
-    let reader = CodeLexicalArtifactReaderV1::open(
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
         &artifact_path,
         &verified,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
     )
     .expect("verify and reopen artifact");
 
@@ -1858,8 +2317,8 @@ fn sealed_page_retained_bytes_include_digest_identities() {
         );
         assert_eq!(
             page.retained_owned_bytes(),
-            payload_bytes + 6 * sha256_digest_len,
-            "page {} retained bytes must include its six digest identity strings",
+            payload_bytes + 8 * sha256_digest_len,
+            "page {} retained bytes must include its eight digest identity strings",
             page.page_ordinal()
         );
     }
@@ -1943,10 +2402,11 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
     let verified = builder
         .rebuild_and_finalize(&mut final_source, &control)
         .expect("rebuild and finalize artifact");
-    let reader = CodeLexicalArtifactReaderV1::open(
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
         &artifact_path,
         &verified,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
     )
     .expect("verify and reopen artifact");
 

@@ -470,8 +470,9 @@ async fn apply_code_generation_retention(
     cancellation: &tracedecay_usecases::context::CancellationToken,
 ) -> bool {
     use crate::retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        execute_code_generation_retention, prepare_next_code_generation_retention_cancellable,
+        CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR, execute_code_generation_retention_cancellable,
+        prepare_next_code_generation_retention_cancellable,
     };
     let layout = graph.hook_store_layout();
     let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
@@ -556,7 +557,7 @@ async fn apply_code_generation_retention(
             offline_replay_reconcile_failed = true;
         }
     }
-    if plan.collectable_generations.is_empty() {
+    if !plan.has_collectable_work() {
         return !offline_replay_reconcile_failed;
     }
     if cancellation.is_cancelled() {
@@ -704,13 +705,15 @@ async fn apply_code_generation_retention(
     let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
     let execution_root = store_root.clone();
     let execution_pool_root = graph_replay_pool_root.clone();
+    let execution_cancellation = cancellation.clone();
     let report = tokio::task::spawn_blocking(move || {
-        execute_code_generation_retention(
+        execute_code_generation_retention_cancellable(
             &execution_root,
             plan,
             CodeGenerationRetentionModeV1::Apply,
             completed_at,
             Some(&execution_pool_root),
+            &|| execution_cancellation.is_cancelled(),
         )
     })
     .await;
@@ -718,7 +721,7 @@ async fn apply_code_generation_retention(
 
     match report {
         Ok(Ok(report)) => {
-            let reclaimed = report.receipt.as_ref().map_or_else(
+            let generation_reclaimed = report.receipt.as_ref().map_or_else(
                 || {
                     report
                         .deleted_generations
@@ -728,6 +731,17 @@ async fn apply_code_generation_retention(
                 },
                 |receipt| receipt.reclaimed_bytes,
             );
+            let text_artifact_reclaimed = report.text_artifact_receipt.as_ref().map_or_else(
+                || {
+                    report
+                        .deleted_text_artifacts
+                        .iter()
+                        .map(|artifact| artifact.size_bytes)
+                        .sum()
+                },
+                |receipt| receipt.reclaimed_bytes,
+            );
+            let reclaimed = generation_reclaimed.saturating_add(text_artifact_reclaimed);
             if reclaimed > 0 {
                 log_daemon_event(
                     "retention_code_generations",
@@ -739,6 +753,10 @@ async fn apply_code_generation_retention(
                             "generations_collected",
                             report.deleted_generations.len().to_string(),
                         ),
+                        (
+                            "text_artifacts_collected",
+                            report.deleted_text_artifacts.len().to_string(),
+                        ),
                     ],
                 );
             }
@@ -746,6 +764,10 @@ async fn apply_code_generation_retention(
                 .await
                 .succeeded()
                 && !offline_replay_reconcile_failed
+        }
+        Ok(Err(CodeGenerationRetentionErrorV1::Cancelled)) => {
+            log_code_generation_retention_degraded("retention_cancelled");
+            false
         }
         Ok(Err(_)) => {
             log_code_generation_retention_degraded("retention_pass_failed");

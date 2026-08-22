@@ -1,11 +1,11 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
-use std::io::Read;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use roaring::RoaringBitmap;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter, types::Value};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
@@ -15,6 +15,7 @@ use tracedecay_domain::{
     FixedPointScore, LogicalEvidenceId, ManifestDigest, RetrieverBatch, RetrieverCoverage,
     RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId,
 };
+use tracedecay_private_fs::open_private_file;
 
 use super::builder::compute_section_digests;
 use super::format::{
@@ -65,14 +66,6 @@ impl std::fmt::Debug for CodeLexicalArtifactReaderV1 {
 }
 
 impl CodeLexicalArtifactReaderV1 {
-    pub fn open(
-        path: impl AsRef<Path>,
-        expected: &VerifiedCodeLexicalArtifactV1,
-        cache_budget_bytes: usize,
-    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
-        Self::open_with_control(path, expected, cache_budget_bytes, &NeverInterrupted)
-    }
-
     /// Open a published artifact whose trust anchor is its content address:
     /// the durable head names the artifact file's size and SHA-256 digest,
     /// the embedded receipt is decoded only after the whole file matches
@@ -87,65 +80,66 @@ impl CodeLexicalArtifactReaderV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
+        validate_cache_budget(cache_budget_bytes)?;
         let path = path.as_ref();
-        let file_size = path
-            .metadata()
-            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?
-            .len();
+        // A durable content address names only a private, no-follow file made
+        // by the artifact publisher. Keep that exact handle through both
+        // digests; path metadata alone cannot bind the bytes SQLite serves.
+        let mut file = open_private_file(path).map_err(map_private_artifact_file_error)?;
+        let metadata = file.metadata().map_err(map_artifact_file_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "artifact path is not a regular file".to_owned(),
+            ));
+        }
+        let file_size = metadata.len();
         if file_size != expected_file_size_bytes {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
                 "artifact file has {file_size} bytes; the durable head names {expected_file_size_bytes}"
             )));
         }
-        let mut file = std::fs::File::open(path)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0u8; 1 << 16];
-        loop {
-            checkpoint(control)?;
-            let read = file
-                .read(&mut buffer)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        let digest = ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let digest = digest_artifact_file(&mut file, control)?;
         if &digest != expected_file_digest {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "artifact file bytes do not match the durable head digest".to_owned(),
             ));
         }
-        let receipt = {
-            let connection = Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
+        checkpoint(control)?;
+        verify_named_path_identity(path, &file)?;
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| map_reader_open_error(path, error))?;
+        checkpoint(control)?;
+        verify_named_path_identity(path, &file)?;
+        configure_reader_window(&connection, cache_budget_bytes, 0)?;
+        connection
+            .pragma_update(None, "query_only", true)
             .map_err(sqlite_error)?;
-            connection
-                .pragma_update(None, "query_only", true)
-                .map_err(sqlite_error)?;
-            let receipt_bytes: Vec<u8> = connection
-                .query_row(
-                    "SELECT receipt FROM artifact_state WHERE singleton = 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(sqlite_corrupt)?;
-            decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Corrupt(
-                    "content-addressed lexical artifact has no finalized receipt".to_owned(),
-                )
-            })?
-        };
+        verify_artifact_state_revision(&connection, control)?;
+        let receipt_bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT receipt FROM artifact_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_corrupt)?;
+        let receipt = decode_padded_receipt(&receipt_bytes)?.ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Corrupt(
+                "content-addressed lexical artifact has no finalized receipt".to_owned(),
+            )
+        })?;
         if receipt.file_size_bytes() != expected_file_size_bytes {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "embedded receipt disagrees with the durable head file size".to_owned(),
             ));
         }
-        Self::open_with_control(path, &receipt, cache_budget_bytes, control)
+        let reader =
+            Self::open_connection_with_control(connection, &receipt, cache_budget_bytes, control)?;
+        verify_retained_artifact_digest(&mut file, expected_file_digest, control)?;
+        verify_named_path_identity(path, &file)?;
+        Ok(reader)
     }
 
     pub fn open_with_control(
@@ -155,18 +149,15 @@ impl CodeLexicalArtifactReaderV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
-        if cache_budget_bytes == 0
-            || cache_budget_bytes > CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1
-        {
-            return Err(CodeLexicalArtifactErrorV1::Contract(format!(
-                "lexical artifact cache must be within 1..={CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1} bytes"
-            )));
-        }
+        validate_cache_budget(cache_budget_bytes)?;
         let path = path.as_ref();
-        let file_size = path
-            .metadata()
-            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?
-            .len();
+        let metadata = path.symlink_metadata().map_err(map_artifact_file_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "artifact path is not a regular file".to_owned(),
+            ));
+        }
+        let file_size = metadata.len();
         if file_size != expected.file_size_bytes() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
                 "artifact file has {file_size} bytes; receipt binds {}",
@@ -177,11 +168,49 @@ impl CodeLexicalArtifactReaderV1 {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .map_err(sqlite_error)?;
+        .map_err(|error| map_reader_open_error(path, error))?;
+        Self::open_connection_with_control(connection, expected, cache_budget_bytes, control)
+    }
+
+    fn open_connection_with_control(
+        connection: Connection,
+        expected: &VerifiedCodeLexicalArtifactV1,
+        cache_budget_bytes: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
         connection
             .pragma_update(None, "query_only", true)
             .map_err(sqlite_error)?;
+        verify_artifact_state_revision(&connection, control)?;
+        // Read the BLOB length first so the page cache can be configured
+        // before metadata is materialized. The retained metadata copy plus
+        // SQLite's cache therefore cannot exceed the caller's reservation.
+        let stored_metadata_len: i64 = connection
+            .query_row(
+                "SELECT length(metadata) FROM artifact_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        let stored_metadata_len = usize::try_from(stored_metadata_len)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        if stored_metadata_len >= cache_budget_bytes {
+            return Err(CodeLexicalArtifactErrorV1::Unreserved(
+                "lexical artifact metadata exhausts the reader cache budget".to_owned(),
+            ));
+        }
+        // Kernel SQLite window: no mmap grant, page cache clamped to
+        // [2, 64] MiB. The caller budget covers the retained metadata copy
+        // plus the cache actually granted; nothing else is claimed.
+        let sqlite_budget = cache_budget_bytes - stored_metadata_len;
+        if sqlite_budget < ARTIFACT_SQLITE_CACHE_FLOOR_BYTES {
+            return Err(CodeLexicalArtifactErrorV1::Unreserved(format!(
+                "lexical artifact reader budget leaves {sqlite_budget} bytes, under the {ARTIFACT_SQLITE_CACHE_FLOOR_BYTES}-byte kernel page-cache floor"
+            )));
+        }
+        let page_cache_bytes =
+            configure_reader_window(&connection, cache_budget_bytes, stored_metadata_len)?;
         let (stored_metadata_bytes, stored_metadata_digest): (Vec<u8>, String) = connection
             .query_row(
                 "SELECT metadata, metadata_digest FROM artifact_state WHERE singleton = 1",
@@ -189,35 +218,14 @@ impl CodeLexicalArtifactReaderV1 {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-        if stored_metadata_bytes.len() >= cache_budget_bytes {
-            return Err(CodeLexicalArtifactErrorV1::Contract(
-                "lexical artifact metadata exhausts the reader cache budget".to_owned(),
+        if stored_metadata_bytes.len() != stored_metadata_len {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact metadata changed while opening its sealed reader".to_owned(),
             ));
         }
         let metadata: super::super::CodeLexicalProjectionMetadataV1 =
             serde_json::from_slice(&stored_metadata_bytes)
                 .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-        // Kernel SQLite window: no mmap grant, page cache clamped to
-        // [2, 64] MiB. The caller budget covers the retained metadata copy
-        // plus the cache actually granted; nothing else is claimed.
-        let sqlite_budget = cache_budget_bytes - stored_metadata_bytes.len();
-        if sqlite_budget < ARTIFACT_SQLITE_CACHE_FLOOR_BYTES {
-            return Err(CodeLexicalArtifactErrorV1::Contract(format!(
-                "lexical artifact reader budget leaves {sqlite_budget} bytes, under the {ARTIFACT_SQLITE_CACHE_FLOOR_BYTES}-byte kernel page-cache floor"
-            )));
-        }
-        let page_cache_bytes = sqlite_budget.min(ARTIFACT_SQLITE_CACHE_BYTES);
-        connection
-            .pragma_update(
-                None,
-                "cache_size",
-                -i64::try_from(page_cache_bytes / 1024)
-                    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
-            )
-            .map_err(sqlite_error)?;
-        connection
-            .pragma_update(None, "mmap_size", 0i64)
-            .map_err(sqlite_error)?;
         let integrity: String = connection
             .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
             .map_err(sqlite_corrupt)?;
@@ -463,6 +471,153 @@ struct ArtifactQueryV1<'a> {
     document_count: usize,
 }
 
+/// A SQLite-owned candidate set. The query is evaluated row-by-row, so Rust
+/// never retains one identifier per matching document. Query input is already
+/// bounded by the lexical request contract; n-gram intersections additionally
+/// have a fixed predicate ceiling below.
+#[derive(Clone, Debug)]
+struct DocumentQueryV1 {
+    sql: Option<String>,
+    parameters: Vec<Value>,
+}
+
+impl DocumentQueryV1 {
+    fn empty() -> Self {
+        Self {
+            sql: None,
+            parameters: Vec::new(),
+        }
+    }
+
+    fn term(field: String, term: String) -> Self {
+        Self {
+            sql: Some(
+                "SELECT document_id FROM term_postings WHERE field = ? AND term = ?".to_owned(),
+            ),
+            parameters: vec![Value::Text(field), Value::Text(term)],
+        }
+    }
+
+    fn term_except(term: String, excluded_field: String) -> Self {
+        Self {
+            sql: Some(
+                "SELECT document_id FROM term_postings WHERE term = ? AND field != ?".to_owned(),
+            ),
+            parameters: vec![Value::Text(term), Value::Text(excluded_field)],
+        }
+    }
+
+    fn exact(field: String, term: Vec<u8>) -> Self {
+        Self {
+            sql: Some(
+                "SELECT document_id FROM exact_postings WHERE field = ? AND term = ?".to_owned(),
+            ),
+            parameters: vec![Value::Text(field), Value::Blob(term)],
+        }
+    }
+}
+
+/// The query engine, rather than an in-process bitmap, owns duplicate removal
+/// and sorted candidate enumeration. SQLite's configured fixed page cache is
+/// the only storage used for the set-operation work table.
+const ARTIFACT_UNION_COMPOUND_ARMS_V1: usize = 64;
+
+fn union_document_queries(queries: impl IntoIterator<Item = DocumentQueryV1>) -> DocumentQueryV1 {
+    let mut level = queries
+        .into_iter()
+        .filter(|query| query.sql.is_some())
+        .collect::<Vec<_>>();
+    if level.is_empty() {
+        return DocumentQueryV1::empty();
+    }
+    while level.len() > 1 {
+        level = level
+            .chunks(ARTIFACT_UNION_COMPOUND_ARMS_V1)
+            .map(compound_union_document_queries)
+            .collect();
+    }
+    let Some(root) = level.pop() else {
+        return DocumentQueryV1::empty();
+    };
+    DocumentQueryV1 {
+        sql: root
+            .sql
+            .map(|sql| format!("SELECT DISTINCT document_id FROM ({sql}) ORDER BY document_id")),
+        parameters: root.parameters,
+    }
+}
+
+fn compound_union_document_queries(queries: &[DocumentQueryV1]) -> DocumentQueryV1 {
+    let mut sql = String::new();
+    let mut parameters = Vec::new();
+    for query in queries {
+        let Some(query_sql) = query.sql.as_deref() else {
+            continue;
+        };
+        if !sql.is_empty() {
+            sql.push_str(" UNION ALL ");
+        }
+        sql.push_str("SELECT document_id FROM (");
+        sql.push_str(query_sql);
+        sql.push(')');
+        parameters.extend(query.parameters.iter().cloned());
+    }
+    DocumentQueryV1 {
+        sql: Some(sql),
+        parameters,
+    }
+}
+
+fn visit_document_ids(
+    connection: &Connection,
+    query: &DocumentQueryV1,
+    mut visitor: impl FnMut(u32) -> Result<(), RetrievalPortError>,
+) -> Result<(), RetrievalPortError> {
+    let Some(sql) = &query.sql else {
+        return Ok(());
+    };
+    let mut statement = connection.prepare(sql).map_err(map_query_sql_error)?;
+    let mut rows = statement
+        .query(params_from_iter(query.parameters.iter()))
+        .map_err(map_query_sql_error)?;
+    while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+        let document = row.get::<_, i64>(0).map_err(map_query_sql_error)?;
+        visitor(u32::try_from(document).map_err(contract_error)?)?;
+    }
+    Ok(())
+}
+
+const ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1: usize = 16;
+
+/// The first fixed number of distinct n-grams forms a selective, bounded
+/// prefilter. It may admit a superset for a very long phrase; the row-level
+/// substring check remains the correctness authority before scoring.
+fn ngram_document_query(kind: i64, bytes: &[u8]) -> DocumentQueryV1 {
+    let ngrams = query_ngrams(bytes)
+        .into_iter()
+        .take(ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1)
+        .collect::<Vec<_>>();
+    if ngrams.is_empty() {
+        return DocumentQueryV1::empty();
+    }
+    let placeholders = std::iter::repeat_n("?", ngrams.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut parameters = Vec::with_capacity(ngrams.len() + 2);
+    parameters.push(Value::Integer(kind));
+    parameters.extend(ngrams.iter().map(|ngram| Value::Integer(i64::from(*ngram))));
+    parameters.push(Value::Integer(ngrams.len() as i64));
+    DocumentQueryV1 {
+        sql: Some(format!(
+            "SELECT document_id FROM ngram_postings \
+             WHERE kind = ? AND ngram IN ({placeholders}) \
+             GROUP BY document_id HAVING COUNT(DISTINCT ngram) = ? \
+             ORDER BY document_id"
+        )),
+        parameters,
+    }
+}
+
 impl<'a> ArtifactQueryV1<'a> {
     fn new(
         connection: &'a Connection,
@@ -482,48 +637,50 @@ impl<'a> ArtifactQueryV1<'a> {
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
         let fuzzy = self.fuzzy_expansions(request)?;
-        let phrase_candidates = request
+        let phrase_queries = request
             .phrases
             .iter()
             .map(|phrase| {
                 let normalized = normalize_lexical(phrase);
-                self.ngram_documents(NGRAM_NORMALIZED, normalized.as_bytes())
-                    .map(|documents| (normalized, documents))
+                let query = ngram_document_query(NGRAM_NORMALIZED, normalized.as_bytes());
+                (normalized, query)
             })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+            .collect::<BTreeMap<_, _>>();
         let mut phrase_frequencies = BTreeMap::new();
-        for (phrase, candidates) in &phrase_candidates {
+        for (phrase, query) in &phrase_queries {
             let mut frequency = 0usize;
-            for document in candidates.iter() {
+            self.visit_documents(query, |document| {
                 let row = self.row(document)?;
                 if substring_count(&row.normalized_text, phrase) > 0 {
                     frequency += 1;
                 }
-            }
+                Ok(())
+            })?;
             phrase_frequencies.insert(phrase.clone(), frequency);
         }
-        let documents = self.lexical_documents(request, &fuzzy, &phrase_candidates)?;
+        let documents = self.lexical_documents(request, &fuzzy, &phrase_queries)?;
         // Selection precedes hydration: the scan holds one transient row at
         // a time and a bounded worst-first heap of ranking keys, so retained
         // materialization never exceeds the lane candidate cap.
         let cap = lane_candidate_cap(&request.budget, &request.base.budget);
-        let mut excluded = self.document_count as u64 - documents.len();
+        let mut excluded = self.document_count as u64;
         let mut eligible = 0u64;
         let mut ranked = BinaryHeap::new();
-        for document in documents {
+        self.visit_documents(&documents, |document| {
             let row = self.row(document)?;
             let score = self.score_row(document, &row, request, &fuzzy, &phrase_frequencies)?;
             let Some(ranking) = admitted_score_micros(&score, &request.field_filters)? else {
-                excluded += 1;
-                continue;
+                return Ok(());
             };
             eligible += 1;
+            excluded = excluded.saturating_sub(1);
             retain_bounded(
                 &mut ranked,
                 cap,
                 (Reverse(ranking), row.id.as_str().to_owned(), document),
             );
-        }
+            Ok(())
+        })?;
         let selected = ranked.into_sorted_vec();
         let truncated = eligible - selected.len() as u64;
         let mut candidates = Vec::with_capacity(selected.len());
@@ -577,15 +734,14 @@ impl<'a> ArtifactQueryV1<'a> {
         // fail the batch. Retained state stays bounded: at most `cap`
         // minted proofs alongside the ranking keys.
         let cap = lane_candidate_cap(&request.budget, &request.base.budget);
-        let mut excluded = self.document_count as u64 - documents.len();
+        let mut excluded = self.document_count as u64;
         let mut eligible = 0u64;
         let mut ranked = BinaryHeap::new();
-        for document in documents {
+        self.visit_documents(&documents, |document| {
             let row = self.row(document)?;
             let (matched_literals, _) = exact_matches_artifact(&row, request);
             if matched_literals.is_empty() {
-                excluded += 1;
-                continue;
+                return Ok(());
             }
             let proof = matched_literals
                 .iter()
@@ -597,10 +753,10 @@ impl<'a> ArtifactQueryV1<'a> {
                 .transpose()
                 .map_err(contract_error)?;
             let Some(proof) = proof else {
-                excluded += 1;
-                continue;
+                return Ok(());
             };
             eligible += 1;
+            excluded = excluded.saturating_sub(1);
             retain_bounded(
                 &mut ranked,
                 cap,
@@ -613,7 +769,8 @@ impl<'a> ArtifactQueryV1<'a> {
                     proof,
                 },
             );
-        }
+            Ok(())
+        })?;
         let selected = ranked.into_sorted_vec();
         let truncated = eligible - selected.len() as u64;
         let mut candidates = Vec::with_capacity(selected.len());
@@ -668,37 +825,40 @@ impl<'a> ArtifactQueryV1<'a> {
         &self,
         request: &LexicalLaneRequest<'_>,
         fuzzy: &FuzzyExpansionsV1,
-        phrase_candidates: &BTreeMap<String, RoaringBitmap>,
-    ) -> Result<RoaringBitmap, RetrievalPortError> {
-        let mut documents = RoaringBitmap::new();
+        phrase_queries: &BTreeMap<String, DocumentQueryV1>,
+    ) -> Result<DocumentQueryV1, RetrievalPortError> {
+        let mut sources = Vec::new();
         let subtoken_field =
             encode_field(LexicalFieldV1::Subtoken).map_err(map_query_artifact_error)?;
         for term in &request.whole_terms {
-            self.union_term_except(&normalize_lexical(term), &subtoken_field, &mut documents)?;
+            sources.push(DocumentQueryV1::term_except(
+                normalize_lexical(term),
+                subtoken_field.clone(),
+            ));
             if let Some(expansions) = fuzzy.by_query.get(term) {
                 for expansion in expansions {
-                    self.union_term_except(expansion, &subtoken_field, &mut documents)?;
+                    sources.push(DocumentQueryV1::term_except(
+                        expansion.clone(),
+                        subtoken_field.clone(),
+                    ));
                 }
             }
         }
         for subtoken in &request.subtokens {
-            self.union_term(
-                &subtoken_field,
-                &normalize_lexical(subtoken),
-                &mut documents,
-            )?;
+            sources.push(DocumentQueryV1::term(
+                subtoken_field.clone(),
+                normalize_lexical(subtoken),
+            ));
         }
-        for candidates in phrase_candidates.values() {
-            documents |= candidates;
-        }
-        Ok(documents)
+        sources.extend(phrase_queries.values().cloned());
+        Ok(union_document_queries(sources))
     }
 
     fn exact_documents(
         &self,
         request: &ExactLaneRequest,
-    ) -> Result<RoaringBitmap, RetrievalPortError> {
-        let mut documents = RoaringBitmap::new();
+    ) -> Result<DocumentQueryV1, RetrievalPortError> {
+        let mut sources = Vec::new();
         for literal in &request.literals {
             if matches!(
                 literal.field,
@@ -706,106 +866,30 @@ impl<'a> ArtifactQueryV1<'a> {
                     | ExactFieldV1::DiagnosticText
                     | ExactFieldV1::CompilerOrRuntimeError
             ) {
-                documents |= self.ngram_documents(NGRAM_NORMALIZED, &literal.original_bytes)?;
-                documents |= self.ngram_documents(NGRAM_RAW_OVERRIDE, &literal.original_bytes)?;
+                sources.push(ngram_document_query(
+                    NGRAM_NORMALIZED,
+                    &literal.original_bytes,
+                ));
+                sources.push(ngram_document_query(
+                    NGRAM_RAW_OVERRIDE,
+                    &literal.original_bytes,
+                ));
             }
             let field = serde_json::to_string(&literal.field).map_err(contract_error)?;
-            let mut statement = self
-                .connection
-                .prepare(
-                    "SELECT document_id FROM exact_postings WHERE field = ?1 AND term = ?2 ORDER BY document_id",
-                )
-                .map_err(map_query_sql_error)?;
-            let mut rows = statement
-                .query(params![field, &literal.canonical_bytes])
-                .map_err(map_query_sql_error)?;
-            while let Some(row) = rows.next().map_err(map_query_sql_error)? {
-                insert_document(&mut documents, row.get(0).map_err(map_query_sql_error)?)?;
-            }
+            sources.push(DocumentQueryV1::exact(
+                field,
+                literal.canonical_bytes.clone(),
+            ));
         }
-        Ok(documents)
+        Ok(union_document_queries(sources))
     }
 
-    fn ngram_documents(
+    fn visit_documents(
         &self,
-        kind: i64,
-        bytes: &[u8],
-    ) -> Result<RoaringBitmap, RetrievalPortError> {
-        let mut ngrams = query_ngrams(bytes).into_iter();
-        let Some(first) = ngrams.next() else {
-            return Ok(RoaringBitmap::new());
-        };
-        let mut documents = self.documents_for_ngram(kind, first)?;
-        for ngram in ngrams {
-            documents &= self.documents_for_ngram(kind, ngram)?;
-            if documents.is_empty() {
-                break;
-            }
-        }
-        Ok(documents)
-    }
-
-    fn documents_for_ngram(
-        &self,
-        kind: i64,
-        ngram: u32,
-    ) -> Result<RoaringBitmap, RetrievalPortError> {
-        let mut documents = RoaringBitmap::new();
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT document_id FROM ngram_postings WHERE kind = ?1 AND ngram = ?2 ORDER BY document_id",
-            )
-            .map_err(map_query_sql_error)?;
-        let mut rows = statement
-            .query(params![kind, i64::from(ngram)])
-            .map_err(map_query_sql_error)?;
-        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
-            insert_document(&mut documents, row.get(0).map_err(map_query_sql_error)?)?;
-        }
-        Ok(documents)
-    }
-
-    fn union_term(
-        &self,
-        field: &str,
-        term: &str,
-        documents: &mut RoaringBitmap,
+        query: &DocumentQueryV1,
+        visitor: impl FnMut(u32) -> Result<(), RetrievalPortError>,
     ) -> Result<(), RetrievalPortError> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT document_id FROM term_postings WHERE field = ?1 AND term = ?2 ORDER BY document_id",
-            )
-            .map_err(map_query_sql_error)?;
-        let mut rows = statement
-            .query(params![field, term])
-            .map_err(map_query_sql_error)?;
-        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
-            insert_document(documents, row.get(0).map_err(map_query_sql_error)?)?;
-        }
-        Ok(())
-    }
-
-    fn union_term_except(
-        &self,
-        term: &str,
-        excluded_field: &str,
-        documents: &mut RoaringBitmap,
-    ) -> Result<(), RetrievalPortError> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT document_id FROM term_postings WHERE term = ?1 AND field != ?2 ORDER BY document_id",
-            )
-            .map_err(map_query_sql_error)?;
-        let mut rows = statement
-            .query(params![term, excluded_field])
-            .map_err(map_query_sql_error)?;
-        while let Some(row) = rows.next().map_err(map_query_sql_error)? {
-            insert_document(documents, row.get(0).map_err(map_query_sql_error)?)?;
-        }
-        Ok(())
+        visit_document_ids(self.connection, query, visitor)
     }
 
     fn fuzzy_expansions(
@@ -1275,6 +1359,214 @@ fn decode_row(bytes: &[u8]) -> Result<ArtifactRowV1, CodeLexicalArtifactErrorV1>
         .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
 }
 
+fn validate_cache_budget(cache_budget_bytes: usize) -> Result<(), CodeLexicalArtifactErrorV1> {
+    if cache_budget_bytes == 0
+        || cache_budget_bytes > CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1
+    {
+        return Err(CodeLexicalArtifactErrorV1::Unreserved(format!(
+            "lexical artifact cache must be within 1..={CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn digest_artifact_file(
+    file: &mut File,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 16];
+    loop {
+        checkpoint(control)?;
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    ManifestDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
+}
+
+/// The content-addressed head is the immutable authority for the bytes served
+/// by SQLite. Rehash the retained file only after the SQLite handle has
+/// completed its full validation, so an in-place mutation cannot retain its
+/// inode and still be returned as the original content address.
+fn verify_retained_artifact_digest(
+    file: &mut File,
+    expected: &ManifestDigest,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+    let actual = digest_artifact_file(file, control)?;
+    if &actual != expected {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "artifact bytes changed after SQLite opened the verified file".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Make the content-addressed reader refuse a replacement at the published
+/// name. It runs immediately before and after SQLite opens that name; after
+/// the latter check, SQLite holds the verified file's own handle.
+fn verify_named_path_identity(path: &Path, file: &File) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let named = path.symlink_metadata().map_err(map_artifact_file_error)?;
+    if !named.file_type().is_file() {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "artifact path changed from a regular file while opening".to_owned(),
+        ));
+    }
+    let opened = file.metadata().map_err(map_artifact_file_error)?;
+    if named.len() != opened.len() {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "artifact path changed size while opening".to_owned(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if named.dev() != opened.dev() || named.ino() != opened.ino() {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "artifact path was atomically replaced while opening".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        let named_volume = named.volume_serial_number().ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Incompatible(
+                "artifact filesystem does not expose a stable volume identity".to_owned(),
+            )
+        })?;
+        let opened_volume = opened.volume_serial_number().ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Incompatible(
+                "opened artifact does not expose a stable volume identity".to_owned(),
+            )
+        })?;
+        let named_index = named.file_index().ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Incompatible(
+                "artifact filesystem does not expose a stable file identity".to_owned(),
+            )
+        })?;
+        let opened_index = opened.file_index().ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Incompatible(
+                "opened artifact does not expose a stable file identity".to_owned(),
+            )
+        })?;
+        if named_volume != opened_volume || named_index != opened_index {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "artifact path was atomically replaced while opening".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(CodeLexicalArtifactErrorV1::Incompatible(
+            "the platform does not expose a stable artifact file identity".to_owned(),
+        ))
+    }
+}
+
+fn verify_artifact_state_revision(
+    connection: &Connection,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
+    let revision: i64 = connection
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            CodeLexicalArtifactErrorV1::Incompatible(format!(
+                "artifact state has no readable format revision: {error}"
+            ))
+        })?;
+    let revision = u32::try_from(revision).map_err(|_| {
+        CodeLexicalArtifactErrorV1::Incompatible(
+            "artifact state format revision is outside the supported range".to_owned(),
+        )
+    })?;
+    if revision != CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1 {
+        return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
+            "artifact state format revision {revision} is unsupported"
+        )));
+    }
+    checkpoint(control)
+}
+
+fn configure_reader_window(
+    connection: &Connection,
+    cache_budget_bytes: usize,
+    retained_metadata_bytes: usize,
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    let available = cache_budget_bytes
+        .checked_sub(retained_metadata_bytes)
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Unreserved(
+                "lexical artifact metadata exceeds the reader reservation".to_owned(),
+            )
+        })?;
+    if available == 0 {
+        return Err(CodeLexicalArtifactErrorV1::Unreserved(
+            "lexical artifact reader has no SQLite cache reservation".to_owned(),
+        ));
+    }
+    let page_cache_bytes = available.min(ARTIFACT_SQLITE_CACHE_BYTES);
+    connection
+        .pragma_update(
+            None,
+            "cache_size",
+            -i64::try_from(page_cache_bytes / 1024)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
+        )
+        .map_err(sqlite_error)?;
+    connection
+        .pragma_update(None, "mmap_size", 0i64)
+        .map_err(sqlite_error)?;
+    connection
+        .pragma_update(None, "temp_store", "FILE")
+        .map_err(sqlite_error)?;
+    Ok(page_cache_bytes)
+}
+
+fn map_artifact_file_error(error: std::io::Error) -> CodeLexicalArtifactErrorV1 {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        CodeLexicalArtifactErrorV1::Missing(error.to_string())
+    } else {
+        CodeLexicalArtifactErrorV1::Io(error.to_string())
+    }
+}
+
+fn map_private_artifact_file_error(error: std::io::Error) -> CodeLexicalArtifactErrorV1 {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        CodeLexicalArtifactErrorV1::Missing(error.to_string())
+    } else {
+        CodeLexicalArtifactErrorV1::Corrupt(format!(
+            "content-addressed lexical artifact does not satisfy the private-file authority: {error}"
+        ))
+    }
+}
+
+fn map_reader_open_error(path: &Path, error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
+    match path.try_exists() {
+        Ok(false) => CodeLexicalArtifactErrorV1::Missing(error.to_string()),
+        Ok(true) | Err(_) => sqlite_error(error),
+    }
+}
+
 fn row_occurrence(row: ArtifactRowV1) -> CodeLexicalArtifactOccurrenceV1 {
     CodeLexicalArtifactOccurrenceV1 {
         generation: row.anchor.generation_id,
@@ -1287,11 +1579,6 @@ fn row_occurrence(row: ArtifactRowV1) -> CodeLexicalArtifactOccurrenceV1 {
     }
 }
 
-fn insert_document(documents: &mut RoaringBitmap, document: i64) -> Result<(), RetrievalPortError> {
-    documents.insert(u32::try_from(document).map_err(contract_error)?);
-    Ok(())
-}
-
 fn map_query_sql_error(error: rusqlite::Error) -> RetrievalPortError {
     RetrievalPortError::AuthorityUnavailable(format!("lexical artifact read failed: {error}"))
 }
@@ -1301,21 +1588,12 @@ fn map_query_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortE
         CodeLexicalArtifactErrorV1::Interrupted(_) => RetrievalPortError::Cancelled,
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(error) => RetrievalPortError::Contract(error),
-        CodeLexicalArtifactErrorV1::Corrupt(error) | CodeLexicalArtifactErrorV1::Io(error) => {
+        CodeLexicalArtifactErrorV1::Unreserved(_) => RetrievalPortError::BudgetExceeded,
+        CodeLexicalArtifactErrorV1::Corrupt(error)
+        | CodeLexicalArtifactErrorV1::Io(error)
+        | CodeLexicalArtifactErrorV1::Missing(error) => {
             RetrievalPortError::AuthorityUnavailable(error)
         }
-    }
-}
-
-struct NeverInterrupted;
-
-impl CodeIndexExecutionControlV1 for NeverInterrupted {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-
-    fn is_deadline_exceeded(&self) -> bool {
-        false
     }
 }
 
@@ -1323,8 +1601,353 @@ impl CodeIndexExecutionControlV1 for NeverInterrupted {
 mod tests {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::retain_bounded;
+    use rusqlite::{Connection, params};
+    use tracedecay_domain::ManifestDigest;
+    use tracedecay_private_fs::open_private_file;
+
+    use super::{
+        ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, CodeLexicalArtifactErrorV1,
+        CodeLexicalArtifactReaderV1, DocumentQueryV1, NGRAM_NORMALIZED, map_query_artifact_error,
+        ngram_document_query, query_ngrams, retain_bounded, union_document_queries,
+        visit_document_ids,
+    };
+    use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+
+    struct AlwaysActiveControl;
+
+    impl CodeIndexExecutionControlV1 for AlwaysActiveControl {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    struct MutateSqliteHeaderAtObservation {
+        path: PathBuf,
+        mutation_observation: usize,
+        observations: AtomicUsize,
+    }
+
+    impl MutateSqliteHeaderAtObservation {
+        fn new(path: PathBuf, mutation_observation: usize) -> Self {
+            Self {
+                path,
+                mutation_observation,
+                observations: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl CodeIndexExecutionControlV1 for MutateSqliteHeaderAtObservation {
+        fn is_cancelled(&self) -> bool {
+            let observation = self
+                .observations
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
+            if observation == self.mutation_observation {
+                let connection = Connection::open(&self.path)
+                    .expect("open the artifact through a real SQLite writer");
+                connection
+                    .pragma_update(None, "user_version", 2i64)
+                    .expect("mutate the same artifact inode through SQLite");
+            }
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    fn streamed_documents(connection: &Connection, query: &DocumentQueryV1) -> Vec<u32> {
+        let mut documents = Vec::new();
+        visit_document_ids(connection, query, |document| {
+            documents.push(document);
+            Ok(())
+        })
+        .expect("SQLite stream succeeds");
+        documents
+    }
+
+    #[test]
+    fn invalid_content_addressed_budget_is_rejected_before_path_touch() {
+        let missing = std::env::temp_dir().join(format!(
+            "tracedecay-reader-budget-missing-{}",
+            std::process::id()
+        ));
+        let digest =
+            ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).expect("digest fixture");
+
+        let error = CodeLexicalArtifactReaderV1::open_content_addressed(
+            &missing,
+            &digest,
+            0,
+            0,
+            &AlwaysActiveControl,
+        )
+        .expect_err("an invalid budget wins before the missing path is observed");
+
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Unreserved(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_identity_refuses_replacement_after_sqlite_open() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let artifact_path = directory.path().join("artifact.sqlite");
+        let replacement_path = directory.path().join("replacement.sqlite");
+        let connection = Connection::open(&artifact_path).expect("create artifact SQLite file");
+        connection
+            .pragma_update(None, "user_version", 1i64)
+            .expect("seed original SQLite header");
+        drop(connection);
+        std::fs::copy(&artifact_path, &replacement_path).expect("copy replacement SQLite file");
+        let replacement = Connection::open(&replacement_path).expect("open replacement SQLite");
+        replacement
+            .pragma_update(None, "user_version", 2i64)
+            .expect("mutate replacement SQLite header");
+        drop(replacement);
+
+        let opened = std::fs::File::open(&artifact_path).expect("retain original file handle");
+        super::verify_named_path_identity(&artifact_path, &opened)
+            .expect("named path initially identifies the retained file");
+        let served = Connection::open_with_flags(
+            &artifact_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("SQLite opens the retained artifact name");
+        std::fs::rename(&replacement_path, &artifact_path)
+            .expect("atomically replace the artifact after SQLite open");
+
+        assert!(matches!(
+            super::verify_named_path_identity(&artifact_path, &opened),
+            Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+        ));
+        let served_version: i64 = served
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("the opened SQLite connection remains bound to the original file");
+        assert_eq!(served_version, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_inode_mutation_after_hash_must_not_pass_artifact_validation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let artifact_path = directory.path().join("artifact.sqlite");
+        let connection = Connection::open(&artifact_path).expect("create artifact SQLite file");
+        connection
+            .pragma_update(None, "user_version", 1i64)
+            .expect("seed original SQLite header");
+        drop(connection);
+        std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o600))
+            .expect("make the artifact private");
+
+        let mut retained = open_private_file(&artifact_path).expect("retain private artifact file");
+        let expected = super::digest_artifact_file(&mut retained, &AlwaysActiveControl)
+            .expect("hash the original artifact bytes");
+        let mutation = MutateSqliteHeaderAtObservation::new(artifact_path.clone(), 1);
+        super::checkpoint(&mutation).expect("run the reader's post-hash checkpoint");
+        let served = Connection::open_with_flags(
+            &artifact_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("SQLite opens the same inode after mutation");
+        let served_version: i64 = served
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read the served SQLite header");
+
+        assert!(
+            matches!(
+                super::verify_retained_artifact_digest(
+                    &mut retained,
+                    &expected,
+                    &AlwaysActiveControl,
+                ),
+                Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+            ),
+            "SQLite served same-inode user_version {served_version} after digest {expected}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_addressed_open_refuses_non_private_artifact_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let artifact_path = directory.path().join("artifact.sqlite");
+        let connection = Connection::open(&artifact_path).expect("create artifact SQLite file");
+        connection
+            .pragma_update(None, "user_version", 1i64)
+            .expect("seed SQLite header");
+        drop(connection);
+        std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o644))
+            .expect("make the artifact publicly readable");
+
+        let mut file = std::fs::File::open(&artifact_path).expect("open artifact for digest");
+        let digest = super::digest_artifact_file(&mut file, &AlwaysActiveControl)
+            .expect("hash the publicly readable artifact");
+        let size = file.metadata().expect("artifact metadata").len();
+
+        let error = CodeLexicalArtifactReaderV1::open_content_addressed(
+            &artifact_path,
+            &digest,
+            size,
+            1024 * 1024,
+            &AlwaysActiveControl,
+        )
+        .expect_err("content-addressed reader must require the private artifact authority");
+
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)));
+    }
+
+    #[test]
+    fn typed_artifact_availability_never_becomes_an_empty_result() {
+        assert!(matches!(
+            map_query_artifact_error(CodeLexicalArtifactErrorV1::Missing(
+                "sealed artifact is absent".to_owned()
+            )),
+            crate::retrieval::ports::RetrievalPortError::AuthorityUnavailable(_)
+        ));
+        assert_eq!(
+            map_query_artifact_error(CodeLexicalArtifactErrorV1::Unreserved(
+                "reader has no cache reservation".to_owned()
+            )),
+            crate::retrieval::ports::RetrievalPortError::BudgetExceeded
+        );
+    }
+
+    #[test]
+    fn phrase_ngram_stream_intersects_a_fixed_number_of_predicates() {
+        let connection = Connection::open_in_memory().expect("in-memory SQLite");
+        connection
+            .execute_batch(
+                "CREATE TABLE ngram_postings (
+                    kind INTEGER NOT NULL,
+                    ngram INTEGER NOT NULL,
+                    document_id INTEGER NOT NULL
+                );",
+            )
+            .expect("ngram fixture schema");
+        let phrase = b"abcdefghijklmnopqrstuvw";
+        let ngrams = query_ngrams(phrase)
+            .into_iter()
+            .take(ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1)
+            .collect::<Vec<_>>();
+        assert_eq!(ngrams.len(), ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1);
+        for (ordinal, ngram) in ngrams.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (?1, ?2, 1)",
+                    params![NGRAM_NORMALIZED, i64::from(*ngram)],
+                )
+                .expect("complete phrase posting");
+            if ordinal + 1 < ngrams.len() {
+                connection
+                    .execute(
+                        "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (?1, ?2, 2)",
+                        params![NGRAM_NORMALIZED, i64::from(*ngram)],
+                    )
+                    .expect("incomplete phrase posting");
+            }
+        }
+
+        let query = ngram_document_query(NGRAM_NORMALIZED, phrase);
+
+        assert_eq!(
+            query.parameters.len(),
+            ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1 + 2
+        );
+        assert_eq!(streamed_documents(&connection, &query), vec![1]);
+    }
+
+    #[test]
+    fn streamed_union_preserves_phrase_and_fuzzy_candidate_membership() {
+        let connection = Connection::open_in_memory().expect("in-memory SQLite");
+        connection
+            .execute_batch(
+                "CREATE TABLE term_postings (
+                    field TEXT NOT NULL,
+                    term TEXT NOT NULL,
+                    document_id INTEGER NOT NULL
+                );",
+            )
+            .expect("term fixture schema");
+        for (field, term, document) in [
+            ("body", "render", 1),
+            ("body", "renderer", 2),
+            ("subtoken", "render", 3),
+            ("subtoken", "render", 3),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO term_postings(field, term, document_id) VALUES (?1, ?2, ?3)",
+                    params![field, term, document],
+                )
+                .expect("term posting");
+        }
+        let query = union_document_queries([
+            DocumentQueryV1::term_except("render".to_owned(), "subtoken".to_owned()),
+            DocumentQueryV1::term_except("renderer".to_owned(), "subtoken".to_owned()),
+            DocumentQueryV1::term("subtoken".to_owned(), "render".to_owned()),
+        ]);
+
+        assert_eq!(streamed_documents(&connection, &query), vec![1, 2, 3]);
+        assert_eq!(
+            streamed_documents(
+                &connection,
+                &union_document_queries([DocumentQueryV1::term(
+                    "subtoken".to_owned(),
+                    "render".to_owned(),
+                )]),
+            ),
+            vec![3],
+            "one source query must preserve bitmap-like candidate deduplication"
+        );
+    }
+
+    #[test]
+    fn streamed_union_handles_more_sources_than_sqlite_compound_limit() {
+        let connection = Connection::open_in_memory().expect("in-memory SQLite");
+        connection
+            .execute_batch(
+                "CREATE TABLE term_postings (
+                    field TEXT NOT NULL,
+                    term TEXT NOT NULL,
+                    document_id INTEGER NOT NULL
+                );",
+            )
+            .expect("term fixture schema");
+        let source_count = 513u32;
+        let sources = (0..source_count)
+            .map(|document| {
+                let term = format!("term-{document:04}");
+                connection
+                    .execute(
+                        "INSERT INTO term_postings(field, term, document_id) VALUES (?1, ?2, ?3)",
+                        params!["body", term, i64::from(document)],
+                    )
+                    .expect("term posting");
+                DocumentQueryV1::term("body".to_owned(), term)
+            })
+            .collect::<Vec<_>>();
+
+        let query = union_document_queries(sources);
+
+        assert_eq!(
+            streamed_documents(&connection, &query),
+            (0..source_count).collect::<Vec<_>>(),
+            "nested streamed enumeration preserves the exact candidate order beyond SQLite's flat UNION ceiling"
+        );
+    }
 
     #[test]
     fn bounded_selection_retains_at_most_the_cap_and_matches_a_full_sort() {
