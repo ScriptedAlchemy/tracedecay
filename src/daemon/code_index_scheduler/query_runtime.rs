@@ -22,14 +22,13 @@ use tracedecay_domain::{
 use super::CodeIndexSchedulerRegistryV1;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
-    ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::fusion::{CompositionLaneInput, RetrievalCursorKeyringV1};
 use tracedecay_query::retrieval::graph::{
     GraphExecutionControl, GraphLaneRequest, GraphLaneRetriever,
 };
 use tracedecay_query::retrieval::lexical::{
-    LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
+    LexicalLaneEvidence, LexicalLaneRequest, lexical_query_parts,
 };
 use tracedecay_query::retrieval::{
     AuthorizedQueryFallbackV1, QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1,
@@ -489,7 +488,7 @@ where
     let query_view = sanitized.query_view();
     let owners = latest.production_query_owners_with_budget(&request.budget)?;
     let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
-    let exact = owners.exact.retrieve_exact(&ExactLaneRequest {
+    let exact = owners.retrieve_exact(&ExactLaneRequest {
         base: request.clone(),
         query_view,
         generation: generation.clone(),
@@ -497,7 +496,7 @@ where
         budget: request.budget,
     })?;
     let lexical_parts = lexical_query_parts(query_view.as_str())?;
-    let lexical = owners.lexical.retrieve_lexical(&LexicalLaneRequest {
+    let lexical = owners.retrieve_lexical(&LexicalLaneRequest {
         base: request.clone(),
         query_view,
         generation: generation.clone(),
