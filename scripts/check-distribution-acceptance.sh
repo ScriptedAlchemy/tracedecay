@@ -199,98 +199,13 @@ assert_code_extraction_assets() {
 verify_feature_wiring() {
   local source_manifest=$1
   local packaged_manifest=$2
-  python3 - "$source_manifest" "$packaged_manifest" <<'PY'
-import sys
-import tomllib
-from pathlib import Path
-
-REQUIRED = {
-    "full",
-    "token-counting",
-    "semantic-fastembed",
-    "test-transport",
-}
-
-
-def load(path: str) -> dict:
-    with Path(path).open("rb") as handle:
-        return tomllib.load(handle)
-
-
-def optional_dependencies(manifest: dict) -> set[str]:
-    names: set[str] = set()
-
-    def collect(table: object) -> None:
-        if not isinstance(table, dict):
-            return
-        dependencies = table.get("dependencies")
-        if isinstance(dependencies, dict):
-            for name, spec in dependencies.items():
-                if isinstance(spec, dict) and spec.get("optional") is True:
-                    names.add(name)
-
-    collect(manifest)
-    for target in manifest.get("target", {}).values():
-        collect(target)
-    return names
-
-
-source = load(sys.argv[1])
-packaged = load(sys.argv[2])
-source_features = source.get("features", {})
-packaged_features = packaged.get("features", {})
-
-missing = sorted(REQUIRED - source_features.keys())
-if missing:
-    raise SystemExit(
-        "distribution acceptance: source manifest is missing required features: "
-        + ", ".join(missing)
-    )
-if source_features != packaged_features:
-    raise SystemExit(
-        "distribution acceptance: packaged feature wiring differs from Cargo.toml"
-    )
-
-semantic_members = packaged_features.get("semantic-fastembed")
-required_semantic_members = {
-    "dep:fastembed",
-    "fastembed/ort-download-binaries-rustls-tls",
-}
-if not isinstance(semantic_members, list) or not required_semantic_members.issubset(
-    semantic_members
-):
-    raise SystemExit(
-        "distribution acceptance: semantic-fastembed must enable dep:fastembed "
-        "and fastembed/ort-download-binaries-rustls-tls"
-    )
-fastembed_dependency = packaged.get("dependencies", {}).get("fastembed")
-if (
-    not isinstance(fastembed_dependency, dict)
-    or fastembed_dependency.get("optional") is not True
-    or fastembed_dependency.get("default-features") is not False
-):
-    raise SystemExit(
-        "distribution acceptance: fastembed must remain optional with default features disabled"
-    )
-
-references = {
-    item
-    for members in packaged_features.values()
-    for item in members
-    if isinstance(item, str)
-}
-unwired = sorted(
-    dependency
-    for dependency in optional_dependencies(packaged)
-    if f"dep:{dependency}" not in references
-    and dependency not in packaged_features
-)
-if unwired:
-    raise SystemExit(
-        "distribution acceptance: optional dependencies are not feature-wired: "
-        + ", ".join(unwired)
-    )
-PY
+  local semantic_source_manifest=$3
+  local semantic_packaged_manifest=$4
+  python3 "$repo/scripts/check-distribution-feature-wiring.py" \
+    --root-source "$source_manifest" \
+    --root-packaged "$packaged_manifest" \
+    --semantic-source "$semantic_source_manifest" \
+    --semantic-packaged "$semantic_packaged_manifest"
 }
 
 while (($#)); do
@@ -454,7 +369,11 @@ catalog_package=${package_dirs[tracedecay-tool-catalog]}
 
 assert_required_assets "$root_package"
 assert_code_extraction_assets "$code_extraction_package"
-verify_feature_wiring "$repo/Cargo.toml" "$root_package/Cargo.toml"
+verify_feature_wiring \
+  "$repo/Cargo.toml" \
+  "$root_package/Cargo.toml" \
+  "$repo/crates/tracedecay-semantic/Cargo.toml" \
+  "$semantic_package/Cargo.toml"
 
 patch_config="$work/packaged-crates.toml"
 python3 - "$metadata" "$packages" >"$patch_config" <<'PY'
