@@ -3302,8 +3302,8 @@ fn text_artifact_hash_rejects_a_named_file_replaced_during_hashing() {
     std::io::Write::write_all(&mut staging_file, &vec![7_u8; 2 * 64 * 1024])
         .expect("write original staging file");
     drop(staging_file);
-    let mut replacement_file = tracedecay_private_fs::create_private_file(&replacement)
-        .expect("create replacement file");
+    let mut replacement_file =
+        tracedecay_private_fs::create_private_file(&replacement).expect("create replacement file");
     std::io::Write::write_all(&mut replacement_file, &vec![9_u8; 2 * 64 * 1024])
         .expect("write replacement file");
     drop(replacement_file);
