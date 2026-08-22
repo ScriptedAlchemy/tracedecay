@@ -8,9 +8,8 @@ use tracedecay_policy::CurationApplyDecisionV1;
 use super::artifacts::sha256_bytes;
 use super::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
-    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, apply_managed_skill_archive,
-    apply_managed_skill_update, create_managed_skill, default_managed_skill_targets,
-    list_managed_skills,
+    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, apply_managed_skill_update,
+    create_managed_skill, default_managed_skill_targets, list_managed_skills,
 };
 use super::skill_usage::{
     SkillOverlapCandidate, SkillStaleRecommendation, SkillUsageSummary,
@@ -26,8 +25,8 @@ use super::config_error;
 mod consolidation;
 
 use consolidation::{
-    applied_consolidation_record, apply_skill_merge, skill_archive_from_proposal,
-    skill_merge_from_proposal,
+    applied_consolidation_record, apply_skill_archive, apply_skill_merge,
+    skill_archive_from_proposal, skill_merge_from_proposal,
 };
 
 /// Outcome of validating and applying one batch of `skill_writer` proposals.
@@ -197,14 +196,7 @@ pub(crate) async fn validate_and_apply_skill_proposals(
                             rejected.push(rejected_skill(proposal, &reason));
                             continue;
                         }
-                        match apply_managed_skill_archive(
-                            profile_root,
-                            &archive.skill_id,
-                            &archive.base_checksum,
-                            Some(archive.reason.clone()),
-                        )
-                        .await
-                        {
+                        match apply_skill_archive(profile_root, &archive).await {
                             Ok(skill) => {
                                 existing_skills.insert(archive.skill_id.clone(), skill.clone());
                                 consolidations.push(applied_consolidation_record(
