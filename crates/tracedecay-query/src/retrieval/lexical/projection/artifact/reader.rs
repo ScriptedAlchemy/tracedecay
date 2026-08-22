@@ -102,7 +102,13 @@ impl CodeLexicalArtifactReaderV1 {
         }
         checkpoint(control)?;
         verify_named_path_identity(path, &file)?;
-        let connection = open_content_addressed_connection(path, &file)?;
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| map_reader_open_error(path, error))?;
+        checkpoint(control)?;
+        verify_named_path_identity(path, &file)?;
         configure_reader_window(&connection, cache_budget_bytes, 0)?;
         connection
             .pragma_update(None, "query_only", true)
@@ -1377,8 +1383,8 @@ fn digest_artifact_file(
 }
 
 /// Make the content-addressed reader refuse a replacement at the published
-/// name. The SQLite connection below is opened from the retained descriptor,
-/// so it cannot silently switch to a different inode after this check.
+/// name. It runs immediately before and after SQLite opens that name; after
+/// the latter check, SQLite holds the verified file's own handle.
 fn verify_named_path_identity(path: &Path, file: &File) -> Result<(), CodeLexicalArtifactErrorV1> {
     let named = path.symlink_metadata().map_err(map_artifact_file_error)?;
     if !named.file_type().is_file() {
@@ -1401,45 +1407,46 @@ fn verify_named_path_identity(path: &Path, file: &File) -> Result<(), CodeLexica
                 "artifact path was atomically replaced while opening".to_owned(),
             ));
         }
+        return Ok(());
     }
-    Ok(())
-}
 
-fn open_content_addressed_connection(
-    _named_path: &Path,
-    file: &File,
-) -> Result<Connection, CodeLexicalArtifactErrorV1> {
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::fd::AsRawFd;
+        use std::os::windows::fs::MetadataExt;
 
-        let descriptor_paths = [
-            format!("/proc/self/fd/{}", file.as_raw_fd()),
-            format!("/dev/fd/{}", file.as_raw_fd()),
-        ];
-        for descriptor_path in descriptor_paths {
-            let descriptor_path = Path::new(&descriptor_path);
-            if !descriptor_path.exists() {
-                continue;
-            }
-            if let Ok(connection) = Connection::open_with_flags(
-                descriptor_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            ) {
-                return Ok(connection);
-            }
+        let named_volume = named.volume_serial_number().ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Incompatible(
+                "artifact filesystem does not expose a stable volume identity".to_owned(),
+            )
+        })?;
+        let opened_volume = opened.volume_serial_number().ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Incompatible(
+                "opened artifact does not expose a stable volume identity".to_owned(),
+            )
+        })?;
+        let named_index = named.file_index().ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Incompatible(
+                "artifact filesystem does not expose a stable file identity".to_owned(),
+            )
+        })?;
+        let opened_index = opened.file_index().ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Incompatible(
+                "opened artifact does not expose a stable file identity".to_owned(),
+            )
+        })?;
+        if named_volume != opened_volume || named_index != opened_index {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "artifact path was atomically replaced while opening".to_owned(),
+            ));
         }
-        Err(CodeLexicalArtifactErrorV1::Incompatible(
-            "the platform cannot open SQLite through the verified artifact handle".to_owned(),
-        ))
+        return Ok(());
     }
-    #[cfg(not(unix))]
+
+    #[cfg(not(any(unix, windows)))]
     {
-        Connection::open_with_flags(
-            _named_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|error| map_reader_open_error(_named_path, error))
+        Err(CodeLexicalArtifactErrorV1::Incompatible(
+            "the platform does not expose a stable artifact file identity".to_owned(),
+        ))
     }
 }
 
