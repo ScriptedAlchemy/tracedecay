@@ -1232,9 +1232,6 @@ fn config_requires_interval_secs_for_configured_interval_schedule() {
 
 #[test]
 fn config_validates_scheduler_idle_and_lock_bounds() {
-    // Fresh scheduled defaults validate at the domain layer first, so a zero
-    // idle or lock duration is rejected as a non-canonical task duration
-    // before the per-field automation checks can name the exact field.
     let patch = AutomationConfigPatch {
         memory_curator: AutomationTaskPatch {
             min_idle_secs: Some(Some(0)),
@@ -1246,8 +1243,8 @@ fn config_validates_scheduler_idle_and_lock_bounds() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("automation task duration"),
-        "zero min_idle_secs must be rejected as a task duration: {error}"
+        error.contains("memory_curator min_idle_secs must be greater than zero"),
+        "zero min_idle_secs must retain its field-specific rejection: {error}"
     );
 
     let patch = AutomationConfigPatch {
@@ -1261,8 +1258,8 @@ fn config_validates_scheduler_idle_and_lock_bounds() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("automation task duration"),
-        "zero stale_lock_secs must be rejected as a task duration: {error}"
+        error.contains("memory_curator stale_lock_secs must be greater than zero"),
+        "zero stale_lock_secs must retain its field-specific rejection: {error}"
     );
 
     // Nonzero bounds on the same fields remain accepted, so the rejection
