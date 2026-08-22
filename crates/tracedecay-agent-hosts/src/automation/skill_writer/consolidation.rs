@@ -8,6 +8,7 @@ use super::super::managed_skills::{
     ManagedSkill, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
     apply_managed_skill_consolidation, preview_managed_skill_update,
 };
+use super::super::skill_usage::{DEFAULT_SKILL_OVERLAP_LIMIT, skill_overlap_candidates};
 use super::{
     SkillProposalAction, optional_proposal_string, optional_proposal_targets,
     required_proposal_string, support_files_from_proposal,
@@ -59,6 +60,31 @@ fn consolidation_guard<'a>(
     Ok(skill)
 }
 
+fn required_consolidation_reason(value: Option<&Value>) -> std::result::Result<String, String> {
+    let reason = required_proposal_string(value, "reason")?;
+    if reason == SKILL_OVERLAP_REMOVAL_TOMBSTONE {
+        return Err("reason must not reuse the reserved skill-overlap tombstone label".to_string());
+    }
+    Ok(reason)
+}
+
+fn is_detected_overlap_candidate(
+    existing_skills: &BTreeMap<String, ManagedSkill>,
+    skill_id: &str,
+    paired_skill_id: Option<&str>,
+) -> bool {
+    let skills = existing_skills.values().cloned().collect::<Vec<_>>();
+    skill_overlap_candidates(&skills, DEFAULT_SKILL_OVERLAP_LIMIT)
+        .iter()
+        .any(|candidate| match paired_skill_id {
+            Some(paired_skill_id) => {
+                (candidate.skill_a == skill_id && candidate.skill_b == paired_skill_id)
+                    || (candidate.skill_a == paired_skill_id && candidate.skill_b == skill_id)
+            }
+            None => candidate.skill_a == skill_id || candidate.skill_b == skill_id,
+        })
+}
+
 pub(super) fn skill_archive_from_proposal(
     proposal: &Value,
     existing_skills: &BTreeMap<String, ManagedSkill>,
@@ -68,8 +94,13 @@ pub(super) fn skill_archive_from_proposal(
         .ok_or_else(|| "proposal must be a JSON object".to_string())?;
     let id = required_proposal_string(object.get("id"), "id")?;
     let base_checksum = required_proposal_string(object.get("base_checksum"), "base_checksum")?;
-    let reason = required_proposal_string(object.get("reason"), "reason")?;
+    let reason = required_consolidation_reason(object.get("reason"))?;
     consolidation_guard(existing_skills, &id, &base_checksum, "archive")?;
+    if !is_detected_overlap_candidate(existing_skills, &id, None) {
+        return Err(format!(
+            "managed skill '{id}' is not a detected overlap candidate"
+        ));
+    }
     Ok(SkillArchiveProposal {
         skill_id: id,
         base_checksum,
@@ -90,7 +121,7 @@ pub(super) fn skill_merge_from_proposal(
         required_proposal_string(object.get("source_skill_id"), "source_skill_id")?;
     let source_base_checksum =
         required_proposal_string(object.get("source_base_checksum"), "source_base_checksum")?;
-    let reason = required_proposal_string(object.get("reason"), "reason")?;
+    let reason = required_consolidation_reason(object.get("reason"))?;
     if source_skill_id == target_skill_id {
         return Err("merge proposal source_skill_id must differ from id".to_string());
     }
@@ -101,6 +132,11 @@ pub(super) fn skill_merge_from_proposal(
         &source_base_checksum,
         "merge source",
     )?;
+    if !is_detected_overlap_candidate(existing_skills, &target_skill_id, Some(&source_skill_id)) {
+        return Err(format!(
+            "managed skills '{target_skill_id}' and '{source_skill_id}' are not a detected overlap candidate pair"
+        ));
+    }
 
     let update = ManagedSkillUpdate {
         title: optional_proposal_string(object.get("title"))?,
@@ -257,13 +293,39 @@ mod tests {
         skill
     }
 
+    fn unrelated_automation_skill() -> ManagedSkill {
+        let mut draft = fixture_draft("rust-error-handling", ManagedSkillSource::AutomationRun);
+        draft.title = "Rust error handling".to_string();
+        draft.summary = "Model library failures with explicit error enums.".to_string();
+        draft.body_markdown =
+            "Convert IO failures at module boundaries and reserve panics for invariants."
+                .to_string();
+        let mut skill = draft
+            .materialize()
+            .unwrap_or_else(|err| panic!("unrelated skill should materialize: {err}"));
+        skill.set_state(ManagedSkillState::Active);
+        skill
+    }
+
+    fn overlapping_automation_skill(id: &str, title: &str) -> ManagedSkill {
+        let mut draft = fixture_draft(id, ManagedSkillSource::AutomationRun);
+        draft.title = title.to_string();
+        draft.summary = "Review automatically applied automation run outcomes.".to_string();
+        draft.body_markdown = "Check run ledger counts, rejected proposals, and deployment receipts after automatic application.".to_string();
+        let mut skill = draft
+            .materialize()
+            .unwrap_or_else(|err| panic!("overlapping skill should materialize: {err}"));
+        skill.set_state(ManagedSkillState::Active);
+        skill
+    }
+
     fn consolidation_fixture() -> BTreeMap<String, ManagedSkill> {
         let mut archived =
             fixture_skill("archived-skill", ManagedSkillSource::AutomationRun, false);
         archived.set_state(ManagedSkillState::Archived);
         [
-            fixture_skill("workflow-a", ManagedSkillSource::AutomationRun, false),
-            fixture_skill("workflow-b", ManagedSkillSource::AutomationRun, false),
+            overlapping_automation_skill("workflow-a", "Automation run review"),
+            overlapping_automation_skill("workflow-b", "Review automation runs"),
             fixture_skill("pinned-skill", ManagedSkillSource::AutomationRun, true),
             fixture_skill("user-skill", ManagedSkillSource::User, false),
             fixture_skill("imported-skill", ManagedSkillSource::Import, false),
@@ -503,6 +565,72 @@ mod tests {
         assert_eq!(
             assert_ok(skill_proposal_action(&json!({"action": "archive"}))),
             SkillProposalAction::Archive
+        );
+    }
+
+    #[test]
+    fn consolidation_proposals_require_a_detected_overlap() {
+        let mut skills = consolidation_fixture();
+        let unrelated = unrelated_automation_skill();
+        let unrelated_id = unrelated.metadata.id.clone();
+        skills.insert(unrelated_id.clone(), unrelated);
+
+        assert_err_eq(
+            skill_archive_from_proposal(
+                &json!({
+                    "action": "archive",
+                    "id": unrelated_id,
+                    "base_checksum": checksum(&skills, "rust-error-handling"),
+                    "reason": "retire an unrelated automation skill"
+                }),
+                &skills,
+            ),
+            "managed skill 'rust-error-handling' is not a detected overlap candidate",
+        );
+        assert_err_eq(
+            skill_merge_from_proposal(
+                &json!({
+                    "action": "merge",
+                    "id": "workflow-a",
+                    "base_checksum": checksum(&skills, "workflow-a"),
+                    "source_skill_id": "rust-error-handling",
+                    "source_base_checksum": checksum(&skills, "rust-error-handling"),
+                    "reason": "merge unrelated automation skills"
+                }),
+                &skills,
+            ),
+            "managed skills 'workflow-a' and 'rust-error-handling' are not a detected overlap candidate pair",
+        );
+    }
+
+    #[test]
+    fn consolidation_proposals_reject_the_reserved_tombstone_as_a_reason() {
+        let skills = consolidation_fixture();
+        assert_err_eq(
+            skill_archive_from_proposal(
+                &json!({
+                    "action": "archive",
+                    "id": "workflow-a",
+                    "base_checksum": checksum(&skills, "workflow-a"),
+                    "reason": SKILL_OVERLAP_REMOVAL_TOMBSTONE
+                }),
+                &skills,
+            ),
+            "reason must not reuse the reserved skill-overlap tombstone label",
+        );
+        assert_err_eq(
+            skill_merge_from_proposal(
+                &json!({
+                    "action": "merge",
+                    "id": "workflow-a",
+                    "base_checksum": checksum(&skills, "workflow-a"),
+                    "source_skill_id": "workflow-b",
+                    "source_base_checksum": checksum(&skills, "workflow-b"),
+                    "reason": SKILL_OVERLAP_REMOVAL_TOMBSTONE
+                }),
+                &skills,
+            ),
+            "reason must not reuse the reserved skill-overlap tombstone label",
         );
     }
 

@@ -15,9 +15,9 @@ pub use crate::evidence_budget::{
 /// Ledger label for a run skipped because automation is disabled in config.
 ///
 /// Host adapters previously spelled this wire value as inline literals;
-/// owning the canonical spelling here keeps every emitter and assertion on
-/// one constant and lets the distinctness tests below fence the tombstone
-/// label against it.
+/// owning the canonical spelling here lets migrated emitters and assertions
+/// share one constant and lets the distinctness tests below fence the
+/// tombstone label against it.
 pub const AUTOMATION_DISABLED: &str = "automation_disabled";
 
 /// Label carried by applied skill-consolidation records for a managed skill
