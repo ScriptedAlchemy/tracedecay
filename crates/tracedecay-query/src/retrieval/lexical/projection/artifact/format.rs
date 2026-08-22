@@ -17,13 +17,13 @@ const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v1\0";
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
 pub(super) const SECTION_NAMES: [&str; 8] = [
     "source_pages",
+    "derived_integrity",
     "import_evidence",
     "rows",
     "term_postings",
     "exact_postings",
     "ngram_postings",
     "statistics",
-    "derived_integrity",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

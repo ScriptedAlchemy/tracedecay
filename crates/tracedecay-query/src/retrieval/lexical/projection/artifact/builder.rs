@@ -40,13 +40,13 @@ use super::super::{
 
 const SECTION_QUERIES: [&str; 8] = [
     "SELECT page_ordinal, page_digest, cumulative_digest, chunk_count, payload_bytes, import_count, import_payload_bytes, import_dictionary_digest, next_cursor FROM source_pages ORDER BY page_ordinal",
+    "SELECT 'document', document_id, digest FROM document_integrity UNION ALL SELECT 'import', canonical, digest FROM import_integrity ORDER BY 1, 2",
     "SELECT canonical, evidence FROM import_evidence ORDER BY canonical",
     "SELECT document_id, chunk_id, row FROM rows ORDER BY document_id",
     "SELECT field, term, document_id, frequency FROM term_postings ORDER BY field, term, document_id",
     "SELECT field, term, document_id FROM exact_postings ORDER BY field, term, document_id",
     "SELECT kind, ngram, document_id FROM ngram_postings ORDER BY kind, ngram, document_id",
     "SELECT 'field', field, '', total_length FROM field_stats UNION ALL SELECT 'term', field, term, document_frequency FROM term_stats UNION ALL SELECT 'vocabulary', '', term, 0 FROM vocabulary ORDER BY 1, 2, 3, 4",
-    "SELECT 'document', document_id, digest FROM document_integrity UNION ALL SELECT 'import', canonical, digest FROM import_integrity ORDER BY 1, 2",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
