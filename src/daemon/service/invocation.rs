@@ -77,7 +77,8 @@ use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCase
 
 use super::project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
-    ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1, StoreObservabilityRegistryV1,
+    ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1,
+    StoreObservabilityMountV1, StoreObservabilityRegistryV1,
 };
 use crate::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,

@@ -23,7 +23,10 @@ mod observability;
 mod request_snapshot;
 mod shutdown;
 
-pub(crate) use observability::{RegisteredObservabilityProducerV1, StoreObservabilityRegistryV1};
+pub(crate) use observability::{
+    RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
+    StoreObservabilityRegistryV1,
+};
 pub(crate) use shutdown::ProjectRuntimeRootQuiescenceV1;
 use shutdown::ShutdownState;
 

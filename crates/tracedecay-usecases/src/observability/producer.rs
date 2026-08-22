@@ -61,6 +61,16 @@ impl ObservabilityProducerIdentityV1 {
         }
         Ok(())
     }
+
+    /// The one store-owner alias gate: a policy-stamping frontend must match
+    /// its owner on every store-authority field. Only the policy revision a
+    /// linked root selects for its own emissions may differ.
+    pub(super) fn is_policy_alias_of(&self, owner: &Self) -> bool {
+        self.authorized_scope_ref == owner.authorized_scope_ref
+            && self.process_boot_id == owner.process_boot_id
+            && self.producer_revision == owner.producer_revision
+            && self.configuration_revision == owner.configuration_revision
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,19 +173,38 @@ struct ProducerWorkerProgress {
     rollup_frontier_initialized: bool,
 }
 
-pub struct BoundedObservabilityProducerV1 {
+/// Store-owner state shared by every policy-stamping frontend: the bounded
+/// queue, the worker, the sequence allocator, and the lifecycle exist exactly
+/// once per started producer. Frontends are cheap identity carriers over one
+/// `Arc` of this core, so aliasing is handle construction and shutdown drains
+/// the one worker no matter which frontend drives it.
+struct ObservabilityProducerCoreV1 {
     db: RegisteredGlobalDbLeaseV1,
+    /// The founding owner identity. Every alias must match it on the
+    /// store-authority fields (`is_policy_alias_of`); frontends stamp their
+    /// own policy revision at admission.
     identity: ObservabilityProducerIdentityV1,
     data: mpsc::Sender<QueuedObservation>,
     control: mpsc::Sender<ProducerControl>,
+    // The next five stay `Arc` because the spawned worker shares them. The
+    // worker must not hold the core itself: the queue senders live in the
+    // core, so a worker-held core would keep its own channels open and the
+    // worker could never wind down when every frontend is dropped.
     pending_drops: Arc<Mutex<Vec<DropRange>>>,
     total_dropped: Arc<AtomicU64>,
     next_sequence: Arc<AtomicU64>,
     state: Arc<AtomicU8>,
-    deadlines: ObservabilityProducerDeadlinesV1,
-    emission_lock: Arc<Mutex<()>>,
     durable_emission_lock: Arc<AsyncMutex<()>>,
-    worker: Arc<Mutex<Option<JoinHandle<()>>>>,
+    deadlines: ObservabilityProducerDeadlinesV1,
+    emission_lock: Mutex<()>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+pub struct BoundedObservabilityProducerV1 {
+    core: Arc<ObservabilityProducerCoreV1>,
+    /// The identity this frontend stamps on admitted envelopes. It differs
+    /// from the core owner identity only in policy provenance.
+    identity: ObservabilityProducerIdentityV1,
 }
 
 impl BoundedObservabilityProducerV1 {
@@ -227,53 +256,40 @@ impl BoundedObservabilityProducerV1 {
                 deadlines,
             },
         ));
-        Ok(Self {
+        let core = Arc::new(ObservabilityProducerCoreV1 {
             db,
-            identity,
+            identity: identity.clone(),
             data,
             control,
             pending_drops,
             total_dropped,
             next_sequence,
             state,
-            deadlines,
-            emission_lock: Arc::new(Mutex::new(())),
             durable_emission_lock,
-            worker: Arc::new(Mutex::new(Some(worker))),
-        })
+            deadlines,
+            emission_lock: Mutex::new(()),
+            worker: Mutex::new(Some(worker)),
+        });
+        Ok(Self { core, identity })
     }
 
     /// Attach a policy-specific emission frontend to this producer's shared
-    /// queue, sequence, lifecycle, and worker.
+    /// core: one queue, sequence, lifecycle, and worker.
     ///
     /// Linked worktrees share one registered project-session store owner but
-    /// retain distinct policy provenance. Every backend authority must match;
-    /// only the policy stamped at admission may differ.
+    /// retain distinct policy provenance. Every store-authority field must
+    /// match the owner; only the policy stamped at admission may differ.
     pub fn alias_with_policy_identity(
         &self,
         identity: ObservabilityProducerIdentityV1,
     ) -> Result<Self, &'static str> {
         identity.validate()?;
-        if identity.authorized_scope_ref != self.identity.authorized_scope_ref
-            || identity.process_boot_id != self.identity.process_boot_id
-            || identity.producer_revision != self.identity.producer_revision
-            || identity.configuration_revision != self.identity.configuration_revision
-        {
+        if !identity.is_policy_alias_of(&self.core.identity) {
             return Err("observability_producer_alias_identity");
         }
         Ok(Self {
-            db: self.db.clone(),
+            core: Arc::clone(&self.core),
             identity,
-            data: self.data.clone(),
-            control: self.control.clone(),
-            pending_drops: Arc::clone(&self.pending_drops),
-            total_dropped: Arc::clone(&self.total_dropped),
-            next_sequence: Arc::clone(&self.next_sequence),
-            state: Arc::clone(&self.state),
-            deadlines: self.deadlines,
-            emission_lock: Arc::clone(&self.emission_lock),
-            durable_emission_lock: Arc::clone(&self.durable_emission_lock),
-            worker: Arc::clone(&self.worker),
         })
     }
 
@@ -286,12 +302,12 @@ impl BoundedObservabilityProducerV1 {
         &self.identity
     }
 
-    pub const fn persistence_deadline(&self) -> Duration {
-        self.deadlines.persistence
+    pub fn persistence_deadline(&self) -> Duration {
+        self.core.deadlines.persistence
     }
 
     fn validate_admission(&self, envelope: &ObservabilityEnvelopeV1) -> Result<(), &'static str> {
-        if self.state.load(Ordering::Acquire) != PRODUCER_RUNNING {
+        if self.core.state.load(Ordering::Acquire) != PRODUCER_RUNNING {
             return Err("observability_producer_closed");
         }
         if envelope.scope_ref != self.identity.authorized_scope_ref {
@@ -326,11 +342,12 @@ impl BoundedObservabilityProducerV1 {
         envelope: ObservabilityEnvelopeV1,
     ) -> Result<ObservabilityEmissionOutcomeV1, &'static str> {
         let _emission_guard = self
+            .core
             .emission_lock
             .lock()
             .map_err(|_| "observability_producer_lock_poisoned")?;
         self.validate_admission(&envelope)?;
-        let sequence = self.next_sequence.fetch_add(1, Ordering::AcqRel);
+        let sequence = self.core.next_sequence.fetch_add(1, Ordering::AcqRel);
         let envelope = self.prepare_delivery(envelope, sequence, false)?;
         self.offer_prepared(envelope, None)
     }
@@ -341,10 +358,11 @@ impl BoundedObservabilityProducerV1 {
         owner_fact: Option<QueuedOwnerFact>,
     ) -> Result<ObservabilityEmissionOutcomeV1, &'static str> {
         let sequence = envelope.producer_sequence;
-        match self.data.try_reserve() {
+        match self.core.data.try_reserve() {
             Ok(permit) => {
                 let carried_drops = {
                     let mut pending = self
+                        .core
                         .pending_drops
                         .lock()
                         .map_err(|_| "observability_producer_lock_poisoned")?;
@@ -375,6 +393,7 @@ impl BoundedObservabilityProducerV1 {
 
     fn record_capacity_drop(&self, sequence: u64) -> Result<(), &'static str> {
         let mut pending = self
+            .core
             .pending_drops
             .lock()
             .map_err(|_| "observability_producer_lock_poisoned")?;
@@ -392,20 +411,24 @@ impl BoundedObservabilityProducerV1 {
                 count: 1,
             });
         }
-        self.total_dropped.fetch_add(1, Ordering::AcqRel);
+        self.core.total_dropped.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
     pub async fn shutdown(
         &self,
     ) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
-        self.stop(false).await
+        self.core.stop(false).await
     }
 
     pub async fn cancel(&self) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
-        self.stop(true).await
+        self.core.stop(true).await
     }
+}
 
+impl ObservabilityProducerCoreV1 {
+    /// Shutdown lives only on the core: any frontend may drive it, and the
+    /// lifecycle compare-and-swap admits exactly one drain.
     async fn stop(
         &self,
         cancelled: bool,

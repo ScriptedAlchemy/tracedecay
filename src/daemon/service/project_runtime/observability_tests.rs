@@ -22,10 +22,28 @@ use tracedecay_usecases::observability::{
 
 use crate::daemon::service::invocation::DaemonInvocationService;
 
-use super::StoreObservabilityRegistryV1;
+use super::{
+    StoreObservabilityMountErrorV1, StoreObservabilityMountV1, StoreObservabilityRegistryV1,
+};
 
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
+}
+
+/// A registry mount request whose store-authority fields match `identity`,
+/// stamping that identity's policy revision for the mounting root.
+fn store_mount(
+    configuration_provenance_revision: &ManifestDigest,
+    identity: &ObservabilityProducerIdentityV1,
+) -> StoreObservabilityMountV1 {
+    StoreObservabilityMountV1 {
+        configuration_provenance_revision: configuration_provenance_revision.clone(),
+        authorized_scope_ref: identity.authorized_scope_ref.clone(),
+        producer_revision: identity.producer_revision.clone(),
+        configuration_revision: identity.configuration_revision.clone(),
+        policy_revision: identity.policy_revision.clone(),
+        delivery_capacity: 1,
+    }
 }
 
 fn envelope(scope: &ProjectId, event: &str) -> ObservabilityEnvelopeV1 {
@@ -820,44 +838,35 @@ async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finis
         runtime("observability-retiring-two-aliases").await;
     let registry = StoreObservabilityRegistryV1::default();
     let configuration_provenance_revision = digest('0');
-    let producer = BoundedObservabilityProducerV1::start(
-        database.clone(),
-        ObservabilityProducerIdentityV1 {
-            authorized_scope_ref: project_id.as_str().to_owned(),
-            process_boot_id: "daemon:retiring-two-aliases".to_owned(),
-            producer_revision: "producer.v1".to_owned(),
-            configuration_revision: digest('6').as_str().to_owned(),
-            policy_revision: digest('7').as_str().to_owned(),
-        },
-        1,
-    )
-    .expect("producer");
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: project_id.as_str().to_owned(),
+        process_boot_id: "daemon:retiring-two-aliases".to_owned(),
+        producer_revision: "producer.v1".to_owned(),
+        configuration_revision: digest('6').as_str().to_owned(),
+        policy_revision: digest('7').as_str().to_owned(),
+    };
+    let producer = BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 1)
+        .expect("producer");
     let first = registry
-        .acquire_or_start::<&'static str>(
+        .acquire_or_start(
             &database,
-            &configuration_provenance_revision,
-            |_| false,
-            ObservabilityProducerIdentityV1::clone,
-            || "unexpected incumbent store producer",
+            &store_mount(&configuration_provenance_revision, &identity),
             || Ok(producer),
-            1,
-            |error| error,
         )
         .expect("first alias");
+    let linked_identity = ObservabilityProducerIdentityV1 {
+        policy_revision: digest('8').as_str().to_owned(),
+        ..identity.clone()
+    };
     let linked = registry
-        .acquire_or_start::<&'static str>(
+        .acquire_or_start(
             &database,
-            &configuration_provenance_revision,
-            |_| true,
-            |incumbent| {
-                let mut identity = incumbent.clone();
-                identity.policy_revision = digest('8').as_str().to_owned();
-                identity
+            &store_mount(&configuration_provenance_revision, &linked_identity),
+            || {
+                Err(StoreObservabilityMountErrorV1::Unavailable(
+                    "must not start a second producer",
+                ))
             },
-            || "unexpected incumbent refusal",
-            || Err("must not start a second producer"),
-            1,
-            |error| error,
         )
         .expect("linked alias");
     let first_producer = first.producer();
@@ -876,8 +885,6 @@ async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finis
         .try_emit(envelope(&project_id, "retiring:two-aliases:blocked"))
         .expect("enqueue blocked event");
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
-    let first = Arc::new(first);
-    let linked = Arc::new(linked);
     let first_barrier = Arc::clone(&barrier);
     let first_release = tokio::spawn(async move {
         first_barrier.wait().await;
@@ -908,17 +915,15 @@ async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finis
     .await
     .expect("concurrent last release reaches the producer");
 
-    let retiring = registry.acquire_or_start::<&'static str>(
+    let retiring = registry.acquire_or_start(
         &database,
-        &configuration_provenance_revision,
-        |_| true,
-        ObservabilityProducerIdentityV1::clone,
-        || "unexpected incumbent refusal",
+        &store_mount(&configuration_provenance_revision, &identity),
         || panic!("retiring store must not start an overlapping producer"),
-        1,
-        |error| error,
     );
-    assert!(matches!(retiring, Err("store_observability_retiring")));
+    assert!(matches!(
+        retiring,
+        Err(StoreObservabilityMountErrorV1::Retiring)
+    ));
     blocker.commit().await.expect("release registered writer");
     tokio::time::timeout(Duration::from_secs(3), async {
         first_release
@@ -933,29 +938,16 @@ async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finis
     .await
     .expect("concurrent owner retirement completes");
 
+    let replacement_identity = ObservabilityProducerIdentityV1 {
+        process_boot_id: "daemon:retiring-two-aliases-replacement".to_owned(),
+        ..identity.clone()
+    };
+    let replacement_mount = store_mount(&configuration_provenance_revision, &replacement_identity);
     let replacement = registry
-        .acquire_or_start::<&'static str>(
-            &database,
-            &configuration_provenance_revision,
-            |_| false,
-            ObservabilityProducerIdentityV1::clone,
-            || "unexpected incumbent store producer",
-            || {
-                BoundedObservabilityProducerV1::start(
-                    database.clone(),
-                    ObservabilityProducerIdentityV1 {
-                        authorized_scope_ref: project_id.as_str().to_owned(),
-                        process_boot_id: "daemon:retiring-two-aliases-replacement".to_owned(),
-                        producer_revision: "producer.v1".to_owned(),
-                        configuration_revision: digest('6').as_str().to_owned(),
-                        policy_revision: digest('7').as_str().to_owned(),
-                    },
-                    1,
-                )
-            },
-            1,
-            |error| error,
-        )
+        .acquire_or_start(&database, &replacement_mount, || {
+            BoundedObservabilityProducerV1::start(database.clone(), replacement_identity, 1)
+                .map_err(StoreObservabilityMountErrorV1::Unavailable)
+        })
         .expect("one replacement after both aliases release");
     replacement.shutdown().await.expect("replacement shutdown");
 }
@@ -973,44 +965,35 @@ async fn adjacent_linked_alias_capacity_drops_retain_distinct_policy_carriers() 
     let configuration_provenance_revision = digest('0');
     let policy_a = digest('a');
     let policy_b = digest('b');
-    let producer = BoundedObservabilityProducerV1::start(
-        database.clone(),
-        ObservabilityProducerIdentityV1 {
-            authorized_scope_ref: project_id.as_str().to_owned(),
-            process_boot_id: "daemon:linked-capacity-drops".to_owned(),
-            producer_revision: "producer.v1".to_owned(),
-            configuration_revision: digest('c').as_str().to_owned(),
-            policy_revision: policy_a.as_str().to_owned(),
-        },
-        1,
-    )
-    .expect("producer");
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: project_id.as_str().to_owned(),
+        process_boot_id: "daemon:linked-capacity-drops".to_owned(),
+        producer_revision: "producer.v1".to_owned(),
+        configuration_revision: digest('c').as_str().to_owned(),
+        policy_revision: policy_a.as_str().to_owned(),
+    };
+    let producer = BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 1)
+        .expect("producer");
     let first = registry
-        .acquire_or_start::<&'static str>(
+        .acquire_or_start(
             &database,
-            &configuration_provenance_revision,
-            |_| false,
-            ObservabilityProducerIdentityV1::clone,
-            || "unexpected incumbent store producer",
+            &store_mount(&configuration_provenance_revision, &identity),
             || Ok(producer),
-            1,
-            |error| error,
         )
         .expect("first alias");
+    let linked_identity = ObservabilityProducerIdentityV1 {
+        policy_revision: policy_b.as_str().to_owned(),
+        ..identity.clone()
+    };
     let linked = registry
-        .acquire_or_start::<&'static str>(
+        .acquire_or_start(
             &database,
-            &configuration_provenance_revision,
-            |_| true,
-            |incumbent| {
-                let mut identity = incumbent.clone();
-                identity.policy_revision = policy_b.as_str().to_owned();
-                identity
+            &store_mount(&configuration_provenance_revision, &linked_identity),
+            || {
+                Err(StoreObservabilityMountErrorV1::Unavailable(
+                    "must not start a second producer",
+                ))
             },
-            || "unexpected incumbent refusal",
-            || Err("must not start a second producer"),
-            1,
-            |error| error,
         )
         .expect("linked alias");
     let first_producer = first.producer();
@@ -1089,29 +1072,19 @@ async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) = runtime("observability-retiring-drop").await;
     let registry = StoreObservabilityRegistryV1::default();
-    let producer = BoundedObservabilityProducerV1::start(
-        database.clone(),
-        ObservabilityProducerIdentityV1 {
-            authorized_scope_ref: project_id.as_str().to_owned(),
-            process_boot_id: "daemon:retiring-drop".to_owned(),
-            producer_revision: "producer.v1".to_owned(),
-            configuration_revision: digest('6').as_str().to_owned(),
-            policy_revision: digest('7').as_str().to_owned(),
-        },
-        1,
-    )
-    .expect("producer");
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: project_id.as_str().to_owned(),
+        process_boot_id: "daemon:retiring-drop".to_owned(),
+        producer_revision: "producer.v1".to_owned(),
+        configuration_revision: digest('6').as_str().to_owned(),
+        policy_revision: digest('7').as_str().to_owned(),
+    };
+    let producer = BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 1)
+        .expect("producer");
     let registered = registry
-        .acquire_or_start::<&'static str>(
-            &database,
-            &digest('0'),
-            |_| false,
-            ObservabilityProducerIdentityV1::clone,
-            || "unexpected incumbent store producer",
-            || Ok(producer),
-            1,
-            |error| error,
-        )
+        .acquire_or_start(&database, &store_mount(&digest('0'), &identity), || {
+            Ok(producer)
+        })
         .expect("registered observability producer");
     let blocker = database
         .begin_write_transaction()
@@ -1123,58 +1096,39 @@ async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
         .expect("enqueue blocked event");
     drop(registered);
 
-    let retiring = registry.acquire_or_start::<&'static str>(
-        &database,
-        &digest('0'),
-        |_| true,
-        ObservabilityProducerIdentityV1::clone,
-        || "unexpected incumbent refusal",
-        || {
-            BoundedObservabilityProducerV1::start(
-                database.clone(),
-                ObservabilityProducerIdentityV1 {
-                    authorized_scope_ref: project_id.as_str().to_owned(),
-                    process_boot_id: "daemon:retiring-drop-overlap".to_owned(),
-                    producer_revision: "producer.v1".to_owned(),
-                    configuration_revision: digest('6').as_str().to_owned(),
-                    policy_revision: digest('7').as_str().to_owned(),
-                },
-                1,
-            )
-        },
-        1,
-        |error| error,
-    );
-    assert!(matches!(retiring, Err("store_observability_retiring")));
+    let overlap_identity = ObservabilityProducerIdentityV1 {
+        process_boot_id: "daemon:retiring-drop-overlap".to_owned(),
+        ..identity.clone()
+    };
+    let overlap_mount = store_mount(&digest('0'), &overlap_identity);
+    let retiring = registry.acquire_or_start(&database, &overlap_mount, || {
+        BoundedObservabilityProducerV1::start(database.clone(), overlap_identity.clone(), 1)
+            .map_err(StoreObservabilityMountErrorV1::Unavailable)
+    });
+    assert!(matches!(
+        retiring,
+        Err(StoreObservabilityMountErrorV1::Retiring)
+    ));
     blocker.commit().await.expect("release registered writer");
 
+    let replacement_identity = ObservabilityProducerIdentityV1 {
+        process_boot_id: "daemon:retiring-drop-replacement".to_owned(),
+        ..identity.clone()
+    };
+    let replacement_mount = store_mount(&digest('0'), &replacement_identity);
     let replacement = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let attempt = registry.acquire_or_start::<&'static str>(
-                &database,
-                &digest('0'),
-                |_| true,
-                ObservabilityProducerIdentityV1::clone,
-                || "unexpected incumbent refusal",
-                || {
-                    BoundedObservabilityProducerV1::start(
-                        database.clone(),
-                        ObservabilityProducerIdentityV1 {
-                            authorized_scope_ref: project_id.as_str().to_owned(),
-                            process_boot_id: "daemon:retiring-drop-replacement".to_owned(),
-                            producer_revision: "producer.v1".to_owned(),
-                            configuration_revision: digest('6').as_str().to_owned(),
-                            policy_revision: digest('7').as_str().to_owned(),
-                        },
-                        1,
-                    )
-                },
-                1,
-                |error| error,
-            );
+            let attempt = registry.acquire_or_start(&database, &replacement_mount, || {
+                BoundedObservabilityProducerV1::start(
+                    database.clone(),
+                    replacement_identity.clone(),
+                    1,
+                )
+                .map_err(StoreObservabilityMountErrorV1::Unavailable)
+            });
             match attempt {
                 Ok(replacement) => break replacement,
-                Err("store_observability_retiring") => tokio::task::yield_now().await,
+                Err(StoreObservabilityMountErrorV1::Retiring) => tokio::task::yield_now().await,
                 Err(error) => panic!("unexpected replacement result: {error}"),
             }
         }
@@ -1189,15 +1143,16 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) =
         runtime("observability-shutdown-failure").await;
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: project_id.as_str().to_owned(),
+        process_boot_id: "daemon:shutdown-failure".to_owned(),
+        producer_revision: "producer.v1".to_owned(),
+        configuration_revision: digest('e').as_str().to_owned(),
+        policy_revision: digest('f').as_str().to_owned(),
+    };
     let producer = BoundedObservabilityProducerV1::start_with_deadlines(
         database.clone(),
-        ObservabilityProducerIdentityV1 {
-            authorized_scope_ref: project_id.as_str().to_owned(),
-            process_boot_id: "daemon:shutdown-failure".to_owned(),
-            producer_revision: "producer.v1".to_owned(),
-            configuration_revision: digest('e').as_str().to_owned(),
-            policy_revision: digest('f').as_str().to_owned(),
-        },
+        identity.clone(),
         1,
         ObservabilityProducerDeadlinesV1 {
             persistence: Duration::from_millis(50),
@@ -1207,16 +1162,9 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
     .expect("producer");
     let registry = StoreObservabilityRegistryV1::default();
     let registered = registry
-        .acquire_or_start::<&'static str>(
-            &database,
-            &digest('0'),
-            |_| false,
-            ObservabilityProducerIdentityV1::clone,
-            || "unexpected incumbent store producer",
-            || Ok(producer),
-            1,
-            |error| error,
-        )
+        .acquire_or_start(&database, &store_mount(&digest('0'), &identity), || {
+            Ok(producer)
+        })
         .expect("registered observability producer");
     let blocker = database
         .begin_write_transaction()
@@ -1241,29 +1189,19 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
     );
     let start_called = Arc::new(AtomicBool::new(false));
     let observed_start = Arc::clone(&start_called);
-    let failed = registry.acquire_or_start::<&'static str>(
-        &database,
-        &digest('0'),
-        |_| true,
-        ObservabilityProducerIdentityV1::clone,
-        || "unexpected incumbent refusal",
-        || {
-            observed_start.store(true, Ordering::Release);
-            BoundedObservabilityProducerV1::start(
-                database.clone(),
-                ObservabilityProducerIdentityV1 {
-                    authorized_scope_ref: project_id.as_str().to_owned(),
-                    process_boot_id: "daemon:shutdown-failure-replacement".to_owned(),
-                    producer_revision: "producer.v1".to_owned(),
-                    configuration_revision: digest('e').as_str().to_owned(),
-                    policy_revision: digest('f').as_str().to_owned(),
-                },
-                1,
-            )
-        },
-        1,
-        |error| error,
-    );
-    assert!(matches!(failed, Err("store_observability_shutdown_failed")));
+    let replacement_identity = ObservabilityProducerIdentityV1 {
+        process_boot_id: "daemon:shutdown-failure-replacement".to_owned(),
+        ..identity.clone()
+    };
+    let replacement_mount = store_mount(&digest('0'), &replacement_identity);
+    let failed = registry.acquire_or_start(&database, &replacement_mount, || {
+        observed_start.store(true, Ordering::Release);
+        BoundedObservabilityProducerV1::start(database.clone(), replacement_identity.clone(), 1)
+            .map_err(StoreObservabilityMountErrorV1::Unavailable)
+    });
+    assert!(matches!(
+        failed,
+        Err(StoreObservabilityMountErrorV1::ShutdownFailed)
+    ));
     assert!(!start_called.load(Ordering::Acquire));
 }

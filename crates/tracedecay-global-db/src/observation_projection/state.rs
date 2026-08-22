@@ -360,6 +360,117 @@ pub(super) async fn read_message(
     }))
 }
 
+/// The one definition of the projected-output ownership aggregation that
+/// populates `temp.observation_projection_output_state`: for every
+/// `(projector_version, output_provider, output_message_id)` group in the
+/// (optionally filtered) provenance authority it derives the canonical owner
+/// (newest row when the projector owns the output, oldest otherwise), the
+/// newest owner row and its sequence, and the group's ownership counts.
+/// Whole-cache initialization and per-output re-aggregation both render
+/// their statement from this single spelling so the aggregation cannot
+/// drift; `provenance_filter` scopes only the grouped rows (the correlated
+/// owner lookups constrain themselves to each group's exact key).
+fn output_state_aggregation_sql(provenance_filter: &str) -> String {
+    format!(
+        "INSERT INTO temp.observation_projection_output_state (
+            projector_version, output_provider, output_message_id,
+            canonical_observation_id, latest_observation_id, latest_sequence,
+            projector_owned, owner_count
+         )
+         SELECT groups.projector_version, groups.output_provider, groups.output_message_id,
+                CASE WHEN groups.projector_owned = 1 THEN (
+                    SELECT provenance.observation_id
+                    FROM observation_projection_provenance AS provenance
+                    JOIN observations AS observation
+                      ON observation.observation_id = provenance.observation_id
+                    WHERE provenance.projector_version = groups.projector_version
+                      AND provenance.output_provider = groups.output_provider
+                      AND provenance.output_message_id = groups.output_message_id
+                    ORDER BY observation.sequence DESC, provenance.observation_id DESC
+                    LIMIT 1
+                ) ELSE (
+                    SELECT provenance.observation_id
+                    FROM observation_projection_provenance AS provenance
+                    JOIN observations AS observation
+                      ON observation.observation_id = provenance.observation_id
+                    WHERE provenance.projector_version = groups.projector_version
+                      AND provenance.output_provider = groups.output_provider
+                      AND provenance.output_message_id = groups.output_message_id
+                    ORDER BY observation.sequence ASC, provenance.observation_id ASC
+                    LIMIT 1
+                ) END,
+                (
+                    SELECT provenance.observation_id
+                    FROM observation_projection_provenance AS provenance
+                    JOIN observations AS observation
+                      ON observation.observation_id = provenance.observation_id
+                    WHERE provenance.projector_version = groups.projector_version
+                      AND provenance.output_provider = groups.output_provider
+                      AND provenance.output_message_id = groups.output_message_id
+                    ORDER BY observation.sequence DESC, provenance.observation_id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT observation.sequence
+                    FROM observation_projection_provenance AS provenance
+                    JOIN observations AS observation
+                      ON observation.observation_id = provenance.observation_id
+                    WHERE provenance.projector_version = groups.projector_version
+                      AND provenance.output_provider = groups.output_provider
+                      AND provenance.output_message_id = groups.output_message_id
+                    ORDER BY observation.sequence DESC, provenance.observation_id DESC
+                    LIMIT 1
+                ),
+                groups.projector_owned, groups.owner_count
+         FROM (
+            SELECT projector_version, output_provider, output_message_id,
+                   MAX(message_created) AS projector_owned,
+                   COUNT(*) AS owner_count
+            FROM observation_projection_provenance
+            {provenance_filter}
+            GROUP BY projector_version, output_provider, output_message_id
+         ) AS groups"
+    )
+}
+
+/// Re-aggregates the ownership cache for one exact output from the
+/// provenance authority: the output's cached row is removed and rebuilt
+/// through the canonical aggregation ([`output_state_aggregation_sql`]), so
+/// convergence paths (e.g. collided-provenance reconciliation) share the
+/// initialization's single definition.
+pub(super) async fn reaggregate_output_state_for_output(
+    conn: &impl Executor,
+    output_provider: &str,
+    output_message_id: &str,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "DELETE FROM temp.observation_projection_output_state
+         WHERE projector_version = ?1
+           AND output_provider = ?2 AND output_message_id = ?3",
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            output_provider,
+            output_message_id,
+        ],
+    )
+    .await
+    .map_err(|error| storage("reset collided projection output state", error))?;
+    conn.execute(
+        &output_state_aggregation_sql(
+            "WHERE projector_version = ?1
+               AND output_provider = ?2 AND output_message_id = ?3",
+        ),
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            output_provider,
+            output_message_id,
+        ],
+    )
+    .await
+    .map_err(|error| storage("reaggregate collided projection output state", error))?;
+    Ok(())
+}
+
 pub(super) struct ProjectionOutputOwner {
     pub(super) sequence: u64,
     pub(super) observation: DurableObservationV1,
@@ -427,68 +538,13 @@ pub(super) async fn ensure_projection_output_state_cache(
 
     conn.execute_batch(
         "DELETE FROM temp.observation_projection_output_state;
-         DELETE FROM temp.observation_projection_output_state_meta;
-         WITH owner_groups AS (
-            SELECT projector_version, output_provider, output_message_id,
-                   MAX(message_created) AS projector_owned,
-                   COUNT(*) AS owner_count
-            FROM observation_projection_provenance
-            GROUP BY projector_version, output_provider, output_message_id
-         )
-         INSERT INTO temp.observation_projection_output_state (
-            projector_version, output_provider, output_message_id,
-            canonical_observation_id, latest_observation_id, latest_sequence,
-            projector_owned, owner_count
-         )
-         SELECT groups.projector_version, groups.output_provider, groups.output_message_id,
-                CASE WHEN groups.projector_owned = 1 THEN (
-                    SELECT provenance.observation_id
-                    FROM observation_projection_provenance AS provenance
-                    JOIN observations AS observation
-                      ON observation.observation_id = provenance.observation_id
-                    WHERE provenance.projector_version = groups.projector_version
-                      AND provenance.output_provider = groups.output_provider
-                      AND provenance.output_message_id = groups.output_message_id
-                    ORDER BY observation.sequence DESC, provenance.observation_id DESC
-                    LIMIT 1
-                ) ELSE (
-                    SELECT provenance.observation_id
-                    FROM observation_projection_provenance AS provenance
-                    JOIN observations AS observation
-                      ON observation.observation_id = provenance.observation_id
-                    WHERE provenance.projector_version = groups.projector_version
-                      AND provenance.output_provider = groups.output_provider
-                      AND provenance.output_message_id = groups.output_message_id
-                    ORDER BY observation.sequence ASC, provenance.observation_id ASC
-                    LIMIT 1
-                ) END,
-                (
-                    SELECT provenance.observation_id
-                    FROM observation_projection_provenance AS provenance
-                    JOIN observations AS observation
-                      ON observation.observation_id = provenance.observation_id
-                    WHERE provenance.projector_version = groups.projector_version
-                      AND provenance.output_provider = groups.output_provider
-                      AND provenance.output_message_id = groups.output_message_id
-                    ORDER BY observation.sequence DESC, provenance.observation_id DESC
-                    LIMIT 1
-                ),
-                (
-                    SELECT observation.sequence
-                    FROM observation_projection_provenance AS provenance
-                    JOIN observations AS observation
-                      ON observation.observation_id = provenance.observation_id
-                    WHERE provenance.projector_version = groups.projector_version
-                      AND provenance.output_provider = groups.output_provider
-                      AND provenance.output_message_id = groups.output_message_id
-                    ORDER BY observation.sequence DESC, provenance.observation_id DESC
-                    LIMIT 1
-                ),
-                groups.projector_owned, groups.owner_count
-         FROM owner_groups AS groups;",
+         DELETE FROM temp.observation_projection_output_state_meta;",
     )
     .await
     .map_err(|error| storage("initialize projection output state cache", error))?;
+    conn.execute(&output_state_aggregation_sql(""), ())
+        .await
+        .map_err(|error| storage("initialize projection output state cache", error))?;
     conn.execute(
         "INSERT INTO temp.observation_projection_output_state_meta(initialized, data_version)
          VALUES (1, ?1)",
