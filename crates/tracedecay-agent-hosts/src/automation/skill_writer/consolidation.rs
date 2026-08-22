@@ -9,7 +9,7 @@ use super::super::managed_skills::{
     apply_managed_skill_overlap_archive, apply_managed_skill_overlap_consolidation,
     preview_managed_skill_update,
 };
-use super::super::skill_usage::{DEFAULT_SKILL_OVERLAP_LIMIT, skill_overlap_candidates};
+use super::super::skill_usage::{detected_skill_overlap_pair, detected_skill_overlap_partner};
 use super::{
     SkillProposalAction, optional_proposal_string, optional_proposal_targets,
     required_proposal_string, support_files_from_proposal,
@@ -61,68 +61,12 @@ fn consolidation_guard<'a>(
     Ok(skill)
 }
 
-fn overlap_partner_guard<'a>(
-    existing_skills: &'a BTreeMap<String, ManagedSkill>,
-    id: &str,
-    base_checksum: &str,
-) -> std::result::Result<&'a ManagedSkill, String> {
-    let skill = existing_skills
-        .get(id)
-        .ok_or_else(|| format!("archive overlap partner managed skill id '{id}' does not exist"))?;
-    if base_checksum != skill.metadata.checksum {
-        return Err(format!(
-            "base_checksum for managed skill id '{id}' is stale"
-        ));
-    }
-    if skill.metadata.pinned {
-        return Err(format!(
-            "managed skill '{id}' is pinned and exempt from consolidation"
-        ));
-    }
-    if skill.metadata.state != ManagedSkillState::Active {
-        return Err(format!("managed skill '{id}' is not active"));
-    }
-    Ok(skill)
-}
-
 fn required_consolidation_reason(value: Option<&Value>) -> std::result::Result<String, String> {
     let reason = required_proposal_string(value, "reason")?;
     if reason == SKILL_OVERLAP_REMOVAL_TOMBSTONE {
         return Err("reason must not reuse the reserved skill-overlap tombstone label".to_string());
     }
     Ok(reason)
-}
-
-fn is_detected_overlap_pair(
-    existing_skills: &BTreeMap<String, ManagedSkill>,
-    first_skill_id: &str,
-    second_skill_id: &str,
-) -> bool {
-    let skills = existing_skills.values().cloned().collect::<Vec<_>>();
-    skill_overlap_candidates(&skills, DEFAULT_SKILL_OVERLAP_LIMIT)
-        .iter()
-        .any(|candidate| {
-            (candidate.skill_a == first_skill_id && candidate.skill_b == second_skill_id)
-                || (candidate.skill_a == second_skill_id && candidate.skill_b == first_skill_id)
-        })
-}
-
-fn detected_overlap_partner(
-    existing_skills: &BTreeMap<String, ManagedSkill>,
-    skill_id: &str,
-) -> Option<String> {
-    let skills = existing_skills.values().cloned().collect::<Vec<_>>();
-    skill_overlap_candidates(&skills, DEFAULT_SKILL_OVERLAP_LIMIT)
-        .into_iter()
-        .find_map(|candidate| {
-            if candidate.skill_a == skill_id {
-                Some(candidate.skill_b)
-            } else if candidate.skill_b == skill_id {
-                Some(candidate.skill_a)
-            } else {
-                None
-            }
-        })
 }
 
 pub(super) fn skill_archive_from_proposal(
@@ -135,23 +79,19 @@ pub(super) fn skill_archive_from_proposal(
     let id = required_proposal_string(object.get("id"), "id")?;
     let base_checksum = required_proposal_string(object.get("base_checksum"), "base_checksum")?;
     required_consolidation_reason(object.get("reason"))?;
-    consolidation_guard(existing_skills, &id, &base_checksum, "archive")?;
-    let overlap_skill_id = detected_overlap_partner(existing_skills, &id)
+    let skill = consolidation_guard(existing_skills, &id, &base_checksum, "archive")?;
+    // Partner discovery scans every skill pairwise under the single overlap
+    // authority, so a partner cannot be crowded out of a ranked candidate
+    // list. A discovered partner is active and unpinned by that authority;
+    // its checksum is captured here so the apply layer re-fences the exact
+    // partner revision against the store under its lock.
+    let partner = detected_skill_overlap_partner(skill, existing_skills.values())
         .ok_or_else(|| format!("managed skill '{id}' is not a detected overlap candidate"))?;
-    let overlap_base_checksum = existing_skills
-        .get(&overlap_skill_id)
-        .ok_or_else(|| {
-            format!("detected overlap partner managed skill id '{overlap_skill_id}' does not exist")
-        })?
-        .metadata
-        .checksum
-        .clone();
-    overlap_partner_guard(existing_skills, &overlap_skill_id, &overlap_base_checksum)?;
     Ok(SkillArchiveProposal {
         skill_id: id,
         base_checksum,
-        overlap_skill_id,
-        overlap_base_checksum,
+        overlap_skill_id: partner.metadata.id.clone(),
+        overlap_base_checksum: partner.metadata.checksum.clone(),
     })
 }
 
@@ -173,13 +113,13 @@ pub(super) fn skill_merge_from_proposal(
         return Err("merge proposal source_skill_id must differ from id".to_string());
     }
     let target = consolidation_guard(existing_skills, &target_skill_id, &base_checksum, "merge")?;
-    consolidation_guard(
+    let source = consolidation_guard(
         existing_skills,
         &source_skill_id,
         &source_base_checksum,
         "merge source",
     )?;
-    if !is_detected_overlap_pair(existing_skills, &target_skill_id, &source_skill_id) {
+    if !detected_skill_overlap_pair(target, source) {
         return Err(format!(
             "managed skills '{target_skill_id}' and '{source_skill_id}' are not a detected overlap candidate pair"
         ));
@@ -306,6 +246,7 @@ mod tests {
     };
     #[cfg(unix)]
     use super::super::super::skill_usage::skill_usage_ledger_path;
+    use super::super::super::skill_usage::{DEFAULT_SKILL_OVERLAP_LIMIT, skill_overlap_candidates};
     use super::super::skill_proposal_action;
     use super::*;
 
@@ -380,6 +321,47 @@ mod tests {
             .unwrap_or_else(|err| panic!("overlapping skill should materialize: {err}"));
         skill.set_state(ManagedSkillState::Active);
         skill
+    }
+
+    fn crowding_cluster_skill(id: &str) -> ManagedSkill {
+        let mut draft = fixture_draft(id, ManagedSkillSource::AutomationRun);
+        draft.title = "Automation ledger triage".to_string();
+        draft.summary = "Triage automation ledger regressions immediately.".to_string();
+        draft.body_markdown =
+            "Inspect ledger deltas, replay failing runs, and quarantine flaky proposals."
+                .to_string();
+        let mut skill = draft
+            .materialize()
+            .unwrap_or_else(|err| panic!("cluster skill should materialize: {err}"));
+        skill.set_state(ManagedSkillState::Active);
+        skill
+    }
+
+    fn moderately_overlapping_migration_pair() -> (ManagedSkill, ManagedSkill) {
+        let build = |id: &str, title: &str, body: &str| {
+            let mut draft = fixture_draft(id, ManagedSkillSource::AutomationRun);
+            draft.title = title.to_string();
+            draft.summary =
+                "Verify migration journals before deploying schema changes.".to_string();
+            draft.body_markdown = body.to_string();
+            let mut skill = draft
+                .materialize()
+                .unwrap_or_else(|err| panic!("migration skill should materialize: {err}"));
+            skill.set_state(ManagedSkillState::Active);
+            skill
+        };
+        (
+            build(
+                "migration-verification",
+                "Database migration verification",
+                "Check migration journals, verify rollback steps, and confirm schema versions before deployment.",
+            ),
+            build(
+                "migration-rehearsal",
+                "Database migration rehearsal",
+                "Check migration journals, verify rollback steps, and rehearse recovery drills after deployment.",
+            ),
+        )
     }
 
     fn consolidation_fixture() -> BTreeMap<String, ManagedSkill> {
@@ -775,6 +757,77 @@ mod tests {
     }
 
     #[test]
+    fn consolidation_validates_pairs_crowded_out_of_the_ranked_discovery_list() {
+        let mut skills = BTreeMap::new();
+        for id in ["cluster-a", "cluster-b", "cluster-c", "cluster-d"] {
+            let skill = crowding_cluster_skill(id);
+            skills.insert(skill.metadata.id.clone(), skill);
+        }
+        let (verification, rehearsal) = moderately_overlapping_migration_pair();
+        skills.insert(verification.metadata.id.clone(), verification);
+        skills.insert(rehearsal.metadata.id.clone(), rehearsal);
+
+        // Premise: the identical cluster skills produce six maximal-score
+        // pairs, saturating the ranked discovery list and crowding out the
+        // lower-scoring (but detected) migration pair.
+        let ranked = skill_overlap_candidates(
+            &skills.values().cloned().collect::<Vec<_>>(),
+            DEFAULT_SKILL_OVERLAP_LIMIT,
+        );
+        assert_eq!(ranked.len(), DEFAULT_SKILL_OVERLAP_LIMIT);
+        assert!(
+            ranked.iter().all(|candidate| {
+                candidate.skill_a.starts_with("cluster-")
+                    && candidate.skill_b.starts_with("cluster-")
+            }),
+            "premise: cluster pairs must crowd the migration pair out of the ranked list"
+        );
+
+        // Validation is pairwise, so the crowded-out pair still merges …
+        let merge = assert_ok(skill_merge_from_proposal(
+            &json!({
+                "action": "merge",
+                "id": "migration-verification",
+                "base_checksum": checksum(&skills, "migration-verification"),
+                "source_skill_id": "migration-rehearsal",
+                "source_base_checksum": checksum(&skills, "migration-rehearsal"),
+                "reason": "duplicate migration guidance"
+            }),
+            &skills,
+        ));
+        assert_eq!(merge.source_skill_id, "migration-rehearsal");
+
+        // … and archive partner discovery still resolves the true pairwise
+        // partner instead of failing or drifting to an unrelated cluster skill.
+        let archive = assert_ok(skill_archive_from_proposal(
+            &json!({
+                "action": "archive",
+                "id": "migration-rehearsal",
+                "base_checksum": checksum(&skills, "migration-rehearsal"),
+                "reason": "duplicate migration guidance"
+            }),
+            &skills,
+        ));
+        assert_eq!(archive.overlap_skill_id, "migration-verification");
+        assert_eq!(
+            archive.overlap_base_checksum,
+            checksum(&skills, "migration-verification")
+        );
+
+        // Equal-scoring partners resolve deterministically.
+        let cluster_archive = assert_ok(skill_archive_from_proposal(
+            &json!({
+                "action": "archive",
+                "id": "cluster-d",
+                "base_checksum": checksum(&skills, "cluster-d"),
+                "reason": "duplicate cluster guidance"
+            }),
+            &skills,
+        ));
+        assert_eq!(cluster_archive.overlap_skill_id, "cluster-a");
+    }
+
+    #[test]
     fn consolidation_proposals_reject_the_reserved_tombstone_as_a_reason() {
         let skills = consolidation_fixture();
         assert_err_eq(
@@ -990,9 +1043,13 @@ mod tests {
                 .unwrap();
 
             assert_eq!(archived.metadata.state, ManagedSkillState::Archived);
+            // Independently spelled pin of the persisted tombstone: skills
+            // archived by earlier releases durably carry this exact string,
+            // so constant drift must fail here instead of silently
+            // re-labeling the on-disk format.
             assert_eq!(
                 archived.metadata.archived_reason.as_deref(),
-                Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
+                Some("skill_overlap_removal_tombstone")
             );
             assert_eq!(partner, partner_before);
             assert_eq!(partner.metadata.state, ManagedSkillState::Active);

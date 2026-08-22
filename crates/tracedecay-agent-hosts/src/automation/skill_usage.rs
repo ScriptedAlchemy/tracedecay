@@ -18,7 +18,8 @@ pub use analytics::ingest_analytics_events;
 pub use analytics::ingest_project_analytics_events;
 pub use overlap::{
     DEFAULT_SKILL_OVERLAP_LIMIT, SKILL_OVERLAP_CONTENT_THRESHOLD, SKILL_OVERLAP_TITLE_THRESHOLD,
-    SkillOverlapCandidate, skill_overlap_candidates,
+    SkillOverlapCandidate, detected_skill_overlap_pair, detected_skill_overlap_partner,
+    skill_overlap_candidates,
 };
 pub use recommendations::{skill_improvement_recommendations, stale_skill_recommendations};
 
