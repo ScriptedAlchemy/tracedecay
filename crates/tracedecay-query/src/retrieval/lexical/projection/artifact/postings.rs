@@ -10,16 +10,18 @@ use super::{
 pub(super) const NGRAM_NORMALIZED: i64 = 0;
 pub(super) const NGRAM_RAW_OVERRIDE: i64 = 1;
 
-pub(super) fn insert_document_ngrams(
-    transaction: &Transaction<'_>,
-    kind: i64,
-    document: i64,
-    bytes: &[u8],
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let window_count = (1..=bytes.len().min(3)).try_fold(0usize, |count, width| {
+/// The exact pre-dedup n-gram scratch one document allocates: the window
+/// count and the `u32` scratch bytes reserved for it.
+///
+/// `insert_document_ngrams` reserves exactly this capacity, sorts in place,
+/// and compacts duplicates in place, so this is the document's n-gram
+/// allocation peak; the build memory ledger charges the same number.
+pub(super) fn document_ngram_scratch(
+    text_len: usize,
+) -> Result<(usize, usize), CodeLexicalArtifactErrorV1> {
+    let window_count = (1..=text_len.min(3)).try_fold(0usize, |count, width| {
         count
-            .checked_add(bytes.len().saturating_sub(width).saturating_add(1))
+            .checked_add(text_len.saturating_sub(width).saturating_add(1))
             .ok_or_else(|| {
                 CodeLexicalArtifactErrorV1::Contract(
                     "lexical artifact n-gram scratch count overflowed".to_owned(),
@@ -33,6 +35,17 @@ pub(super) fn insert_document_ngrams(
                 "lexical artifact n-gram scratch bytes overflowed".to_owned(),
             )
         })?;
+    Ok((window_count, scratch_bytes))
+}
+
+pub(super) fn insert_document_ngrams(
+    transaction: &Transaction<'_>,
+    kind: i64,
+    document: i64,
+    bytes: &[u8],
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let (window_count, scratch_bytes) = document_ngram_scratch(bytes.len())?;
     if scratch_bytes > ARTIFACT_DOCUMENT_SCRATCH_LIMIT_BYTES {
         return Err(CodeLexicalArtifactErrorV1::Contract(format!(
             "one lexical document requires {scratch_bytes} bytes of n-gram scratch, exceeding the {}-byte bound",

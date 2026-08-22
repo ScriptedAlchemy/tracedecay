@@ -1,25 +1,34 @@
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
+use tracedecay_code_index::chunks::{
+    CodeIndexImportEvidenceV1, ExtractionAdmittedCodeSearchChunkV1,
+};
 use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, CodeIndexProductionErrorV1, VerifiedSealedLexicalCursorV1,
     VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
     VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
 };
-use tracedecay_domain::{ExactFieldV1, ManifestDigest};
+use tracedecay_domain::{
+    CodeSearchChunkAnchorV1, CodeSearchChunkV1, ExactFieldV1, ExactTechnicalTermV1,
+    FileOccurrenceId, ManifestDigest,
+};
 
 use super::format::{
     ArtifactRowV1, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactSectionDigestV1,
     RECEIPT_RESERVATION_BYTES, SECTION_NAMES, VerifiedCodeLexicalArtifactV1, artifact_digest,
     decode_padded_receipt, encode_field, metadata_digest, new_verified_receipt, padded_receipt,
 };
-use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, insert_document_ngrams};
+use super::postings::{
+    NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngram_scratch, insert_document_ngrams,
+};
 use super::{
+    ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1, CodeLexicalArtifactErrorV1, checkpoint,
     open_builder_connection, sqlite_corrupt, sqlite_error,
 };
@@ -47,6 +56,8 @@ pub struct CodeLexicalArtifactBuilderV1 {
     connection: Connection,
     metadata: CodeLexicalProjectionMetadataV1,
     metadata_digest: ManifestDigest,
+    memory_budget_bytes: usize,
+    fixed_ledger_charge_bytes: usize,
 }
 
 impl CodeLexicalArtifactBuilderV1 {
@@ -54,9 +65,23 @@ impl CodeLexicalArtifactBuilderV1 {
         path: impl AsRef<Path>,
         metadata: CodeLexicalProjectionMetadataV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        Self::create_with_memory_budget(
+            path,
+            metadata,
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        )
+    }
+
+    pub fn create_with_memory_budget(
+        path: impl AsRef<Path>,
+        metadata: CodeLexicalProjectionMetadataV1,
+        memory_budget_bytes: usize,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         metadata
             .validate()
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let fixed_ledger_charge_bytes =
+            validated_fixed_ledger_charge(&metadata, memory_budget_bytes)?;
         let path = path.as_ref();
         if path.metadata().is_ok_and(|metadata| metadata.len() > 0) {
             return Err(CodeLexicalArtifactErrorV1::Contract(
@@ -84,6 +109,8 @@ impl CodeLexicalArtifactBuilderV1 {
             connection,
             metadata,
             metadata_digest,
+            memory_budget_bytes,
+            fixed_ledger_charge_bytes,
         })
     }
 
@@ -91,9 +118,23 @@ impl CodeLexicalArtifactBuilderV1 {
         path: impl AsRef<Path>,
         expected_metadata: CodeLexicalProjectionMetadataV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        Self::open_or_resume_with_memory_budget(
+            path,
+            expected_metadata,
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        )
+    }
+
+    pub fn open_or_resume_with_memory_budget(
+        path: impl AsRef<Path>,
+        expected_metadata: CodeLexicalProjectionMetadataV1,
+        memory_budget_bytes: usize,
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         expected_metadata
             .validate()
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let fixed_ledger_charge_bytes =
+            validated_fixed_ledger_charge(&expected_metadata, memory_budget_bytes)?;
         let path = path.as_ref();
         if !path.is_file() {
             return Err(CodeLexicalArtifactErrorV1::Io(
@@ -129,6 +170,8 @@ impl CodeLexicalArtifactBuilderV1 {
             connection,
             metadata: expected_metadata,
             metadata_digest: expected_digest,
+            memory_budget_bytes,
+            fixed_ledger_charge_bytes,
         })
     }
 
@@ -136,6 +179,31 @@ impl CodeLexicalArtifactBuilderV1 {
         &self,
     ) -> Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1> {
         progress(&self.connection)
+    }
+
+    /// The ledger bytes charged regardless of page content: the SQLite
+    /// page-cache authority plus the builder-retained projection metadata.
+    pub fn fixed_ledger_charge_bytes(&self) -> usize {
+        self.fixed_ledger_charge_bytes
+    }
+
+    /// The deterministic ledger charge admitting `page` would add on top of
+    /// the fixed charge: the page's retained owned bytes plus the measured
+    /// per-chunk/per-import transient peak (chunk clone, projected row and
+    /// field/token/frequency maps at capacity granularity, row and import
+    /// JSON buffers, and pre-compaction n-gram scratch).
+    pub fn page_ledger_charge_bytes(
+        &self,
+        page: &VerifiedSealedLexicalPageV1,
+    ) -> Result<usize, CodeLexicalArtifactErrorV1> {
+        let transient = page_transient_peak_bytes(&self.metadata, page, usize::MAX)?;
+        page.retained_owned_bytes()
+            .checked_add(transient)
+            .ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical artifact page ledger charge overflowed".to_owned(),
+                )
+            })
     }
 
     pub fn append_page(
@@ -176,6 +244,14 @@ impl CodeLexicalArtifactBuilderV1 {
                 "sealed lexical page did not advance its cumulative digest".to_owned(),
             ));
         }
+        // Ledger refusal precedes the staging transaction: a page that does
+        // not fit the build memory budget leaves progress untouched.
+        admit_page_within_memory_budget(
+            &self.metadata,
+            self.fixed_ledger_charge_bytes,
+            self.memory_budget_bytes,
+            page,
+        )?;
 
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
         append_imports(&transaction, page, control)?;
@@ -231,14 +307,20 @@ impl CodeLexicalArtifactBuilderV1 {
         let metadata_bytes = serde_json::to_vec(&metadata)
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
         let path = self.path.clone();
+        let fixed_ledger_charge_bytes = self.fixed_ledger_charge_bytes;
+        let memory_budget_bytes = self.memory_budget_bytes;
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
         clear_staged_projection(&transaction)?;
         checkpoint(control)?;
         let mut previous_cursor = None;
         let source_receipt = loop {
             checkpoint(control)?;
-            match source.next_page(control).map_err(map_source_replay_error)? {
-                VerifiedSealedLexicalPageReadV1::Page(page) => {
+            // Admission runs inside `next_page_if`: a bound or ledger
+            // refusal leaves the source cursor and hash authorities
+            // unchanged, so a retry resumes on the same source-minted page
+            // instead of silently skipping it.
+            let admitted = source
+                .next_page_if(control, |page| {
                     if page.retained_owned_bytes()
                         > CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1
                     {
@@ -247,6 +329,20 @@ impl CodeLexicalArtifactBuilderV1 {
                             CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1
                         )));
                     }
+                    admit_page_within_memory_budget(
+                        &metadata,
+                        fixed_ledger_charge_bytes,
+                        memory_budget_bytes,
+                        page,
+                    )
+                })
+                .map_err(map_source_replay_error)?;
+            let read = match admitted {
+                Ok(read) => read,
+                Err(refusal) => return Err(refusal),
+            };
+            match read {
+                VerifiedSealedLexicalPageReadV1::Page(page) => {
                     page.verify_transition(previous_cursor.as_ref())
                         .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
                     append_imports(&transaction, &page, control)?;
@@ -324,6 +420,277 @@ fn map_source_replay_error(error: CodeIndexProductionErrorV1) -> CodeLexicalArti
         }
         error => CodeLexicalArtifactErrorV1::Corrupt(error.to_string()),
     }
+}
+
+/// Validate a caller-selected build memory budget and return the fixed
+/// ledger charge it must absorb before any page is admitted.
+fn validated_fixed_ledger_charge(
+    metadata: &CodeLexicalProjectionMetadataV1,
+    memory_budget_bytes: usize,
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    if memory_budget_bytes == 0
+        || memory_budget_bytes > CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1
+    {
+        return Err(CodeLexicalArtifactErrorV1::Contract(format!(
+            "lexical artifact build memory budget must be within 1..={CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1} bytes"
+        )));
+    }
+    let fixed = ARTIFACT_SQLITE_CACHE_BYTES
+        .checked_add(metadata_retained_bytes(metadata))
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact fixed ledger charge overflowed".to_owned(),
+            )
+        })?;
+    if fixed >= memory_budget_bytes {
+        return Err(CodeLexicalArtifactErrorV1::Contract(format!(
+            "the {ARTIFACT_SQLITE_CACHE_BYTES}-byte SQLite cache authority and retained metadata exhaust the {memory_budget_bytes}-byte build memory budget"
+        )));
+    }
+    Ok(fixed)
+}
+
+/// Owned bytes the builder retains for the projection metadata: identity
+/// strings at length and logical paths at capacity, per map entry.
+fn metadata_retained_bytes(metadata: &CodeLexicalProjectionMetadataV1) -> usize {
+    let path_bytes = metadata.logical_paths.iter().fold(
+        metadata
+            .logical_paths
+            .len()
+            .saturating_mul(std::mem::size_of::<(FileOccurrenceId, String)>()),
+        |bytes, (file, path)| {
+            bytes
+                .saturating_add(file.as_str().len())
+                .saturating_add(path.capacity())
+        },
+    );
+    path_bytes
+        .saturating_add(metadata.generation.as_str().len())
+        .saturating_add(
+            metadata
+                .repository_id
+                .as_ref()
+                .map_or(0, |repository| repository.as_str().len()),
+        )
+        .saturating_add(metadata.freshness.source_namespace.as_str().len())
+        .saturating_add(metadata.freshness.source_instance.as_str().len())
+        .saturating_add(metadata.freshness.policy_revision.as_str().len())
+        .saturating_add(metadata.exact_retriever_revision.as_str().len())
+        .saturating_add(metadata.lexical_retriever_revision.as_str().len())
+        .saturating_add(metadata.exact_score_domain.as_str().len())
+}
+
+/// Refuse a page whose ledger charge does not fit the remaining budget.
+///
+/// Runs before the staging transaction on the append path and inside the
+/// source's `next_page_if` admission on the rebuild path, so a refusal
+/// never mutates staged progress and never advances the source.
+fn admit_page_within_memory_budget(
+    metadata: &CodeLexicalProjectionMetadataV1,
+    fixed_ledger_charge_bytes: usize,
+    memory_budget_bytes: usize,
+    page: &VerifiedSealedLexicalPageV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let refusal = |needed: usize| {
+        CodeLexicalArtifactErrorV1::Contract(format!(
+            "sealed lexical page needs at least {needed} ledger bytes on top of the {fixed_ledger_charge_bytes}-byte fixed charge, exceeding the {memory_budget_bytes}-byte build memory budget"
+        ))
+    };
+    let headroom = memory_budget_bytes.saturating_sub(fixed_ledger_charge_bytes);
+    let retained = page.retained_owned_bytes();
+    if retained > headroom {
+        return Err(refusal(retained));
+    }
+    let transient_headroom = headroom - retained;
+    let transient = page_transient_peak_bytes(metadata, page, transient_headroom)?;
+    if transient > transient_headroom {
+        return Err(refusal(retained.saturating_add(transient)));
+    }
+    Ok(())
+}
+
+/// The widest transient allocation staging this page performs, measured one
+/// chunk or import at a time so the measurement itself never outgrows the
+/// staging path. Aborts early once `abort_above` is exceeded; the returned
+/// value is then a lower bound that already fails admission.
+fn page_transient_peak_bytes(
+    metadata: &CodeLexicalProjectionMetadataV1,
+    page: &VerifiedSealedLexicalPageV1,
+    abort_above: usize,
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    let mut peak = 0usize;
+    for admitted in page.chunks() {
+        peak = peak.max(projected_chunk_transient_bytes(metadata, admitted)?);
+        if peak > abort_above {
+            return Ok(peak);
+        }
+    }
+    for evidence in page.imports() {
+        peak = peak.max(import_transient_bytes(evidence)?);
+        if peak > abort_above {
+            return Ok(peak);
+        }
+    }
+    Ok(peak)
+}
+
+/// Transient owned bytes staging one admitted chunk allocates, measured by
+/// performing the same clone, projection, and serialization the append path
+/// performs and reading back real capacities. Components are summed as if
+/// simultaneous (moved storage is counted on both sides of the move), which
+/// upper-bounds every instantaneous peak on the staging path.
+fn projected_chunk_transient_bytes(
+    metadata: &CodeLexicalProjectionMetadataV1,
+    admitted: &ExtractionAdmittedCodeSearchChunkV1,
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    let chunk = admitted.clone().into_chunk();
+    let clone_bytes = chunk_owned_bytes(&chunk);
+    let logical_path = metadata
+        .logical_paths
+        .get(&chunk.anchor.file_occurrence_id)
+        .cloned()
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(format!(
+                "lexical artifact metadata is missing path {}",
+                chunk.anchor.file_occurrence_id
+            ))
+        })?;
+    let (row, fields) = ProjectedChunkV1::new(chunk, logical_path);
+    let field_bytes = fields.iter().fold(
+        fields
+            .len()
+            .saturating_mul(std::mem::size_of::<(LexicalFieldV1, Vec<String>)>()),
+        |bytes, (_, terms)| {
+            terms.iter().fold(
+                bytes.saturating_add(
+                    terms
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<String>()),
+                ),
+                |bytes, term| bytes.saturating_add(term.capacity()),
+            )
+        },
+    );
+    // `insert_fields` compacts one per-field duplicate-frequency map at a
+    // time; the ledger charges the widest such map.
+    let frequency_bytes = fields
+        .values()
+        .map(|terms| {
+            terms
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                .saturating_mul(std::mem::size_of::<(&str, u32)>())
+        })
+        .max()
+        .unwrap_or(0);
+    let (_, normalized_scratch) = document_ngram_scratch(row.normalized_text.len())?;
+    let raw_scratch = if row.sanitized_text.as_str().as_bytes() != row.normalized_text.as_bytes() {
+        document_ngram_scratch(row.sanitized_text.as_str().len())?.1
+    } else {
+        0
+    };
+    let row_bytes = projected_row_owned_bytes(&row);
+    let artifact_row = ArtifactRowV1::from(row);
+    let serialized_bytes = serde_json::to_vec(&artifact_row)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?
+        .capacity();
+    Ok(clone_bytes
+        .saturating_add(field_bytes)
+        .saturating_add(frequency_bytes)
+        .saturating_add(normalized_scratch)
+        .saturating_add(raw_scratch)
+        .saturating_add(row_bytes)
+        .saturating_add(serialized_bytes))
+}
+
+fn projected_row_owned_bytes(row: &ProjectedChunkV1) -> usize {
+    row.id
+        .as_str()
+        .len()
+        .saturating_add(anchor_owned_bytes(&row.anchor))
+        .saturating_add(row.language_descriptor_revision.as_str().len())
+        .saturating_add(exact_terms_owned_bytes(
+            row.exact_terms.capacity(),
+            &row.exact_terms,
+        ))
+        .saturating_add(row.sanitized_text.as_str().len())
+        .saturating_add(row.logical_path.capacity())
+        .saturating_add(
+            row.field_lengths
+                .len()
+                .saturating_mul(std::mem::size_of::<(LexicalFieldV1, usize)>()),
+        )
+        .saturating_add(row.normalized_text.capacity())
+}
+
+fn chunk_owned_bytes(chunk: &CodeSearchChunkV1) -> usize {
+    let subtoken_bytes = chunk.subtokens.iter().fold(
+        chunk
+            .subtokens
+            .capacity()
+            .saturating_mul(std::mem::size_of::<String>()),
+        |bytes, subtoken| bytes.saturating_add(subtoken.capacity()),
+    );
+    chunk
+        .id
+        .as_str()
+        .len()
+        .saturating_add(anchor_owned_bytes(&chunk.anchor))
+        .saturating_add(chunk.content_digest.as_str().len())
+        .saturating_add(chunk.language_descriptor_revision.as_str().len())
+        .saturating_add(chunk.chunker_revision.as_str().len())
+        .saturating_add(chunk.sanitizer_revision.as_str().len())
+        .saturating_add(chunk.sensitivity.policy_revision.as_str().len())
+        .saturating_add(exact_terms_owned_bytes(
+            chunk.exact_terms.capacity(),
+            &chunk.exact_terms,
+        ))
+        .saturating_add(subtoken_bytes)
+        .saturating_add(chunk.sanitized_text.as_str().len())
+}
+
+fn exact_terms_owned_bytes(capacity: usize, terms: &[ExactTechnicalTermV1]) -> usize {
+    terms.iter().fold(
+        capacity.saturating_mul(std::mem::size_of::<ExactTechnicalTermV1>()),
+        |bytes, term| {
+            bytes
+                .saturating_add(term.original_bytes().len())
+                .saturating_add(term.canonical_bytes().len())
+                .saturating_add(
+                    term.symbol_occurrence_id()
+                        .map_or(0, |occurrence| occurrence.as_str().len()),
+                )
+        },
+    )
+}
+
+fn anchor_owned_bytes(anchor: &CodeSearchChunkAnchorV1) -> usize {
+    anchor
+        .generation_id
+        .as_str()
+        .len()
+        .saturating_add(anchor.file_occurrence_id.as_str().len())
+        .saturating_add(
+            anchor
+                .symbol_occurrence_id
+                .as_ref()
+                .map_or(0, |occurrence| occurrence.as_str().len()),
+        )
+        .saturating_add(
+            anchor
+                .parent_chunk_id
+                .as_ref()
+                .map_or(0, |parent| parent.as_str().len()),
+        )
+}
+
+fn import_transient_bytes(
+    evidence: &CodeIndexImportEvidenceV1,
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
+    serde_json::to_vec(evidence)
+        .map(|bytes| bytes.capacity())
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
 fn clear_staged_projection(

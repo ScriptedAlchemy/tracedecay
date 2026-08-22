@@ -21,10 +21,33 @@ pub use format::{
 };
 pub use reader::{CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1};
 
+/// Default and maximum budget for the artifact build memory ledger.
+///
+/// This is a *ledger claim over tracked allocations*, not a hard RSS bound.
+/// The enforced ledger charges, as if simultaneous: the SQLite page-cache
+/// authority granted to the staging connection, the builder-retained
+/// projection metadata (identity and logical-path capacities), the sealed
+/// page's retained owned bytes, and the measured per-chunk/per-import
+/// transient peak — the cloned chunk, the projected row, the field/token
+/// vectors and per-field frequency map at `Vec`/`String` capacity
+/// granularity, the row and import JSON serialization buffers, and the
+/// pre-compaction n-gram scratch. A page whose charge exceeds the budget is
+/// refused before any staging mutation and before the source advances.
+///
+/// Explicitly outside the claim (the narrowed part): SQLite's `cache_size`
+/// is a target the engine may transiently exceed, per-statement and
+/// allocator metadata overhead are unaccounted, and `temp_store = FILE`
+/// keeps temporary b-trees on disk rather than bounding them in memory.
 pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1: usize = 256 * 1024 * 1024;
+/// Maximum reader cache budget: the stored metadata copy plus the SQLite
+/// page-cache target and mmap window split from the remainder. The same
+/// narrowed claim as the build budget applies: `cache_size` is a target,
+/// not a hard allocator bound, and the mmap window is file-backed.
 pub const CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1: usize = 256 * 1024 * 1024;
 pub const CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1: usize = 96 * 1024 * 1024;
 
+/// Page-cache authority granted to builder connections; charged in full
+/// against the build memory ledger because SQLite may use all of it.
 const ARTIFACT_SQLITE_CACHE_BYTES: usize = 96 * 1024 * 1024;
 const ARTIFACT_DOCUMENT_SCRATCH_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
