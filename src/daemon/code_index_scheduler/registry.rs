@@ -37,6 +37,8 @@ use super::{
 #[cfg(test)]
 use super::{CodeIndexBytePoolStatsV1, CodeIndexCadenceReadModelV1};
 
+#[cfg(test)]
+mod cold_read_wake_tests;
 mod ignored_dependencies;
 mod lsp_projection;
 #[cfg(test)]
@@ -3421,12 +3423,13 @@ impl CodeIndexSchedulerRegistryV1 {
         let project_root = project_root.canonicalize().ok()?;
         // Clone the per-worktree handle under a short map lock, then drop the
         // registry guard before checking the mounted route.
-        let (scheduler, serving_generation, wake, pending_wake) = {
+        let (scheduler, serving_generation, hints, wake, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
             )
@@ -3496,7 +3499,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 .micros
                 == 0
             {
-                scheduler.request_background_reconcile();
+                // A cold read carries no source-change evidence. Preserve any
+                // snapshot the retained owner is already reconstructing and
+                // keep one follow-up authoritative scan pending instead.
+                hints
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .overflow();
                 Self::note_wake(
                     &pending_wake,
                     &wake,
@@ -3842,7 +3851,7 @@ impl CodeIndexSchedulerRegistryV1 {
         } else {
             None
         };
-        let (scheduler, serving_generation, wake, pending_wake) = {
+        let (scheduler, serving_generation, hints, wake, pending_wake) = {
             let Ok(mounted) = self.mounted.try_lock() else {
                 return false;
             };
@@ -3859,6 +3868,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 matched = Some((
                     Arc::clone(&worktree.scheduler),
                     Arc::clone(&worktree.serving_generation),
+                    Arc::clone(&worktree.hints),
                     Arc::clone(&worktree.wake),
                     Arc::clone(&worktree.pending_wake),
                 ));
@@ -3914,7 +3924,13 @@ impl CodeIndexSchedulerRegistryV1 {
             // apply: a reconcile is the only thing that can ever make this scope
             // answerable, and no other caller on this path will ask for it.
             if nothing_servable {
-                scheduler.request_background_reconcile();
+                // This admission observed no source mutation, so it may not
+                // supersede an in-flight authoritative snapshot. The retained
+                // overflow plus pending wake guarantees a follow-up pass.
+                hints
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .overflow();
             } else if !scheduler.request_fresh_for_query_background() {
                 return false;
             }
