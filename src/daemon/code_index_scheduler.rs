@@ -1598,6 +1598,38 @@ impl DaemonCodeTextArtifactStoreV1 {
         Ok(())
     }
 
+    /// Remove one incompatible resumable staging database before rebuilding
+    /// it with the current artifact format. The path is daemon-derived and the
+    /// canonical store lock serializes this replacement with generation and
+    /// artifact publication; non-regular collisions fail closed.
+    fn discard_incompatible_staging(
+        &self,
+        staging_path: &Path,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), RetrievalPortError> {
+        checkpoint_text_artifact_control(control)?;
+        let artifacts_root = code_text_artifacts_root(&self.store_root);
+        if staging_path.parent() != Some(artifacts_root.as_path()) {
+            return Err(RetrievalPortError::Contract(
+                "text-artifact staging path is outside its canonical root".to_owned(),
+            ));
+        }
+        let _lock = acquire_code_generation_store_lock(&self.store_root)
+            .map_err(text_artifact_unavailable)?;
+        checkpoint_text_artifact_control(control)?;
+        let metadata = staging_path
+            .symlink_metadata()
+            .map_err(text_artifact_unavailable)?;
+        if !metadata.file_type().is_file() {
+            return Err(RetrievalPortError::Contract(
+                "incompatible text-artifact staging path is not a regular file".to_owned(),
+            ));
+        }
+        std::fs::remove_file(staging_path).map_err(text_artifact_unavailable)?;
+        DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
+            .map_err(text_artifact_unavailable)
+    }
+
     /// Resolve the immutable, content-addressed sealed file for one retained
     /// generation without re-encoding its decoded in-memory representation.
     fn sealed_identity(
@@ -2102,6 +2134,10 @@ impl LatestCompleteCodeIndexV1 {
                         drop(reader_reservation);
                         store.withdraw_unavailable_descriptor(&descriptor, true)?;
                     }
+                    Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
+                        drop(reader_reservation);
+                        store.withdraw_unavailable_descriptor(&descriptor, false)?;
+                    }
                     Err(error) => return Err(map_text_artifact_error(error)),
                 }
             }
@@ -2129,11 +2165,23 @@ impl LatestCompleteCodeIndexV1 {
             let builder_budget = text_artifact_builder_budget(source.staging_window_bytes())?;
             let metadata = self.text_projection_metadata()?;
             let builder = if staging_path.exists() {
-                CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget(
+                match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
                     &staging_path,
-                    metadata,
+                    metadata.clone(),
                     builder_budget,
-                )
+                    &control,
+                ) {
+                    Ok(builder) => Ok(builder),
+                    Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
+                        store.discard_incompatible_staging(&staging_path, &control)?;
+                        CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                            &staging_path,
+                            metadata,
+                            builder_budget,
+                        )
+                    }
+                    Err(error) => Err(error),
+                }
             } else {
                 CodeLexicalArtifactBuilderV1::create_with_memory_budget(
                     &staging_path,
