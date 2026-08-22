@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -2491,10 +2492,13 @@ fn rewrite_active_text_artifact_format_revision(store_root: &Path, revision: u64
         );
     }
     let artifact_bytes = std::fs::read(&old_path).expect("read rewritten artifact");
-    let artifact_hex = Sha256::digest(&artifact_bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let artifact_hex = Sha256::digest(&artifact_bytes).iter().fold(
+        String::with_capacity(64),
+        |mut artifact_hex, byte| {
+            write!(&mut artifact_hex, "{byte:02x}").expect("write digest hex");
+            artifact_hex
+        },
+    );
     let artifact_file = format!("text-artifact-{artifact_hex}.bin");
     let rewritten_path = old_path
         .parent()
@@ -2652,9 +2656,14 @@ fn incompatible_published_text_artifact_is_withdrawn_and_rebuilt() {
 
 #[test]
 fn incompatible_partial_text_artifact_is_discarded_and_rebuilt() {
-    let source = (0..256)
-        .map(|index| format!("pub fn staged_{index}() -> usize {{ {index} }}\n"))
-        .collect::<String>();
+    let source = (0..256).fold(String::new(), |mut source, index| {
+        writeln!(
+            &mut source,
+            "pub fn staged_{index}() -> usize {{ {index} }}"
+        )
+        .expect("write staged source fixture");
+        source
+    });
     let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
     let store = TempDir::new().expect("store root");
     {

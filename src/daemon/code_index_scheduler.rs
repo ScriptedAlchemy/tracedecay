@@ -3716,7 +3716,7 @@ fn checkpoint_text_artifact_control(
 }
 
 /// Divide the single process reservation between the source's concurrently
-/// retained decode window and the SQLite builder. Each component fitting the
+/// retained decode window and the `SQLite` builder. Each component fitting the
 /// ceiling independently is insufficient because both remain live while a
 /// page is admitted.
 fn text_artifact_builder_budget(source_window_bytes: usize) -> Result<usize, RetrievalPortError> {

@@ -1407,7 +1407,7 @@ fn verify_named_path_identity(path: &Path, file: &File) -> Result<(), CodeLexica
                 "artifact path was atomically replaced while opening".to_owned(),
             ));
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(windows)]
@@ -1439,7 +1439,7 @@ fn verify_named_path_identity(path: &Path, file: &File) -> Result<(), CodeLexica
                 "artifact path was atomically replaced while opening".to_owned(),
             ));
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(unix, windows)))]
