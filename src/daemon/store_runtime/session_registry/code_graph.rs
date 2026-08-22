@@ -764,6 +764,31 @@ impl RetainedCodeGraphRuntimeV1 {
                 tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
             )?,
         };
+        let verify_durable_source = || {
+            let replay_pool_lock = lock_project_graph_replay_pool(
+                &self.replay_root,
+                &|| match probe.interruption() {
+                    Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                    Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                        Err(GraphDbError::DeadlineExceeded)
+                    }
+                    None => Ok(()),
+                },
+            )?;
+            super::code_graph_manifest::verify_sealed_generation_source_from_roots(
+                &self.generations_root,
+                &self.replay_root,
+                &self.sealed_state_digest,
+                &|| match probe.interruption() {
+                    Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                    Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                        Err(GraphDbError::DeadlineExceeded)
+                    }
+                    None => Ok(()),
+                },
+            )?;
+            Ok::<_, GraphDbError>(replay_pool_lock)
+        };
         let mut storage = self
             .project_database
             .graph_publication_storage()
@@ -854,19 +879,14 @@ impl RetainedCodeGraphRuntimeV1 {
                         &relational_projection,
                     );
                 }
+                let _replay_pool_lock = verify_durable_source()?;
                 let publication = publish(&mut storage, &publication_key, Some(manifest))?;
                 return Ok(publication.snapshot);
             }
             GraphPublicationReplayLookupV1::Retired(_) => return Err(GraphDbError::Conflict),
             GraphPublicationReplayLookupV1::Missing => {}
         }
-        let replay_pool_lock = lock_project_graph_replay_pool(&self.replay_root, &|| match probe
-            .interruption()
-        {
-            Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-            Some(RuntimeInterruptionV1::DeadlineExceeded) => Err(GraphDbError::DeadlineExceeded),
-            None => Ok(()),
-        })?;
+        let replay_pool_lock = verify_durable_source()?;
         let input = canonical_sha256(&(
             "tracedecay.code-graph-publication-input.v1",
             &source,
