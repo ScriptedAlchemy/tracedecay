@@ -25,8 +25,15 @@ use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 // became uncollectable.
 #[cfg(test)]
 use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
-use tracedecay_code_index::production::sealed_generation_format_revision_is_compatible;
-use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_code_index::production::{
+    CodeIndexGenerationStatisticsV1, CodeIndexIgnoredSourceAdmissionV1,
+    sealed_generation_format_revision_is_compatible,
+};
+use tracedecay_domain::{
+    CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, PrivacyDomainId,
+    ProjectId, RefId, RepositoryId, SnapshotFileDispositionV1, SourceFreshness, TreeId, UtcMicros,
+    WorktreeId, canonical_sha256, validate_code_logical_path,
+};
 
 mod generation_scan;
 mod graph_replay_release;
@@ -120,6 +127,266 @@ pub struct DurableCodeTextArtifactDescriptorV1 {
     pub artifact_file: String,
     pub artifact_digest: ManifestDigest,
     pub artifact_size_bytes: u64,
+}
+
+/// One named section digest inside a verified code-lexical artifact receipt.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeLexicalArtifactSectionDigestV1 {
+    pub name: String,
+    pub row_count: u64,
+    pub digest: ManifestDigest,
+}
+
+/// Durable copy of the lexical-artifact verification receipt sealed into the
+/// published text head.
+///
+/// This mirrors `tracedecay_query::retrieval::lexical::VerifiedCodeLexicalArtifactV1`
+/// field-for-field: that receipt type was reverted off this branch together
+/// with the bounded lexical-artifact reader and currently lives only on the
+/// unmerged artifact work stream. Retention still has to persist the receipt
+/// it was handed, so this DTO keeps the exact serialized shape — when the
+/// query-crate receipt re-lands, this definition can be replaced by a re-export
+/// without changing any durable file. Fields stay private for the same reason
+/// they are private upstream: a receipt is minted by verification (here, by
+/// deserializing verified receipt bytes), never assembled ad hoc.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VerifiedCodeLexicalArtifactV1 {
+    format_revision: u32,
+    generation: CodeGenerationId,
+    repository_id: Option<RepositoryId>,
+    freshness: SourceFreshness,
+    metadata_digest: ManifestDigest,
+    source_state_digest: ManifestDigest,
+    source_cumulative_digest: ManifestDigest,
+    source_format_revision: u32,
+    page_count: u64,
+    total_chunks: u64,
+    total_payload_bytes: u64,
+    total_imports: u64,
+    import_payload_bytes: u64,
+    import_dictionary_digest: ManifestDigest,
+    artifact_digest: ManifestDigest,
+    section_digests: Vec<CodeLexicalArtifactSectionDigestV1>,
+    file_size_bytes: u64,
+}
+
+impl VerifiedCodeLexicalArtifactV1 {
+    #[must_use]
+    pub fn generation(&self) -> &CodeGenerationId {
+        &self.generation
+    }
+
+    #[must_use]
+    pub fn repository_id(&self) -> Option<&RepositoryId> {
+        self.repository_id.as_ref()
+    }
+
+    #[must_use]
+    pub fn source_state_digest(&self) -> &ManifestDigest {
+        &self.source_state_digest
+    }
+
+    #[must_use]
+    pub fn source_format_revision(&self) -> u32 {
+        self.source_format_revision
+    }
+
+    #[must_use]
+    pub fn artifact_digest(&self) -> &ManifestDigest {
+        &self.artifact_digest
+    }
+
+    #[must_use]
+    pub fn file_size_bytes(&self) -> u64 {
+        self.file_size_bytes
+    }
+}
+
+/// One sanitized source file addressed by the published text artifact.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DurableCodeTextArtifactFileV1 {
+    pub file_occurrence_id: FileOccurrenceId,
+    pub logical_path: String,
+    pub content_digest: ContentDigest,
+    pub disposition: SnapshotFileDispositionV1,
+}
+
+/// Everything a canonical text head asserts, before it is digest-sealed.
+///
+/// The [`DurableCodeTextArtifactDescriptorV1`] stays the attachment DTO the
+/// generation index already stores; the head wraps that descriptor as
+/// [`Self::artifact`] alongside the verification receipt and snapshot
+/// identity, rather than redefining any of it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DurableCodeTextArtifactHeadMaterialV1 {
+    pub schema: String,
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub generation_id: CodeGenerationId,
+    pub parent_generation: Option<CodeGenerationId>,
+    pub source_reference: Option<RefId>,
+    pub source_revision: Option<CommitId>,
+    pub source_tree: Option<TreeId>,
+    pub privacy_domain: PrivacyDomainId,
+    pub sealed_at_micros: i64,
+    pub source_manifest_digest: ManifestDigest,
+    pub snapshot_digest: ManifestDigest,
+    pub invalidation_digest: ManifestDigest,
+    pub snapshot_content_identity: ContentDigest,
+    pub capability_manifest_digest: ManifestDigest,
+    pub sealed_identity: DurableSealedCodeGenerationIdentityV1,
+    pub artifact: DurableCodeTextArtifactDescriptorV1,
+    pub verified_artifact: VerifiedCodeLexicalArtifactV1,
+    pub files: Vec<DurableCodeTextArtifactFileV1>,
+    pub ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
+    pub ignored_source_admissions_digest: ManifestDigest,
+    pub repository_parse_identity_digest: ManifestDigest,
+    pub generation_statistics: CodeIndexGenerationStatisticsV1,
+}
+
+/// The digest-sealed canonical text head, exactly as it is stored durably.
+///
+/// The material fields are repeated at the top level (never flattened through
+/// serde) so the durable JSON is one self-describing document, and
+/// [`Self::head_digest`] commits to every one of them: any byte edited in the
+/// stored file makes [`read_durable_code_text_artifact_head`] refuse the head
+/// as unsafe rather than serve tampered identity.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DurableCodeTextArtifactHeadV1 {
+    pub schema: String,
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub generation_id: CodeGenerationId,
+    pub parent_generation: Option<CodeGenerationId>,
+    pub source_reference: Option<RefId>,
+    pub source_revision: Option<CommitId>,
+    pub source_tree: Option<TreeId>,
+    pub privacy_domain: PrivacyDomainId,
+    pub sealed_at_micros: i64,
+    pub source_manifest_digest: ManifestDigest,
+    pub snapshot_digest: ManifestDigest,
+    pub invalidation_digest: ManifestDigest,
+    pub snapshot_content_identity: ContentDigest,
+    pub capability_manifest_digest: ManifestDigest,
+    pub sealed_identity: DurableSealedCodeGenerationIdentityV1,
+    pub artifact: DurableCodeTextArtifactDescriptorV1,
+    pub verified_artifact: VerifiedCodeLexicalArtifactV1,
+    pub files: Vec<DurableCodeTextArtifactFileV1>,
+    pub ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
+    pub ignored_source_admissions_digest: ManifestDigest,
+    pub repository_parse_identity_digest: ManifestDigest,
+    pub generation_statistics: CodeIndexGenerationStatisticsV1,
+    pub head_digest: String,
+}
+
+impl DurableCodeTextArtifactHeadV1 {
+    /// Seal head material into the canonical durable head.
+    ///
+    /// Every cross-identity fact the material carries is checked against the
+    /// existing sealed-identity and descriptor validators before the digest is
+    /// minted, so a head can never durably assert a receipt that belongs to a
+    /// different generation, artifact, or sealed file.
+    pub fn from_material(
+        material: DurableCodeTextArtifactHeadMaterialV1,
+    ) -> Result<Self, CodeGenerationRetentionErrorV1> {
+        validate_text_artifact_head_material(&material)?;
+        let head_digest = canonical_sha256(&material)
+            .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?
+            .as_str()
+            .to_owned();
+        let DurableCodeTextArtifactHeadMaterialV1 {
+            schema,
+            project_id,
+            repository_id,
+            worktree_id,
+            generation_id,
+            parent_generation,
+            source_reference,
+            source_revision,
+            source_tree,
+            privacy_domain,
+            sealed_at_micros,
+            source_manifest_digest,
+            snapshot_digest,
+            invalidation_digest,
+            snapshot_content_identity,
+            capability_manifest_digest,
+            sealed_identity,
+            artifact,
+            verified_artifact,
+            files,
+            ignored_source_admissions,
+            ignored_source_admissions_digest,
+            repository_parse_identity_digest,
+            generation_statistics,
+        } = material;
+        Ok(Self {
+            schema,
+            project_id,
+            repository_id,
+            worktree_id,
+            generation_id,
+            parent_generation,
+            source_reference,
+            source_revision,
+            source_tree,
+            privacy_domain,
+            sealed_at_micros,
+            source_manifest_digest,
+            snapshot_digest,
+            invalidation_digest,
+            snapshot_content_identity,
+            capability_manifest_digest,
+            sealed_identity,
+            artifact,
+            verified_artifact,
+            files,
+            ignored_source_admissions,
+            ignored_source_admissions_digest,
+            repository_parse_identity_digest,
+            generation_statistics,
+            head_digest,
+        })
+    }
+
+    /// The exact material this head commits to. Re-sealing it must reproduce
+    /// this head bit-for-bit; readers use that equality as tamper evidence.
+    #[must_use]
+    pub fn material(&self) -> DurableCodeTextArtifactHeadMaterialV1 {
+        DurableCodeTextArtifactHeadMaterialV1 {
+            schema: self.schema.clone(),
+            project_id: self.project_id.clone(),
+            repository_id: self.repository_id.clone(),
+            worktree_id: self.worktree_id.clone(),
+            generation_id: self.generation_id.clone(),
+            parent_generation: self.parent_generation.clone(),
+            source_reference: self.source_reference.clone(),
+            source_revision: self.source_revision.clone(),
+            source_tree: self.source_tree.clone(),
+            privacy_domain: self.privacy_domain.clone(),
+            sealed_at_micros: self.sealed_at_micros,
+            source_manifest_digest: self.source_manifest_digest.clone(),
+            snapshot_digest: self.snapshot_digest.clone(),
+            invalidation_digest: self.invalidation_digest.clone(),
+            snapshot_content_identity: self.snapshot_content_identity.clone(),
+            capability_manifest_digest: self.capability_manifest_digest.clone(),
+            sealed_identity: self.sealed_identity.clone(),
+            artifact: self.artifact.clone(),
+            verified_artifact: self.verified_artifact.clone(),
+            files: self.files.clone(),
+            ignored_source_admissions: self.ignored_source_admissions.clone(),
+            ignored_source_admissions_digest: self.ignored_source_admissions_digest.clone(),
+            repository_parse_identity_digest: self.repository_parse_identity_digest.clone(),
+            generation_statistics: self.generation_statistics.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -319,6 +586,112 @@ pub fn attach_verified_text_artifact_under_lock(
     )
     .map_err(storage)?;
     Ok(pointer)
+}
+
+/// Durably publish the canonical text head under the store lock.
+///
+/// The head is an independent publication: it is written to its own
+/// [`ACTIVE_CODE_TEXT_ARTIFACT_FILE_V1`] and never rewrites the generation
+/// pointer, so a failed head publication can never damage generation
+/// publication and vice versa. The pointer is still read as the liveness
+/// authority: a head may only be published for a generation the durable index
+/// retains with exactly this attached descriptor and sealed identity.
+/// `expected_head` is the incumbent the caller read (or `None` for a first
+/// publication); losing that compare-and-set refuses the write instead of
+/// silently replacing a concurrent head.
+pub fn publish_code_text_artifact_head_under_lock(
+    lock: &CodeGenerationStoreLockV1,
+    expected_head: Option<&DurableCodeTextArtifactHeadV1>,
+    head: DurableCodeTextArtifactHeadV1,
+) -> Result<DurableCodeTextArtifactHeadV1, CodeGenerationRetentionErrorV1> {
+    let store_root = lock.generation_store_root()?;
+    if DurableCodeTextArtifactHeadV1::from_material(head.material())? != head {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "text-artifact head digest does not match its material".to_owned(),
+        ));
+    }
+    let pointer = read_active_pointer(store_root)?;
+    validate_durable_generation_index(&pointer)?;
+    let entry = pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == head.generation_id.as_str())
+        .ok_or_else(|| {
+            CodeGenerationRetentionErrorV1::Conflict(
+                "text-artifact head generation is no longer retained by the durable index"
+                    .to_owned(),
+            )
+        })?;
+    if entry.generation_file != head.sealed_identity.locator
+        || entry.state_digest != head.sealed_identity.digest.as_str()
+        || entry.size_bytes != head.sealed_identity.size_bytes
+    {
+        return Err(CodeGenerationRetentionErrorV1::Conflict(
+            "text-artifact head does not match the retained sealed generation".to_owned(),
+        ));
+    }
+    if entry.text_artifact.as_ref() != Some(&head.artifact) {
+        return Err(CodeGenerationRetentionErrorV1::Conflict(
+            "text-artifact head descriptor is not attached to its generation".to_owned(),
+        ));
+    }
+    let current = read_durable_code_text_artifact_head(store_root)?;
+    if current.as_ref() == Some(&head) {
+        return Ok(head);
+    }
+    if current.as_ref() != expected_head {
+        return Err(CodeGenerationRetentionErrorV1::Conflict(
+            "active text-artifact head changed before publication".to_owned(),
+        ));
+    }
+    let bytes = serde_json::to_vec(&head).map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "text-artifact head serialization failed: {error}"
+        ))
+    })?;
+    atomic_write(
+        &store_root.join(ACTIVE_CODE_TEXT_ARTIFACT_FILE_V1),
+        "code-text-artifact-head-publication",
+        &bytes,
+        DirectorySyncPolicy::Strict,
+    )
+    .map_err(storage)?;
+    Ok(head)
+}
+
+/// Read the durable canonical text head, if one has been published.
+///
+/// The stored head is re-sealed from its own material before it is served: a
+/// digest that no longer matches — any field edited in the durable file — is
+/// refused as unsafe state rather than returned as identity.
+pub fn read_durable_code_text_artifact_head(
+    store_root: &Path,
+) -> Result<Option<DurableCodeTextArtifactHeadV1>, CodeGenerationRetentionErrorV1> {
+    let path = store_root.join(ACTIVE_CODE_TEXT_ARTIFACT_FILE_V1);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(storage(error)),
+    };
+    let head: DurableCodeTextArtifactHeadV1 = serde_json::from_slice(&bytes).map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "active text-artifact head '{}' is corrupt: {error}",
+            path.display()
+        ))
+    })?;
+    if DurableCodeTextArtifactHeadV1::from_material(head.material())? != head {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "active text-artifact head does not match its sealed digest".to_owned(),
+        ));
+    }
+    Ok(Some(head))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1364,6 +1737,72 @@ fn validate_text_artifact_descriptor(
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "text artifact filename does not match its digest".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_text_artifact_head_material(
+    material: &DurableCodeTextArtifactHeadMaterialV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if material.schema != CODE_TEXT_ARTIFACT_HEAD_SCHEMA_V1 {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "text-artifact head schema is not supported".to_owned(),
+        ));
+    }
+    validate_sealed_generation_identity(&material.sealed_identity)?;
+    validate_text_artifact_descriptor(&material.artifact)?;
+    if material.artifact.generation_id != material.generation_id {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "text-artifact head descriptor names a different generation".to_owned(),
+        ));
+    }
+    if material.parent_generation.as_ref() == Some(&material.generation_id) {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "text-artifact head names itself as its parent generation".to_owned(),
+        ));
+    }
+    let receipt = &material.verified_artifact;
+    if receipt.generation() != &material.generation_id {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "text-artifact verification receipt names a different generation".to_owned(),
+        ));
+    }
+    if receipt.artifact_digest() != &material.artifact.artifact_digest
+        || receipt.file_size_bytes() != material.artifact.artifact_size_bytes
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "text-artifact verification receipt does not match the artifact descriptor".to_owned(),
+        ));
+    }
+    if receipt.source_state_digest() != &material.sealed_identity.digest {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "text-artifact verification receipt was built from a different sealed generation"
+                .to_owned(),
+        ));
+    }
+    if receipt
+        .repository_id()
+        .is_some_and(|repository_id| repository_id != &material.repository_id)
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "text-artifact verification receipt names a different repository".to_owned(),
+        ));
+    }
+    if !sealed_generation_format_revision_is_compatible(receipt.source_format_revision()) {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "text-artifact verification receipt has an incompatible source format revision"
+                .to_owned(),
+        ));
+    }
+    let mut file_occurrences = BTreeSet::new();
+    for file in &material.files {
+        validate_code_logical_path(&file.logical_path)
+            .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
+        if !file_occurrences.insert(file.file_occurrence_id.as_str()) {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "text-artifact head repeats a file occurrence".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
