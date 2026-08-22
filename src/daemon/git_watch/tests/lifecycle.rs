@@ -641,11 +641,20 @@ async fn retired_linked_owner_is_replaced_before_recreated_root_admission() {
         "a racing recreation must wait until the retired supervisor is joined"
     );
     stale_task_release.notify_one();
+    // Both admissions must be polled together: the racing admission already
+    // queued as the fair projects-mutex head waiter, so awaiting the first
+    // admission alone would strand the lock handoff and self-deadlock the
+    // test while the production fence behaves correctly.
+    let (first_admission, racing_admission) = tokio::time::timeout(TEST_READY_TIMEOUT, async {
+        tokio::join!(first_admission, racing_admission)
+    })
+    .await
+    .expect("both admissions complete once the retired supervisor is joined");
     assert_eq!(
-        first_admission.await.expect("first admission task"),
+        first_admission.expect("first admission task"),
         GitWatcherAdmission::Ready
     );
-    assert_eq!(racing_admission.await, GitWatcherAdmission::Ready);
+    assert_eq!(racing_admission, GitWatcherAdmission::Ready);
     let active = ready_registered_state(&watcher, &linked).await;
     assert!(
         !Arc::ptr_eq(&active, &stale),
