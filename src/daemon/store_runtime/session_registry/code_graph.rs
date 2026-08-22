@@ -754,6 +754,7 @@ impl RetainedCodeGraphRuntimeV1 {
             self.authority.binding().shard_id.clone(),
             self.project_id.clone(),
             self.repository_id.clone(),
+            self.generations_root.clone(),
             self.replay_root.clone(),
         )?;
         let source = SealedCodeGenerationReplay {

@@ -225,6 +225,44 @@ fn open_checked_seal_reader<'a>(
     ))
 }
 
+/// Resolve a sealed generation from its canonical `code-generations-v1/` root
+/// first, then from the graph replay pool. Retirement moves a sealed file
+/// strictly canonical->pool by atomic rename, so probing in that order
+/// observes a live seal in at least one root; every read is digest-verified,
+/// which makes recovery from either root equally trustworthy. Typed
+/// interruptions from the caller's probe are transport states and must
+/// surface immediately instead of triggering a second full read.
+fn decode_verified_seal_from_roots(
+    canonical: &std::path::Path,
+    pool: &std::path::Path,
+    expected_digest: &str,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<tracedecay_code_index::production::CodeIndexPublishedGenerationV1, GraphDbError> {
+    let canonical_absent = matches!(
+        std::fs::symlink_metadata(canonical),
+        Err(ref error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    if !canonical_absent {
+        match decode_verified_seal(canonical, expected_digest, check) {
+            Ok(generation) => return Ok(generation),
+            Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => {
+                return Err(error);
+            }
+            Err(canonical_error) => {
+                // A concurrent retirement rename can move the seal mid-read;
+                // the pool copy is digest-verified, so recovering there is
+                // sound. A pool failure reports the canonical error, which
+                // names the authoritative copy.
+                return match decode_verified_seal(pool, expected_digest, check) {
+                    Ok(generation) => Ok(generation),
+                    Err(_) => Err(canonical_error),
+                };
+            }
+        }
+    }
+    decode_verified_seal(pool, expected_digest, check)
+}
+
 fn decode_verified_seal(
     path: &std::path::Path,
     expected_digest: &str,
@@ -251,6 +289,7 @@ struct BoundCodeGenerationSourceV1 {
     project_shard: StoreShardIdV1,
     project_id: ProjectId,
     repositories: BTreeSet<RepositoryId>,
+    generations_root: PathBuf,
     replay_root: PathBuf,
 }
 
@@ -265,6 +304,7 @@ impl DaemonCodeGraphManifestProviderV1 {
         project_shard: StoreShardIdV1,
         project_id: ProjectId,
         repository: RepositoryId,
+        generations_root: PathBuf,
         replay_root: PathBuf,
     ) -> Result<(), GraphDbError> {
         let mut sources = self.sources.write().map_err(|_| {
@@ -273,6 +313,7 @@ impl DaemonCodeGraphManifestProviderV1 {
         if let Some(existing) = sources.get_mut(&project_shard) {
             if existing.project_shard != project_shard
                 || existing.project_id != project_id
+                || existing.generations_root != generations_root
                 || existing.replay_root != replay_root
             {
                 return Err(GraphDbError::Conflict);
@@ -286,6 +327,7 @@ impl DaemonCodeGraphManifestProviderV1 {
                 project_shard,
                 project_id,
                 repositories: BTreeSet::from([repository]),
+                generations_root,
                 replay_root,
             },
         );
@@ -335,10 +377,13 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
             .as_str()
             .strip_prefix("sha256:")
             .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
-        let path = binding
-            .replay_root
-            .join(format!("generation-{digest}.json"));
-        let generation = decode_verified_seal(&path, digest, check)?;
+        let seal_file = format!("generation-{digest}.json");
+        let generation = decode_verified_seal_from_roots(
+            &binding.generations_root.join(&seal_file),
+            &binding.replay_root.join(&seal_file),
+            digest,
+            check,
+        )?;
         if generation.manifest().project_id != binding.project_id
             || generation.snapshot().repository != source.repository
             || generation.manifest().generation_id != source.generation
@@ -421,6 +466,7 @@ mod tests {
     }
 
     fn fixture(
+        generations_root: std::path::PathBuf,
         replay_root: std::path::PathBuf,
     ) -> (
         DaemonCodeGraphManifestProviderV1,
@@ -436,7 +482,13 @@ mod tests {
         );
         let provider = DaemonCodeGraphManifestProviderV1::default();
         provider
-            .bind(shard.clone(), project, repository.clone(), replay_root)
+            .bind(
+                shard.clone(),
+                project,
+                repository.clone(),
+                generations_root,
+                replay_root,
+            )
             .unwrap();
         (
             provider,
@@ -465,9 +517,19 @@ mod tests {
     #[test]
     fn exact_seal_provider_rejects_missing_corrupt_and_foreign_sources() {
         let temp = TempDir::new().unwrap();
+        let generations_root = temp.path().join("generations");
         let replay_root = temp.path().join("replay");
+        std::fs::create_dir_all(&generations_root).unwrap();
         std::fs::create_dir_all(&replay_root).unwrap();
-        let (provider, owner, source) = fixture(replay_root.clone());
+        let (provider, owner, source) = fixture(generations_root.clone(), replay_root.clone());
+        let seal_file = format!(
+            "generation-{}.json",
+            source
+                .sealed_state_digest
+                .as_str()
+                .strip_prefix("sha256:")
+                .unwrap()
+        );
 
         assert!(matches!(
             provider.hydrate_sealed_code_generation(&owner, &source, &|| Ok(())),
@@ -483,22 +545,58 @@ mod tests {
             GraphDbError::Conflict
         );
 
-        std::fs::write(
-            replay_root.join(format!(
-                "generation-{}.json",
-                source
-                    .sealed_state_digest
-                    .as_str()
-                    .strip_prefix("sha256:")
-                    .unwrap()
-            )),
-            b"corrupt",
-        )
-        .unwrap();
+        // A retired seal that only survives in the replay pool is still read.
+        std::fs::write(replay_root.join(&seal_file), b"corrupt").unwrap();
         assert!(matches!(
             provider.hydrate_sealed_code_generation(&owner, &source, &|| Ok(())),
             Err(GraphDbError::Corrupt { .. })
         ));
+
+        // A canonical read failure is authoritative over a failing pool probe.
+        std::fs::remove_file(replay_root.join(&seal_file)).unwrap();
+        std::fs::write(generations_root.join(&seal_file), b"corrupt").unwrap();
+        assert!(matches!(
+            provider.hydrate_sealed_code_generation(&owner, &source, &|| Ok(())),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn seal_interruptions_surface_without_probing_the_replay_pool() {
+        let temp = TempDir::new().unwrap();
+        let generations_root = temp.path().join("generations");
+        let replay_root = temp.path().join("replay");
+        std::fs::create_dir_all(&generations_root).unwrap();
+        std::fs::create_dir_all(&replay_root).unwrap();
+        let (provider, owner, source) = fixture(generations_root.clone(), replay_root.clone());
+        let seal_file = format!(
+            "generation-{}.json",
+            source
+                .sealed_state_digest
+                .as_str()
+                .strip_prefix("sha256:")
+                .unwrap()
+        );
+        std::fs::write(generations_root.join(&seal_file), b"canonical").unwrap();
+        std::fs::write(replay_root.join(&seal_file), b"pool").unwrap();
+
+        // Pass the entry probe, then cancel during the canonical read: the
+        // typed interruption must surface without a second read against the
+        // pool copy (which would probe the closure again).
+        let probes = AtomicUsize::new(0);
+        assert_eq!(
+            provider
+                .hydrate_sealed_code_generation(&owner, &source, &|| {
+                    if probes.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(())
+                    } else {
+                        Err(GraphDbError::Cancelled)
+                    }
+                })
+                .unwrap_err(),
+            GraphDbError::Cancelled
+        );
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
     }
 
     #[test]
