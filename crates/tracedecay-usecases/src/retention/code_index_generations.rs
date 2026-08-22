@@ -10,8 +10,8 @@
 //! evidence beyond the pointer's byte-, time-, and count-bounded history.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -789,7 +789,12 @@ pub fn execute_code_generation_retention(
             ));
         }
         if let Some(pool_root) = graph_replay_pool_root {
-            expose_staged_generations_to_graph_replay_pool(store_root, &transaction, pool_root)?;
+            expose_staged_generations_to_graph_replay_pool(
+                store_root,
+                &transaction,
+                pool_root,
+                GraphReplayPoolExposureV1::BeforeReceipt,
+            )?;
         }
         write_receipt(store_root, &receipt)?;
         cleanup_committed_transaction(
@@ -1139,30 +1144,72 @@ fn stage_collectable_generations(
     Ok(())
 }
 
+/// Which authority backs a graph replay pool exposure pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphReplayPoolExposureV1 {
+    /// The first exposure of a transaction, before `write_receipt` publishes
+    /// its deletion receipt and release events.
+    BeforeReceipt,
+    /// A replay after the receipt is durable (the tail of the committed path
+    /// and crash recovery). The queued release events are the authority: a
+    /// consumed event means the graph reconciler already retired the pool
+    /// copy, and re-linking it would strand an orphan nothing collects again.
+    AfterDurableReceipt,
+}
+
 /// Expose every quarantined generation to the graph replay pool by hard link
 /// before its release event becomes durable. The pool entry is the sealed
 /// generation's survival path once the canonical file is unlinked; linking
 /// before `write_receipt` publishes the release events guarantees the replay
 /// reconciler can never observe an event whose pool copy is still missing and
 /// complete it early, which would strand a later-linked copy as an
-/// unreclaimable orphan. A digest-named destination that already exists is
-/// the same sealed content and is left in place.
+/// unreclaimable orphan.
+///
+/// A destination that already exists is never trusted by name alone: the
+/// digest-named path could hold a corrupt regular file, a symlink, or a
+/// directory, and accepting it would let `write_receipt` publish deletion
+/// evidence whose pool copy is unusable. The collision is verified byte for
+/// byte against the staged sealed source and retention fails closed on any
+/// mismatch, before any receipt is published.
+///
+/// Lock order is the code-generation store lock first, then the pool lock:
+/// every caller already holds the store lock, and the daemon's replay
+/// reconciler serializes its pool unlinks behind this same canonical pool
+/// lock (`lock_project_graph_replay_pool`), so an entry cannot be swapped or
+/// retired between the collision probe and its identity verification.
 fn expose_staged_generations_to_graph_replay_pool(
     store_root: &Path,
     transaction: &CodeGenerationRetentionTransactionV1,
     pool_root: &Path,
+    exposure: GraphReplayPoolExposureV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     let stage_root = transaction_stage_root(store_root, &transaction.receipt);
     std::fs::create_dir_all(pool_root).map_err(storage)?;
+    let _pool_lock = acquire_code_generation_store_lock(pool_root)?;
     let mut linked = false;
     for generation in &transaction.receipt.deleted_generations {
         let staged = stage_root.join(&generation.generation_file);
         if !regular_file_exists(&staged)? {
             continue;
         }
+        if exposure == GraphReplayPoolExposureV1::AfterDurableReceipt
+            && !graph_replay_release::release_event_exists(
+                store_root,
+                &transaction.receipt,
+                generation,
+            )?
+        {
+            continue;
+        }
         match std::fs::hard_link(&staged, pool_root.join(&generation.generation_file)) {
             Ok(()) => linked = true,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                verify_existing_graph_replay_pool_entry(
+                    &pool_root.join(&generation.generation_file),
+                    &staged,
+                    generation,
+                )?;
+            }
             Err(error) => return Err(storage(error)),
         }
     }
@@ -1172,17 +1219,154 @@ fn expose_staged_generations_to_graph_replay_pool(
     Ok(())
 }
 
+/// Prove that a same-name pool collision is the retired generation's exact
+/// sealed bytes. The destination must be a regular file (never a symlink or
+/// directory), match the expected size, and be byte-identical to the staged
+/// source; its identity must also be stable across the content check, so a
+/// mid-verify swap fails closed instead of certifying stale evidence.
+fn verify_existing_graph_replay_pool_entry(
+    pool_entry: &Path,
+    staged: &Path,
+    generation: &CodeGenerationRetentionGenerationV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let unsafe_entry = |reason: &str| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "graph replay pool entry '{}' {reason}",
+            generation.generation_file
+        ))
+    };
+    let before = std::fs::symlink_metadata(pool_entry).map_err(storage)?;
+    if !before.file_type().is_file() {
+        return Err(unsafe_entry("is not a regular file"));
+    }
+    if before.len() != generation.size_bytes {
+        return Err(unsafe_entry("does not match the retired generation's size"));
+    }
+    let entry_file = File::open(pool_entry).map_err(storage)?;
+    let opened = entry_file.metadata().map_err(storage)?;
+    if !metadata_identity_matches(&before, &opened) {
+        return Err(unsafe_entry("changed while its identity was being verified"));
+    }
+    let staged_file = File::open(staged).map_err(storage)?;
+    if !open_files_are_byte_identical(&entry_file, &staged_file)? {
+        return Err(unsafe_entry("does not match the staged sealed bytes"));
+    }
+    let after = entry_file.metadata().map_err(storage)?;
+    if !metadata_identity_matches(&before, &after) {
+        return Err(unsafe_entry("changed while its identity was being verified"));
+    }
+    Ok(())
+}
+
+/// Whether two metadata snapshots name the same stable file identity. On
+/// Unix the device and inode pair is exact; the type, length, and
+/// modification time double as the cross-check that the content did not
+/// change between the snapshots.
+fn metadata_identity_matches(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if left.dev() != right.dev() || left.ino() != right.ino() {
+            return false;
+        }
+    }
+    left.file_type() == right.file_type()
+        && left.len() == right.len()
+        && left.modified().ok() == right.modified().ok()
+}
+
+/// Compare two open files byte for byte. Hard links short-circuit: the pool
+/// destination is normally the staged inode itself after a replayed
+/// exposure, so the common recovery path never rereads a sealed generation.
+fn open_files_are_byte_identical(
+    left: &File,
+    right: &File,
+) -> Result<bool, CodeGenerationRetentionErrorV1> {
+    let left_metadata = left.metadata().map_err(storage)?;
+    let right_metadata = right.metadata().map_err(storage)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if left_metadata.dev() == right_metadata.dev()
+            && left_metadata.ino() == right_metadata.ino()
+        {
+            return Ok(true);
+        }
+    }
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+    let mut left_reader = left;
+    let mut right_reader = right;
+    let mut left_buffer = vec![0_u8; 64 * 1024];
+    let mut right_buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let left_read = read_full(&mut left_reader, &mut left_buffer)?;
+        let right_read = read_full(&mut right_reader, &mut right_buffer)?;
+        if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn read_full(
+    reader: &mut impl Read,
+    buffer: &mut [u8],
+) -> Result<usize, CodeGenerationRetentionErrorV1> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match reader.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(storage(error)),
+        }
+    }
+    Ok(filled)
+}
+
 /// Withdraw a rolled-back transaction's pool exposure. The canonical files
-/// are restored by the rollback rename, so the graph replay path resolves
-/// them from the generation directory again; a same-digest entry left by the
-/// eager staging path is equally safe to remove for the same reason.
+/// are restored by the rollback rename before this runs, so the graph replay
+/// path resolves them from the generation directory again. Only entries that
+/// are provably that generation's sealed bytes are removed — normally the
+/// very inode the rollback just renamed back, or a same-digest copy left by
+/// the eager staging path. A foreign same-name entry (non-regular or with
+/// different bytes) was never linked by this transaction and is left in
+/// place so the rollback cannot destroy evidence it does not own.
 fn withdraw_generations_from_graph_replay_pool(
+    store_root: &Path,
     transaction: &CodeGenerationRetentionTransactionV1,
     pool_root: &Path,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
+    match std::fs::symlink_metadata(pool_root) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage(error)),
+    }
+    let _pool_lock = acquire_code_generation_store_lock(pool_root)?;
+    let generations_root = store_root.join(GENERATIONS_DIRECTORY);
     let mut removed = false;
     for generation in &transaction.receipt.deleted_generations {
-        match std::fs::remove_file(pool_root.join(&generation.generation_file)) {
+        let pool_entry = pool_root.join(&generation.generation_file);
+        match std::fs::symlink_metadata(&pool_entry) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(storage(error)),
+        }
+        let canonical = generations_root.join(&generation.generation_file);
+        if !regular_file_exists(&canonical)? {
+            continue;
+        }
+        let pool_file = File::open(&pool_entry).map_err(storage)?;
+        let canonical_file = File::open(&canonical).map_err(storage)?;
+        if !open_files_are_byte_identical(&pool_file, &canonical_file)? {
+            continue;
+        }
+        match std::fs::remove_file(&pool_entry) {
             Ok(()) => removed = true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(storage(error)),
@@ -1226,7 +1410,7 @@ fn rollback_staged_transaction(
         }
     }
     if let Some(pool_root) = graph_replay_pool_root {
-        withdraw_generations_from_graph_replay_pool(transaction, pool_root)?;
+        withdraw_generations_from_graph_replay_pool(store_root, transaction, pool_root)?;
     }
     graph_replay_release::remove_events(store_root, &transaction.receipt)?;
     remove_empty_stage_root(&stage_root)
@@ -1240,7 +1424,12 @@ fn cleanup_committed_transaction(
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     ensure_transaction_liveness(store_root, transaction, vector_readable_sources)?;
     if let Some(pool_root) = graph_replay_pool_root {
-        expose_staged_generations_to_graph_replay_pool(store_root, transaction, pool_root)?;
+        expose_staged_generations_to_graph_replay_pool(
+            store_root,
+            transaction,
+            pool_root,
+            GraphReplayPoolExposureV1::AfterDurableReceipt,
+        )?;
     }
     let generations_root = store_root.join(GENERATIONS_DIRECTORY);
     let stage_root = transaction_stage_root(store_root, &transaction.receipt);
