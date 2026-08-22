@@ -3586,6 +3586,70 @@ mod tests {
     }
 
     #[test]
+    fn text_head_republish_is_idempotent_and_advancing_requires_the_incumbent() {
+        let (store, generations) = fixture_store(1);
+        let generation = generations.last().expect("active generation");
+        let descriptor = text_artifact(&generation.id, 21, 4096);
+        write_fixture_text_artifact(&store, &descriptor);
+        let expected_pointer = read_active_pointer(store.path()).expect("active pointer");
+        let lock = acquire_code_generation_store_lock(store.path()).expect("generation store lock");
+        attach_verified_text_artifact_under_lock(
+            &lock,
+            &expected_pointer,
+            &DurableSealedCodeGenerationIdentityV1 {
+                locator: generation.file.clone(),
+                digest: ManifestDigest::new(generation.state_digest.clone())
+                    .expect("sealed digest"),
+                size_bytes: generation.size_bytes,
+            },
+            descriptor.clone(),
+        )
+        .expect("attach artifact to generation index");
+        let head = DurableCodeTextArtifactHeadV1::from_material(fixture_text_head_material(
+            generation,
+            descriptor.clone(),
+        ))
+        .expect("build canonical text head");
+        publish_code_text_artifact_head_under_lock(&lock, None, head.clone())
+            .expect("first head publication");
+
+        assert_eq!(
+            publish_code_text_artifact_head_under_lock(&lock, Some(&head), head.clone())
+                .expect("republish naming the incumbent"),
+            head
+        );
+        assert_eq!(
+            publish_code_text_artifact_head_under_lock(&lock, None, head.clone())
+                .expect("exact republication is idempotent"),
+            head
+        );
+
+        let mut successor_material = fixture_text_head_material(generation, descriptor);
+        successor_material.sealed_at_micros = 2;
+        let successor = DurableCodeTextArtifactHeadV1::from_material(successor_material)
+            .expect("build successor text head");
+        let error = publish_code_text_artifact_head_under_lock(&lock, None, successor.clone())
+            .expect_err("advancing without naming the incumbent must lose the CAS");
+        assert!(matches!(error, CodeGenerationRetentionErrorV1::Conflict(_)));
+        assert_eq!(
+            read_durable_code_text_artifact_head(store.path()).expect("durable head after refusal"),
+            Some(head.clone()),
+            "a refused publication must not change the durable head"
+        );
+
+        let advanced =
+            publish_code_text_artifact_head_under_lock(&lock, Some(&head), successor.clone())
+                .expect("advance naming the incumbent");
+        drop(lock);
+
+        assert_eq!(advanced, successor);
+        assert_eq!(
+            read_durable_code_text_artifact_head(store.path()).expect("advanced durable head"),
+            Some(successor)
+        );
+    }
+
+    #[test]
     fn text_head_refuses_a_receipt_for_a_different_generation() {
         let (_store, generations) = fixture_store(2);
         let first = &generations[0];
