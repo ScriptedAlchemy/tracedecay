@@ -96,6 +96,45 @@ fn sqlite_error(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Io(error.to_string())
 }
 
+fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
+    match error.sqlite_error_code() {
+        Some(
+            rusqlite::ffi::ErrorCode::DatabaseCorrupt | rusqlite::ffi::ErrorCode::NotADatabase,
+        ) => CodeLexicalArtifactErrorV1::Corrupt(error.to_string()),
+        _ => CodeLexicalArtifactErrorV1::Io(error.to_string()),
+    }
+}
+
+/// Open one artifact staging connection inside the kernel SQLite window:
+/// no mmap grant, page cache at the kernel's 64 MiB ceiling, and
+/// `synchronous = NORMAL`. The single deliberate exception is
+/// `journal_mode = DELETE`: a sealed artifact is one content-addressed file,
+/// and a WAL sidecar would fall outside its digest; bounded finalization
+/// persists its own verified progress, so rollback-journal durability suffices.
+fn open_builder_connection(
+    path: &Path,
+) -> Result<rusqlite::Connection, CodeLexicalArtifactErrorV1> {
+    let connection = rusqlite::Connection::open(path).map_err(sqlite_error)?;
+    connection
+        .pragma_update(None, "journal_mode", "DELETE")
+        .map_err(sqlite_error)?;
+    connection
+        .pragma_update(None, "synchronous", "NORMAL")
+        .map_err(sqlite_error)?;
+    connection
+        .pragma_update(None, "temp_store", "FILE")
+        .map_err(sqlite_error)?;
+    connection
+        .pragma_update(None, "mmap_size", 0i64)
+        .map_err(sqlite_error)?;
+    let cache_kib = -i64::try_from(ARTIFACT_SQLITE_CACHE_BYTES / 1024)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    connection
+        .pragma_update(None, "cache_size", cache_kib)
+        .map_err(sqlite_error)?;
+    Ok(connection)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ARTIFACT_SQLITE_CACHE_BYTES, open_builder_connection};
@@ -135,43 +174,4 @@ mod tests {
             "artifact staging must use synchronous=NORMAL"
         );
     }
-}
-
-fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
-    match error.sqlite_error_code() {
-        Some(
-            rusqlite::ffi::ErrorCode::DatabaseCorrupt | rusqlite::ffi::ErrorCode::NotADatabase,
-        ) => CodeLexicalArtifactErrorV1::Corrupt(error.to_string()),
-        _ => CodeLexicalArtifactErrorV1::Io(error.to_string()),
-    }
-}
-
-/// Open one artifact staging connection inside the kernel SQLite window:
-/// no mmap grant, page cache at the kernel's 64 MiB ceiling, and
-/// `synchronous = NORMAL`. The single deliberate exception is
-/// `journal_mode = DELETE`: a sealed artifact is one content-addressed file,
-/// and a WAL sidecar would fall outside its digest; finalization persists its
-/// own bounded progress, so rollback-journal durability suffices.
-fn open_builder_connection(
-    path: &Path,
-) -> Result<rusqlite::Connection, CodeLexicalArtifactErrorV1> {
-    let connection = rusqlite::Connection::open(path).map_err(sqlite_error)?;
-    connection
-        .pragma_update(None, "journal_mode", "DELETE")
-        .map_err(sqlite_error)?;
-    connection
-        .pragma_update(None, "synchronous", "NORMAL")
-        .map_err(sqlite_error)?;
-    connection
-        .pragma_update(None, "temp_store", "FILE")
-        .map_err(sqlite_error)?;
-    connection
-        .pragma_update(None, "mmap_size", 0i64)
-        .map_err(sqlite_error)?;
-    let cache_kib = -i64::try_from(ARTIFACT_SQLITE_CACHE_BYTES / 1024)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-    connection
-        .pragma_update(None, "cache_size", cache_kib)
-        .map_err(sqlite_error)?;
-    Ok(connection)
 }

@@ -286,6 +286,7 @@ fn code_generation_retention_preserves_every_pointer_addressable_generation() {
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(49),
+        None,
     )
     .expect("apply retention");
 
@@ -356,6 +357,7 @@ fn bounded_pointer_history_collects_evicted_clean_and_dirty_generations() {
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(50),
+        None,
     )
     .expect("collect generations evicted from bounded history");
     assert_eq!(
@@ -410,6 +412,7 @@ fn code_generation_retention_dry_run_reports_without_deleting() {
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::DryRun,
         UtcMicros(50),
+        None,
     )
     .expect("plan retention");
 
@@ -462,6 +465,7 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(60),
+        None,
     )
     .expect("apply retention");
 
@@ -517,6 +521,7 @@ fn code_generation_retention_emits_durable_reclaim_receipt() {
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(70),
+        None,
     )
     .expect("apply retention");
 
