@@ -133,7 +133,7 @@ impl<R> GlobalDbObservationStore<R> {
         let identity = candidate.identity();
         let actual_cursor =
             read_runtime_source_cursor(&self.runtime, identity.source(), identity.scope())?;
-        let Some(mut advance) = refused_scan_frontier(write, actual_cursor.as_ref()) else {
+        let Some(mut advance) = refused_scan_frontier(write, actual_cursor.as_ref())? else {
             return Ok(());
         };
         match (
@@ -863,18 +863,24 @@ fn read_runtime_retrieval_anchor_by_alias(
     }
 }
 
-/// Whether a refused candidate stands at the sequential scan frontier: the
-/// durable cursor has NOT covered its range, the caller's expected cursor
-/// matches the durable one, and the record either continues the current
-/// generation contiguously or restarts a replacement generation from position
-/// zero. Generation values are opaque source identities, not ordered counters.
-/// Coverage is
-/// recorded only for this shape — the one production ingest actually loops
-/// on; gaps and stale views prove the caller is not the scan frontier.
+/// The typed cursor advance for a refused candidate standing at the
+/// sequential scan frontier: the durable cursor has NOT covered its range and
+/// the caller's expected cursor matches the durable one. Generation values
+/// are opaque source identities, not ordered counters.
+///
+/// `Ok(None)` is the not-at-frontier verdict — a covered replay or a stale
+/// expected view — and leaves every ledger untouched. Gaps and generation
+/// jumps never reach the advance constructor here: `ObservationWrite::new`
+/// already validated that this write's expected→next cursor transition
+/// covers the candidate range, which is exactly the transition the advance
+/// re-derives from the same identity, expected cursor, and range. A
+/// construction failure is therefore a contract violation, and it surfaces
+/// as the typed store error — silently answering "not at the scan frontier"
+/// would record no coverage and leave the refused record re-read forever.
 fn refused_scan_frontier(
     write: &AnchoredObservationWrite,
     actual_cursor: Option<&ClaudeSourceCursorV1>,
-) -> Option<ObservationCursorAdvance> {
+) -> ObservationStoreResult<Option<ObservationCursorAdvance>> {
     let identity = write.observation().identity();
     let candidate_covered = actual_cursor.is_some_and(|cursor| {
         cursor.generation() == identity.generation()
@@ -882,7 +888,7 @@ fn refused_scan_frontier(
             && cursor.position() >= identity.position().end()
     });
     if candidate_covered || actual_cursor != write.expected_cursor() {
-        return None;
+        return Ok(None);
     }
     ObservationCursorAdvance::for_ordering(
         identity.source().clone(),
@@ -893,7 +899,7 @@ fn refused_scan_frontier(
         identity.position(),
         ObservationCoverageReason::AdmissionRefused,
     )
-    .ok()
+    .map(Some)
 }
 
 /// Durable terminal marker for a previously refused identity collision.
