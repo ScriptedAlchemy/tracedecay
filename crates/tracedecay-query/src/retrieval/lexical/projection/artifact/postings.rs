@@ -10,15 +10,9 @@ use super::{
 pub(super) const NGRAM_NORMALIZED: i64 = 0;
 pub(super) const NGRAM_RAW_OVERRIDE: i64 = 1;
 
-/// The exact pre-dedup n-gram scratch one document allocates: the window
-/// count and the measured scratch bytes reserved for it.
-///
-/// `try_reserve_exact` may end with a capacity above the request when the
-/// allocator returns a larger block, so the scratch bytes are measured on a
-/// real reservation instead of assuming `window_count * 4`.
-/// `insert_document_ngrams` performs the same reservation, sorts in place,
-/// and compacts duplicates in place, so this is the document's n-gram
-/// allocation peak; the build memory ledger charges the same number.
+/// The exact requested pre-dedup n-gram scratch one document needs. The
+/// calculation is arithmetic-only so a page can be refused before any n-gram
+/// scratch allocation is attempted.
 pub(super) fn document_ngram_scratch(
     text_len: usize,
 ) -> Result<(usize, usize), CodeLexicalArtifactErrorV1> {
@@ -31,9 +25,7 @@ pub(super) fn document_ngram_scratch(
                 )
             })
     })?;
-    let scratch = reserve_ngram_scratch(window_count)?;
-    let scratch_bytes = scratch
-        .capacity()
+    let scratch_bytes = window_count
         .checked_mul(std::mem::size_of::<u32>())
         .ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract(
@@ -120,8 +112,8 @@ mod tests {
             let scratch = reserve_ngram_scratch(window_count).expect("scratch reservation");
             assert_eq!(
                 scratch_bytes,
-                scratch.capacity() * std::mem::size_of::<u32>(),
-                "the ledger must charge the reservation's actual capacity, not the request"
+                window_count * std::mem::size_of::<u32>(),
+                "the preflight must remain allocation-free and exact to the requested window"
             );
             assert!(scratch.capacity() >= window_count);
         }

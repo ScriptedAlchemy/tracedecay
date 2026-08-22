@@ -15,7 +15,7 @@ use super::CodeLexicalArtifactErrorV1;
 pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 1;
 const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v1\0";
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
-pub(super) const SECTION_NAMES: [&str; 7] = [
+pub(super) const SECTION_NAMES: [&str; 8] = [
     "source_pages",
     "import_evidence",
     "rows",
@@ -23,6 +23,7 @@ pub(super) const SECTION_NAMES: [&str; 7] = [
     "exact_postings",
     "ngram_postings",
     "statistics",
+    "derived_integrity",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,16 +251,32 @@ pub(super) fn padded_receipt(
 pub(super) fn decode_padded_receipt(
     bytes: &[u8],
 ) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
+    if bytes.len() != RECEIPT_RESERVATION_BYTES {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact receipt reservation has the wrong length".to_owned(),
+        ));
+    }
+    let end = bytes.iter().position(|byte| *byte == 0).ok_or_else(|| {
+        CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact receipt is missing its reserved zero tail".to_owned(),
+        )
+    })?;
+    if bytes[end..].iter().any(|byte| *byte != 0) {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact receipt has nonzero bytes after its canonical payload".to_owned(),
+        ));
+    }
     if end == 0 {
         return Ok(None);
     }
-    serde_json::from_slice(&bytes[..end])
-        .map(Some)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
+    let receipt = serde_json::from_slice(&bytes[..end])
+        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+    if padded_receipt(&receipt)? != bytes {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact receipt is not canonically encoded".to_owned(),
+        ));
+    }
+    Ok(Some(receipt))
 }
 
 pub(super) fn new_verified_receipt(
