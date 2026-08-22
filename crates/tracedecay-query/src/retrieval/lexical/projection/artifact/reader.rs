@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +15,7 @@ use tracedecay_domain::{
     FixedPointScore, LogicalEvidenceId, ManifestDigest, RetrieverBatch, RetrieverCoverage,
     RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId,
 };
+use tracedecay_private_fs::open_private_file;
 
 use super::builder::compute_section_digests;
 use super::format::{
@@ -81,7 +82,11 @@ impl CodeLexicalArtifactReaderV1 {
         checkpoint(control)?;
         validate_cache_budget(cache_budget_bytes)?;
         let path = path.as_ref();
-        let metadata = path.symlink_metadata().map_err(map_artifact_file_error)?;
+        // A durable content address names only a private, no-follow file made
+        // by the artifact publisher. Keep that exact handle through both
+        // digests; path metadata alone cannot bind the bytes SQLite serves.
+        let mut file = open_private_file(path).map_err(map_private_artifact_file_error)?;
+        let metadata = file.metadata().map_err(map_artifact_file_error)?;
         if !metadata.file_type().is_file() {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "artifact path is not a regular file".to_owned(),
@@ -93,7 +98,6 @@ impl CodeLexicalArtifactReaderV1 {
                 "artifact file has {file_size} bytes; the durable head names {expected_file_size_bytes}"
             )));
         }
-        let mut file = File::open(path).map_err(map_artifact_file_error)?;
         let digest = digest_artifact_file(&mut file, control)?;
         if &digest != expected_file_digest {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -131,7 +135,11 @@ impl CodeLexicalArtifactReaderV1 {
                 "embedded receipt disagrees with the durable head file size".to_owned(),
             ));
         }
-        Self::open_connection_with_control(connection, &receipt, cache_budget_bytes, control)
+        let reader =
+            Self::open_connection_with_control(connection, &receipt, cache_budget_bytes, control)?;
+        verify_retained_artifact_digest(&mut file, expected_file_digest, control)?;
+        verify_named_path_identity(path, &file)?;
+        Ok(reader)
     }
 
     pub fn open_with_control(
@@ -1382,6 +1390,26 @@ fn digest_artifact_file(
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))
 }
 
+/// The content-addressed head is the immutable authority for the bytes served
+/// by SQLite. Rehash the retained file only after the SQLite handle has
+/// completed its full validation, so an in-place mutation cannot retain its
+/// inode and still be returned as the original content address.
+fn verify_retained_artifact_digest(
+    file: &mut File,
+    expected: &ManifestDigest,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+    let actual = digest_artifact_file(file, control)?;
+    if &actual != expected {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "artifact bytes changed after SQLite opened the verified file".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Make the content-addressed reader refuse a replacement at the published
 /// name. It runs immediately before and after SQLite opens that name; after
 /// the latter check, SQLite holds the verified file's own handle.
@@ -1522,6 +1550,16 @@ fn map_artifact_file_error(error: std::io::Error) -> CodeLexicalArtifactErrorV1 
     }
 }
 
+fn map_private_artifact_file_error(error: std::io::Error) -> CodeLexicalArtifactErrorV1 {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        CodeLexicalArtifactErrorV1::Missing(error.to_string())
+    } else {
+        CodeLexicalArtifactErrorV1::Corrupt(format!(
+            "content-addressed lexical artifact does not satisfy the private-file authority: {error}"
+        ))
+    }
+}
+
 fn map_reader_open_error(path: &Path, error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
     match path.try_exists() {
         Ok(false) => CodeLexicalArtifactErrorV1::Missing(error.to_string()),
@@ -1563,9 +1601,12 @@ fn map_query_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortE
 mod tests {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rusqlite::{Connection, params};
     use tracedecay_domain::ManifestDigest;
+    use tracedecay_private_fs::open_private_file;
 
     use super::{
         ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, CodeLexicalArtifactErrorV1,
@@ -1579,6 +1620,43 @@ mod tests {
 
     impl CodeIndexExecutionControlV1 for AlwaysActiveControl {
         fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    struct MutateSqliteHeaderAtObservation {
+        path: PathBuf,
+        mutation_observation: usize,
+        observations: AtomicUsize,
+    }
+
+    impl MutateSqliteHeaderAtObservation {
+        fn new(path: PathBuf, mutation_observation: usize) -> Self {
+            Self {
+                path,
+                mutation_observation,
+                observations: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl CodeIndexExecutionControlV1 for MutateSqliteHeaderAtObservation {
+        fn is_cancelled(&self) -> bool {
+            let observation = self
+                .observations
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
+            if observation == self.mutation_observation {
+                let connection = Connection::open(&self.path)
+                    .expect("open the artifact through a real SQLite writer");
+                connection
+                    .pragma_update(None, "user_version", 2i64)
+                    .expect("mutate the same artifact inode through SQLite");
+            }
             false
         }
 
@@ -1655,6 +1733,80 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("the opened SQLite connection remains bound to the original file");
         assert_eq!(served_version, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_inode_mutation_after_hash_must_not_pass_artifact_validation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let artifact_path = directory.path().join("artifact.sqlite");
+        let connection = Connection::open(&artifact_path).expect("create artifact SQLite file");
+        connection
+            .pragma_update(None, "user_version", 1i64)
+            .expect("seed original SQLite header");
+        drop(connection);
+        std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o600))
+            .expect("make the artifact private");
+
+        let mut retained = open_private_file(&artifact_path).expect("retain private artifact file");
+        let expected = super::digest_artifact_file(&mut retained, &AlwaysActiveControl)
+            .expect("hash the original artifact bytes");
+        let mutation = MutateSqliteHeaderAtObservation::new(artifact_path.clone(), 1);
+        super::checkpoint(&mutation).expect("run the reader's post-hash checkpoint");
+        let served = Connection::open_with_flags(
+            &artifact_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("SQLite opens the same inode after mutation");
+        let served_version: i64 = served
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read the served SQLite header");
+
+        assert!(
+            matches!(
+                super::verify_retained_artifact_digest(
+                    &mut retained,
+                    &expected,
+                    &AlwaysActiveControl,
+                ),
+                Err(CodeLexicalArtifactErrorV1::Corrupt(_))
+            ),
+            "SQLite served same-inode user_version {served_version} after digest {expected}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_addressed_open_refuses_non_private_artifact_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let artifact_path = directory.path().join("artifact.sqlite");
+        let connection = Connection::open(&artifact_path).expect("create artifact SQLite file");
+        connection
+            .pragma_update(None, "user_version", 1i64)
+            .expect("seed SQLite header");
+        drop(connection);
+        std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o644))
+            .expect("make the artifact publicly readable");
+
+        let mut file = std::fs::File::open(&artifact_path).expect("open artifact for digest");
+        let digest = super::digest_artifact_file(&mut file, &AlwaysActiveControl)
+            .expect("hash the publicly readable artifact");
+        let size = file.metadata().expect("artifact metadata").len();
+
+        let error = CodeLexicalArtifactReaderV1::open_content_addressed(
+            &artifact_path,
+            &digest,
+            size,
+            1024 * 1024,
+            &AlwaysActiveControl,
+        )
+        .expect_err("content-addressed reader must require the private artifact authority");
+
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)));
     }
 
     #[test]
