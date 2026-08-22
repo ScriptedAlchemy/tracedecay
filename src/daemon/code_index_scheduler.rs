@@ -102,7 +102,7 @@ const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
 /// Rows digested by one scheduler finalization operation. The builder persists
 /// its exact section/row cursor after this bounded slice, avoiding both a
-/// corpus-sized wake and one scheduler wake per individual SQLite row.
+/// corpus-sized wake and one scheduler wake per individual `SQLite` row.
 const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
 
 pub(in crate::daemon) fn scoped_code_index_store_root(
@@ -1389,7 +1389,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
     }
 }
 
-/// Partial durable-artifact build: the staging SQLite builder plus the
+/// Partial durable-artifact build: the staging `SQLite` builder plus the
 /// verified page source over this generation's durable sealed file.
 struct CodeTextArtifactBuildV1 {
     builder: CodeLexicalArtifactBuilderV1,

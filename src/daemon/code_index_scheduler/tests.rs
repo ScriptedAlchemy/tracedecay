@@ -2248,7 +2248,7 @@ fn foreground_query_owner_read_stays_warming_until_background_projection_finishe
     );
 }
 
-/// The production text-serving journey with a durable store: build the SQLite
+/// The production text-serving journey with a durable store: build the `SQLite`
 /// lexical artifact in bounded page windows, publish it durably (pointer names
 /// the content-addressed artifact file), then reopen the durable head after a
 /// simulated restart in a single bounded pass — no rebuild — and serve exact
