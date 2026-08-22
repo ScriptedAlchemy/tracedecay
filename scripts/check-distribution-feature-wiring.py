@@ -47,7 +47,7 @@ def optional_dependencies(manifest: dict) -> set[str]:
     return names
 
 
-def dependency_names(manifest: dict) -> set[str]:
+def dependency_package_names(manifest: dict) -> set[str]:
     names: set[str] = set()
 
     def collect(table: object) -> None:
@@ -55,7 +55,9 @@ def dependency_names(manifest: dict) -> set[str]:
             return
         dependencies = table.get("dependencies")
         if isinstance(dependencies, dict):
-            names.update(dependencies)
+            for name, spec in dependencies.items():
+                package = spec.get("package") if isinstance(spec, dict) else None
+                names.add(package if isinstance(package, str) else name)
 
     collect(manifest)
     for target in manifest.get("target", {}).values():
@@ -106,7 +108,7 @@ def validate(
             + ", ".join(missing)
         )
     root_semantic_members = root_features.get("semantic-fastembed")
-    if "fastembed" in dependency_names(root_packaged):
+    if "fastembed" in dependency_package_names(root_packaged):
         raise SystemExit(
             "distribution acceptance: root package must not own fastembed"
         )

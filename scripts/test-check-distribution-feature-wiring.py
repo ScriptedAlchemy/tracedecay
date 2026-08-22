@@ -136,6 +136,22 @@ def main() -> int:
     if "root package must not own fastembed" not in root_shadow_owner.stderr:
         raise SystemExit("root shadow ownership failed for an unexpected reason")
 
+    root_with_aliased_shadow_owner = ROOT_MANIFEST.replace(
+        "[dependencies]\n",
+        "[dependencies]\nfastembed-shadow = { package = \"fastembed\", version = \"=5.17.3\", optional = true }\n",
+    ).replace(
+        "[features]\n",
+        '[features]\nshadow-fastembed = ["dep:fastembed-shadow"]\n',
+    )
+    root_aliased_shadow_owner = run_fixture(
+        root_source=root_with_aliased_shadow_owner,
+        root_packaged=root_with_aliased_shadow_owner,
+    )
+    if root_aliased_shadow_owner.returncode == 0:
+        raise SystemExit("renamed root FastEmbed dependency was accepted")
+    if "root package must not own fastembed" not in root_aliased_shadow_owner.stderr:
+        raise SystemExit("renamed root ownership failed for an unexpected reason")
+
     print("distribution feature wiring fixtures passed")
     return 0
 
