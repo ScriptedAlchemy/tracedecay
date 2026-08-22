@@ -95,6 +95,19 @@ fn same_registered_store_authority(
         && incumbent.verified_locator() == candidate.verified_locator()
 }
 
+/// How a `Stopping` entry's drain is progressing. Only a confirmed drain may
+/// settle the retirement: a mount frontend obtained from the owner can
+/// outlive every alias handle, so the entry must keep refusing mounts until
+/// the core is actually closed.
+#[derive(Clone, Copy)]
+enum StoreObservabilityDrainV1 {
+    /// A retiring caller is awaiting the core drain or has spawned it.
+    InFlight,
+    /// The last alias was dropped without a tokio runtime, so nothing could
+    /// run the drain. The next mount attempt on a live runtime starts it.
+    Deferred,
+}
+
 enum StoreObservabilityStateV1 {
     Active {
         core: Arc<StoreObservabilityCoreV1>,
@@ -106,6 +119,7 @@ enum StoreObservabilityStateV1 {
     },
     Stopping {
         core: Arc<StoreObservabilityCoreV1>,
+        drain: StoreObservabilityDrainV1,
     },
     Failed,
 }
@@ -235,7 +249,17 @@ impl StoreObservabilityRegistryV1 {
                     *aliases = next_aliases;
                     Ok(registered)
                 }
-                StoreObservabilityStateV1::Stopping { .. } => {
+                StoreObservabilityStateV1::Stopping { core, drain } => {
+                    // A deferred drain (the last alias was dropped without a
+                    // runtime) starts now that a caller with a live runtime
+                    // has arrived. The mount is still refused: only the
+                    // confirmed drain may vacate the entry.
+                    if matches!(drain, StoreObservabilityDrainV1::Deferred)
+                        && let Ok(runtime) = tokio::runtime::Handle::try_current()
+                    {
+                        *drain = StoreObservabilityDrainV1::InFlight;
+                        self.spawn_retirement_drain(&runtime, Arc::clone(core));
+                    }
                     Err(StoreObservabilityMountErrorV1::Retiring)
                 }
                 StoreObservabilityStateV1::Failed => {
@@ -267,11 +291,14 @@ impl StoreObservabilityRegistryV1 {
     }
 
     /// Surrenders one alias release. Reports whether it was the last one, in
-    /// which case the entry is now `Stopping` and the caller must drain the
-    /// core and then finish the retirement.
+    /// which case the entry is now `Stopping` with the given drain progress:
+    /// an `InFlight` caller must drain the core and finish the retirement; a
+    /// `Deferred` retirement waits for the next mount attempt on a live
+    /// runtime to start the drain.
     fn begin_retirement(
         &self,
         core: &Arc<StoreObservabilityCoreV1>,
+        drain: StoreObservabilityDrainV1,
     ) -> Result<bool, ApplicationContractError> {
         let mut entries =
             self.lock_entries()
@@ -311,8 +338,28 @@ impl StoreObservabilityRegistryV1 {
         }
         entry.state = StoreObservabilityStateV1::Stopping {
             core: Arc::clone(core),
+            drain,
         };
         Ok(true)
+    }
+
+    /// Runs the core drain in the background and settles the retirement with
+    /// the drain's confirmed outcome.
+    fn spawn_retirement_drain(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        core: Arc<StoreObservabilityCoreV1>,
+    ) {
+        let registry = self.clone();
+        runtime.spawn(async move {
+            let result = core.shutdown().await;
+            if let Err(error) = &result {
+                tracing::warn!(%error, "background observability owner drain was incomplete");
+            }
+            if let Err(error) = registry.finish_retirement(&core, result.is_ok()) {
+                tracing::warn!(%error, "background observability retirement was incomplete");
+            }
+        });
     }
 
     /// Settles a `Stopping` entry: a releasable retirement removes it so a
@@ -332,7 +379,7 @@ impl StoreObservabilityRegistryV1 {
             same_registered_store_authority(&entry.database, &core.database)
                 && matches!(
                     &entry.state,
-                    StoreObservabilityStateV1::Stopping { core: incumbent }
+                    StoreObservabilityStateV1::Stopping { core: incumbent, .. }
                         if Arc::ptr_eq(incumbent, core)
                 )
         }) else {
@@ -428,7 +475,7 @@ impl RegisteredObservabilityProducerV1 {
         };
         let registry = self.registry.clone();
         drop(self);
-        if !registry.begin_retirement(&core)? {
+        if !registry.begin_retirement(&core, StoreObservabilityDrainV1::InFlight)? {
             return Ok(());
         }
         let result = core.shutdown().await;
@@ -453,7 +500,19 @@ impl Drop for RegisteredObservabilityProducerV1 {
         let Some(core) = self.release.take() else {
             return;
         };
-        let is_last = match self.registry.begin_retirement(&core) {
+        // A drop without a runtime cannot await the drain, and retained
+        // mount frontends may still hold the shared producer core open, so
+        // inability to drain is never a confirmed close. The entry stays
+        // retiring — refusing replacement mounts that would start a
+        // duplicate producer — until the deferred drain, started by the next
+        // mount attempt on a live runtime, confirms the close.
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        let drain = if runtime.is_some() {
+            StoreObservabilityDrainV1::InFlight
+        } else {
+            StoreObservabilityDrainV1::Deferred
+        };
+        let is_last = match self.registry.begin_retirement(&core, drain) {
             Ok(is_last) => is_last,
             Err(error) => {
                 tracing::warn!(%error, "observability alias release was incomplete");
@@ -463,32 +522,12 @@ impl Drop for RegisteredObservabilityProducerV1 {
         if !is_last {
             return;
         }
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
-                let registry = self.registry.clone();
-                runtime.spawn(async move {
-                    let result = core.shutdown().await;
-                    if let Err(error) = &result {
-                        tracing::warn!(%error, "dropped observability owner shutdown was incomplete");
-                    }
-                    if let Err(error) = registry.finish_retirement(&core, result.is_ok()) {
-                        tracing::warn!(%error, "dropped observability retirement was incomplete");
-                    }
-                });
-            }
-            Err(_) => {
-                // A drop without a runtime is a teardown accident, not a
-                // shutdown failure: release the store entry instead of
-                // poisoning it so a future daemon runtime can mount fresh
-                // owners. The owner workers settle on their own runtime as
-                // their queues close when the core drops.
-                tracing::warn!(
-                    "observability owners dropped without a runtime; released without an awaited drain"
-                );
-                if let Err(error) = self.registry.finish_retirement(&core, true) {
-                    tracing::warn!(%error, "dropped observability retirement was incomplete");
-                }
-            }
+        match runtime {
+            Some(runtime) => self.registry.spawn_retirement_drain(&runtime, core),
+            None => tracing::warn!(
+                "observability owners dropped without a runtime; the store stays \
+                 retiring until a deferred drain confirms the close"
+            ),
         }
     }
 }
