@@ -868,8 +868,12 @@ fn plan_code_generation_retention_with_verification_cancellable(
         .take(MAX_CODE_GENERATION_RETENTION_BATCH_V1)
         .cloned()
         .collect();
-    let text_artifact_inventory =
-        plan_collectable_text_artifacts_cancellable(store_root, &active_pointer, is_cancelled)?;
+    let text_artifact_inventory = plan_collectable_text_artifacts_cancellable(
+        store_root,
+        &active_pointer,
+        verification,
+        is_cancelled,
+    )?;
 
     Ok(CodeGenerationRetentionPlanV1 {
         active_generation_id,
@@ -892,6 +896,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
 fn plan_collectable_text_artifacts_cancellable(
     store_root: &Path,
     active_pointer: &DurablePublicationPointerV1,
+    verification: GenerationDigestVerificationV1,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeTextArtifactRetentionInventoryV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
@@ -955,6 +960,7 @@ fn plan_collectable_text_artifacts_cancellable(
         verify_completed_text_artifact(
             &root.join(&descriptor.artifact_file),
             descriptor,
+            verification,
             is_cancelled,
         )?;
         inventory.insert(
@@ -1010,6 +1016,7 @@ fn plan_collectable_text_artifacts_cancellable(
                     &path,
                     digest,
                     metadata.len(),
+                    verification,
                     is_cancelled,
                 )?;
                 Some(CodeTextArtifactRetentionCandidateV1 {
@@ -1098,6 +1105,7 @@ fn is_lowercase_sha256(value: &str) -> bool {
 fn verify_completed_text_artifact(
     path: &Path,
     descriptor: &DurableCodeTextArtifactDescriptorV1,
+    verification: GenerationDigestVerificationV1,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     let digest = sha256_file_component(&descriptor.artifact_digest, "text artifact")?;
@@ -1105,16 +1113,20 @@ fn verify_completed_text_artifact(
         path,
         digest,
         descriptor.artifact_size_bytes,
+        verification,
         is_cancelled,
     )
 }
 
 /// A content-addressed path is trusted only after the open file and its path
-/// still name the same regular inode before and after its bounded hash.
+/// still name the same regular inode. Full retention hashes that stable file;
+/// metadata-only observation deliberately stops at bounded type/size/name
+/// identity and can never authorize an unlink.
 fn verify_unreferenced_completed_text_artifact(
     path: &Path,
     expected_digest: &str,
     expected_size_bytes: u64,
+    verification: GenerationDigestVerificationV1,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     let before = std::fs::symlink_metadata(path).map_err(storage)?;
@@ -1132,7 +1144,9 @@ fn verify_unreferenced_completed_text_artifact(
             path.display()
         )));
     }
-    if open_file_sha256_hex_cancellable(&file, is_cancelled)? != expected_digest {
+    if verification == GenerationDigestVerificationV1::Full
+        && open_file_sha256_hex_cancellable(&file, is_cancelled)? != expected_digest
+    {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "code text artifact '{}' does not match its content address",
             path.display()
@@ -1679,6 +1693,7 @@ fn stage_collectable_text_artifacts(
                         &source,
                         digest,
                         candidate.size_bytes,
+                        GenerationDigestVerificationV1::Full,
                         &|| false,
                     )?;
                 }
@@ -4702,9 +4717,12 @@ mod tests {
         std::fs::write(&orphan, b"uncollected").expect("write artifact debris");
         let pointer = read_active_pointer(store.path()).expect("pointer");
         let checks = std::sync::atomic::AtomicUsize::new(0);
-        let error = plan_collectable_text_artifacts_cancellable(store.path(), &pointer, &|| {
-            checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
-        })
+        let error = plan_collectable_text_artifacts_cancellable(
+            store.path(),
+            &pointer,
+            GenerationDigestVerificationV1::Full,
+            &|| checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0,
+        )
         .expect_err("cancellation must stop the bounded inventory");
         assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
         assert!(
@@ -5772,7 +5790,14 @@ mod tests {
 
     #[test]
     fn metadata_only_census_matches_full_verification() {
-        let (store, _generations) = fixture_store(5);
+        let (store, generations) = fixture_store(5);
+        let active = generations.last().expect("active generation");
+        let referenced = attach_fixture_text_artifact(&store, active, b"metadata parity live");
+        let orphan = text_artifact_for_bytes(&active.id, b"metadata parity orphan");
+        write_text_artifact(&store, &orphan, b"metadata parity orphan");
+        let stale_staging = code_text_artifacts_root(store.path())
+            .join(format!(".text-artifact-{}.staging", "e".repeat(64)));
+        std::fs::write(&stale_staging, b"metadata parity staging").expect("write stale staging");
 
         let full =
             plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
@@ -5792,6 +5817,48 @@ mod tests {
         assert_eq!(
             full.collectable_generations,
             metadata_only.collectable_generations
+        );
+        assert_eq!(
+            full.collectable_text_artifacts, metadata_only.collectable_text_artifacts,
+            "metadata observation must identify the same bounded artifact debris"
+        );
+        assert_eq!(
+            full.text_artifact_inventory_bytes(),
+            metadata_only.text_artifact_inventory_bytes(),
+            "both modes must account the same unique descriptor, staging, and candidate bytes"
+        );
+        assert!(
+            code_text_artifacts_root(store.path())
+                .join(&referenced.artifact_file)
+                .is_file(),
+            "planning in either mode preserves the descriptor target"
+        );
+    }
+
+    #[test]
+    fn metadata_only_artifact_census_does_not_hash_unlink_evidence() {
+        let (store, generations) = fixture_store(1);
+        let active = generations.last().expect("active generation");
+        let orphan = text_artifact_for_bytes(&active.id, b"good");
+        let orphan_path = write_text_artifact(&store, &orphan, b"good");
+        std::fs::write(&orphan_path, b"evil").expect("same-size tamper");
+
+        let metadata_only = plan_code_generation_retention_with_verification(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+            GenerationDigestVerificationV1::MetadataOnly,
+        )
+        .expect("metadata census uses bounded filename/type/size identity");
+        assert_eq!(metadata_only.collectable_text_artifacts.len(), 1);
+        let full = plan_code_generation_retention(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        );
+        assert!(
+            matches!(full, Err(CodeGenerationRetentionErrorV1::UnsafeState(_))),
+            "only full verification may trust the content address for unlinking"
         );
     }
 
