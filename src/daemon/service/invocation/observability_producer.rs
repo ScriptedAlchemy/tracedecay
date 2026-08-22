@@ -84,30 +84,48 @@ impl DaemonInvocationService {
                     })
                 },
                 || {
-                    let identity = daemon_observability_producer_identity(
-                        &project_id,
-                        &configuration_revision,
-                        &policy_revision,
-                    )?;
-                    let producer =
-                        tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
-                            database.clone(),
-                            identity,
-                            DAEMON_OBSERVABILITY_QUEUE_CAPACITY,
-                        )
-                        .map_err(|error| TraceDecayError::Config {
-                            message: format!(
-                                "project observability producer mount failed: {error}"
-                            ),
-                        })?;
-                    RegisteredObservabilityProducerV1::new(
-                        database.clone(),
-                        producer,
+                    // The producer and its store-keyed settlement recorder are
+                    // acquired per exact registered-store authority: a linked
+                    // root of an already-mounted store attaches an alias to
+                    // the incumbent owners instead of starting a second
+                    // recorder for the same store.
+                    self.store_observability.acquire_or_start(
+                        &database,
+                        |incumbent| {
+                            incumbent.authorized_scope_ref == project_id.as_str()
+                                && incumbent.producer_revision
+                                    == DAEMON_OBSERVABILITY_PRODUCER_REVISION
+                                && incumbent.configuration_revision
+                                    == configuration_revision.as_str()
+                                && incumbent.policy_revision == policy_revision.as_str()
+                        },
+                        || TraceDecayError::Config {
+                            message:
+                                "a different observability producer is already mounted for this project store"
+                                    .to_owned(),
+                        },
+                        || {
+                            let identity = daemon_observability_producer_identity(
+                                &project_id,
+                                &configuration_revision,
+                                &policy_revision,
+                            )?;
+                            tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+                                database.clone(),
+                                identity,
+                                DAEMON_OBSERVABILITY_QUEUE_CAPACITY,
+                            )
+                            .map_err(|error| TraceDecayError::Config {
+                                message: format!(
+                                    "project observability producer mount failed: {error}"
+                                ),
+                            })
+                        },
                         DAEMON_DELIVERY_SETTLEMENT_QUEUE_CAPACITY,
+                        |error| TraceDecayError::Config {
+                            message: format!("project delivery settlement mount failed: {error}"),
+                        },
                     )
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!("project delivery settlement mount failed: {error}"),
-                    })
                 },
             )
             .await?;
