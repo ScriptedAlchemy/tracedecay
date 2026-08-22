@@ -680,6 +680,7 @@ pub struct VerifiedSealedLexicalPageSourceV1<R> {
     maximum_page_chunks: usize,
     maximum_page_bytes: usize,
     cursor: VerifiedSealedLexicalCursorV1,
+    admitted_file: Option<(u64, AdmittedSealedLexicalFileV1)>,
 }
 
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
@@ -702,6 +703,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 "sealed generation state digest does not match the admitted source".to_owned(),
             ));
         }
+        validate_decode_window(layout.maximum_file_bytes, maximum_page_bytes)?;
         let cursor = VerifiedSealedLexicalCursorV1::initial(
             layout.state_digest.clone(),
             layout.first_file_offset,
@@ -717,6 +719,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             maximum_page_chunks,
             maximum_page_bytes,
             cursor,
+            admitted_file: None,
         })
     }
 
@@ -746,6 +749,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             Some(&expected_file_digest),
             control,
         )?;
+        validate_decode_window(layout.maximum_file_bytes, maximum_page_bytes)?;
         let cursor = VerifiedSealedLexicalCursorV1::initial(
             layout.state_digest.clone(),
             layout.first_file_offset,
@@ -761,6 +765,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             maximum_page_chunks,
             maximum_page_bytes,
             cursor,
+            admitted_file: None,
         })
     }
 
@@ -800,6 +805,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     ) -> Result<(), CodeIndexProductionErrorV1> {
         checkpoint(control)?;
         cursor.verify_source(&self.source_state_digest)?;
+        self.admitted_file = None;
         if cursor.next_file_ordinal > self.file_count {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed lexical cursor exceeds the admitted file layout".to_owned(),
@@ -822,7 +828,16 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     "sealed lexical cursor byte offset is outside the files array".to_owned(),
                 ));
             }
-            let admitted = self.read_admitted_file(cursor.next_file_offset, control)?;
+            self.ensure_admitted_file(cursor.next_file_offset, control)?;
+            let admitted = &self
+                .admitted_file
+                .as_ref()
+                .ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical admitted-file cache is missing".to_owned(),
+                    )
+                })?
+                .1;
             let chunk_count = u64::try_from(admitted.chunks.len()).map_err(|_| {
                 CodeIndexProductionErrorV1::Contract(
                     "sealed lexical file chunk count exceeds u64".to_owned(),
@@ -862,6 +877,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             self.source_state_digest.clone(),
             self.first_file_offset,
         )?;
+        self.admitted_file = None;
         Ok(())
     }
 
@@ -879,9 +895,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// opening scan. This remains constant as the generation's file count
     /// grows; individual file boundaries are discovered from the byte cursor.
     pub fn retained_layout_bytes(&self) -> usize {
-        std::mem::size_of::<u64>()
-            .checked_mul(4)
-            .unwrap_or(usize::MAX)
+        std::mem::size_of::<u64>().saturating_mul(4)
     }
 
     pub fn next_page(
@@ -932,7 +946,16 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
 
         while cursor.next_file_ordinal < self.file_count {
             checkpoint(control)?;
-            let admitted = self.read_admitted_file(cursor.next_file_offset, control)?;
+            self.ensure_admitted_file(cursor.next_file_offset, control)?;
+            let admitted = &self
+                .admitted_file
+                .as_ref()
+                .ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical admitted-file cache is missing".to_owned(),
+                    )
+                })?
+                .1;
             let mut chunk_ordinal = usize::try_from(cursor.next_chunk_ordinal).map_err(|_| {
                 CodeIndexProductionErrorV1::Contract(
                     "sealed lexical chunk cursor exceeds the platform limit".to_owned(),
@@ -1060,13 +1083,15 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     )
                 })?;
             }
+            let next_file_offset = admitted.next_file_offset;
+            self.admitted_file = None;
             cursor.next_file_ordinal =
                 cursor.next_file_ordinal.checked_add(1).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
                         "sealed lexical file ordinal overflowed".to_owned(),
                     )
                 })?;
-            cursor.next_file_offset = admitted.next_file_offset;
+            cursor.next_file_offset = next_file_offset;
             cursor.next_chunk_ordinal = 0;
             cursor.next_import_ordinal = 0;
             // The page contract serializes every chunk before every import.
@@ -1162,6 +1187,23 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         })
     }
 
+    fn ensure_admitted_file(
+        &mut self,
+        file_offset: u64,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        if self
+            .admitted_file
+            .as_ref()
+            .is_some_and(|(cached_offset, _)| *cached_offset == file_offset)
+        {
+            return Ok(());
+        }
+        let admitted = self.read_admitted_file(file_offset, control)?;
+        self.admitted_file = Some((file_offset, admitted));
+        Ok(())
+    }
+
     fn commit_page(
         &mut self,
         pending: PendingSealedLexicalPageV1,
@@ -1253,6 +1295,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     }
 }
 
+#[derive(Debug)]
 struct AdmittedSealedLexicalFileV1 {
     chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
@@ -1667,17 +1710,18 @@ fn read_next_file_bytes<R: Read + Seek>(
                         _ => {}
                     }
                 }
-            } else if byte.is_ascii_whitespace() {
-            } else if byte == b',' && !saw_separator {
-                saw_separator = true;
-            } else if byte == b'{' && saw_separator {
-                return Ok((bytes, offset));
-            } else if byte == b']' && !saw_separator && offset == files_end_offset {
-                return Ok((bytes, files_end_offset));
-            } else {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical files array separators are invalid".to_owned(),
-                ));
+            } else if !byte.is_ascii_whitespace() {
+                if byte == b',' && !saw_separator {
+                    saw_separator = true;
+                } else if byte == b'{' && saw_separator {
+                    return Ok((bytes, offset));
+                } else if byte == b']' && !saw_separator && offset == files_end_offset {
+                    return Ok((bytes, files_end_offset));
+                } else {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical files array separators are invalid".to_owned(),
+                    ));
+                }
             }
             consumed += 1;
             offset = offset.checked_add(1).ok_or_else(|| {
@@ -1688,6 +1732,18 @@ fn read_next_file_bytes<R: Read + Seek>(
         }
         reader.consume(consumed);
     }
+}
+
+fn validate_decode_window(
+    maximum_file_bytes: u64,
+    maximum_page_bytes: usize,
+) -> Result<(), CodeIndexProductionErrorV1> {
+    if maximum_file_bytes > u64::try_from(maximum_page_bytes).unwrap_or(u64::MAX) {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "one sealed lexical file exceeds the bounded decode window".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeIndexProductionErrorV1> {

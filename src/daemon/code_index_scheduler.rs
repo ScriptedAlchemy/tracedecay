@@ -2118,6 +2118,9 @@ impl LatestCompleteCodeIndexV1 {
             .map_err(map_text_artifact_error)?;
             let progress = builder.progress().map_err(map_text_artifact_error)?;
             let mut source = store.open_sealed_source(&sealed_identity, &control)?;
+            if source.staging_window_bytes() > CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1 {
+                return Err(RetrievalPortError::BudgetExceeded);
+            }
             if let Some(cursor) = progress.next_cursor.as_ref() {
                 source
                     .restore_cursor(cursor, &control)
