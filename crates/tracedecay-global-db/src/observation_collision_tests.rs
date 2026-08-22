@@ -1123,16 +1123,13 @@ async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
     // Invalid rewrite at the rescan frontier (generation 2, from zero):
     // authored content changed, so it is a true identity collision and
     // records the refusal terminal.
-    let corrupted = {
-        let current = codex_revision_observation(
-            &session_id,
-            2,
-            "receipt.codex.revision.corrupted",
-            false,
-            "corrupted rewrite content",
-        );
-        current
-    };
+    let corrupted = codex_revision_observation(
+        &session_id,
+        2,
+        "receipt.codex.revision.corrupted",
+        false,
+        "corrupted rewrite content",
+    );
     assert_eq!(corrupted.observation_id(), legacy.observation_id());
     let refusal = store
         .persist_observation(anchored_write_for(corrupted.clone(), committed_cursor))
