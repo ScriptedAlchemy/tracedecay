@@ -9,9 +9,9 @@ use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkId, CompactCandidate,
-    ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, FixedPointScore,
-    LogicalEvidenceId, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
-    ScoreDomainId, SourceOccurrenceId,
+    ComponentRevision, EvidenceRole, ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1,
+    FixedPointScore, LogicalEvidenceId, RetrieverBatch, RetrieverCoverage, RetrieverKind,
+    RetrieverOutcome, ScoreDomainId, SourceOccurrenceId,
 };
 
 use super::builder::compute_section_digests;
@@ -490,6 +490,11 @@ impl<'a> ArtifactQueryV1<'a> {
         // Same bounded selection as the lexical lane: keys mirror the exact
         // lane's canonical order (admitted literal count, then occurrence),
         // and only the selected winners are rehydrated into evidence.
+        // Central admission runs BEFORE heap eligibility: a document whose
+        // matched literals are all denied is excluded, never selected, so a
+        // denied best match can never displace an admitted candidate or
+        // fail the batch. Retained state stays bounded: at most `cap`
+        // minted proofs alongside the ranking keys.
         let cap = lane_candidate_cap(&request.budget, &request.base.budget);
         let mut excluded = self.document_count as u64 - documents.len();
         let mut eligible = 0u64;
@@ -501,24 +506,6 @@ impl<'a> ArtifactQueryV1<'a> {
                 excluded += 1;
                 continue;
             }
-            eligible += 1;
-            retain_bounded(
-                &mut ranked,
-                cap,
-                (
-                    Reverse(matched_literals.len()),
-                    row.id.as_str().to_owned(),
-                    document,
-                ),
-            );
-        }
-        let selected = ranked.into_sorted_vec();
-        let truncated = eligible - selected.len() as u64;
-        let mut candidates = Vec::with_capacity(selected.len());
-        let mut evidence_by_occurrence = BTreeMap::new();
-        for (ordinal, (_, _, document)) in selected.into_iter().enumerate() {
-            let row = self.row(document)?;
-            let (matched_literals, matched_kinds) = exact_matches_artifact(&row, request);
             let proof = matched_literals
                 .iter()
                 .find_map(|literal| {
@@ -527,12 +514,36 @@ impl<'a> ArtifactQueryV1<'a> {
                         .transpose()
                 })
                 .transpose()
-                .map_err(contract_error)?
-                .ok_or_else(|| {
-                    RetrievalPortError::Contract(
-                        "central authority rejected every artifact exact match".to_owned(),
-                    )
-                })?;
+                .map_err(contract_error)?;
+            let Some(proof) = proof else {
+                excluded += 1;
+                continue;
+            };
+            eligible += 1;
+            retain_bounded(
+                &mut ranked,
+                cap,
+                RankedExactEntryV1 {
+                    key: (
+                        Reverse(matched_literals.len()),
+                        row.id.as_str().to_owned(),
+                        document,
+                    ),
+                    proof,
+                },
+            );
+        }
+        let selected = ranked.into_sorted_vec();
+        let truncated = eligible - selected.len() as u64;
+        let mut candidates = Vec::with_capacity(selected.len());
+        let mut evidence_by_occurrence = BTreeMap::new();
+        for (ordinal, entry) in selected.into_iter().enumerate() {
+            let RankedExactEntryV1 {
+                key: (_, _, document),
+                proof,
+            } = entry;
+            let row = self.row(document)?;
+            let (matched_literals, matched_kinds) = exact_matches_artifact(&row, request);
             let mut candidate = candidate(
                 self.receipt,
                 &row,
@@ -981,7 +992,7 @@ fn candidate(
     retriever: RetrieverKind,
     retriever_revision: ComponentRevision,
     score_domain: ScoreDomainId,
-    exact_admission_proof: Option<tracedecay_domain::ExactAdmissionProof>,
+    exact_admission_proof: Option<ExactAdmissionProof>,
 ) -> Result<CompactCandidate, RetrievalPortError> {
     let lane = retriever.as_str();
     let chunk_id = row.id.as_str();
@@ -1031,6 +1042,34 @@ fn binding(
         language_descriptor_revision: row.language_descriptor_revision.clone(),
         matched_term_kinds,
         source_occurrence: candidate.source_occurrence_id.clone(),
+    }
+}
+
+/// One admitted exact candidate retained during bounded selection: the
+/// canonical ranking key plus the proof the central authority already
+/// minted for it. Ordering is by key alone.
+struct RankedExactEntryV1 {
+    key: (Reverse<usize>, String, u32),
+    proof: ExactAdmissionProof,
+}
+
+impl PartialEq for RankedExactEntryV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for RankedExactEntryV1 {}
+
+impl PartialOrd for RankedExactEntryV1 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankedExactEntryV1 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key.cmp(&other.key)
     }
 }
 
