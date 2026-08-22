@@ -35,10 +35,9 @@ use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
 
 /// Observation-store adapter over the already-registered authoritative
 /// runtime. The struct is concrete: the collision tests prove the
-/// terminal-refusal fast path repeats no record work behaviorally — they
-/// corrupt the stored row after the marker exists, so any stored-row decode,
-/// identity re-derivation, or payload re-hash fails loudly — not through any
-/// adapter seam or counter instrumentation.
+/// terminal-refusal fast path never accesses the retained observation row —
+/// they corrupt and hide that row after the marker exists, so any later read
+/// fails loudly — not through an adapter seam or test-only port.
 #[derive(Clone)]
 pub struct GlobalDbObservationStore {
     database: Database,
@@ -900,19 +899,7 @@ fn read_runtime_stored_observation(
         },
     )? {
         ObservationReadResultV1::Observation(row) => match *row {
-            Some(row) => {
-                tracing::trace!(
-                    target: "tracedecay::observation_admission_work",
-                    work = "identity_derivation",
-                    "materialized stored observation identity"
-                );
-                tracing::trace!(
-                    target: "tracedecay::observation_admission_work",
-                    work = "payload_digest",
-                    "verified stored observation payload"
-                );
-                stored_observation_from_runtime_row(row).map(Some)
-            }
+            Some(row) => stored_observation_from_runtime_row(row).map(Some),
             None => Ok(None),
         },
         _ => Err(runtime_storage_error(

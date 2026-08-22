@@ -64,60 +64,50 @@ use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::params;
 
 const COLLISION_PROVIDER: &str = "collision-test";
-const ADMISSION_WORK_TRACE_TARGET: &str = "tracedecay::observation_admission_work";
+const OBSERVATION_DISPATCH_TRACE_TARGET: &str = "tracedecay::observation_admission_work";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct AdmissionWorkSnapshot {
-    identity_derivations: u64,
-    payload_digests: u64,
+struct ObservationDispatchSnapshot {
     runtime_commands: u64,
 }
 
 #[derive(Default)]
-struct AdmissionWorkTrace {
-    identity_derivations: AtomicU64,
-    payload_digests: AtomicU64,
+struct ObservationDispatchTrace {
     runtime_commands: AtomicU64,
 }
 
-impl AdmissionWorkTrace {
-    fn snapshot(&self) -> AdmissionWorkSnapshot {
-        AdmissionWorkSnapshot {
-            identity_derivations: self.identity_derivations.load(Ordering::Relaxed),
-            payload_digests: self.payload_digests.load(Ordering::Relaxed),
+impl ObservationDispatchTrace {
+    fn snapshot(&self) -> ObservationDispatchSnapshot {
+        ObservationDispatchSnapshot {
             runtime_commands: self.runtime_commands.load(Ordering::Relaxed),
         }
     }
 }
 
-struct AdmissionWorkSubscriber {
-    trace: Arc<AdmissionWorkTrace>,
+struct ObservationDispatchSubscriber {
+    trace: Arc<ObservationDispatchTrace>,
 }
 
-struct AdmissionWorkVisitor<'a> {
-    trace: &'a AdmissionWorkTrace,
+struct ObservationDispatchVisitor<'a> {
+    trace: &'a ObservationDispatchTrace,
 }
 
-impl Visit for AdmissionWorkVisitor<'_> {
+impl Visit for ObservationDispatchVisitor<'_> {
     fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
 
     fn record_str(&mut self, field: &Field, value: &str) {
         if field.name() != "work" {
             return;
         }
-        let counter = match value {
-            "identity_derivation" => &self.trace.identity_derivations,
-            "payload_digest" => &self.trace.payload_digests,
-            "runtime_command" => &self.trace.runtime_commands,
-            _ => return,
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
+        if value == "runtime_command" {
+            self.trace.runtime_commands.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
-impl Subscriber for AdmissionWorkSubscriber {
+impl Subscriber for ObservationDispatchSubscriber {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        metadata.target() == ADMISSION_WORK_TRACE_TARGET
+        metadata.target() == OBSERVATION_DISPATCH_TRACE_TARGET
     }
 
     fn new_span(&self, _span: &Attributes<'_>) -> Id {
@@ -129,7 +119,7 @@ impl Subscriber for AdmissionWorkSubscriber {
     fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
     fn event(&self, event: &Event<'_>) {
-        let mut visitor = AdmissionWorkVisitor { trace: &self.trace };
+        let mut visitor = ObservationDispatchVisitor { trace: &self.trace };
         event.record(&mut visitor);
     }
 
@@ -773,11 +763,11 @@ async fn identity_collision_records_durable_admission_refused_coverage() {
 
 /// Stage0a symptom 1, second RED requirement: once the collision is durably
 /// terminal, a re-admitted candidate (late catch-up pass or temporal trigger
-/// holding a stale cursor) must fail with the same typed error WITHOUT
-/// decoding the stored row, re-classifying the collision, probing the payload
-/// revision, or computing another canonical digest.
+/// holding a stale cursor) must fail with the same typed error without
+/// accessing the retained observation row and with only the one source-cursor
+/// runtime dispatch needed to converge coverage.
 #[tokio::test]
-async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() {
+async fn re_admitted_identity_collision_uses_marker_without_retained_row_access() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -810,9 +800,9 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
         "receipt.identity-collision.readmitted.rewritten",
         committed_cursor,
     );
-    let first_admission_work = Arc::new(AdmissionWorkTrace::default());
-    let first_dispatch = Dispatch::new(AdmissionWorkSubscriber {
-        trace: Arc::clone(&first_admission_work),
+    let first_dispatch_trace = Arc::new(ObservationDispatchTrace::default());
+    let first_dispatch = Dispatch::new(ObservationDispatchSubscriber {
+        trace: Arc::clone(&first_dispatch_trace),
     });
     let first_trace_guard = tracing::dispatcher::set_default(&first_dispatch);
     let first = store
@@ -831,14 +821,11 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
         "{first:?}"
     );
     assert_eq!(
-        first_admission_work.snapshot(),
-        AdmissionWorkSnapshot {
-            identity_derivations: 1,
-            payload_digests: 1,
+        first_dispatch_trace.snapshot(),
+        ObservationDispatchSnapshot {
             runtime_commands: 2,
         },
-        "the full collision path must measure one decoded stored identity, one verified \
-         stored payload, and the stored-observation plus source-cursor runtime reads"
+        "the full collision path must dispatch the stored-observation and source-cursor reads"
     );
 
     // The terminal marker now exists. Arm the corruption tripwire: overwrite
@@ -851,9 +838,9 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
 
     // A later catch-up pass or temporal trigger re-presents the exact same
     // candidate with its now-stale expected cursor.
-    let admission_work = Arc::new(AdmissionWorkTrace::default());
-    let dispatch = Dispatch::new(AdmissionWorkSubscriber {
-        trace: Arc::clone(&admission_work),
+    let dispatch_trace = Arc::new(ObservationDispatchTrace::default());
+    let dispatch = Dispatch::new(ObservationDispatchSubscriber {
+        trace: Arc::clone(&dispatch_trace),
     });
     let trace_guard = tracing::dispatcher::set_default(&dispatch);
     let second = store
@@ -874,14 +861,11 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
          would have failed on the tripwire bytes; {second:?}"
     );
     assert_eq!(
-        admission_work.snapshot(),
-        AdmissionWorkSnapshot {
-            identity_derivations: 0,
-            payload_digests: 0,
+        dispatch_trace.snapshot(),
+        ObservationDispatchSnapshot {
             runtime_commands: 1,
         },
-        "the terminal fast path must neither re-derive nor re-hash the valid candidate, \
-         and may dispatch only the one canonical source-cursor read"
+        "the terminal marker path may dispatch only the canonical source-cursor read"
     );
     // Any access to the retained row — including an ignored bare-column read
     // that would evade a byte-corruption tripwire — would have failed because
