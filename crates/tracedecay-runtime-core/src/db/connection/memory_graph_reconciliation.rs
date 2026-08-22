@@ -1108,7 +1108,10 @@ mod tests {
         })
         .await;
 
-        tokio::time::advance(AUTOMATIC_RETRY_BASE - Duration::from_millis(1)).await;
+        let just_before_retry = AUTOMATIC_RETRY_BASE
+            .checked_sub(Duration::from_millis(1))
+            .expect("automatic retry base exceeds one millisecond");
+        tokio::time::advance(just_before_retry).await;
         for _ in 0..64 {
             tokio::task::yield_now().await;
         }
