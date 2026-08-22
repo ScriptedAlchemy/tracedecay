@@ -321,6 +321,70 @@ pub fn attach_verified_text_artifact_under_lock(
     Ok(pointer)
 }
 
+/// Withdraw one exact derived text-artifact attachment under the canonical
+/// generation-store lock.
+///
+/// Missing or corrupt artifact bytes are recoverable because the sealed code
+/// generation remains authoritative. The exact descriptor is the CAS token:
+/// a caller may clear only the attachment it failed to open, never a newer
+/// artifact published by a concurrent repair.
+pub fn withdraw_verified_text_artifact_under_lock(
+    lock: &CodeGenerationStoreLockV1,
+    expected_pointer: &DurablePublicationPointerV1,
+    descriptor: &DurableCodeTextArtifactDescriptorV1,
+) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
+    let store_root = lock.generation_store_root()?;
+    validate_text_artifact_descriptor(descriptor)?;
+    let mut pointer = read_active_pointer(store_root)?;
+    if &pointer != expected_pointer {
+        return Err(CodeGenerationRetentionErrorV1::Conflict(
+            "active generation pointer changed before text-artifact withdrawal".to_owned(),
+        ));
+    }
+    validate_durable_generation_index(&pointer)?;
+    let entry = pointer
+        .generation_index
+        .iter_mut()
+        .find(|entry| entry.generation_id == descriptor.generation_id.as_str())
+        .ok_or_else(|| {
+            CodeGenerationRetentionErrorV1::Conflict(
+                "text-artifact generation is no longer retained by the durable index".to_owned(),
+            )
+        })?;
+    match entry.text_artifact.as_ref() {
+        Some(existing) if existing == descriptor => entry.text_artifact = None,
+        Some(_) => {
+            return Err(CodeGenerationRetentionErrorV1::Conflict(
+                "sealed generation names a newer text artifact".to_owned(),
+            ));
+        }
+        None => return Ok(pointer),
+    }
+    pointer.generation_index_digest = Some(durable_generation_index_digest(
+        &pointer.generation_index,
+        pointer.generation_index_truncated,
+    )?);
+    validate_durable_generation_index(&pointer)?;
+    let bytes = serde_json::to_vec(&pointer).map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "publication pointer serialization failed: {error}"
+        ))
+    })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1 {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "publication pointer exceeds its durable byte bound".to_owned(),
+        ));
+    }
+    atomic_write(
+        &store_root.join(ACTIVE_POINTER_FILE),
+        "code-generation-text-artifact-withdrawal",
+        &bytes,
+        DirectorySyncPolicy::Strict,
+    )
+    .map_err(storage)?;
+    Ok(pointer)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeGenerationRetentionModeV1 {
     DryRun,
@@ -3461,6 +3525,40 @@ mod tests {
                 .generation_index[0]
                 .text_artifact,
             Some(descriptor)
+        );
+    }
+
+    #[test]
+    fn verified_text_artifact_withdrawal_is_exact_durable_and_idempotent() {
+        let (store, generations) = fixture_store(1);
+        let expected = read_active_pointer(store.path()).expect("active pointer");
+        let active = generations.last().expect("active generation");
+        let sealed_identity = DurableSealedCodeGenerationIdentityV1 {
+            locator: active.file.clone(),
+            digest: ManifestDigest::new(active.state_digest.clone()).expect("sealed digest"),
+            size_bytes: active.size_bytes,
+        };
+        let descriptor = text_artifact(&active.id, 11, 4096);
+        let lock = acquire_code_generation_store_lock(store.path()).expect("generation store lock");
+        let attached = attach_verified_text_artifact_under_lock(
+            &lock,
+            &expected,
+            &sealed_identity,
+            descriptor.clone(),
+        )
+        .expect("attach verified artifact");
+
+        let withdrawn = withdraw_verified_text_artifact_under_lock(&lock, &attached, &descriptor)
+            .expect("withdraw exact artifact");
+        let repeated = withdraw_verified_text_artifact_under_lock(&lock, &withdrawn, &descriptor)
+            .expect("repeat exact withdrawal");
+        drop(lock);
+
+        assert_eq!(repeated, withdrawn);
+        assert_eq!(withdrawn.generation_index[0].text_artifact, None);
+        assert_eq!(
+            read_active_pointer(store.path()).expect("durable pointer"),
+            withdrawn
         );
     }
 
