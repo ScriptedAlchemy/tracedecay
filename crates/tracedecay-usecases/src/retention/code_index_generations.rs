@@ -2377,11 +2377,41 @@ fn path_still_names_open_file(
     if !current.file_type().is_file() {
         return Ok(false);
     }
-    let opened = opened.metadata().map_err(storage)?;
-    Ok(
-        metadata_identity_matches(admitted, &opened)
-            && metadata_identity_matches(&current, &opened),
-    )
+    let opened_metadata = opened.metadata().map_err(storage)?;
+    if !metadata_identity_matches(admitted, &opened_metadata)
+        || !metadata_identity_matches(&current, &opened_metadata)
+    {
+        return Ok(false);
+    }
+    #[cfg(windows)]
+    {
+        let current_file = match File::open(path) {
+            Ok(file) => file,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(storage(error)),
+        };
+        let current_opened_metadata = current_file.metadata().map_err(storage)?;
+        if !metadata_identity_matches(&current, &current_opened_metadata) {
+            return Ok(false);
+        }
+        let opened_identity =
+            tracedecay_runtime_core::windows_file::information(opened).map_err(storage)?;
+        let current_identity =
+            tracedecay_runtime_core::windows_file::information(&current_file).map_err(storage)?;
+        if opened_identity.volume_serial_number != current_identity.volume_serial_number
+            || opened_identity.file_index != current_identity.file_index
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Whether two metadata snapshots name the same stable file identity. On
@@ -2404,11 +2434,7 @@ fn metadata_identity_matches(left: &std::fs::Metadata, right: &std::fs::Metadata
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        if left.volume_serial_number() != right.volume_serial_number()
-            || left.file_index() != right.file_index()
-            || left.number_of_links() != right.number_of_links()
-            || left.file_attributes() != right.file_attributes()
-        {
+        if left.file_attributes() != right.file_attributes() {
             return false;
         }
     }
