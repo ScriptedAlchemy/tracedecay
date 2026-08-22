@@ -187,10 +187,6 @@ impl VerifiedSealedLexicalCursorV1 {
         self.next_file_ordinal
     }
 
-    pub fn next_file_offset(&self) -> u64 {
-        self.next_file_offset
-    }
-
     pub fn next_chunk_ordinal(&self) -> u64 {
         self.next_chunk_ordinal
     }
