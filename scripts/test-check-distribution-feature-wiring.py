@@ -120,6 +120,22 @@ def main() -> int:
     if "root semantic-fastembed must forward" not in root_direct_owner.stderr:
         raise SystemExit("root ownership drift failed for an unexpected reason")
 
+    root_with_shadow_owner = ROOT_MANIFEST.replace(
+        "[dependencies]\n",
+        "[dependencies]\nfastembed = { version = \"=5.17.3\", optional = true }\n",
+    ).replace(
+        'semantic-fastembed = [\n',
+        'semantic-fastembed = [\n    "dep:fastembed",\n',
+    )
+    root_shadow_owner = run_fixture(
+        root_source=root_with_shadow_owner,
+        root_packaged=root_with_shadow_owner,
+    )
+    if root_shadow_owner.returncode == 0:
+        raise SystemExit("root package retaining shadow FastEmbed ownership was accepted")
+    if "root package must not own fastembed" not in root_shadow_owner.stderr:
+        raise SystemExit("root shadow ownership failed for an unexpected reason")
+
     print("distribution feature wiring fixtures passed")
     return 0
 

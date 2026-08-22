@@ -47,6 +47,22 @@ def optional_dependencies(manifest: dict) -> set[str]:
     return names
 
 
+def dependency_names(manifest: dict) -> set[str]:
+    names: set[str] = set()
+
+    def collect(table: object) -> None:
+        if not isinstance(table, dict):
+            return
+        dependencies = table.get("dependencies")
+        if isinstance(dependencies, dict):
+            names.update(dependencies)
+
+    collect(manifest)
+    for target in manifest.get("target", {}).values():
+        collect(target)
+    return names
+
+
 def require_matching_features(name: str, source: dict, packaged: dict) -> dict:
     source_features = source.get("features", {})
     packaged_features = packaged.get("features", {})
@@ -90,8 +106,13 @@ def validate(
             + ", ".join(missing)
         )
     root_semantic_members = root_features.get("semantic-fastembed")
-    if not isinstance(root_semantic_members, list) or not REQUIRED_ROOT_SEMANTIC_MEMBERS.issubset(
-        root_semantic_members
+    if "fastembed" in dependency_names(root_packaged):
+        raise SystemExit(
+            "distribution acceptance: root package must not own fastembed"
+        )
+    if (
+        not isinstance(root_semantic_members, list)
+        or set(root_semantic_members) != REQUIRED_ROOT_SEMANTIC_MEMBERS
     ):
         raise SystemExit(
             "distribution acceptance: root semantic-fastembed must forward to the "
