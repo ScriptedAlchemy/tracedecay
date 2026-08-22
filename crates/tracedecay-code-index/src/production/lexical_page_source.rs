@@ -17,6 +17,22 @@ const IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN: &[u8] =
     b"tracedecay.sealed-lexical-import-dictionary-chain.v1\0";
 const CURSOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-cursor.v1\0";
 
+type PersistedSealedLexicalCursorFields = (
+    String,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    String,
+    String,
+    String,
+);
+
 /// Resume position after one fully admitted lexical page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedSealedLexicalCursorV1 {
@@ -89,21 +105,7 @@ impl VerifiedSealedLexicalCursorV1 {
             import_dictionary_digest,
             cumulative_digest,
             integrity_digest,
-        ): (
-            String,
-            u64,
-            u64,
-            u64,
-            u64,
-            u64,
-            u64,
-            u64,
-            u64,
-            u64,
-            String,
-            String,
-            String,
-        ) = serde_json::from_slice(bytes).map_err(|error| {
+        ): PersistedSealedLexicalCursorFields = serde_json::from_slice(bytes).map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "persisted sealed lexical cursor is invalid: {error}"
             ))
