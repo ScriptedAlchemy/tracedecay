@@ -11,9 +11,12 @@ pub(super) const NGRAM_NORMALIZED: i64 = 0;
 pub(super) const NGRAM_RAW_OVERRIDE: i64 = 1;
 
 /// The exact pre-dedup n-gram scratch one document allocates: the window
-/// count and the `u32` scratch bytes reserved for it.
+/// count and the measured scratch bytes reserved for it.
 ///
-/// `insert_document_ngrams` reserves exactly this capacity, sorts in place,
+/// `try_reserve_exact` may end with a capacity above the request when the
+/// allocator returns a larger block, so the scratch bytes are measured on a
+/// real reservation instead of assuming `window_count * 4`.
+/// `insert_document_ngrams` performs the same reservation, sorts in place,
 /// and compacts duplicates in place, so this is the document's n-gram
 /// allocation peak; the build memory ledger charges the same number.
 pub(super) fn document_ngram_scratch(
@@ -28,7 +31,9 @@ pub(super) fn document_ngram_scratch(
                 )
             })
     })?;
-    let scratch_bytes = window_count
+    let scratch = reserve_ngram_scratch(window_count)?;
+    let scratch_bytes = scratch
+        .capacity()
         .checked_mul(std::mem::size_of::<u32>())
         .ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract(
@@ -36,6 +41,19 @@ pub(super) fn document_ngram_scratch(
             )
         })?;
     Ok((window_count, scratch_bytes))
+}
+
+/// Reserve the exact pre-dedup n-gram scratch vector, surfacing allocation
+/// failure as a typed I/O error. Both the ledger measurement and the insert
+/// path use this same reservation, so the charge equals the allocation.
+fn reserve_ngram_scratch(window_count: usize) -> Result<Vec<u32>, CodeLexicalArtifactErrorV1> {
+    let mut scratch = Vec::new();
+    scratch.try_reserve_exact(window_count).map_err(|error| {
+        CodeLexicalArtifactErrorV1::Io(format!(
+            "bounded lexical n-gram scratch allocation failed: {error}"
+        ))
+    })?;
+    Ok(scratch)
 }
 
 pub(super) fn insert_document_ngrams(
@@ -52,12 +70,7 @@ pub(super) fn insert_document_ngrams(
             ARTIFACT_DOCUMENT_SCRATCH_LIMIT_BYTES
         )));
     }
-    let mut ngrams = Vec::new();
-    ngrams.try_reserve_exact(window_count).map_err(|error| {
-        CodeLexicalArtifactErrorV1::Io(format!(
-            "bounded lexical n-gram scratch allocation failed: {error}"
-        ))
-    })?;
+    let mut ngrams = reserve_ngram_scratch(window_count)?;
     for width in 1..=bytes.len().min(3) {
         ngrams.extend(bytes.windows(width).map(pack_byte_ngram));
     }
@@ -93,4 +106,24 @@ fn pack_byte_ngram(bytes: &[u8]) -> u32 {
         .fold((bytes.len() as u32) << 24, |packed, (index, byte)| {
             packed | (u32::from(*byte) << (index * 8))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{document_ngram_scratch, reserve_ngram_scratch};
+
+    #[test]
+    fn ngram_scratch_charge_equals_a_real_reservation() {
+        for text_len in [0usize, 1, 2, 3, 64, 4_096, 100_000] {
+            let (window_count, scratch_bytes) =
+                document_ngram_scratch(text_len).expect("scratch charge");
+            let scratch = reserve_ngram_scratch(window_count).expect("scratch reservation");
+            assert_eq!(
+                scratch_bytes,
+                scratch.capacity() * std::mem::size_of::<u32>(),
+                "the ledger must charge the reservation's actual capacity, not the request"
+            );
+            assert!(scratch.capacity() >= window_count);
+        }
+    }
 }
