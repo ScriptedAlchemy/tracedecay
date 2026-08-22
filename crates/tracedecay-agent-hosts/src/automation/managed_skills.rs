@@ -45,10 +45,6 @@ impl PostCommitUsageSyncTestGuard {
     pub(super) async fn entered(&self) {
         self.gate.entered.notified().await;
     }
-
-    pub(super) fn release(&self) {
-        self.gate.release.notify_waiters();
-    }
 }
 
 #[cfg(test)]
@@ -416,9 +412,15 @@ pub async fn apply_managed_skill_consolidation(
     let mut revisions: Vec<&ManagedSkill> = target.iter().collect();
     revisions.push(&source);
     persist_skill_transaction_unlocked(profile_root, &revisions)?;
-    let committed_revisions = revisions.into_iter().cloned().collect::<Vec<_>>();
     drop(lock);
-    spawn_consolidation_usage_sync_best_effort(profile_root, committed_revisions);
+    #[cfg(test)]
+    wait_for_post_commit_usage_sync_test_gate().await;
+    for skill in &revisions {
+        if let Err(error) = super::skill_usage::sync_skill_usage_metadata(profile_root, skill).await
+        {
+            tracing::warn!(skill_id = %skill.metadata.id, error = %error, "skill usage metadata reconciliation failed after committed consolidation");
+        }
+    }
 
     Ok(SkillConsolidationResult {
         target_before_checksum: original_target
@@ -697,7 +699,7 @@ pub async fn apply_managed_skill_archive(
     let lock = lock_skill_store_async(profile_root).await?;
     let skill = apply_managed_skill_archive_unlocked(profile_root, id, base_checksum, reason)?;
     drop(lock);
-    spawn_skill_patch_best_effort(profile_root, skill.clone(), "automatic_archive");
+    record_skill_patch_best_effort(profile_root, &skill, "automatic_archive").await;
     Ok(skill)
 }
 
@@ -786,28 +788,6 @@ async fn record_skill_patch_best_effort(profile_root: &Path, skill: &ManagedSkil
     {
         tracing::warn!(skill_id = %skill.metadata.id, target, error = %error, "skill usage patch recording failed after committed skill change");
     }
-}
-
-fn spawn_skill_patch_best_effort(profile_root: &Path, skill: ManagedSkill, target: &'static str) {
-    let profile_root = profile_root.to_path_buf();
-    drop(tokio::spawn(async move {
-        record_skill_patch_best_effort(&profile_root, &skill, target).await;
-    }));
-}
-
-fn spawn_consolidation_usage_sync_best_effort(profile_root: &Path, skills: Vec<ManagedSkill>) {
-    let profile_root = profile_root.to_path_buf();
-    drop(tokio::spawn(async move {
-        #[cfg(test)]
-        wait_for_post_commit_usage_sync_test_gate().await;
-        for skill in &skills {
-            if let Err(error) =
-                super::skill_usage::sync_skill_usage_metadata(&profile_root, skill).await
-            {
-                tracing::warn!(skill_id = %skill.metadata.id, error = %error, "skill usage metadata reconciliation failed after committed consolidation");
-            }
-        }
-    }));
 }
 
 pub async fn disable_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
