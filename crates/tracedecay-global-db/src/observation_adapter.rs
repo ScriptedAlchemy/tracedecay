@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_application::clock::now_micros;
@@ -22,89 +21,33 @@ use tracedecay_store::{
     RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
     RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
-    RuntimeReadOperationV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeReadResultV1,
-    RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
-    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1,
-    StoreOperationIdV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, StoredObservation,
-    StoredObservationRowV1,
+    RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
+    RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
+    StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
 };
 
 use tracedecay_runtime_core::db::{Database, DatabaseRuntimeClientV1};
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
     COMMIT_SOURCE_CURSOR_SQL, READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL,
     RECORD_CURSOR_ADVANCE_SQL, cursor_advance_ledger_row_matches,
 };
 
-/// The closed dispatch boundary between this adapter and the authoritative
-/// store runtime. Every stored-record read and every runtime write the
-/// adapter performs crosses this seam, so an observer wrapped around it sees
-/// exactly the record work one persist call dispatches — the collision tests
-/// prove the terminal-refusal fast path repeats no stored-row read (and thus
-/// no decode, classification, or revision probing) and no submit (and thus no
-/// canonical command digest) by counting here.
-pub(crate) trait ObservationRuntimeDispatch: Clone + Send + Sync {
-    fn binding(&self) -> &StoreRuntimeBindingV1;
-
-    fn dispatch_read(
-        &self,
-        request: RuntimeReadRequestV1,
-        probe: &dyn RuntimeRequestProbeV1,
-    ) -> Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure>;
-
-    fn dispatch_submit(
-        &self,
-        request: RuntimeSubmitRequestV1,
-        probe: Arc<dyn RuntimeRequestProbeV1>,
-    ) -> impl Future<Output = Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure>> + Send;
-}
-
-impl ObservationRuntimeDispatch for DatabaseRuntimeClientV1 {
-    fn binding(&self) -> &StoreRuntimeBindingV1 {
-        DatabaseRuntimeClientV1::binding(self)
-    }
-
-    fn dispatch_read(
-        &self,
-        request: RuntimeReadRequestV1,
-        probe: &dyn RuntimeRequestProbeV1,
-    ) -> Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
-        DatabaseRuntimeClientV1::dispatch_read(self, request, probe)
-    }
-
-    async fn dispatch_submit(
-        &self,
-        request: RuntimeSubmitRequestV1,
-        probe: Arc<dyn RuntimeRequestProbeV1>,
-    ) -> Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure> {
-        DatabaseRuntimeClientV1::dispatch_submit(self, request, probe).await
-    }
-}
-
-/// Observation-store adapter over the already-registered authoritative runtime.
-///
-/// The runtime parameter exists so tests can observe the dispatch seam;
-/// production only ever constructs the default [`DatabaseRuntimeClientV1`]
-/// via [`GlobalDbObservationStore::new`], and the struct shape is identical
-/// in every build.
+/// Observation-store adapter over the already-registered authoritative
+/// runtime. The struct is concrete: the collision tests prove the
+/// terminal-refusal fast path repeats no record work by counting at the
+/// domain's canonicalize-then-hash boundary
+/// (`tracedecay_domain::identity_digest_probe`), not through any adapter
+/// seam.
 #[derive(Clone)]
-pub struct GlobalDbObservationStore<R = DatabaseRuntimeClientV1> {
+pub struct GlobalDbObservationStore {
     database: Database,
-    runtime: R,
+    runtime: DatabaseRuntimeClientV1,
 }
 
 impl GlobalDbObservationStore {
     pub fn new(database: Database) -> Self {
         let runtime = database.runtime_client();
-        Self { database, runtime }
-    }
-}
-
-impl<R> GlobalDbObservationStore<R> {
-    /// Binds the adapter to an explicit runtime dispatch seam so a test can
-    /// count the record work a persist path performs.
-    #[cfg(test)]
-    pub(crate) fn with_runtime_dispatch(database: Database, runtime: R) -> Self {
         Self { database, runtime }
     }
 
@@ -130,10 +73,7 @@ impl<R> GlobalDbObservationStore<R> {
         &self,
         write: &AnchoredObservationWrite,
         retained_digest: &PayloadDigestV1,
-    ) -> ObservationStoreResult<()>
-    where
-        R: ObservationRuntimeDispatch,
-    {
+    ) -> ObservationStoreResult<()> {
         const OPERATION: &str = "record refused admission terminal and coverage";
         let candidate = write.observation();
         let identity = candidate.identity();
@@ -297,7 +237,7 @@ impl<R> GlobalDbObservationStore<R> {
     }
 }
 
-impl<R: ObservationRuntimeDispatch> ObservationStore for GlobalDbObservationStore<R> {
+impl ObservationStore for GlobalDbObservationStore {
     async fn persist_observation(
         &self,
         write: AnchoredObservationWrite,
@@ -719,7 +659,7 @@ impl RuntimeRequestProbeV1 for RuntimeObservationProbe {
 }
 
 fn dispatch_runtime_observation_read(
-    runtime: &impl ObservationRuntimeDispatch,
+    runtime: &DatabaseRuntimeClientV1,
     operation: ObservationReadOperationV1,
 ) -> ObservationStoreResult<ObservationReadResultV1> {
     let command_digest = canonical_sha256(&operation)
@@ -820,7 +760,7 @@ fn stored_observation_from_runtime_row(
 }
 
 fn read_runtime_source_cursor(
-    runtime: &impl ObservationRuntimeDispatch,
+    runtime: &DatabaseRuntimeClientV1,
     source: &ClaudeSourceIdentityV1,
     scope: &ObservationScopeV1,
 ) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
@@ -840,7 +780,7 @@ fn read_runtime_source_cursor(
 }
 
 fn read_runtime_retrieval_anchor_by_alias(
-    runtime: &impl ObservationRuntimeDispatch,
+    runtime: &DatabaseRuntimeClientV1,
     scope: &ObservationScopeV1,
     alias: &tracedecay_domain::NativeAliasV2,
 ) -> ObservationStoreResult<Option<tracedecay_domain::RetrievalAnchorId>> {
@@ -945,7 +885,7 @@ async fn read_admission_refusal(
 }
 
 fn read_runtime_stored_observation(
-    runtime: &impl ObservationRuntimeDispatch,
+    runtime: &DatabaseRuntimeClientV1,
     observation_id: &CanonicalObservationIdV1,
 ) -> ObservationStoreResult<Option<StoredObservation>> {
     match dispatch_runtime_observation_read(
@@ -965,7 +905,7 @@ fn read_runtime_stored_observation(
 }
 
 async fn submit_runtime_write(
-    runtime: &impl ObservationRuntimeDispatch,
+    runtime: &DatabaseRuntimeClientV1,
     payload: RepositoryWritePayloadV1,
     idempotency_key: String,
     operation: &'static str,
@@ -1108,7 +1048,7 @@ fn runtime_storage_error(
     }
 }
 
-impl<R: ObservationRuntimeDispatch> ObservationProjectionStore for GlobalDbObservationStore<R> {
+impl ObservationProjectionStore for GlobalDbObservationStore {
     async fn next_queued_observation(
         &self,
     ) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
