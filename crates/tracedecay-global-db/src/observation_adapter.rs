@@ -35,10 +35,10 @@ use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
 
 /// Observation-store adapter over the already-registered authoritative
 /// runtime. The struct is concrete: the collision tests prove the
-/// terminal-refusal fast path repeats no record work by counting at the
-/// domain's canonicalize-then-hash boundary
-/// (`tracedecay_domain::identity_digest_probe`), not through any adapter
-/// seam.
+/// terminal-refusal fast path repeats no record work behaviorally — they
+/// corrupt the stored row after the marker exists, so any stored-row decode,
+/// identity re-derivation, or payload re-hash fails loudly — not through any
+/// adapter seam or counter instrumentation.
 #[derive(Clone)]
 pub struct GlobalDbObservationStore {
     database: Database,

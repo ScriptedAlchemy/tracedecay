@@ -24,14 +24,17 @@
 //!   replays and gap-shaped candidates leave every ledger untouched;
 //! * only the narrow existing-output collision converges on drain; divergent
 //!   workflow/effect state stays a hard error;
-//! * no-rework is proven at the domain's canonicalize-then-hash boundary
-//!   itself (`tracedecay_domain::identity_digest_probe`): zero identity and
-//!   payload digests with exactly one frontier cursor-read command digest
-//!   means no record content was decoded, derived, or hashed and no extra
-//!   runtime command was dispatched — and by the real sessions JSONL
-//!   `FileBytes` path: zero bytes consumed and zero calls at the fully
-//!   materialized host-admission boundary means no frame was deserialized on
-//!   a subsequent trigger.
+//! * no-rework is proven behaviorally with a corruption tripwire: once the
+//!   terminal refusal marker exists, the stored observation row's payload
+//!   bytes and identity-derivation source columns are corrupted into
+//!   undecodable garbage (an engine fixture the harness sanctions for
+//!   post-admission corruption setup). The marker fast path never touches
+//!   that row, so re-admission still returns the typed `IdentityCollision`
+//!   with converged coverage; any regression that re-decodes, re-derives, or
+//!   re-hashes stored data hits the corrupted bytes and fails loudly — and by
+//!   the real sessions JSONL `FileBytes` path: zero bytes consumed and zero
+//!   calls at the fully materialized host-admission boundary means no frame
+//!   was deserialized on a subsequent trigger.
 
 use serde_json::{Value, json};
 use std::path::Path;
@@ -46,7 +49,7 @@ use tracedecay_domain::{
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, UtcMicros, identity_digest_probe,
+    SessionId, UtcMicros,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationCoverageReason, ObservationPersistOutcome,
@@ -59,22 +62,149 @@ use tracedecay_runtime_core::db::engine::params;
 
 const COLLISION_PROVIDER: &str = "collision-test";
 
-/// One thread-local view of the sanctioned domain digest probe:
-/// `(identity digests, payload digests, canonical command digests)`.
+/// The corrupted `observation_json` the no-rework tripwire writes over a
+/// retained row. It stays syntactically valid JSON with a matching
+/// `observation_id` (production retention bookkeeping and mount-time audits
+/// run `json_valid`/`json_extract` over committed rows), but it fails any
+/// `DurableObservationV1` serde decode, carries no identity-derivation
+/// material to re-derive, and its bytes hash to a digest no canonical
+/// payload could produce.
+fn tripwire_observation_json(observation_id: &str) -> String {
+    json!({
+        "__tripwire": "corrupted stored observation row",
+        "observation_id": observation_id,
+    })
+    .to_string()
+}
+
+/// Corrupted committed-cursor bytes: valid JSON, undecodable as a cursor.
+const TRIPWIRE_CURSOR_JSON: &str = r#"{"__tripwire":"corrupted committed cursor"}"#;
+/// Corrupted stored payload digest: no re-hash of any payload can match it.
+const TRIPWIRE_PAYLOAD_DIGEST: &str = "tripwire:corrupted-payload-digest";
+
+/// The fixture writes through the `observations_immutable_update` guard the
+/// same way production retention's tombstone writer does: drop the trigger,
+/// update inside the same transaction, recreate the trigger.
+const DROP_OBSERVATION_UPDATE_TRIGGER: &str =
+    "DROP TRIGGER IF EXISTS observations_immutable_update";
+const CREATE_OBSERVATION_UPDATE_TRIGGER: &str = "CREATE TRIGGER \
+     observations_immutable_update BEFORE UPDATE ON observations BEGIN \
+     SELECT RAISE(ABORT, 'observations are immutable'); END";
+
+/// One guarded write over a retained row's authority columns, used both to
+/// arm the corruption tripwire and to restore the original bytes.
+async fn overwrite_stored_observation_row(
+    runtime: &HostAdmissionTestRuntimeV1,
+    observation_id: &str,
+    payload_digest: &str,
+    observation_json: &str,
+    committed_cursor_json: &str,
+) {
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(DROP_OBSERVATION_UPDATE_TRIGGER)
+        .await
+        .unwrap();
+    let written = transaction
+        .execute(
+            "UPDATE observations
+             SET payload_digest = ?2, observation_json = ?3, committed_cursor_json = ?4
+             WHERE observation_id = ?1",
+            params![
+                observation_id,
+                payload_digest,
+                observation_json,
+                committed_cursor_json
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(written, 1, "the fixture must rewrite exactly one row");
+    transaction
+        .execute_batch(CREATE_OBSERVATION_UPDATE_TRIGGER)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+/// Original stored-row authority bytes captured before the tripwire arms, so
+/// restart-bearing tests can restore the row before remount — mount-time
+/// invariant convergence legitimately decodes committed observation rows.
+struct StoredRowBytes {
+    payload_digest: String,
+    observation_json: String,
+    committed_cursor_json: String,
+}
+
+/// Arms the no-rework corruption tripwire on one retained observation row —
+/// an engine fixture for post-admission corruption setup, which the harness
+/// doc explicitly sanctions.
 ///
-/// Identity and payload digests are record work: every fresh identity
-/// derivation, every stored-row decode (which re-derives and verifies the
-/// identity), and every payload-content hash increments them. Canonical
-/// command digests are computed on the calling thread before every runtime
-/// read or submit crosses the dispatch boundary, so their delta also bounds
-/// dispatched record work — a stored-row read whose decode would land on the
-/// reader thread still costs its command digest here first.
-fn digest_counts() -> (u64, u64, u64) {
-    (
-        identity_digest_probe::identity_digests(),
-        identity_digest_probe::payload_digests(),
-        identity_digest_probe::canonical_digests(),
+/// The refusal fast path's contract is that a re-admitted identical candidate
+/// is answered from the `observation_admission_refusals` marker and the
+/// frontier cursor with bare-column reads; it never touches the retained
+/// `observations` row. Overwriting that row's payload bytes and
+/// identity-derivation source columns with undecodable garbage turns the
+/// contract into a behavioral proof: if a regression reintroduces stored-row
+/// decode, identity re-derivation, or payload re-hashing on the fast path,
+/// the corrupted bytes make it fail loudly instead of passing silently.
+async fn corrupt_stored_observation_row(
+    runtime: &HostAdmissionTestRuntimeV1,
+    observation_id: &str,
+) -> StoredRowBytes {
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let snapshot = database.read_snapshot().await.expect("read snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT payload_digest, observation_json, committed_cursor_json
+             FROM observations WHERE observation_id = ?1",
+            params![observation_id],
+        )
+        .await
+        .expect("query retained observation row");
+    let row = rows
+        .next()
+        .await
+        .expect("read retained observation row")
+        .expect("retained observation row");
+    let original = StoredRowBytes {
+        payload_digest: row.get::<String>(0).unwrap(),
+        observation_json: row.get::<String>(1).unwrap(),
+        committed_cursor_json: row.get::<String>(2).unwrap(),
+    };
+    drop(rows);
+    overwrite_stored_observation_row(
+        runtime,
+        observation_id,
+        TRIPWIRE_PAYLOAD_DIGEST,
+        &tripwire_observation_json(observation_id),
+        TRIPWIRE_CURSOR_JSON,
     )
+    .await;
+    original
+}
+
+/// Restores the original stored-row bytes captured by
+/// [`corrupt_stored_observation_row`], disarming the tripwire before a
+/// remount whose invariant convergence legitimately decodes committed rows.
+async fn restore_stored_observation_row(
+    runtime: &HostAdmissionTestRuntimeV1,
+    observation_id: &str,
+    original: &StoredRowBytes,
+) {
+    overwrite_stored_observation_row(
+        runtime,
+        observation_id,
+        &original.payload_digest,
+        &original.observation_json,
+        &original.committed_cursor_json,
+    )
+    .await;
 }
 
 fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
@@ -588,7 +718,6 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
         "receipt.identity-collision.readmitted.rewritten",
         committed_cursor,
     );
-    let before_first = digest_counts();
     let first = store
         .persist_observation(rewritten_write.clone())
         .await
@@ -603,15 +732,13 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
         ),
         "{first:?}"
     );
-    let before = digest_counts();
-    // Non-vacuity anchor: the first collision classifies against the stored
-    // row and converges coverage, so the probe must have counted its
-    // stored-row read and frontier cursor-read command digests.
-    assert!(
-        before.2 - before_first.2 >= 2,
-        "the first collision must digest its stored-row read and frontier cursor-read \
-         commands at the counted canonical boundary"
-    );
+
+    // The terminal marker now exists. Arm the corruption tripwire: overwrite
+    // the retained row's payload bytes and identity-derivation source columns
+    // with undecodable garbage. The marker fast path never reads that row, so
+    // re-admission must be unaffected; any regression that re-decodes,
+    // re-derives, or re-hashes stored data now fails loudly.
+    corrupt_stored_observation_row(&runtime, original.observation_id().as_str()).await;
 
     // A later catch-up pass or temporal trigger re-presents the exact same
     // candidate with its now-stale expected cursor.
@@ -627,31 +754,16 @@ async fn re_admitted_identity_collision_short_circuits_without_decode_or_hash() 
                 ..
             }
         ),
-        "{second:?}"
+        "re-admission over the corrupted retained row must stay the typed terminal \
+         collision — any stored-row decode, identity re-derivation, or payload re-hash \
+         would have failed on the tripwire bytes; {second:?}"
     );
-
-    let after = digest_counts();
+    // The corrupted bytes are untouched: the fast path performed no repair,
+    // rewrite, or decode-and-rewrite of the retained row either.
     assert_eq!(
-        after.0 - before.0,
-        0,
-        "re-admitted terminal collision must not derive or verify an observation \
-         identity — zero identity digests proves the stored row was never decoded and \
-         the candidate identity never re-derived"
-    );
-    assert_eq!(
-        after.1 - before.1,
-        0,
-        "re-admitted terminal collision must not canonicalize or hash any payload"
-    );
-    // Exactly one canonical command digest: the frontier source-cursor read
-    // inside the atomic coverage convergence. Its presence proves the probe
-    // stayed live inside the asserted window; a second digest would mean a
-    // stored-row read or a runtime submit crept back into the fast path.
-    assert_eq!(
-        after.2 - before.2,
-        1,
-        "re-admitted terminal collision dispatches exactly one typed command — the \
-         frontier source-cursor read; anything more is re-introduced record work"
+        raw_observation_json(&runtime, original.observation_id().as_str()).await,
+        tripwire_observation_json(original.observation_id().as_str()),
+        "the fast path must not read back or rewrite the retained observation row"
     );
     // The terminal coverage stays single-row and the cursor stays put.
     assert_eq!(
@@ -743,25 +855,28 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
     );
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
 
-    let before = digest_counts();
+    // Arm the corruption tripwire before re-admission: the fast path must
+    // answer from the marker without touching the corrupted retained row.
+    corrupt_stored_observation_row(&runtime, original.observation_id().as_str()).await;
     let second = store
         .persist_observation(replacement_write)
         .await
         .unwrap_err();
-    assert!(matches!(
-        second,
-        ObservationStoreError::ObservationCollision {
-            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
-            ..
-        }
-    ));
-    let after = digest_counts();
+    assert!(
+        matches!(
+            second,
+            ObservationStoreError::ObservationCollision {
+                outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+                ..
+            }
+        ),
+        "re-admission over the corrupted retained row must stay the typed terminal \
+         collision; {second:?}"
+    );
     assert_eq!(
-        (after.0 - before.0, after.1 - before.1, after.2 - before.2),
-        (0, 0, 1),
-        "re-admission must not derive an identity or hash a payload (zero record work at \
-         the domain digest boundary) and dispatches exactly one typed command — the \
-         frontier cursor read"
+        raw_observation_json(&runtime, original.observation_id().as_str()).await,
+        tripwire_observation_json(original.observation_id().as_str()),
+        "the fast path must not read back or rewrite the retained observation row"
     );
 }
 
@@ -1054,7 +1169,8 @@ async fn admission_refusal_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<(St
 }
 
 /// Raw `observation_json` column for one retained row, read without decoding
-/// so byte-exact immutability can be asserted outside any probe window.
+/// so byte-exact immutability (or an untouched tripwire corruption) can be
+/// asserted directly.
 async fn raw_observation_json(
     runtime: &HostAdmissionTestRuntimeV1,
     observation_id: &str,
@@ -1078,18 +1194,6 @@ async fn raw_observation_json(
         .expect("decode retained observation column")
 }
 
-/// Boundary accounting for one record a catch-up pass decoded and persisted.
-struct CatchUpRecordReceipt {
-    result: Result<ObservationPersistOutcome, ObservationStoreError>,
-    /// Domain digest-probe deltas across the persist call, measured at the
-    /// canonicalize-then-hash boundary itself (see [`digest_counts`]):
-    /// `(identity digests, payload digests, canonical command digests)`.
-    /// `(0, 0, 1)` proves the persist call decoded, derived, and hashed no
-    /// record content and dispatched exactly one typed command — the
-    /// frontier cursor read of the atomic coverage convergence.
-    digest_deltas: (u64, u64, u64),
-}
-
 /// One real catch-up pass over raw persisted source input: read the durable
 /// cursor, decode only the records the cursor does not cover, and persist
 /// each decoded candidate exactly as ingest would. Mirrors production provider ingest by
@@ -1101,7 +1205,10 @@ async fn run_catch_up_pass(
     generation: u64,
     raw_lines: &[((u64, u64), String)],
     pass_label: &str,
-) -> (usize, Vec<CatchUpRecordReceipt>) {
+) -> (
+    usize,
+    Vec<Result<ObservationPersistOutcome, ObservationStoreError>>,
+) {
     let provider = ProviderId::new(COLLISION_PROVIDER).unwrap();
     let source = ObservationSourceIdentityV1::for_provider(provider, session_id.clone()).unwrap();
     let scope = ObservationScopeV1::Profile;
@@ -1127,14 +1234,9 @@ async fn run_catch_up_pass(
             &format!("receipt.catch-up.{pass_label}.{index}"),
         );
         let write = anchored_write_for(observation, cursor);
-        let before = digest_counts();
         let result = store.persist_observation(write).await;
-        let after = digest_counts();
         let aborted = result.is_err();
-        receipts.push(CatchUpRecordReceipt {
-            result,
-            digest_deltas: (after.0 - before.0, after.1 - before.1, after.2 - before.2),
-        });
+        receipts.push(result);
         if aborted {
             break;
         }
@@ -1697,7 +1799,7 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
         run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
     assert_eq!(decoded, 1);
     assert!(matches!(
-        receipts[0].result,
+        receipts[0],
         Ok(ObservationPersistOutcome::Committed(_))
     ));
 
@@ -1709,7 +1811,7 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
         run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
     assert_eq!(decoded, 1, "the collision aborts the pass");
     assert!(matches!(
-        receipts[0].result,
+        receipts[0],
         Err(ObservationStoreError::ObservationCollision {
             outcome: ObservationCollisionOutcomeV1::IdentityCollision,
             ..
@@ -1719,7 +1821,7 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
         run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-resume").await;
     assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
     assert!(matches!(
-        receipts[0].result,
+        receipts[0],
         Ok(ObservationPersistOutcome::Committed(_))
     ));
     let refused = decode_raw_source_record(
@@ -1731,6 +1833,12 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     );
     let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+
+    // The terminal marker exists: arm the corruption tripwire on the retained
+    // row. Every later pass in this test — catch-up, production retention,
+    // the stale re-admission — must complete without touching it.
+    let original_row =
+        corrupt_stored_observation_row(&runtime, refused.observation_id().as_str()).await;
 
     // Pass 2: a later catch-up pass reopens nothing.
     let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
@@ -1774,10 +1882,11 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     );
 
     // A stale in-flight re-admission (a temporal trigger re-presenting the
-    // refused candidate without a current frontier view) still terminates
-    // with zero decode/derive/hash work.
+    // refused candidate without a current frontier view) still terminates.
+    // The armed tripwire is the no-rework proof: any stored-row decode,
+    // identity re-derivation, or payload re-hash would fail on the corrupted
+    // bytes instead of producing this typed refusal.
     let stale_replay = anchored_write_for(refused.clone(), None);
-    let before = digest_counts();
     let error = store.persist_observation(stale_replay).await.unwrap_err();
     assert!(
         matches!(
@@ -1789,13 +1898,16 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
         ),
         "{error:?}"
     );
-    let after = digest_counts();
     assert_eq!(
-        (after.0 - before.0, after.1 - before.1, after.2 - before.2),
-        (0, 0, 1),
-        "the stale re-admission must decode, derive, and hash no record content at the \
-         domain digest boundary, dispatching only the frontier cursor-read command"
+        raw_observation_json(&runtime, refused.observation_id().as_str()).await,
+        tripwire_observation_json(refused.observation_id().as_str()),
+        "no pass may read back, repair, or rewrite the corrupted retained row"
     );
+
+    // Disarm the tripwire before remount: mount-time invariant convergence
+    // legitimately decodes committed observation rows.
+    restore_stored_observation_row(&runtime, refused.observation_id().as_str(), &original_row)
+        .await;
 
     // Restart: the terminal and coverage are durable, catch-up still reopens
     // nothing, and the retained row is byte-identical.
@@ -1826,13 +1938,13 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
 /// re-admits the refused record and must be suppressed by the retained
 /// terminal with ZERO store-side decode/canonicalize/SHA work.
 ///
-/// Deltas at the domain's canonicalize-then-hash boundary itself
-/// (`tracedecay_domain::identity_digest_probe`) prove no identity is derived
-/// or verified, no payload is hashed, and only the single frontier
-/// cursor-read command is digested — so the retained row is never read back,
-/// decoded, collision classified, or revision-probed. The real Vibe journey
-/// below separately proves the production source boundary performs no
-/// subsequent frame materialization.
+/// The no-rework proof is the corruption tripwire: the retained row's
+/// payload bytes and identity-derivation source columns are garbage for the
+/// whole re-admission window, so the typed suppression can only come from
+/// the marker fast path — the retained row is never read back, decoded,
+/// collision classified, or revision-probed. The real Vibe journey below
+/// separately proves the production source boundary performs no subsequent
+/// frame materialization.
 #[tokio::test]
 async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework() {
     use crate::observation::retention::{ObservationRetentionConfig, RetentionMode};
@@ -1882,14 +1994,14 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
         run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
     assert_eq!(decoded, 1);
     assert!(matches!(
-        receipts[0].result,
+        receipts[0],
         Ok(ObservationPersistOutcome::Committed(_))
     ));
     let (decoded, receipts) =
         run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
     assert_eq!(decoded, 1, "the collision aborts the pass like production");
     assert!(matches!(
-        receipts[0].result,
+        receipts[0],
         Err(ObservationStoreError::ObservationCollision {
             outcome: ObservationCollisionOutcomeV1::IdentityCollision,
             ..
@@ -1899,7 +2011,7 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
         run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-resume").await;
     assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
     assert!(matches!(
-        receipts[0].result,
+        receipts[0],
         Ok(ObservationPersistOutcome::Committed(_))
     ));
     let refused = decode_raw_source_record(
@@ -1910,6 +2022,11 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
         "receipt.catch-up.gen2.0",
     );
     let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
+
+    // Arm the corruption tripwire: retention, the gen-3 re-admission, and
+    // every later pass must complete without touching the retained row.
+    let original_row =
+        corrupt_stored_observation_row(&runtime, refused.observation_id().as_str()).await;
 
     // Run production retention: the superseded admission_refused advance row
     // is reclaimed, the refusal terminal survives.
@@ -1941,24 +2058,18 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
         decoded, 1,
         "a rescan after a real file change re-reads the raw source and aborts on the collision"
     );
-    let refused_readmit = &receipts[0];
     assert!(
         matches!(
-            refused_readmit.result,
+            receipts[0],
             Err(ObservationStoreError::ObservationCollision {
                 outcome: ObservationCollisionOutcomeV1::IdentityCollision,
                 ..
             })
         ),
-        "{:?}",
-        refused_readmit.result
-    );
-    assert_eq!(
-        refused_readmit.digest_deltas,
-        (0, 0, 1),
-        "the re-admit must derive no identity and hash no payload, and may digest only \
-         the frontier cursor-read command; coverage converges inside one direct \
-         authority transaction with no record work"
+        "the re-admission over the corrupted retained row must stay the typed terminal \
+         collision — any stored-row decode, identity re-derivation, or payload re-hash \
+         would have failed on the tripwire bytes; {:?}",
+        receipts[0]
     );
     // The suppression above was answered by the retained refusal terminal:
     // it must have survived cursor-advance retention.
@@ -1972,11 +2083,21 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
     let (decoded, receipts) =
         run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-resume").await;
     assert_eq!(decoded, 1, "the resumed pass skips the refused coverage");
-    assert!(receipts[0].result.is_ok(), "{:?}", receipts[0].result);
+    assert!(receipts[0].is_ok(), "{:?}", receipts[0]);
     let (decoded, _) = run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-b").await;
     assert_eq!(decoded, 0, "the converged rescan reopens no source records");
 
-    // Immutable old row: byte-identical after every pass.
+    // The corrupted bytes are untouched: no pass read back, repaired, or
+    // rewrote the retained row.
+    assert_eq!(
+        raw_observation_json(&runtime, refused.observation_id().as_str()).await,
+        tripwire_observation_json(refused.observation_id().as_str()),
+        "no pass may read back, repair, or rewrite the corrupted retained row"
+    );
+    // Disarm the tripwire; the restored row is byte-identical to the
+    // pre-corruption capture.
+    restore_stored_observation_row(&runtime, refused.observation_id().as_str(), &original_row)
+        .await;
     assert_eq!(
         raw_observation_json(&runtime, refused.observation_id().as_str()).await,
         retained_row,
@@ -1989,7 +2110,8 @@ async fn post_retention_rescan_re_admits_from_raw_source_without_terminal_rework
 /// committed record can ever advance coverage on its behalf. Across
 /// production retention, a new generation, and a full restart, the refusal
 /// fast path itself must converge each new scan frontier so later passes
-/// reopen nothing — zero decode, zero identity derivation, zero hashing.
+/// reopen nothing — zero decode, zero identity derivation, zero hashing,
+/// proven by keeping the retained row corrupted for the whole window.
 #[tokio::test]
 async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
     use crate::observation::retention::{ObservationRetentionConfig, RetentionMode};
@@ -2016,7 +2138,7 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
         run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
     assert_eq!(decoded, 1);
     assert!(matches!(
-        receipts[0].result,
+        receipts[0],
         Ok(ObservationPersistOutcome::Committed(_))
     ));
 
@@ -2026,7 +2148,7 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
         run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
     assert_eq!(decoded, 1);
     assert!(matches!(
-        receipts[0].result,
+        receipts[0],
         Err(ObservationStoreError::ObservationCollision {
             outcome: ObservationCollisionOutcomeV1::IdentityCollision,
             ..
@@ -2040,6 +2162,11 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
         "receipt.catch-up.gen2.0",
     );
     let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
+
+    // Arm the corruption tripwire: retention, the gen-3 re-admission, and
+    // every later pass must complete without touching the retained row.
+    let original_row =
+        corrupt_stored_observation_row(&runtime, refused.observation_id().as_str()).await;
     let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
     assert_eq!(
         decoded, 0,
@@ -2067,23 +2194,18 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
     let (decoded, receipts) =
         run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3").await;
     assert_eq!(decoded, 1);
-    let readmit = &receipts[0];
     assert!(
         matches!(
-            readmit.result,
+            receipts[0],
             Err(ObservationStoreError::ObservationCollision {
                 outcome: ObservationCollisionOutcomeV1::IdentityCollision,
                 ..
             })
         ),
-        "{:?}",
-        readmit.result
-    );
-    assert_eq!(
-        readmit.digest_deltas,
-        (0, 0, 1),
-        "the EOF re-admit converges coverage atomically with no record work — zero \
-         identity and payload digests, one frontier cursor-read command digest"
+        "the EOF re-admit over the corrupted retained row must stay the typed terminal \
+         collision — any stored-row decode, identity re-derivation, or payload re-hash \
+         would have failed on the tripwire bytes; {:?}",
+        receipts[0]
     );
     let (decoded, _) = run_catch_up_pass(&store, &session_id, 3, &rewritten_lines, "gen3-b").await;
     assert_eq!(
@@ -2103,6 +2225,16 @@ async fn eof_refusal_converges_new_generation_rescans_without_reopening() {
         .await
         .expect("apply observation retention");
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    assert_eq!(
+        raw_observation_json(&runtime, refused.observation_id().as_str()).await,
+        tripwire_observation_json(refused.observation_id().as_str()),
+        "no pass may read back, repair, or rewrite the corrupted retained row"
+    );
+
+    // Disarm the tripwire before remount: mount-time invariant convergence
+    // legitimately decodes committed observation rows.
+    restore_stored_observation_row(&runtime, refused.observation_id().as_str(), &original_row)
+        .await;
 
     // Restart: coverage and terminal are durable; nothing reopens.
     drop(store);
@@ -2154,7 +2286,7 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
         run_catch_up_pass(&store, &session_id, 1, &original_lines, "gen1").await;
     assert_eq!(decoded, 1);
     assert!(matches!(
-        receipts[0].result,
+        receipts[0],
         Ok(ObservationPersistOutcome::Committed(_))
     ));
 
@@ -2196,28 +2328,28 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
     let retained_row = raw_observation_json(&runtime, refused.observation_id().as_str()).await;
 
+    // Arm the corruption tripwire: the orphan-marker repair must answer from
+    // the marker and the frontier cursor without touching the retained row.
+    let original_row =
+        corrupt_stored_observation_row(&runtime, refused.observation_id().as_str()).await;
+
     // The next frontier pass re-admits the record from raw source: the
     // orphaned marker must answer it AND repair the missing coverage.
     let (decoded, receipts) =
         run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2").await;
     assert_eq!(decoded, 1);
-    let repair = &receipts[0];
     assert!(
         matches!(
-            repair.result,
+            receipts[0],
             Err(ObservationStoreError::ObservationCollision {
                 outcome: ObservationCollisionOutcomeV1::IdentityCollision,
                 ..
             })
         ),
-        "{:?}",
-        repair.result
-    );
-    assert_eq!(
-        repair.digest_deltas,
-        (0, 0, 1),
-        "the orphan-marker re-admit repairs coverage atomically with no record work — \
-         zero identity and payload digests, one frontier cursor-read command digest"
+        "the orphan-marker re-admit over the corrupted retained row must stay the typed \
+         terminal collision — any stored-row decode, identity re-derivation, or payload \
+         re-hash would have failed on the tripwire bytes; {:?}",
+        receipts[0]
     );
 
     // Coverage is repaired: later passes never reopen the record, even after
@@ -2225,6 +2357,16 @@ async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
     let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
     assert_eq!(decoded, 0, "repaired coverage must not reopen the record");
     assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    assert_eq!(
+        raw_observation_json(&runtime, refused.observation_id().as_str()).await,
+        tripwire_observation_json(refused.observation_id().as_str()),
+        "no pass may read back, repair, or rewrite the corrupted retained row"
+    );
+
+    // Disarm the tripwire before remount: mount-time invariant convergence
+    // legitimately decodes committed observation rows.
+    restore_stored_observation_row(&runtime, refused.observation_id().as_str(), &original_row)
+        .await;
     drop(store);
     drop(runtime);
     let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path())
