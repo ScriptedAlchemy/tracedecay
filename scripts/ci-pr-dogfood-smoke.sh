@@ -9,6 +9,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_PATH="$REPO_ROOT/scripts/ci-pr-dogfood-smoke.sh"
 DAEMON_HARNESS="$REPO_ROOT/scripts/with-isolated-tracedecay-daemon.sh"
+OUTPUT_VALIDATOR="$REPO_ROOT/scripts/check-pr-dogfood-output.py"
 WORK_DIR=""
 
 cleanup() {
@@ -50,53 +51,17 @@ run_timed() {
   fi
 }
 
-validate_json() {
-  local kind="$1"
-  local path="$2"
-  python3 - "$kind" "$path" <<'PY'
-import json
-import sys
-
-kind, path = sys.argv[1:]
-with open(path, encoding="utf-8") as handle:
-    value = json.load(handle)
-if not isinstance(value, dict):
-    raise SystemExit(f"{kind} output must be a JSON object")
-
-if kind == "status":
-    if not value:
-        raise SystemExit("status output must not be empty")
-elif kind == "context":
-    coverage = value.get("coverage")
-    if not isinstance(coverage, dict) or not coverage:
-        raise SystemExit("context must return typed retrieval coverage")
-elif kind == "pr_context":
-    for key in ("base_oid", "head_oid", "merge_base"):
-        if not isinstance(value.get(key), str) or not value[key]:
-            raise SystemExit(f"pr_context must return {key}")
-    changes = value.get("changes")
-    if not isinstance(changes, list) or not changes:
-        raise SystemExit("pr_context must return changed-file evidence")
-    if value.get("files_changed") != len(changes):
-        raise SystemExit("pr_context changed-file count must match its evidence")
-    coverage = value.get("analysis_coverage")
-    if not isinstance(coverage, dict) or not isinstance(coverage.get("complete"), bool):
-        raise SystemExit("pr_context must return typed analysis coverage")
-    graph = value.get("verified_graph_evidence")
-    if graph is not None:
-        if graph.get("status") != "unavailable" or not graph.get("reason_code"):
-            raise SystemExit("cold graph evidence must be typed unavailable")
-else:
-    raise SystemExit(f"unknown validation kind: {kind}")
-PY
-}
-
 run_smoke() {
   local project_root="$1"
   local base_ref="$2"
   local head_ref="$3"
   local output_dir="$4"
   local binary="$TRACEDECAY_BIN"
+  local base_oid head_oid merge_base
+
+  base_oid="$(git -C "$project_root" rev-parse "$base_ref^{commit}")"
+  head_oid="$(git -C "$project_root" rev-parse "$head_ref^{commit}")"
+  merge_base="$(git -C "$project_root" merge-base "$base_ref" "$head_ref")"
 
   echo "tracedecay_ci_checkout head=$(git -C "$project_root" rev-parse HEAD) base=$base_ref"
   echo "tracedecay_ci_binary path=$binary version=$($binary --version)"
@@ -109,23 +74,25 @@ run_smoke() {
 
   run_timed status 60 "$output_dir/status.json" "$output_dir/status.stderr" \
     "$binary" status --json "$project_root"
-  validate_json status "$output_dir/status.json"
+  python3 "$OUTPUT_VALIDATOR" --kind status --input "$output_dir/status.json"
 
   run_timed context 90 "$output_dir/context.json" "$output_dir/context.stderr" \
     "$binary" tool context --project "$project_root" \
       --task "Locate the TraceDecay CLI entry point and report available evidence." \
       --format json
-  validate_json context "$output_dir/context.json"
+  python3 "$OUTPUT_VALIDATOR" --kind context --input "$output_dir/context.json"
 
   run_timed pr_context 90 "$output_dir/pr-context.json" "$output_dir/pr-context.stderr" \
     "$binary" tool pr_context --project "$project_root" \
       --base-ref "$base_ref" --head-ref "$head_ref" --format json
-  validate_json pr_context "$output_dir/pr-context.json"
+  python3 "$OUTPUT_VALIDATOR" --kind pr_context \
+    --input "$output_dir/pr-context.json" \
+    --base-oid "$base_oid" --head-oid "$head_oid" --merge-base "$merge_base"
 
   run_timed runtime_status 60 "$output_dir/runtime-status.json" \
     "$output_dir/runtime-status.stderr" \
     "$binary" status --json --runtime "$project_root"
-  validate_json status "$output_dir/runtime-status.json"
+  python3 "$OUTPUT_VALIDATOR" --kind status --input "$output_dir/runtime-status.json"
 
   echo "tracedecay_ci_dogfood outcome=complete"
 }
