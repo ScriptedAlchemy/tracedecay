@@ -284,6 +284,40 @@ async fn table_count(runtime: &HostAdmissionTestRuntimeV1, table: &str) -> i64 {
 
 type ProvenanceRow = (String, String, i64, String, String, String, String, i64);
 
+/// Projected `sessions` row captured verbatim from a clean drain.
+type ProjectedSessionRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+    Option<String>,
+);
+
+/// Projected `session_messages` row captured verbatim from a clean drain.
+type ProjectedMessageRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<i64>,
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+);
+
 async fn provenance_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<ProvenanceRow> {
     let database = runtime
         .registered_database(HostAdmissionScope::Profile)
@@ -1947,21 +1981,7 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
         .await
         .unwrap();
     let session_row = rows.next().await.unwrap().expect("projected session row");
-    let projected_session: (
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        i64,
-        Option<String>,
-        Option<String>,
-    ) = (
+    let projected_session: ProjectedSessionRow = (
         session_row.get(0).unwrap(),
         session_row.get(1).unwrap(),
         session_row.get(2).unwrap(),
@@ -1987,21 +2007,7 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
         .await
         .unwrap();
     let message_row = rows.next().await.unwrap().expect("projected message row");
-    let projected_message: (
-        String,
-        String,
-        String,
-        String,
-        Option<i64>,
-        i64,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-    ) = (
+    let projected_message: ProjectedMessageRow = (
         message_row.get(0).unwrap(),
         message_row.get(1).unwrap(),
         message_row.get(2).unwrap(),
