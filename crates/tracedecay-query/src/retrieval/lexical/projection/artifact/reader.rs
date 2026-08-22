@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -27,7 +28,7 @@ use super::{
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
-    RetrievalPortError, contract_error,
+    RetrievalPortError, contract_error, lane_candidate_cap,
 };
 
 use super::super::{
@@ -37,7 +38,8 @@ use super::super::{
     substring_count,
 };
 use crate::retrieval::lexical::{
-    LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1,
+    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
+    MAX_FUZZY_TERM_EXPANSIONS_V1, field_admitted,
 };
 
 #[derive(Clone)]
@@ -420,16 +422,35 @@ impl<'a> ArtifactQueryV1<'a> {
             phrase_frequencies.insert(phrase.clone(), frequency);
         }
         let documents = self.lexical_documents(request, &fuzzy, &phrase_candidates)?;
+        // Selection precedes hydration: the scan holds one transient row at
+        // a time and a bounded worst-first heap of ranking keys, so retained
+        // materialization never exceeds the lane candidate cap.
+        let cap = lane_candidate_cap(&request.budget, &request.base.budget);
         let mut excluded = self.document_count as u64 - documents.len();
-        let mut pairs = Vec::new();
+        let mut eligible = 0u64;
+        let mut ranked = BinaryHeap::new();
         for document in documents {
             let row = self.row(document)?;
             let score = self.score_row(document, &row, request, &fuzzy, &phrase_frequencies)?;
-            if score.field_scores.is_empty() {
+            let Some(ranking) = admitted_score_micros(&score, &request.field_filters)? else {
                 excluded += 1;
                 continue;
-            }
-            let candidate = candidate(
+            };
+            eligible += 1;
+            retain_bounded(
+                &mut ranked,
+                cap,
+                (Reverse(ranking), row.id.as_str().to_owned(), document),
+            );
+        }
+        let selected = ranked.into_sorted_vec();
+        let truncated = eligible - selected.len() as u64;
+        let mut candidates = Vec::with_capacity(selected.len());
+        let mut evidence_by_occurrence = BTreeMap::new();
+        for (ordinal, (_, _, document)) in selected.into_iter().enumerate() {
+            let row = self.row(document)?;
+            let score = self.score_row(document, &row, request, &fuzzy, &phrase_frequencies)?;
+            let mut candidate = candidate(
                 self.receipt,
                 &row,
                 RetrieverKind::Lexical,
@@ -437,6 +458,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 request.score_domain.clone(),
                 None,
             )?;
+            candidate.ordinal_rank = ordinal as u32;
             let evidence = LexicalLaneEvidence {
                 binding: binding(&row, &candidate, score.matched_kinds),
                 field_scores_micros: score.field_scores,
@@ -446,9 +468,17 @@ impl<'a> ArtifactQueryV1<'a> {
                 typo_recovery_applied: score.typo_recovery_applied,
                 echo_penalty_applied: score.echo_penalty_applied,
             };
-            pairs.push((candidate, evidence));
+            evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
+            candidates.push(candidate);
         }
-        Ok(ordered_batch(self.document_count, excluded, pairs))
+        Ok(capped_batch(
+            self.document_count,
+            eligible,
+            excluded,
+            truncated,
+            candidates,
+            evidence_by_occurrence,
+        ))
     }
 
     fn exact_batch<A: ExactAdmissionAuthority>(
@@ -457,15 +487,38 @@ impl<'a> ArtifactQueryV1<'a> {
         authority: &A,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
         let documents = self.exact_documents(request)?;
+        // Same bounded selection as the lexical lane: keys mirror the exact
+        // lane's canonical order (admitted literal count, then occurrence),
+        // and only the selected winners are rehydrated into evidence.
+        let cap = lane_candidate_cap(&request.budget, &request.base.budget);
         let mut excluded = self.document_count as u64 - documents.len();
-        let mut pairs = Vec::new();
+        let mut eligible = 0u64;
+        let mut ranked = BinaryHeap::new();
         for document in documents {
             let row = self.row(document)?;
-            let (matched_literals, matched_kinds) = exact_matches_artifact(&row, request);
+            let (matched_literals, _) = exact_matches_artifact(&row, request);
             if matched_literals.is_empty() {
                 excluded += 1;
                 continue;
             }
+            eligible += 1;
+            retain_bounded(
+                &mut ranked,
+                cap,
+                (
+                    Reverse(matched_literals.len()),
+                    row.id.as_str().to_owned(),
+                    document,
+                ),
+            );
+        }
+        let selected = ranked.into_sorted_vec();
+        let truncated = eligible - selected.len() as u64;
+        let mut candidates = Vec::with_capacity(selected.len());
+        let mut evidence_by_occurrence = BTreeMap::new();
+        for (ordinal, (_, _, document)) in selected.into_iter().enumerate() {
+            let row = self.row(document)?;
+            let (matched_literals, matched_kinds) = exact_matches_artifact(&row, request);
             let proof = matched_literals
                 .iter()
                 .find_map(|literal| {
@@ -480,7 +533,7 @@ impl<'a> ArtifactQueryV1<'a> {
                         "central authority rejected every artifact exact match".to_owned(),
                     )
                 })?;
-            let candidate = candidate(
+            let mut candidate = candidate(
                 self.receipt,
                 &row,
                 RetrieverKind::ExactLiteral,
@@ -488,17 +541,22 @@ impl<'a> ArtifactQueryV1<'a> {
                 self.metadata.exact_score_domain.clone(),
                 Some(proof.clone()),
             )?;
+            candidate.ordinal_rank = ordinal as u32;
             let evidence = ExactLaneEvidence {
                 binding: binding(&row, &candidate, matched_kinds),
                 matched_literals,
                 admission_proof: proof,
             };
-            pairs.push((candidate, evidence));
+            evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
+            candidates.push(candidate);
         }
-        Ok(RetrieverOutcome::Complete(ordered_batch(
+        Ok(RetrieverOutcome::Complete(capped_batch(
             self.document_count,
+            eligible,
             excluded,
-            pairs,
+            truncated,
+            candidates,
+            evidence_by_occurrence,
         )))
     }
 
@@ -976,29 +1034,56 @@ fn binding(
     }
 }
 
-fn ordered_batch<E>(
-    examined: usize,
-    excluded: u64,
-    mut pairs: Vec<(CompactCandidate, E)>,
-) -> RetrieverBatch<E> {
-    pairs.sort_by(|left, right| {
-        left.0
-            .source_occurrence_id
-            .cmp(&right.0.source_occurrence_id)
-    });
-    let mut candidates = Vec::with_capacity(pairs.len());
-    let mut evidence_by_occurrence = BTreeMap::new();
-    for (ordinal, (mut candidate, evidence)) in pairs.into_iter().enumerate() {
-        candidate.ordinal_rank = ordinal as u32;
-        evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
-        candidates.push(candidate);
+/// Retain at most `cap` best-ranked entries in a worst-first max-heap.
+///
+/// The heap key ranks worst entries greatest, so popping after an over-cap
+/// push always evicts the current worst. Between calls the heap never holds
+/// more than `cap` entries, which bounds retained materialization to the
+/// lane candidate cap before any winner is hydrated.
+fn retain_bounded<K: Ord>(ranked: &mut BinaryHeap<K>, cap: usize, entry: K) {
+    if cap == 0 {
+        return;
     }
+    ranked.push(entry);
+    if ranked.len() > cap {
+        ranked.pop();
+    }
+}
+
+/// The lexical ranking key: the checked sum of the filter-admitted field
+/// scores, or `None` when the typed field filters admit no scored field —
+/// the same exclusion the lexical lane applies after the port returns.
+fn admitted_score_micros(
+    score: &LexicalRowScoreV1,
+    filters: &[LexicalFieldFilterV1],
+) -> Result<Option<u64>, RetrievalPortError> {
+    let mut total: Option<u64> = None;
+    for (field, micros) in &score.field_scores {
+        if !field_admitted(filters, *field) {
+            continue;
+        }
+        let sum = total.unwrap_or(0).checked_add(*micros).ok_or_else(|| {
+            RetrievalPortError::Contract("lexical artifact ranking score overflowed".to_owned())
+        })?;
+        total = Some(sum);
+    }
+    Ok(total)
+}
+
+fn capped_batch<E>(
+    examined: usize,
+    eligible: u64,
+    excluded: u64,
+    truncated: u64,
+    candidates: Vec<CompactCandidate>,
+    evidence_by_occurrence: BTreeMap<SourceOccurrenceId, E>,
+) -> RetrieverBatch<E> {
     RetrieverBatch {
         coverage: RetrieverCoverage {
             examined: examined as u64,
-            eligible: candidates.len() as u64,
+            eligible,
             excluded,
-            capped: 0,
+            capped: truncated,
             unknown: 0,
         },
         candidates,
@@ -1111,5 +1196,43 @@ impl CodeIndexExecutionControlV1 for NeverInterrupted {
 
     fn is_deadline_exceeded(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    use super::retain_bounded;
+
+    #[test]
+    fn bounded_selection_retains_at_most_the_cap_and_matches_a_full_sort() {
+        let cap = 7usize;
+        let mut ranked = BinaryHeap::new();
+        let mut all = Vec::new();
+        for ordinal in 0..100u32 {
+            // Scores collide on purpose so ties fall through to the stable
+            // identity component, exactly like the lane's canonical order.
+            let entry = (
+                Reverse(u64::from((ordinal * 37) % 11)),
+                format!("chunk.{:03}", (ordinal * 53) % 100),
+                ordinal,
+            );
+            all.push(entry.clone());
+            retain_bounded(&mut ranked, cap, entry);
+            assert!(
+                ranked.len() <= cap,
+                "bounded selection retained {} entries over the {cap}-entry cap",
+                ranked.len()
+            );
+        }
+        let selected = ranked.into_sorted_vec();
+        all.sort();
+        all.truncate(cap);
+        assert_eq!(
+            selected, all,
+            "bounded selection must equal a full sort truncated to the cap"
+        );
     }
 }
