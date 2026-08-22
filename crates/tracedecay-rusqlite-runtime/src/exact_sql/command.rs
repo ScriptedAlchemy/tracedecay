@@ -129,6 +129,33 @@ fn lease_now() -> Instant {
 #[cfg(test)]
 use lease_clock::lease_now;
 
+#[cfg(test)]
+pub(crate) mod lease_clock {
+    use std::{
+        cell::Cell,
+        time::{Duration, Instant},
+    };
+
+    thread_local! {
+        static FAKE_LEASE_NOW: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+
+    /// Real monotonic time until [`advance`] freezes this thread's clock.
+    pub(crate) fn lease_now() -> Instant {
+        FAKE_LEASE_NOW.with(Cell::get).unwrap_or_else(Instant::now)
+    }
+
+    /// Freezes this thread's lease clock `by` past its current reading.
+    ///
+    /// Only code already running on the writer thread — in practice an
+    /// [`super::ExactSqlWriteAuthority`] verification — can move the clock
+    /// the transaction loop reads.
+    pub(crate) fn advance(by: Duration) {
+        let advanced = lease_now() + by;
+        FAKE_LEASE_NOW.with(|fake| fake.set(Some(advanced)));
+    }
+}
+
 pub(crate) enum TransactionCommand {
     Attach {
         attachment: ExactSqlAttachment,
@@ -672,32 +699,5 @@ impl TransactionCompletion {
             None => {}
         }
         cleanup_error.map_or(Ok(()), Err)
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod lease_clock {
-    use std::{
-        cell::Cell,
-        time::{Duration, Instant},
-    };
-
-    thread_local! {
-        static FAKE_LEASE_NOW: Cell<Option<Instant>> = const { Cell::new(None) };
-    }
-
-    /// Real monotonic time until [`advance`] freezes this thread's clock.
-    pub(crate) fn lease_now() -> Instant {
-        FAKE_LEASE_NOW.with(Cell::get).unwrap_or_else(Instant::now)
-    }
-
-    /// Freezes this thread's lease clock `by` past its current reading.
-    ///
-    /// Only code already running on the writer thread — in practice an
-    /// [`super::ExactSqlWriteAuthority`] verification — can move the clock
-    /// the transaction loop reads.
-    pub(crate) fn advance(by: Duration) {
-        let advanced = lease_now() + by;
-        FAKE_LEASE_NOW.with(|fake| fake.set(Some(advanced)));
     }
 }
