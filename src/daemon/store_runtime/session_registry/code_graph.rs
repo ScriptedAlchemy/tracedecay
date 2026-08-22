@@ -43,9 +43,8 @@ mod sealed_publication_tests;
 mod seals;
 mod semantic_vector;
 use seals::{
-    finalize_project_graph_replay_unlink, install_project_graph_replay_seal_at,
-    lock_project_graph_replay_pool, publish_staged_replay_seal, sealed_digest_from_generation_file,
-    stage_project_graph_replay_seal, stage_project_graph_replay_unlink,
+    finalize_project_graph_replay_unlink, lock_project_graph_replay_pool,
+    sealed_digest_from_generation_file, stage_project_graph_replay_unlink,
 };
 
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
@@ -765,6 +764,31 @@ impl RetainedCodeGraphRuntimeV1 {
                 tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
             )?,
         };
+        let verify_durable_source = || {
+            let replay_pool_lock = lock_project_graph_replay_pool(
+                &self.replay_root,
+                &|| match probe.interruption() {
+                    Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                    Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                        Err(GraphDbError::DeadlineExceeded)
+                    }
+                    None => Ok(()),
+                },
+            )?;
+            super::code_graph_manifest::verify_sealed_generation_source_from_roots(
+                &self.generations_root,
+                &self.replay_root,
+                &self.sealed_state_digest,
+                &|| match probe.interruption() {
+                    Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                    Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                        Err(GraphDbError::DeadlineExceeded)
+                    }
+                    None => Ok(()),
+                },
+            )?;
+            Ok::<_, GraphDbError>(replay_pool_lock)
+        };
         let mut storage = self
             .project_database
             .graph_publication_storage()
@@ -841,18 +865,6 @@ impl RetainedCodeGraphRuntimeV1 {
             .map_err(map_publication_error)?
         {
             GraphPublicationReplayLookupV1::Active(_) => {
-                install_project_graph_replay_seal_at(
-                    &self.generations_root,
-                    &self.replay_root,
-                    &self.sealed_state_digest,
-                    &|| match probe.interruption() {
-                        Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-                        Some(RuntimeInterruptionV1::DeadlineExceeded) => {
-                            Err(GraphDbError::DeadlineExceeded)
-                        }
-                        None => Ok(()),
-                    },
-                )?;
                 let head = storage
                     .verified_head(&relational_projection, &context)
                     .map_err(map_publication_error)?;
@@ -867,43 +879,14 @@ impl RetainedCodeGraphRuntimeV1 {
                         &relational_projection,
                     );
                 }
+                let _replay_pool_lock = verify_durable_source()?;
                 let publication = publish(&mut storage, &publication_key, Some(manifest))?;
                 return Ok(publication.snapshot);
             }
             GraphPublicationReplayLookupV1::Retired(_) => return Err(GraphDbError::Conflict),
             GraphPublicationReplayLookupV1::Missing => {}
         }
-        let staged_seal = stage_project_graph_replay_seal(
-            &self.generations_root,
-            &self.replay_root,
-            &self.sealed_state_digest,
-            &|| match probe.interruption() {
-                Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-                Some(RuntimeInterruptionV1::DeadlineExceeded) => {
-                    Err(GraphDbError::DeadlineExceeded)
-                }
-                None => Ok(()),
-            },
-        )?;
-        let replay_pool_lock = lock_project_graph_replay_pool(&self.replay_root, &|| match probe
-            .interruption()
-        {
-            Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-            Some(RuntimeInterruptionV1::DeadlineExceeded) => Err(GraphDbError::DeadlineExceeded),
-            None => Ok(()),
-        })?;
-        publish_staged_replay_seal(
-            staged_seal,
-            &self.replay_root,
-            &self.sealed_state_digest,
-            &|| match probe.interruption() {
-                Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-                Some(RuntimeInterruptionV1::DeadlineExceeded) => {
-                    Err(GraphDbError::DeadlineExceeded)
-                }
-                None => Ok(()),
-            },
-        )?;
+        let replay_pool_lock = verify_durable_source()?;
         let input = canonical_sha256(&(
             "tracedecay.code-graph-publication-input.v1",
             &source,

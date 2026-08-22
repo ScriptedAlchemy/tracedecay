@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
@@ -36,7 +37,7 @@ const ROLLUP_BACKLOG_REBUILD_INTERVAL: Duration = Duration::from_secs(1);
 const ROLLUP_IDLE_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const TELEMETRY_DROP_EVENT_KIND: &str = "telemetry.drop.observed.v1";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ObservabilityProducerIdentityV1 {
     pub authorized_scope_ref: String,
     pub process_boot_id: String,
@@ -46,7 +47,7 @@ pub struct ObservabilityProducerIdentityV1 {
 }
 
 impl ObservabilityProducerIdentityV1 {
-    fn validate(&self) -> Result<(), &'static str> {
+    pub(super) fn validate(&self) -> Result<(), &'static str> {
         for value in [
             self.authorized_scope_ref.as_str(),
             self.process_boot_id.as_str(),
@@ -116,16 +117,17 @@ enum ProducerControl {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct DropRange {
+    identity: ObservabilityProducerIdentityV1,
     first: u64,
     last: u64,
     count: u64,
 }
 
 impl DropRange {
-    fn merge(&mut self, other: Self) -> bool {
-        if self.last.saturating_add(1) != other.first {
+    fn merge(&mut self, other: &Self) -> bool {
+        if self.identity != other.identity || self.last.saturating_add(1) != other.first {
             return false;
         }
         self.last = other.last;
@@ -136,20 +138,19 @@ impl DropRange {
 
 struct QueuedObservation {
     envelope: ObservabilityEnvelopeV1,
-    carried_drop: Option<DropRange>,
+    carried_drops: Vec<DropRange>,
     owner_fact: Option<QueuedOwnerFact>,
 }
 
 struct QueuedOwnerFact {
     json: String,
     durable_claimed: bool,
+    emission_identity: ObservabilityProducerIdentityV1,
 }
 
 struct ProducerWorkerState {
-    pending_dropped: Arc<AtomicU64>,
+    pending_drops: Arc<Mutex<Vec<DropRange>>>,
     total_dropped: Arc<AtomicU64>,
-    first_missing_sequence: Arc<AtomicU64>,
-    last_missing_sequence: Arc<AtomicU64>,
     next_sequence: Arc<AtomicU64>,
     lifecycle: Arc<AtomicU8>,
     durable_emission_lock: Arc<AsyncMutex<()>>,
@@ -167,16 +168,14 @@ pub struct BoundedObservabilityProducerV1 {
     identity: ObservabilityProducerIdentityV1,
     data: mpsc::Sender<QueuedObservation>,
     control: mpsc::Sender<ProducerControl>,
-    pending_dropped: Arc<AtomicU64>,
+    pending_drops: Arc<Mutex<Vec<DropRange>>>,
     total_dropped: Arc<AtomicU64>,
-    first_missing_sequence: Arc<AtomicU64>,
-    last_missing_sequence: Arc<AtomicU64>,
     next_sequence: Arc<AtomicU64>,
     state: Arc<AtomicU8>,
     deadlines: ObservabilityProducerDeadlinesV1,
-    emission_lock: Mutex<()>,
+    emission_lock: Arc<Mutex<()>>,
     durable_emission_lock: Arc<AsyncMutex<()>>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl BoundedObservabilityProducerV1 {
@@ -207,10 +206,8 @@ impl BoundedObservabilityProducerV1 {
         let (data, data_rx) = mpsc::channel(capacity);
         // The control lane remains writable when every data slot is occupied.
         let (control, control_rx) = mpsc::channel(1);
-        let pending_dropped = Arc::new(AtomicU64::new(0));
+        let pending_drops = Arc::new(Mutex::new(Vec::new()));
         let total_dropped = Arc::new(AtomicU64::new(0));
-        let first_missing_sequence = Arc::new(AtomicU64::new(0));
-        let last_missing_sequence = Arc::new(AtomicU64::new(0));
         let next_sequence = Arc::new(AtomicU64::new(1));
         let state = Arc::new(AtomicU8::new(PRODUCER_RUNNING));
         let durable_emission_lock = Arc::new(AsyncMutex::new(()));
@@ -222,10 +219,8 @@ impl BoundedObservabilityProducerV1 {
             data_rx,
             control_rx,
             ProducerWorkerState {
-                pending_dropped: Arc::clone(&pending_dropped),
+                pending_drops: Arc::clone(&pending_drops),
                 total_dropped: Arc::clone(&total_dropped),
-                first_missing_sequence: Arc::clone(&first_missing_sequence),
-                last_missing_sequence: Arc::clone(&last_missing_sequence),
                 next_sequence: Arc::clone(&next_sequence),
                 lifecycle: Arc::clone(&state),
                 durable_emission_lock: Arc::clone(&durable_emission_lock),
@@ -237,16 +232,48 @@ impl BoundedObservabilityProducerV1 {
             identity,
             data,
             control,
-            pending_dropped,
+            pending_drops,
             total_dropped,
-            first_missing_sequence,
-            last_missing_sequence,
             next_sequence,
             state,
             deadlines,
-            emission_lock: Mutex::new(()),
+            emission_lock: Arc::new(Mutex::new(())),
             durable_emission_lock,
-            worker: Mutex::new(Some(worker)),
+            worker: Arc::new(Mutex::new(Some(worker))),
+        })
+    }
+
+    /// Attach a policy-specific emission frontend to this producer's shared
+    /// queue, sequence, lifecycle, and worker.
+    ///
+    /// Linked worktrees share one registered project-session store owner but
+    /// retain distinct policy provenance. Every backend authority must match;
+    /// only the policy stamped at admission may differ.
+    pub fn alias_with_policy_identity(
+        &self,
+        identity: ObservabilityProducerIdentityV1,
+    ) -> Result<Self, &'static str> {
+        identity.validate()?;
+        if identity.authorized_scope_ref != self.identity.authorized_scope_ref
+            || identity.process_boot_id != self.identity.process_boot_id
+            || identity.producer_revision != self.identity.producer_revision
+            || identity.configuration_revision != self.identity.configuration_revision
+        {
+            return Err("observability_producer_alias_identity");
+        }
+        Ok(Self {
+            db: self.db.clone(),
+            identity,
+            data: self.data.clone(),
+            control: self.control.clone(),
+            pending_drops: Arc::clone(&self.pending_drops),
+            total_dropped: Arc::clone(&self.total_dropped),
+            next_sequence: Arc::clone(&self.next_sequence),
+            state: Arc::clone(&self.state),
+            deadlines: self.deadlines,
+            emission_lock: Arc::clone(&self.emission_lock),
+            durable_emission_lock: Arc::clone(&self.durable_emission_lock),
+            worker: Arc::clone(&self.worker),
         })
     }
 
@@ -316,46 +343,57 @@ impl BoundedObservabilityProducerV1 {
         let sequence = envelope.producer_sequence;
         match self.data.try_reserve() {
             Ok(permit) => {
-                let carried_drops = self.pending_dropped.swap(0, Ordering::AcqRel);
-                let carried_drop = (carried_drops > 0).then(|| {
-                    let first = self.first_missing_sequence.swap(0, Ordering::AcqRel);
-                    let last = self.last_missing_sequence.swap(0, Ordering::AcqRel);
-                    DropRange {
-                        first,
-                        last,
-                        count: carried_drops,
-                    }
-                });
-                if carried_drops > 0 {
-                    envelope.dropped_count = envelope.dropped_count.saturating_add(carried_drops);
+                let carried_drops = {
+                    let mut pending = self
+                        .pending_drops
+                        .lock()
+                        .map_err(|_| "observability_producer_lock_poisoned")?;
+                    std::mem::take(&mut *pending)
+                };
+                let carried_drop_count = carried_drops
+                    .iter()
+                    .fold(0_u64, |count, range| count.saturating_add(range.count));
+                if carried_drop_count > 0 {
+                    envelope.dropped_count =
+                        envelope.dropped_count.saturating_add(carried_drop_count);
                     envelope.coverage = CoverageStateV1::Partial;
                 }
                 permit.send(QueuedObservation {
                     envelope,
-                    carried_drop,
+                    carried_drops,
                     owner_fact,
                 });
                 Ok(ObservabilityEmissionOutcomeV1::Enqueued)
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.record_capacity_drop(sequence);
+                self.record_capacity_drop(sequence)?;
                 Ok(ObservabilityEmissionOutcomeV1::DroppedAtCapacity)
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err("observability_producer_closed"),
         }
     }
 
-    fn record_capacity_drop(&self, sequence: u64) {
-        self.pending_dropped.fetch_add(1, Ordering::AcqRel);
+    fn record_capacity_drop(&self, sequence: u64) -> Result<(), &'static str> {
+        let mut pending = self
+            .pending_drops
+            .lock()
+            .map_err(|_| "observability_producer_lock_poisoned")?;
+        if let Some(range) = pending
+            .iter_mut()
+            .find(|range| range.identity == self.identity)
+        {
+            range.last = sequence;
+            range.count = range.count.saturating_add(1);
+        } else {
+            pending.push(DropRange {
+                identity: self.identity.clone(),
+                first: sequence,
+                last: sequence,
+                count: 1,
+            });
+        }
         self.total_dropped.fetch_add(1, Ordering::AcqRel);
-        let _ = self.first_missing_sequence.compare_exchange(
-            0,
-            sequence,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        self.last_missing_sequence
-            .store(sequence, Ordering::Release);
+        Ok(())
     }
 
     pub async fn shutdown(
@@ -575,7 +613,6 @@ async fn run_worker(
                 let persisted_before = progress.persisted;
                 record_queued(
                     &db,
-                    &identity,
                     &state.durable_emission_lock,
                     &state.next_sequence,
                     observation,
@@ -634,7 +671,7 @@ fn should_wake_rollup_now(
 }
 
 fn observation_dirties_rollup(observation: &QueuedObservation) -> bool {
-    observation.carried_drop.is_some()
+    !observation.carried_drops.is_empty()
         || observation.envelope.event_kind == TELEMETRY_DROP_EVENT_KIND
         || EXECUTION_TOPOLOGY_EVENT_KINDS_V1.contains(&observation.envelope.event_kind.as_str())
 }
@@ -659,8 +696,12 @@ async fn settle_worker(
     if discard_pending {
         let mut ranges = Vec::new();
         while let Ok(observation) = data.try_recv() {
-            if observation
-                .owner_fact
+            let QueuedObservation {
+                envelope,
+                carried_drops,
+                owner_fact,
+            } = observation;
+            if owner_fact
                 .as_ref()
                 .is_some_and(|owner| owner.durable_claimed)
             {
@@ -668,29 +709,40 @@ async fn settle_worker(
                 // producer; cancellation never relabels them as loss.
                 continue;
             }
-            if let Some(carried_drop) = observation.carried_drop {
+            for carried_drop in carried_drops {
                 push_drop_range(&mut ranges, carried_drop);
             }
-            let sequence = if observation.owner_fact.is_some() {
+            let emission_identity = owner_fact
+                .as_ref()
+                .map(|owner| owner.emission_identity.clone())
+                .unwrap_or_else(|| identity_from_envelope(&envelope));
+            let sequence = if owner_fact.is_some() {
                 state.next_sequence.fetch_add(1, Ordering::AcqRel)
             } else {
-                observation.envelope.producer_sequence
+                envelope.producer_sequence
             };
             state.total_dropped.fetch_add(1, Ordering::AcqRel);
             push_drop_range(
                 &mut ranges,
                 DropRange {
+                    identity: emission_identity,
                     first: sequence,
                     last: sequence,
                     count: 1,
                 },
             );
         }
-        if let Some(pending) = take_pending_drop(state) {
-            push_drop_range(&mut ranges, pending);
+        match take_pending_drops(state) {
+            Ok(pending) => {
+                for range in pending {
+                    push_drop_range(&mut ranges, range);
+                }
+            }
+            Err(error) if progress.first_error.is_none() => progress.first_error = Some(error),
+            Err(_) => {}
         }
         for range in ranges {
-            let drop_envelope = telemetry_drop_envelope(identity, range, false);
+            let drop_envelope = telemetry_drop_envelope(range, false);
             record(
                 db,
                 drop_envelope,
@@ -704,7 +756,6 @@ async fn settle_worker(
         while let Some(observation) = data.recv().await {
             record_queued(
                 db,
-                identity,
                 &state.durable_emission_lock,
                 &state.next_sequence,
                 observation,
@@ -722,11 +773,19 @@ async fn settle_worker(
             state.deadlines.persistence,
         )
         .await;
-        let pending = take_pending_drop(state);
-        let had_pending = pending.is_some();
-        if let Some(pending) = pending {
+        let pending = match take_pending_drops(state) {
+            Ok(pending) => pending,
+            Err(error) => {
+                if progress.first_error.is_none() {
+                    progress.first_error = Some(error);
+                }
+                Vec::new()
+            }
+        };
+        let had_pending = !pending.is_empty();
+        for pending in pending {
             let closes_cleanly = clean_shutdown_observed && progress.first_error.is_none();
-            let drop_envelope = telemetry_drop_envelope(identity, pending, closes_cleanly);
+            let drop_envelope = telemetry_drop_envelope(pending, closes_cleanly);
             record(
                 db,
                 drop_envelope,
@@ -741,8 +800,8 @@ async fn settle_worker(
             // TelemetryDrop is Plan 26's reserved terminal carrier. A zero
             // lower bound seals this sequence without asserting a drop.
             let zero_terminal = telemetry_drop_envelope(
-                identity,
                 DropRange {
+                    identity: identity.clone(),
                     first: sequence,
                     last: sequence,
                     count: 0,
@@ -769,17 +828,17 @@ async fn settle_worker(
     state.total_dropped.load(Ordering::Acquire)
 }
 
-fn take_pending_drop(state: &ProducerWorkerState) -> Option<DropRange> {
-    let count = state.pending_dropped.swap(0, Ordering::AcqRel);
-    (count > 0).then(|| DropRange {
-        first: state.first_missing_sequence.swap(0, Ordering::AcqRel),
-        last: state.last_missing_sequence.swap(0, Ordering::AcqRel),
-        count,
-    })
+fn take_pending_drops(
+    state: &ProducerWorkerState,
+) -> Result<Vec<DropRange>, ApplicationContractError> {
+    let mut pending = state.pending_drops.lock().map_err(|_| {
+        ApplicationContractError::Domain("observability_producer_lock_poisoned".to_owned())
+    })?;
+    Ok(std::mem::take(&mut *pending))
 }
 
 fn push_drop_range(ranges: &mut Vec<DropRange>, range: DropRange) {
-    if ranges.last_mut().is_some_and(|last| last.merge(range)) {
+    if ranges.last_mut().is_some_and(|last| last.merge(&range)) {
         return;
     }
     ranges.push(range);
@@ -787,7 +846,6 @@ fn push_drop_range(ranges: &mut Vec<DropRange>, range: DropRange) {
 
 async fn record_queued(
     db: &RegisteredGlobalDb,
-    identity: &ObservabilityProducerIdentityV1,
     durable_emission_lock: &AsyncMutex<()>,
     next_sequence: &AtomicU64,
     observation: QueuedObservation,
@@ -809,7 +867,7 @@ async fn record_queued(
         } else {
             claim_and_settle_durable(
                 db,
-                identity,
+                &owner_fact.emission_identity,
                 next_sequence,
                 observation.envelope,
                 owner_fact.json,
@@ -820,8 +878,8 @@ async fn record_queued(
         }
         return;
     }
-    if let Some(range) = observation.carried_drop {
-        let drop_envelope = telemetry_drop_envelope(identity, range, false);
+    for range in observation.carried_drops {
+        let drop_envelope = telemetry_drop_envelope(range, false);
         record(
             db,
             drop_envelope,
@@ -839,6 +897,16 @@ async fn record_queued(
         persistence_deadline,
     )
     .await;
+}
+
+fn identity_from_envelope(envelope: &ObservabilityEnvelopeV1) -> ObservabilityProducerIdentityV1 {
+    ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: envelope.scope_ref.clone(),
+        process_boot_id: envelope.process_boot_id.clone(),
+        producer_revision: envelope.producer_revision.clone(),
+        configuration_revision: envelope.configuration_revision.clone(),
+        policy_revision: envelope.policy_revision.clone(),
+    }
 }
 
 fn prepare_delivery_with_identity(
@@ -888,10 +956,10 @@ async fn record(
 }
 
 fn telemetry_drop_envelope(
-    identity: &ObservabilityProducerIdentityV1,
     range: DropRange,
     clean_shutdown_observed: bool,
 ) -> ObservabilityEnvelopeV1 {
+    let identity = &range.identity;
     let first_missing = range.first.max(1);
     let last_missing = range.last.max(first_missing);
     let observed_at = now_micros().0;

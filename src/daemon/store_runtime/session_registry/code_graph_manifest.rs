@@ -10,7 +10,7 @@ use tracedecay_domain::{ProjectId, RepositoryId};
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphDbError, GraphGenerationManifest, GraphGenerationManifestProvider,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
-    SealedCodeGenerationReplay,
+    SealedCodeGenerationReplay, SealedGraphStateDigest,
 };
 use tracedecay_store::{GraphProjectionIdentityV1, StoreShardIdV1};
 
@@ -232,19 +232,24 @@ fn open_checked_seal_reader<'a>(
 /// which makes recovery from either root equally trustworthy. Typed
 /// interruptions from the caller's probe are transport states and must
 /// surface immediately instead of triggering a second full read.
-fn decode_verified_seal_from_roots(
+fn with_verified_seal_from_roots<T>(
     canonical: &std::path::Path,
     pool: &std::path::Path,
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<tracedecay_code_index::production::CodeIndexPublishedGenerationV1, GraphDbError> {
+    read: impl Fn(
+        &std::path::Path,
+        &str,
+        &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<T, GraphDbError>,
+) -> Result<T, GraphDbError> {
     let canonical_absent = matches!(
         std::fs::symlink_metadata(canonical),
         Err(ref error) if error.kind() == std::io::ErrorKind::NotFound
     );
     if !canonical_absent {
-        match decode_verified_seal(canonical, expected_digest, check) {
-            Ok(generation) => return Ok(generation),
+        match read(canonical, expected_digest, check) {
+            Ok(value) => return Ok(value),
             Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => {
                 return Err(error);
             }
@@ -253,14 +258,29 @@ fn decode_verified_seal_from_roots(
                 // the pool copy is digest-verified, so recovering there is
                 // sound. A pool failure reports the canonical error, which
                 // names the authoritative copy.
-                return match decode_verified_seal(pool, expected_digest, check) {
-                    Ok(generation) => Ok(generation),
+                return match read(pool, expected_digest, check) {
+                    Ok(value) => Ok(value),
                     Err(_) => Err(canonical_error),
                 };
             }
         }
     }
-    decode_verified_seal(pool, expected_digest, check)
+    read(pool, expected_digest, check)
+}
+
+fn decode_verified_seal_from_roots(
+    canonical: &std::path::Path,
+    pool: &std::path::Path,
+    expected_digest: &str,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<tracedecay_code_index::production::CodeIndexPublishedGenerationV1, GraphDbError> {
+    with_verified_seal_from_roots(
+        canonical,
+        pool,
+        expected_digest,
+        check,
+        decode_verified_seal,
+    )
 }
 
 fn decode_verified_seal(
@@ -282,6 +302,45 @@ fn decode_verified_seal(
     })?;
     reader.finish(path, &opened_metadata, admitted_len, expected_digest)?;
     Ok(generation)
+}
+
+fn verify_checked_seal(
+    path: &std::path::Path,
+    expected_digest: &str,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), GraphDbError> {
+    let (mut reader, opened_metadata, admitted_len) = open_checked_seal_reader(path, check)?;
+    let copied = std::io::copy(&mut reader, &mut std::io::sink());
+    if let Some(error) = reader.failure.take() {
+        return Err(error);
+    }
+    copied.map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed code generation checked read failed: {error}"),
+    })?;
+    reader.finish(path, &opened_metadata, admitted_len, expected_digest)
+}
+
+/// Proves that the durable source backing an already-decoded generation still
+/// exists under its canonical-or-retained authority with the exact digest.
+/// This reads and hashes the bounded source without decoding or projecting it.
+pub(super) fn verify_sealed_generation_source_from_roots(
+    generations_root: &std::path::Path,
+    replay_root: &std::path::Path,
+    sealed_state_digest: &SealedGraphStateDigest,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), GraphDbError> {
+    let digest = sealed_state_digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
+    let seal_file = format!("generation-{digest}.json");
+    with_verified_seal_from_roots(
+        &generations_root.join(&seal_file),
+        &replay_root.join(&seal_file),
+        digest,
+        check,
+        verify_checked_seal,
+    )
 }
 
 #[derive(Clone)]
@@ -445,25 +504,9 @@ mod tests {
     };
 
     use super::{
-        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES, open_checked_seal_reader,
-        validate_sealed_generation_metadata,
+        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES,
+        validate_sealed_generation_metadata, verify_checked_seal,
     };
-
-    fn verify_seal_stream(
-        path: &std::path::Path,
-        expected_digest: &str,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<(), GraphDbError> {
-        let (mut reader, opened_metadata, admitted_len) = open_checked_seal_reader(path, check)?;
-        let copied = std::io::copy(&mut reader, &mut std::io::sink());
-        if let Some(error) = reader.failure.take() {
-            return Err(error);
-        }
-        copied.map_err(|error| GraphDbError::Corrupt {
-            message: format!("sealed code generation test read failed: {error}"),
-        })?;
-        reader.finish(path, &opened_metadata, admitted_len, expected_digest)
-    }
 
     fn fixture(
         generations_root: std::path::PathBuf,
@@ -623,7 +666,7 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let checks = AtomicUsize::new(0);
 
-        let error = verify_seal_stream(&path, &digest, &|| {
+        let error = verify_checked_seal(&path, &digest, &|| {
             if checks.fetch_add(1, Ordering::SeqCst) == 1 {
                 let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
                 file.seek(SeekFrom::Start(SEAL_READ_CHECK_BYTES as u64))
@@ -680,7 +723,7 @@ mod tests {
         let checks = AtomicUsize::new(0);
 
         assert_eq!(
-            verify_seal_stream(&path, &digest, &|| {
+            verify_checked_seal(&path, &digest, &|| {
                 if checks.fetch_add(1, Ordering::SeqCst) >= 2 {
                     Err(GraphDbError::DeadlineExceeded)
                 } else {

@@ -522,7 +522,7 @@ pub async fn ensure_registered_schema_for_admission(
     let is_fresh = configuration_fresh.is_some();
     let force_exhaustive = !authority_invariant_triggers_intact(installation).await?;
     let transaction = installation
-        .begin_immediate()
+        .begin_atomic_schema_transaction()
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
