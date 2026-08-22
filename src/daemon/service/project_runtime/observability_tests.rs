@@ -272,6 +272,19 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
         first.identity().process_boot_id,
         linked.identity().process_boot_id
     );
+    let linked_reconciled = first_service
+        .mount_observability_producer(
+            linked_root.clone(),
+            registered_runtime
+                .issue_project_database_lease_for_test()
+                .expect("fresh reconciled linked-root database client"),
+            project_id.clone(),
+            digest('1'),
+            linked_scope.scope_digest.clone(),
+        )
+        .await
+        .expect("reconciled linked-root producer");
+    assert!(Arc::ptr_eq(&linked, &linked_reconciled));
     // The delivery settlement recorder is store-keyed: both roots reach the
     // exact same recorder rather than running one drain per root.
     let first_recorder = first_service
@@ -578,6 +591,7 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
         .acquire_or_start::<&'static str>(
             &database,
             |_| false,
+            ObservabilityProducerIdentityV1::clone,
             || "unexpected incumbent store producer",
             || Ok(producer),
             1,

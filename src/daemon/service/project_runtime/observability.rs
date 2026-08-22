@@ -74,16 +74,16 @@ impl StoreObservabilityCoreV1 {
     }
 }
 
-/// Whether both leases carry one exact registered-store authority: the same
-/// registered client token for the same store runtime binding and verified
-/// locator. Logical shard ids alone never match: two stores that share a
+/// Whether both leases carry one exact registered-store authority. Fresh
+/// owner issuances deliberately have disjoint client tokens, so the durable
+/// runtime binding and its verified locator are the canonical equality.
+/// Logical shard ids alone never match: two stores that share a
 /// brain/profile/project id remain distinct authorities.
 fn same_registered_store_authority(
     incumbent: &crate::global_db::RegisteredGlobalDbLeaseV1,
     candidate: &crate::global_db::RegisteredGlobalDbLeaseV1,
 ) -> bool {
-    incumbent.shares_client_with(candidate)
-        && incumbent.binding() == candidate.binding()
+    incumbent.binding() == candidate.binding()
         && incumbent.verified_locator() == candidate.verified_locator()
 }
 
@@ -117,6 +117,7 @@ impl StoreObservabilityRegistryV1 {
         &self,
         database: &crate::global_db::RegisteredGlobalDbLeaseV1,
         accepts_incumbent: impl FnOnce(&ObservabilityProducerIdentityV1) -> bool,
+        alias_identity: impl FnOnce(&ObservabilityProducerIdentityV1) -> ObservabilityProducerIdentityV1,
         refused: impl FnOnce() -> E,
         start_producer: impl FnOnce() -> Result<BoundedObservabilityProducerV1, E>,
         delivery_capacity: usize,
@@ -130,13 +131,16 @@ impl StoreObservabilityRegistryV1 {
             if !accepts_incumbent(entry.core.producer.identity()) {
                 return Err(refused());
             }
+            let mount_identity = alias_identity(entry.core.producer.identity());
             entry.aliases += 1;
             return Ok(RegisteredObservabilityProducerV1::alias(
                 self.clone(),
                 Arc::clone(&entry.core),
+                mount_identity,
             ));
         }
         let producer = start_producer()?;
+        let mount_identity = alias_identity(producer.identity());
         let core = Arc::new(
             StoreObservabilityCoreV1::start(database.clone(), producer, delivery_capacity)
                 .map_err(core_start_failed)?,
@@ -145,7 +149,11 @@ impl StoreObservabilityRegistryV1 {
             core: Arc::clone(&core),
             aliases: 1,
         });
-        Ok(RegisteredObservabilityProducerV1::alias(self.clone(), core))
+        Ok(RegisteredObservabilityProducerV1::alias(
+            self.clone(),
+            core,
+            mount_identity,
+        ))
     }
 }
 
@@ -153,14 +161,20 @@ impl StoreObservabilityRegistryV1 {
 pub(crate) struct RegisteredObservabilityProducerV1 {
     registry: StoreObservabilityRegistryV1,
     core: Arc<StoreObservabilityCoreV1>,
+    mount_identity: ObservabilityProducerIdentityV1,
     released: AtomicBool,
 }
 
 impl RegisteredObservabilityProducerV1 {
-    fn alias(registry: StoreObservabilityRegistryV1, core: Arc<StoreObservabilityCoreV1>) -> Self {
+    fn alias(
+        registry: StoreObservabilityRegistryV1,
+        core: Arc<StoreObservabilityCoreV1>,
+        mount_identity: ObservabilityProducerIdentityV1,
+    ) -> Self {
         Self {
             registry,
             core,
+            mount_identity,
             released: AtomicBool::new(false),
         }
     }
@@ -188,7 +202,8 @@ impl RegisteredObservabilityProducerV1 {
         database: &crate::global_db::RegisteredGlobalDbLeaseV1,
         identity: &ObservabilityProducerIdentityV1,
     ) -> bool {
-        self.core.database.shares_client_with(database) && self.core.producer.identity() == identity
+        same_registered_store_authority(&self.core.database, database)
+            && self.mount_identity == *identity
     }
 
     /// Releases this alias from its store entry, reporting whether it was the

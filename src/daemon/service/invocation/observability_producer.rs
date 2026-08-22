@@ -97,7 +97,15 @@ impl DaemonInvocationService {
                                     == DAEMON_OBSERVABILITY_PRODUCER_REVISION
                                 && incumbent.configuration_revision
                                     == configuration_revision.as_str()
-                                && incumbent.policy_revision == policy_revision.as_str()
+                        },
+                        |incumbent| {
+                            tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+                                authorized_scope_ref: project_id.as_str().to_owned(),
+                                process_boot_id: incumbent.process_boot_id.clone(),
+                                producer_revision: DAEMON_OBSERVABILITY_PRODUCER_REVISION.to_owned(),
+                                configuration_revision: configuration_revision.as_str().to_owned(),
+                                policy_revision: policy_revision.as_str().to_owned(),
+                            }
                         },
                         || TraceDecayError::Config {
                             message:
