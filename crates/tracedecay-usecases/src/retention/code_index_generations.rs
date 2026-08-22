@@ -451,8 +451,8 @@ pub enum CodeTextArtifactRetentionKindV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeTextArtifactRetentionCandidateV1 {
-    pub(crate) artifact_file: String,
-    pub(crate) kind: CodeTextArtifactRetentionKindV1,
+    artifact_file: String,
+    kind: CodeTextArtifactRetentionKindV1,
     pub size_bytes: u64,
 }
 
@@ -466,12 +466,12 @@ pub struct CodeGenerationRetentionPlanV1 {
     /// Derived text-artifact debris selected from one bounded canonical
     /// inventory. Descriptor-referenced and still-in-progress staging files
     /// are deliberately absent.
-    pub(crate) collectable_text_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
+    collectable_text_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
     /// Unique bytes seen in the bounded text-artifact inventory: durable
     /// descriptor targets, the one resumable active staging file, and this
     /// pass's selected debris candidates. A descriptor shared by retained
     /// generations is counted once by its canonical artifact path.
-    pub(crate) text_artifact_inventory_bytes: u64,
+    text_artifact_inventory_bytes: u64,
     /// How thoroughly this plan proved generation integrity. Apply-mode
     /// execution refuses anything but [`GenerationDigestVerificationV1::Full`].
     pub verification: GenerationDigestVerificationV1,
@@ -519,14 +519,14 @@ pub struct CodeGenerationRetentionReceiptV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeTextArtifactRetentionReceiptV1 {
-    pub(crate) schema: String,
-    pub(crate) receipt_digest: String,
-    pub(crate) active_generation_id: CodeGenerationId,
-    pub(crate) active_generation_index_digest: String,
-    pub(crate) deleted_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
-    pub(crate) inventory_bytes_before_collection: u64,
+    schema: String,
+    receipt_digest: String,
+    active_generation_id: CodeGenerationId,
+    active_generation_index_digest: String,
+    deleted_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
+    inventory_bytes_before_collection: u64,
     pub reclaimed_bytes: u64,
-    pub(crate) completed_at_micros: i64,
+    completed_at_micros: i64,
 }
 
 #[derive(Serialize)]
