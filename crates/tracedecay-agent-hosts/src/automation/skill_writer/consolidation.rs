@@ -285,6 +285,7 @@ mod tests {
         ManagedSkillDraft, ManagedSkillProvenance, ManagedSupportFile, apply_managed_skill_update,
         create_managed_skill, default_managed_skill_targets, load_managed_skill,
     };
+    #[cfg(unix)]
     use super::super::super::skill_usage::skill_usage_ledger_path;
     use super::super::skill_proposal_action;
     use super::*;
