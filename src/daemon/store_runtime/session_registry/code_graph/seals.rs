@@ -534,19 +534,31 @@ fn lock_code_generation_store(
 }
 
 fn ensure_replay_root(replay_root: &Path) -> Result<(), GraphDbError> {
-    std::fs::create_dir_all(replay_root)
-        .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-    if !replay_root
-        .symlink_metadata()
-        .map_err(|error| GraphDbError::unavailable(error.to_string()))?
-        .file_type()
-        .is_dir()
-    {
-        return Err(GraphDbError::Corrupt {
-            message: "project graph replay pool is not a directory".to_owned(),
-        });
+    let validate_existing = || {
+        tracedecay_private_fs::validate_private_directory(replay_root).map_err(|error| {
+            let message =
+                format!("project graph replay pool is not an owner-private directory: {error}");
+            match error.kind() {
+                std::io::ErrorKind::InvalidInput
+                | std::io::ErrorKind::NotADirectory
+                | std::io::ErrorKind::PermissionDenied => GraphDbError::Corrupt { message },
+                _ => GraphDbError::unavailable(message),
+            }
+        })
+    };
+    match replay_root.symlink_metadata() {
+        Ok(_) => validate_existing(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match tracedecay_private_fs::create_private_directory(replay_root) {
+                Ok(()) => Ok(()),
+                Err(create_error) => match replay_root.symlink_metadata() {
+                    Ok(_) => validate_existing(),
+                    Err(_) => Err(GraphDbError::unavailable(create_error.to_string())),
+                },
+            }
+        }
+        Err(error) => Err(GraphDbError::unavailable(error.to_string())),
     }
-    Ok(())
 }
 
 fn digest_hex(sealed: &SealedGraphStateDigest) -> Result<&str, GraphDbError> {
@@ -619,10 +631,75 @@ mod tests {
     use tracedecay_graph_db::GraphDbError;
 
     use super::{
-        install_project_graph_replay_seal_at, lock_project_graph_replay_pool,
+        ensure_replay_root, install_project_graph_replay_seal_at, lock_project_graph_replay_pool,
         publish_staged_replay_seal, publish_staged_replay_seal_with_before_install,
         stage_project_graph_replay_seal, verify_seal_digest,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_root_is_created_owner_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let replay_root = temp.path().join("project-replay");
+
+        ensure_replay_root(&replay_root).unwrap();
+
+        assert_eq!(
+            replay_root.symlink_metadata().unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn replay_root_rejects_existing_non_directory() {
+        let temp = TempDir::new().unwrap();
+        let replay_root = temp.path().join("project-replay");
+        std::fs::write(&replay_root, b"not a directory").unwrap();
+
+        assert!(matches!(
+            ensure_replay_root(&replay_root),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_root_rejects_existing_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let destination = temp.path().join("private-directory");
+        tracedecay_private_fs::create_private_directory(&destination).unwrap();
+        let replay_root = temp.path().join("project-replay");
+        symlink(destination, &replay_root).unwrap();
+
+        assert!(matches!(
+            ensure_replay_root(&replay_root),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_root_rejects_existing_too_permissive_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let replay_root = temp.path().join("project-replay");
+        std::fs::create_dir(&replay_root).unwrap();
+        std::fs::set_permissions(&replay_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(matches!(
+            ensure_replay_root(&replay_root),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+        assert_eq!(
+            replay_root.symlink_metadata().unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
 
     #[test]
     fn project_replay_pool_serializes_same_digest_from_distinct_sources() {
@@ -679,7 +756,7 @@ mod tests {
         let generation_root = temp.path().join("source").join("generations");
         let replay_root = temp.path().join("project-replay");
         std::fs::create_dir_all(&generation_root).unwrap();
-        std::fs::create_dir_all(&replay_root).unwrap();
+        tracedecay_private_fs::create_private_directory(&replay_root).unwrap();
         std::fs::write(
             generation_root.join(format!("generation-{digest_hex}.json")),
             bytes,
@@ -711,7 +788,7 @@ mod tests {
         let generation_root = temp.path().join("source").join("generations");
         let replay_root = temp.path().join("project-replay");
         std::fs::create_dir_all(&generation_root).unwrap();
-        std::fs::create_dir_all(&replay_root).unwrap();
+        tracedecay_private_fs::create_private_directory(&replay_root).unwrap();
         std::fs::write(
             generation_root.join(format!("generation-{digest_hex}.json")),
             bytes,
