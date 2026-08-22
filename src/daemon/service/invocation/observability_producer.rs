@@ -11,14 +11,12 @@ fn daemon_observability_producer_identity(
     project_id: &ProjectId,
     configuration_revision: &ManifestDigest,
     policy_revision: &ManifestDigest,
-) -> Result<tracedecay_usecases::observability::ObservabilityProducerIdentityV1, TraceDecayError> {
+) -> Result<tracedecay_usecases::observability::ObservabilityProducerIdentityV1, &'static str> {
     let registration = NEXT_DAEMON_OBSERVABILITY_PRODUCER_REGISTRATION
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             current.checked_add(1)
         })
-        .map_err(|_| TraceDecayError::Config {
-            message: "daemon observability producer registrations are exhausted".to_owned(),
-        })?;
+        .map_err(|_| "daemon_observability_producer_registrations_exhausted")?;
     Ok(
         tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
             authorized_scope_ref: project_id.as_str().to_owned(),
@@ -93,52 +91,52 @@ impl DaemonInvocationService {
                     // root of an already-mounted store attaches an alias to
                     // the incumbent owners instead of starting a second
                     // recorder for the same store.
-                    self.store_observability.acquire_or_start(
-                        &database,
-                        &configuration_provenance_revision,
-                        |incumbent| {
-                            incumbent.authorized_scope_ref == project_id.as_str()
-                                && incumbent.producer_revision
-                                    == DAEMON_OBSERVABILITY_PRODUCER_REVISION
-                                && incumbent.configuration_revision
-                                    == configuration_revision.as_str()
-                        },
-                        |incumbent| {
-                            tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+                    self.store_observability
+                        .acquire_or_start(
+                            &database,
+                            &StoreObservabilityMountV1 {
+                                configuration_provenance_revision:
+                                    configuration_provenance_revision.clone(),
                                 authorized_scope_ref: project_id.as_str().to_owned(),
-                                process_boot_id: incumbent.process_boot_id.clone(),
-                                producer_revision: DAEMON_OBSERVABILITY_PRODUCER_REVISION.to_owned(),
-                                configuration_revision: configuration_revision.as_str().to_owned(),
-                                policy_revision: policy_revision.as_str().to_owned(),
-                            }
-                        },
-                        || TraceDecayError::Config {
-                            message:
-                                "a different observability producer is already mounted for this project store"
+                                producer_revision: DAEMON_OBSERVABILITY_PRODUCER_REVISION
                                     .to_owned(),
-                        },
-                        || {
-                            let identity = daemon_observability_producer_identity(
-                                &project_id,
-                                &configuration_revision,
-                                &policy_revision,
-                            )?;
-                            tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
-                                database.clone(),
-                                identity,
-                                DAEMON_OBSERVABILITY_QUEUE_CAPACITY,
-                            )
-                            .map_err(|error| TraceDecayError::Config {
-                                message: format!(
-                                    "project observability producer mount failed: {error}"
-                                ),
-                            })
-                        },
-                        DAEMON_DELIVERY_SETTLEMENT_QUEUE_CAPACITY,
-                        |error| TraceDecayError::Config {
-                            message: format!("project observability owner mount failed: {error}"),
-                        },
-                    )
+                                configuration_revision: configuration_revision
+                                    .as_str()
+                                    .to_owned(),
+                                policy_revision: policy_revision.as_str().to_owned(),
+                                delivery_capacity: DAEMON_DELIVERY_SETTLEMENT_QUEUE_CAPACITY,
+                            },
+                            || {
+                                let identity = daemon_observability_producer_identity(
+                                    &project_id,
+                                    &configuration_revision,
+                                    &policy_revision,
+                                )
+                                .map_err(StoreObservabilityMountErrorV1::Unavailable)?;
+                                tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+                                    database.clone(),
+                                    identity,
+                                    DAEMON_OBSERVABILITY_QUEUE_CAPACITY,
+                                )
+                                .map_err(StoreObservabilityMountErrorV1::Unavailable)
+                            },
+                        )
+                        .map_err(|error| match error {
+                            StoreObservabilityMountErrorV1::Busy => TraceDecayError::Config {
+                                message:
+                                    "a different observability producer is already mounted for this project store"
+                                        .to_owned(),
+                            },
+                            error @ (StoreObservabilityMountErrorV1::Retiring
+                            | StoreObservabilityMountErrorV1::ShutdownFailed
+                            | StoreObservabilityMountErrorV1::Unavailable(_)) => {
+                                TraceDecayError::Config {
+                                    message: format!(
+                                        "project observability owner mount failed: {error}"
+                                    ),
+                                }
+                            }
+                        })
                 },
             )
             .await?;
