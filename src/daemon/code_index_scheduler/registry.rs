@@ -1811,6 +1811,10 @@ impl CodeIndexSchedulerRegistryV1 {
             store_root,
             Arc::clone(&self.byte_pool),
         )
+        .map(|mut scheduler| {
+            scheduler.bind_resident_memory(Arc::clone(&self._resident_memory));
+            scheduler
+        })
     }
 
     #[cfg(test)]
@@ -2039,6 +2043,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let open_project_root = project_root.clone();
         let open_byte_pool = Arc::clone(&self.byte_pool);
         let open_semantic_schedule = semantic_schedule.clone();
+        let open_resident_memory = Arc::clone(&self._resident_memory);
         let (opened, cold_mount_reservation) = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             Self::pause_cold_mount_open_for_test(&open_project_root);
@@ -2052,6 +2057,7 @@ impl CodeIndexSchedulerRegistryV1 {
             Self::finish_cold_mount_open_for_test(&open_project_root);
             let mut opened = opened?;
             opened.replace_semantic_schedule_hook(open_semantic_schedule);
+            opened.bind_resident_memory(open_resident_memory);
             Ok::<_, CodeIndexSchedulerErrorV1>((opened, cold_mount_reservation))
         })
         .await

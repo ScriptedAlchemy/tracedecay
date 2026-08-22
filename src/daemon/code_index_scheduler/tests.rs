@@ -23,9 +23,9 @@ use tracedecay_domain::{
     ManifestDigest, OptionalStagePublicStatus, PrincipalId, PrivacyDomainId, ProjectId,
     PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate, RefId, RelationEdgeKindV1,
     RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, SanitizerRevision,
-    ScoreDomainCalibrationV1, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1,
-    UtcMicros, VectorWatermark, WorktreeId,
+    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
+    SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId, SensitivityLevelV1,
+    SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
 };
 
 #[cfg(feature = "semantic-fastembed")]
@@ -57,10 +57,17 @@ use super::{
 };
 use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
 use tracedecay_query::retrieval::QueryAuthorityV1;
+use tracedecay_query::retrieval::exact::{
+    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest,
+};
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
+use tracedecay_query::retrieval::lexical::LexicalLaneRequest;
 use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
     LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
+};
+use tracedecay_runtime_core::resident_memory::{
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
 };
 
 mod noop_reconcile_tests;
@@ -279,6 +286,7 @@ fn code_generation_retention_preserves_every_pointer_addressable_generation() {
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(49),
+        None,
     )
     .expect("apply retention");
 
@@ -349,6 +357,7 @@ fn bounded_pointer_history_collects_evicted_clean_and_dirty_generations() {
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(50),
+        None,
     )
     .expect("collect generations evicted from bounded history");
     assert_eq!(
@@ -403,6 +412,7 @@ fn code_generation_retention_dry_run_reports_without_deleting() {
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::DryRun,
         UtcMicros(50),
+        None,
     )
     .expect("plan retention");
 
@@ -455,6 +465,7 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(60),
+        None,
     )
     .expect("apply retention");
 
@@ -510,6 +521,7 @@ fn code_generation_retention_emits_durable_reclaim_receipt() {
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(70),
+        None,
     )
     .expect("apply retention");
 
@@ -1506,8 +1518,7 @@ fn saved_edit_incremental_publish() {
     let owners = latest
         .production_query_owners()
         .expect("production exact/lexical/graph owners connect");
-    let _ = owners.exact;
-    let _ = owners.lexical;
+    let _ = owners.is_artifact_backed();
     let _ = latest
         .production_graph_serving()
         .expect("graph owner is activated");
@@ -2171,9 +2182,7 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
         .production_query_owners()
         .expect("connect production query owners");
     assert!(
-        std::mem::size_of_val(&owners.exact) > 0
-            && std::mem::size_of_val(&owners.lexical) > 0
-            && latest.production_graph_serving().is_ok(),
+        std::mem::size_of_val(owners.as_ref()) > 0 && latest.production_graph_serving().is_ok(),
         "exact/lexical/graph production owners must be concrete lane values"
     );
     let same_generation = scheduler.latest_complete().expect("same latest generation");
@@ -2236,6 +2245,271 @@ fn foreground_query_owner_read_stays_warming_until_background_projection_finishe
             .expect("completed text projection state")
             .is_none(),
         "completed projection must release its partial builder state"
+    );
+}
+
+/// The production text-serving journey with a durable store: build the SQLite
+/// lexical artifact in bounded page windows, publish it durably (pointer names
+/// the content-addressed artifact file), then reopen the durable head after a
+/// simulated restart in a single bounded pass — no rebuild — and serve exact
+/// and lexical queries from it.
+#[test]
+fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        let mut passes = 0_usize;
+        while !latest
+            .advance_text_serving(64)
+            .expect("advance durable text-artifact build")
+        {
+            passes += 1;
+            assert!(
+                passes < 10_000,
+                "the bounded artifact build never completed"
+            );
+        }
+        assert!(
+            latest
+                .production_query_owners()
+                .expect("artifact-backed owners")
+                .is_artifact_backed(),
+            "a durable store must serve text queries from the published artifact"
+        );
+    }
+
+    // The durable pointer must name the published content-addressed artifact.
+    let pointer: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(store.path().join("active-code-generation-v1.json"))
+            .expect("read durable pointer"),
+    )
+    .expect("parse durable pointer");
+    let active_generation = pointer["generation_id"]
+        .as_str()
+        .expect("active generation id")
+        .to_owned();
+    let entry = pointer["generation_index"]
+        .as_array()
+        .expect("durable generation index")
+        .iter()
+        .find(|entry| entry["generation_id"] == active_generation.as_str())
+        .expect("active generation index entry");
+    let artifact_file = entry["text_artifact"]["artifact_file"]
+        .as_str()
+        .expect("attached text artifact descriptor");
+    assert!(
+        artifact_file.starts_with("text-artifact-") && artifact_file.ends_with(".bin"),
+        "the durable descriptor must use the content-addressed artifact naming rule"
+    );
+    let artifact_path = store
+        .path()
+        .join("code-text-artifacts-v1")
+        .join(artifact_file);
+    assert!(
+        std::fs::metadata(&artifact_path)
+            .expect("published artifact file")
+            .len()
+            > 0,
+        "the published artifact file must exist and be non-empty"
+    );
+
+    // Simulated restart: a fresh scheduler over the same store must reopen
+    // the durable head in ONE bounded pass instead of rebuilding.
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let latest = scheduler.latest_complete().expect("restored generation");
+    assert!(
+        latest
+            .advance_text_serving(1)
+            .expect("durable-head reopen pass"),
+        "a published durable head must reopen without a rebuild"
+    );
+    let owners = latest
+        .production_query_owners()
+        .expect("reopened artifact owners");
+    assert!(
+        owners.is_artifact_backed(),
+        "the reopened owners must serve from the durable artifact"
+    );
+
+    let generation = latest.generation().manifest().generation_id.clone();
+    let base = RetrievalRequest {
+        principal: PrincipalId::new("principal.artifact-head").expect("principal"),
+        scope: RetrievalScope {
+            privacy_domain: latest.generation().manifest().privacy_domain.clone(),
+            root: SingleRootScopeV1 {
+                repository: latest.generation().snapshot().repository.clone(),
+                worktree: latest.generation().snapshot().worktree.clone(),
+                reference: latest.generation().snapshot().reference.clone(),
+            },
+        },
+        temporal_mode: TemporalModeV1::Current,
+        snapshot: RetrievalSnapshot {
+            watermarks: VectorWatermark::default(),
+            freshness_digest: FreshnessVectorDigest::new(format!("sha256:{}", "f".repeat(64)))
+                .expect("freshness digest"),
+            authorization_revision: AuthorizationRevision::new("authorization.artifact-head.v1")
+                .expect("authorization revision"),
+            captured_at: UtcMicros(1),
+        },
+        profile_id: "profile.artifact-head.v1"
+            .to_owned()
+            .try_into()
+            .expect("profile"),
+        budget: RetrievalBudget {
+            max_candidates_per_lane: 8,
+            max_fused_candidates: 8,
+            max_hydrated_results: 8,
+            max_hydration_bytes: 65_536,
+            deadline_micros: None,
+        },
+    };
+    let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+        "callee",
+        SanitizerRevision::new("sanitizer.artifact-head.v1").expect("sanitizer"),
+        QueryNormalizationRevision::new("normalization.artifact-head.v1").expect("normalization"),
+    )
+    .expect("query view");
+    let authority = CentralExactAdmissionAuthorityV1::new(
+        ExactAdmissionRuleRevision::new(tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1)
+            .expect("exact rule revision"),
+    );
+    let exact = owners
+        .retrieve_exact(&ExactLaneRequest {
+            literals: authority.parse_literals(&query_view, &base),
+            generation: generation.clone(),
+            budget: base.budget,
+            base: base.clone(),
+            query_view: &query_view,
+        })
+        .expect("exact retrieval over the reopened artifact");
+    let RetrieverOutcome::Complete(exact_batch) = exact else {
+        panic!("the reopened artifact must complete the exact retrieval");
+    };
+    assert!(
+        !exact_batch.candidates.is_empty(),
+        "the exact lane must return results from the reopened artifact"
+    );
+    let lexical = owners
+        .retrieve_lexical(&LexicalLaneRequest {
+            query_view: &query_view,
+            generation,
+            whole_terms: vec!["callee".to_owned()],
+            subtokens: vec!["callee".to_owned()],
+            phrases: Vec::new(),
+            field_filters: Vec::new(),
+            fuzzy_budget: 0,
+            lexical_profile_revision: ComponentRevision::new(
+                tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
+            )
+            .expect("lexical profile revision"),
+            score_domain: ScoreDomainId::new(
+                tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+            )
+            .expect("lexical score domain"),
+            budget: base.budget,
+            base,
+        })
+        .expect("lexical retrieval over the reopened artifact");
+    let RetrieverOutcome::Complete(lexical_batch) = lexical else {
+        panic!("the reopened artifact must complete the lexical retrieval");
+    };
+    assert!(
+        !lexical_batch.candidates.is_empty(),
+        "the lexical lane must return results from the reopened artifact"
+    );
+}
+
+/// The artifact build and reader ceilings must reserve through the process
+/// resident-memory authority: an authority too small for the advertised
+/// build ceiling refuses the build as a typed unavailability, and a serving
+/// artifact holds its measured reader charge until its owners are dropped.
+#[test]
+fn text_artifact_ceilings_reserve_through_process_resident_memory() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn reserved() {}\n")]);
+    let store = TempDir::new().expect("store root");
+
+    // An authority below the advertised build ceiling refuses the build.
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish"));
+        let tight = Arc::new(ProcessResidentMemoryV1::new(
+            std::num::NonZeroU64::new(1024 * 1024).expect("tight limit"),
+        ));
+        scheduler.bind_resident_memory(Arc::clone(&tight));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        let denied = latest.advance_text_serving(usize::MAX);
+        assert!(
+            matches!(
+                denied,
+                Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+            ),
+            "an unreservable build ceiling must refuse as typed unavailability: {denied:?}"
+        );
+        assert_eq!(
+            tight.snapshot().used_bytes,
+            0,
+            "a denied reservation must not leak a charge"
+        );
+    }
+
+    // An adequate authority admits the build and holds the reader charge
+    // for as long as the artifact owners serve.
+    let adequate = Arc::new(ProcessResidentMemoryV1::new(
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+    ));
+    {
+        // A fresh scheduler restores the durable generation; the unchanged
+        // fixture needs no republish.
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        scheduler.bind_resident_memory(Arc::clone(&adequate));
+        let latest = scheduler
+            .latest_complete()
+            .expect("fresh latest generation");
+        while !latest
+            .advance_text_serving(64)
+            .expect("advance artifact build under an adequate authority")
+        {}
+        let snapshot = adequate.snapshot();
+        assert!(
+            snapshot.charges.iter().any(|charge| {
+                charge.key.component.as_str() == "code-text-artifact-reader" && charge.bytes > 0
+            }),
+            "serving artifact owners must hold the measured reader charge: {snapshot:?}"
+        );
+        assert!(
+            !snapshot
+                .charges
+                .iter()
+                .any(|charge| charge.key.component.as_str() == "code-text-artifact-build"),
+            "the build ceiling must be released once the artifact serves: {snapshot:?}"
+        );
+    }
+    assert_eq!(
+        adequate.snapshot().used_bytes,
+        0,
+        "dropping the serving owners must release every artifact charge"
     );
 }
 
@@ -2307,12 +2581,16 @@ fn concurrent_background_wakes_share_one_generation_owned_text_builder() {
     assert!(second_wake.join().expect("second wake joined").is_ok());
 
     let latest = scheduler.latest_complete().expect("latest generation");
+    // The durable-artifact journey may complete within two bounded page
+    // windows; until it does, both wakes must have fed one shared partial
+    // build rather than each starting their own.
     assert!(
-        latest
-            .text_projection_build
-            .lock()
-            .expect("shared text projection state")
-            .is_some(),
+        latest.query_owners_are_warm()
+            || latest
+                .text_projection_build
+                .lock()
+                .expect("shared text projection state")
+                .is_some(),
         "bounded concurrent wakes must retain one shared partial projection"
     );
     while !latest
