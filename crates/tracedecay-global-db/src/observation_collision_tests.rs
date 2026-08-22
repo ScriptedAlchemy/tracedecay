@@ -98,7 +98,12 @@ fn anchored_write_for(
 
 /// Raw persisted source input for one native transcript record: the exact
 /// JSONL line a provider transcript would hold.
-fn raw_source_line(session_id: &SessionId, record_id: &str, range: (u64, u64), text: &str) -> String {
+fn raw_source_line(
+    session_id: &SessionId,
+    record_id: &str,
+    range: (u64, u64),
+    text: &str,
+) -> String {
     let provider = ProviderId::new(COLLISION_PROVIDER).unwrap();
     let record = ObservationId::new(record_id).unwrap();
     let relations = CanonicalObservationRelationsV1::new(session_id.clone())
@@ -134,8 +139,7 @@ fn decode_raw_source_record(
     receipt_id: &str,
 ) -> DurableObservationV1 {
     let provider = ProviderId::new(COLLISION_PROVIDER).unwrap();
-    let source =
-        ObservationSourceIdentityV1::for_provider(provider, session_id.clone()).unwrap();
+    let source = ObservationSourceIdentityV1::for_provider(provider, session_id.clone()).unwrap();
     let envelope: CanonicalObservationEnvelopeV1 = serde_json::from_str(raw_line).unwrap();
     let record = envelope.stable_record_id().clone();
     let payload = serde_json::to_value(&envelope).unwrap();
@@ -711,10 +715,7 @@ async fn admission_refusal_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<(St
         .expect("query admission refusal authority");
     let mut collected = Vec::new();
     while let Some(row) = rows.next().await.expect("read admission refusal rows") {
-        collected.push((
-            row.get::<String>(0).unwrap(),
-            row.get::<String>(1).unwrap(),
-        ));
+        collected.push((row.get::<String>(0).unwrap(), row.get::<String>(1).unwrap()));
     }
     collected
 }
@@ -758,8 +759,7 @@ async fn run_catch_up_pass(
     Vec<Result<ObservationPersistOutcome, ObservationStoreError>>,
 ) {
     let provider = ProviderId::new(COLLISION_PROVIDER).unwrap();
-    let source =
-        ObservationSourceIdentityV1::for_provider(provider, session_id.clone()).unwrap();
+    let source = ObservationSourceIdentityV1::for_provider(provider, session_id.clone()).unwrap();
     let scope = ObservationScopeV1::Profile;
     let scan_generation = ObservationSourceGenerationV1::new(generation).unwrap();
     let mut decoded = 0;
@@ -796,7 +796,9 @@ async fn run_catch_up_pass(
 #[tokio::test]
 async fn covered_replay_collision_leaves_coverage_state_untouched() {
     let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path()).await.unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
@@ -863,7 +865,9 @@ async fn covered_replay_collision_leaves_coverage_state_untouched() {
 #[tokio::test]
 async fn stale_expected_cursor_collision_stays_a_typed_collision() {
     let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path()).await.unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
@@ -916,7 +920,10 @@ async fn stale_expected_cursor_collision_stays_a_typed_collision() {
         "a stale-expected collision must stay the typed collision, got {error:?}"
     );
 
-    assert_eq!(admission_refused_advance_count(&runtime, &original).await, 0);
+    assert_eq!(
+        admission_refused_advance_count(&runtime, &original).await,
+        0
+    );
     assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
     assert_eq!(
         store
@@ -934,7 +941,9 @@ async fn stale_expected_cursor_collision_stays_a_typed_collision() {
 #[tokio::test]
 async fn generation_jump_collision_records_no_false_coverage() {
     let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path()).await.unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
@@ -1083,7 +1092,9 @@ fn codex_revision_observation(
 #[tokio::test]
 async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
     let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path()).await.unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
@@ -1193,7 +1204,9 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     use crate::observation::retention::{ObservationRetentionConfig, RetentionMode};
 
     let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path()).await.unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
@@ -1202,16 +1215,31 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     // Raw persisted source input.
     let original_lines = vec![(
         (0, 1),
-        raw_source_line(&session_id, "record.retention.0", (0, 1), "original record zero"),
+        raw_source_line(
+            &session_id,
+            "record.retention.0",
+            (0, 1),
+            "original record zero",
+        ),
     )];
     let rewritten_lines = vec![
         (
             (0, 1),
-            raw_source_line(&session_id, "record.retention.0", (0, 1), "rewritten record zero"),
+            raw_source_line(
+                &session_id,
+                "record.retention.0",
+                (0, 1),
+                "rewritten record zero",
+            ),
         ),
         (
             (1, 2),
-            raw_source_line(&session_id, "record.retention.1", (1, 2), "appended record one"),
+            raw_source_line(
+                &session_id,
+                "record.retention.1",
+                (1, 2),
+                "appended record one",
+            ),
         ),
     ];
 
@@ -1253,7 +1281,10 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     // Pass 2: a later catch-up pass reopens nothing.
     let digests_before = tracedecay_domain::observation::identity_digest_probe::count();
     let (decoded, _) = run_catch_up_pass(&store, &session_id, 2, &rewritten_lines, "gen2-b").await;
-    assert_eq!(decoded, 0, "catch-up must not reopen covered source records");
+    assert_eq!(
+        decoded, 0,
+        "catch-up must not reopen covered source records"
+    );
     assert_eq!(
         tracedecay_domain::observation::identity_digest_probe::count() - digests_before,
         0,
@@ -1328,7 +1359,9 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
     // nothing, and the retained row is byte-identical.
     drop(store);
     drop(runtime);
-    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path()).await.unwrap();
+    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
     let reopened_store = reopened
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
@@ -1356,7 +1389,9 @@ async fn terminal_refusal_survives_retention_and_catch_up_never_reopens_the_reco
 #[tokio::test]
 async fn drain_keeps_divergent_workflow_fact_state_a_hard_error() {
     let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path()).await.unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
