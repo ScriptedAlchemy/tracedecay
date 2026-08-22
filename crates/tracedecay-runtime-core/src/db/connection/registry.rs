@@ -99,6 +99,11 @@ impl DatabaseRuntimeClientV1 {
                 message: "read-write database client has no retained write authority".to_owned(),
             }
         })?;
+        tracing::trace!(
+            target: "tracedecay::observation_admission_work",
+            work = "runtime_command",
+            "dispatch database runtime submit"
+        );
         self.guard
             .runtime()
             .dispatch_submit_authorized(request, probe, authority)
@@ -110,6 +115,11 @@ impl DatabaseRuntimeClientV1 {
         request: tracedecay_store::RuntimeReadRequestV1,
         probe: &dyn tracedecay_store::RuntimeRequestProbeV1,
     ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
+        tracing::trace!(
+            target: "tracedecay::observation_admission_work",
+            work = "runtime_command",
+            "dispatch database runtime read"
+        );
         self.guard.runtime().dispatch_read(request, probe)
     }
 }
