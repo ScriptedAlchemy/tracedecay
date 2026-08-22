@@ -5,7 +5,8 @@
 //! digests decide whether publication is necessary.
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    io::{Cursor, Read, Write},
+    fs::File,
+    io::{Read, Write},
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
@@ -15,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use same_file::Handle;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_application::now_micros;
@@ -27,7 +29,9 @@ use tracedecay_domain::{
     SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1,
     WorktreeId, canonical_sha256,
 };
-use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
+use tracedecay_private_fs::{
+    framed_log::DirectorySyncPolicy, open_private_file, validate_private_directory,
+};
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
     ResidentMemoryKeyV1, ResidentMemoryReservationV1,
@@ -52,7 +56,7 @@ use crate::{
             CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
             CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
             SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageReadV1,
-            VerifiedSealedLexicalPageSourceV1,
+            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -69,9 +73,7 @@ use crate::{
         lexical::{
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
-            CodeExactProjectionAdapterV1, CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
-            CodeLexicalArtifactReaderV1, CodeLexicalProjectionAdapterV1,
-            CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
+            CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1,
             CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
             LexicalLaneRetriever,
         },
@@ -83,7 +85,7 @@ use crate::{
         MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
         acquire_code_generation_store_lock, attach_verified_text_artifact_under_lock,
         code_text_artifact_path, code_text_artifacts_root, durable_generation_index_digest,
-        retain_bounded_generation_index,
+        retain_bounded_generation_index, withdraw_verified_text_artifact_under_lock,
     },
 };
 
@@ -101,6 +103,14 @@ const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 /// text artifact. One page is one bounded unit of background build progress.
 const TEXT_ARTIFACT_PAGE_CHUNKS_V1: usize = 128;
 const TEXT_ARTIFACT_PAGE_BYTES_V1: usize = 4 * 1024 * 1024;
+/// One synchronous activation advances only this many page/finalization
+/// operations. Larger caller hints are clamped so work accounting cannot
+/// overflow and every expensive loop retains cancellation checkpoints.
+const TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1: usize = 64;
+/// Rows digested by one scheduler finalization operation. The builder persists
+/// its exact section/row cursor after this bounded slice, avoiding both a
+/// corpus-sized wake and one scheduler wake per individual `SQLite` row.
+const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
 
 pub(in crate::daemon) fn scoped_code_index_store_root(
     store_root: &Path,
@@ -1301,7 +1311,7 @@ type GenerationServingCachesV1 = (
     CodeGenerationId,
     Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     Arc<OnceLock<queries::GenerationRecordIndexV1>>,
-    Arc<Mutex<Option<CodeTextServingBuildV1>>>,
+    Arc<Mutex<Option<CodeTextArtifactBuildV1>>>,
     Arc<AtomicBool>,
     Arc<RwLock<CodeGraphActivationStateV1>>,
 );
@@ -1311,16 +1321,19 @@ pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     generation: Arc<CodeIndexPublishedGenerationV1>,
     query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
-    /// Generation-owned partial text-serving build (durable artifact or
-    /// in-memory projection). Only the background scheduler advances it;
+    /// Generation-owned partial durable text-artifact build. Only the
+    /// background scheduler advances it;
     /// foreground queries observe typed warming until the immutable owners
     /// are installed.
-    text_projection_build: Arc<Mutex<Option<CodeTextServingBuildV1>>>,
+    text_projection_build: Arc<Mutex<Option<CodeTextArtifactBuildV1>>>,
     text_projection_failed: Arc<AtomicBool>,
     /// The durable text-artifact store for this generation's store root.
-    /// `None` only when no durable publication store exists, which keeps the
-    /// in-memory projection path as the fallback.
-    text_artifact_store: Option<DaemonCodeTextArtifactStoreV1>,
+    text_artifact_store: DaemonCodeTextArtifactStoreV1,
+    /// Exact scheduler authorities for shutdown and superseding source epochs.
+    /// Each bounded pass captures the then-current epoch before touching the
+    /// durable source or artifact.
+    text_control_epoch: Arc<AtomicU64>,
+    text_control_shutdown: Arc<AtomicBool>,
     graph_activation: Arc<RwLock<CodeGraphActivationStateV1>>,
 }
 
@@ -1335,29 +1348,16 @@ pub(super) struct SemanticEvaluationCodeSnapshotV1 {
 }
 
 /// Production exact/lexical owners bound to one immutable published generation.
-///
-/// [`Self::Artifact`] serves from the durable content-addressed SQLite lexical
-/// artifact; [`Self::Projection`] is the in-memory fallback used only when no
-/// durable store exists for the generation.
 #[derive(Clone)]
-pub(super) enum ProductionCodeIndexQueryOwnersV1 {
-    Projection {
-        exact: ExactLane<
-            CentralExactAdmissionAuthorityV1,
-            CodeExactProjectionAdapterV1<CentralExactAdmissionAuthorityV1>,
-        >,
-        lexical: LexicalLane<CodeLexicalProjectionAdapterV1>,
-    },
-    Artifact {
-        exact: ExactLane<
-            CentralExactAdmissionAuthorityV1,
-            CodeExactLexicalArtifactReaderV1<CentralExactAdmissionAuthorityV1>,
-        >,
-        lexical: LexicalLane<CodeLexicalArtifactReaderV1>,
-        /// Holds the reader's measured retained bytes reserved in the
-        /// process resident-memory authority while these owners serve.
-        _reader_reservation: Arc<ResidentMemoryReservationV1>,
-    },
+pub(super) struct ProductionCodeIndexQueryOwnersV1 {
+    exact: ExactLane<
+        CentralExactAdmissionAuthorityV1,
+        CodeExactLexicalArtifactReaderV1<CentralExactAdmissionAuthorityV1>,
+    >,
+    lexical: LexicalLane<CodeLexicalArtifactReaderV1>,
+    /// Holds the complete advertised reader ceiling in the process resident-
+    /// memory authority while these owners serve.
+    _reader_reservation: Arc<ResidentMemoryReservationV1>,
 }
 
 impl ProductionCodeIndexQueryOwnersV1 {
@@ -1365,10 +1365,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         &self,
         request: &ExactLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
-        match self {
-            Self::Projection { exact, .. } => exact.retrieve_exact(request),
-            Self::Artifact { exact, .. } => exact.retrieve_exact(request),
-        }
+        self.exact.retrieve_exact(request)
     }
 
     fn artifact(
@@ -1379,7 +1376,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         lexical: LexicalLane<CodeLexicalArtifactReaderV1>,
         reader_reservation: ResidentMemoryReservationV1,
     ) -> Self {
-        Self::Artifact {
+        Self {
             exact,
             lexical,
             _reader_reservation: Arc::new(reader_reservation),
@@ -1390,67 +1387,41 @@ impl ProductionCodeIndexQueryOwnersV1 {
         &self,
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
-        match self {
-            Self::Projection { lexical, .. } => lexical.retrieve_lexical(request),
-            Self::Artifact { lexical, .. } => lexical.retrieve_lexical(request),
-        }
+        self.lexical.retrieve_lexical(request)
     }
 
     #[cfg(test)]
     pub fn is_artifact_backed(&self) -> bool {
-        matches!(self, Self::Artifact { .. })
+        true
     }
 }
 
-/// Generation-owned background text-serving build state.
-///
-/// [`Self::Artifact`] streams the sealed generation through the durable
-/// SQLite artifact builder; [`Self::Projection`] is the in-memory fallback.
-#[allow(clippy::large_enum_variant)] // one build exists per generation; both variants dominate
-enum CodeTextServingBuildV1 {
-    Projection(CodeLexicalProjectionBuildV1),
-    Artifact(CodeTextArtifactBuildV1),
-}
-
-/// Partial durable-artifact build: the staging SQLite builder plus the
-/// verified page source over this generation's sealed bytes.
+/// Partial durable-artifact build: the staging `SQLite` builder plus the
+/// verified page source over this generation's durable sealed file.
 struct CodeTextArtifactBuildV1 {
     builder: CodeLexicalArtifactBuilderV1,
-    source: VerifiedSealedLexicalPageSourceV1<Cursor<Vec<u8>>>,
-    sealed_bytes: Arc<Vec<u8>>,
-    /// The envelope-embedded `"sha256:<hex>"` over the inner generation
-    /// JSON; the verified page source authenticates against this one.
-    envelope_state_digest: String,
-    /// `"sha256:<hex>"` over the whole sealed file bytes; the durable
-    /// generation index names the sealed identity with this one.
-    sealed_file_digest: String,
+    source: VerifiedSealedLexicalPageSourceV1<File>,
+    sealed_identity: DurableSealedCodeGenerationIdentityV1,
+    source_receipt: Option<VerifiedSealedLexicalSourceReceiptV1>,
     staging_path: PathBuf,
-    appended_complete: bool,
     /// Holds the builder's advertised memory ceiling reserved in the
     /// process resident-memory authority for the lifetime of the build.
     _build_reservation: ResidentMemoryReservationV1,
 }
 
-/// Never-cancelled execution control for scheduler-owned artifact work: the
-/// background text build is already bounded per pass by its page window.
-struct NeverInterruptedControlV1;
-
-impl CodeIndexExecutionControlV1 for NeverInterruptedControlV1 {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-
-    fn is_deadline_exceeded(&self) -> bool {
-        false
-    }
-}
-
 fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
     match error {
-        CodeLexicalArtifactErrorV1::Interrupted(_) => RetrievalPortError::Cancelled,
+        CodeLexicalArtifactErrorV1::Interrupted(
+            crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+        ) => RetrievalPortError::Cancelled,
+        CodeLexicalArtifactErrorV1::Interrupted(
+            crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+        ) => RetrievalPortError::BudgetExceeded,
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
-        CodeLexicalArtifactErrorV1::Corrupt(detail) | CodeLexicalArtifactErrorV1::Io(detail) => {
+        CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
+        CodeLexicalArtifactErrorV1::Unreserved(_) => RetrievalPortError::BudgetExceeded,
+        CodeLexicalArtifactErrorV1::Io(detail) | CodeLexicalArtifactErrorV1::Missing(detail) => {
             RetrievalPortError::AuthorityUnavailable(detail)
         }
     }
@@ -1458,6 +1429,12 @@ fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortEr
 
 fn map_sealed_page_source_error(error: CodeIndexProductionErrorV1) -> RetrievalPortError {
     match error {
+        CodeIndexProductionErrorV1::Interrupted(
+            crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+        ) => RetrievalPortError::Cancelled,
+        CodeIndexProductionErrorV1::Interrupted(
+            crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+        ) => RetrievalPortError::BudgetExceeded,
         CodeIndexProductionErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
         error => RetrievalPortError::AuthorityUnavailable(error.to_string()),
     }
@@ -1486,19 +1463,19 @@ pub(super) struct DaemonCodeTextArtifactStoreV1 {
 
 impl DaemonCodeTextArtifactStoreV1 {
     fn bind(
+        store_root: &Path,
         publication: &DaemonCodeIndexPublicationStoreV1,
         resident_memory: &Arc<ProcessResidentMemoryV1>,
         project_id: &ProjectId,
         worktree_id: &WorktreeId,
-    ) -> Option<Self> {
-        let store_root = publication.active_path.parent()?.to_path_buf();
-        Some(Self {
-            store_root,
+    ) -> Self {
+        Self {
+            store_root: store_root.to_path_buf(),
             publication: publication.clone(),
             resident_memory: Arc::clone(resident_memory),
             project_id: project_id.clone(),
             worktree_id: worktree_id.clone(),
-        })
+        }
     }
 
     fn store_root(&self) -> &Path {
@@ -1534,7 +1511,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                 },
                 requested,
             )
-            .map_err(text_artifact_unavailable)
+            .map_err(|_| RetrievalPortError::BudgetExceeded)
     }
 
     /// The durably attached artifact descriptor for one retained generation,
@@ -1557,6 +1534,182 @@ impl DaemonCodeTextArtifactStoreV1 {
             .and_then(|entry| entry.text_artifact.clone()))
     }
 
+    /// Withdraw one exact missing/corrupt derived artifact so the immutable
+    /// sealed generation can rebuild it. A corrupt regular file is moved out
+    /// of the content-addressed namespace before the durable pointer is
+    /// cleared; non-regular objects are preserved and refused fail-closed.
+    fn withdraw_unavailable_descriptor(
+        &self,
+        descriptor: &DurableCodeTextArtifactDescriptorV1,
+        quarantine_corrupt_file: bool,
+    ) -> Result<(), RetrievalPortError> {
+        let lock = acquire_code_generation_store_lock(&self.store_root)
+            .map_err(text_artifact_unavailable)?;
+        let pointer = self
+            .publication
+            .read_publication_pointer()
+            .map_err(text_artifact_unavailable)?
+            .ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(
+                    "durable publication pointer disappeared during artifact repair".to_owned(),
+                )
+            })?;
+        let current = pointer
+            .generation_index
+            .iter()
+            .find(|entry| entry.generation_id == descriptor.generation_id.as_str())
+            .and_then(|entry| entry.text_artifact.as_ref());
+        if current != Some(descriptor) {
+            return Err(RetrievalPortError::AuthorityUnavailable(
+                "durable text-artifact attachment changed during repair".to_owned(),
+            ));
+        }
+
+        let mut quarantined = None;
+        if quarantine_corrupt_file {
+            let path = code_text_artifact_path(&self.store_root, descriptor)
+                .map_err(text_artifact_unavailable)?;
+            let metadata = path.symlink_metadata().map_err(text_artifact_unavailable)?;
+            if !metadata.file_type().is_file() {
+                return Err(RetrievalPortError::Contract(
+                    "corrupt code text artifact is not a regular file".to_owned(),
+                ));
+            }
+            let quarantine =
+                path.with_extension(format!("corrupt-{}-{}", std::process::id(), now_micros().0));
+            std::fs::rename(&path, &quarantine).map_err(text_artifact_unavailable)?;
+            DaemonCodeIndexPublicationStoreV1::sync_directory(path.parent().ok_or_else(|| {
+                RetrievalPortError::Contract("code text artifact path has no parent".to_owned())
+            })?)
+            .map_err(text_artifact_unavailable)?;
+            quarantined = Some(quarantine);
+        }
+
+        withdraw_verified_text_artifact_under_lock(&lock, &pointer, descriptor)
+            .map_err(text_artifact_unavailable)?;
+        if let Some(quarantine) = quarantined {
+            std::fs::remove_file(&quarantine).map_err(text_artifact_unavailable)?;
+            DaemonCodeIndexPublicationStoreV1::sync_directory(quarantine.parent().ok_or_else(
+                || {
+                    RetrievalPortError::Contract(
+                        "quarantined code text artifact has no parent".to_owned(),
+                    )
+                },
+            )?)
+            .map_err(text_artifact_unavailable)?;
+        }
+        Ok(())
+    }
+
+    /// Remove one incompatible resumable staging database before rebuilding
+    /// it with the current artifact format. The path is daemon-derived and the
+    /// canonical store lock serializes this replacement with generation and
+    /// artifact publication; non-regular collisions fail closed.
+    fn discard_incompatible_staging(
+        &self,
+        staging_path: &Path,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), RetrievalPortError> {
+        checkpoint_text_artifact_control(control)?;
+        let artifacts_root = code_text_artifacts_root(&self.store_root);
+        if staging_path.parent() != Some(artifacts_root.as_path()) {
+            return Err(RetrievalPortError::Contract(
+                "text-artifact staging path is outside its canonical root".to_owned(),
+            ));
+        }
+        let _lock = acquire_code_generation_store_lock(&self.store_root)
+            .map_err(text_artifact_unavailable)?;
+        checkpoint_text_artifact_control(control)?;
+        let metadata = staging_path
+            .symlink_metadata()
+            .map_err(text_artifact_unavailable)?;
+        if !metadata.file_type().is_file() {
+            return Err(RetrievalPortError::Contract(
+                "incompatible text-artifact staging path is not a regular file".to_owned(),
+            ));
+        }
+        std::fs::remove_file(staging_path).map_err(text_artifact_unavailable)?;
+        DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
+            .map_err(text_artifact_unavailable)
+    }
+
+    /// Resolve the immutable, content-addressed sealed file for one retained
+    /// generation without re-encoding its decoded in-memory representation.
+    fn sealed_identity(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<DurableSealedCodeGenerationIdentityV1, RetrievalPortError> {
+        let pointer = self
+            .publication
+            .read_publication_pointer()
+            .map_err(text_artifact_unavailable)?
+            .ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(
+                    "durable code-generation index is missing".to_owned(),
+                )
+            })?;
+        let entry = pointer
+            .generation_index
+            .iter()
+            .find(|entry| entry.generation_id == generation_id.as_str())
+            .ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(format!(
+                    "durable code-generation index does not retain generation {generation_id}"
+                ))
+            })?;
+        Ok(DurableSealedCodeGenerationIdentityV1 {
+            locator: entry.generation_file.clone(),
+            digest: ManifestDigest::new(entry.state_digest.clone())
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            size_bytes: entry.size_bytes,
+        })
+    }
+
+    /// Open the exact durable sealed file after the caller has admitted the
+    /// build's resident-memory ceiling. The lexical source verifies the whole
+    /// file content address during its one bounded structural scan.
+    fn open_sealed_source(
+        &self,
+        identity: &DurableSealedCodeGenerationIdentityV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<VerifiedSealedLexicalPageSourceV1<File>, RetrievalPortError> {
+        DaemonCodeIndexPublicationStoreV1::validate_generation_file(&identity.locator)
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        let path = self.publication.generations_root.join(&identity.locator);
+        let metadata = path.symlink_metadata().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                RetrievalPortError::AuthorityUnavailable(
+                    "durable sealed lexical source is missing".to_owned(),
+                )
+            } else {
+                text_artifact_unavailable(error)
+            }
+        })?;
+        if !metadata.file_type().is_file() || metadata.len() != identity.size_bytes {
+            return Err(RetrievalPortError::Contract(
+                "durable sealed lexical source identity is corrupt".to_owned(),
+            ));
+        }
+        let file = File::open(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                RetrievalPortError::AuthorityUnavailable(
+                    "durable sealed lexical source disappeared before open".to_owned(),
+                )
+            } else {
+                text_artifact_unavailable(error)
+            }
+        })?;
+        VerifiedSealedLexicalPageSourceV1::open_content_addressed(
+            file,
+            identity.size_bytes,
+            identity.digest.clone(),
+            TEXT_ARTIFACT_PAGE_CHUNKS_V1,
+            TEXT_ARTIFACT_PAGE_BYTES_V1,
+            control,
+        )
+        .map_err(map_sealed_page_source_error)
+    }
+
     /// Durably publish one finalized staging artifact: content-address it,
     /// move it into the artifacts root, fsync the directory, and attach the
     /// descriptor to the sealed generation entry under the store lock.
@@ -1564,13 +1717,19 @@ impl DaemonCodeTextArtifactStoreV1 {
         &self,
         staging_path: &Path,
         generation: &CodeIndexPublishedGenerationV1,
-        sealed_bytes_len: u64,
-        state_digest: &str,
+        sealed_identity: &DurableSealedCodeGenerationIdentityV1,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<DurableCodeTextArtifactDescriptorV1, RetrievalPortError> {
-        let artifact_hex = sha256_file_hex(staging_path).map_err(text_artifact_unavailable)?;
-        let artifact_size_bytes = std::fs::metadata(staging_path)
-            .map_err(text_artifact_unavailable)?
-            .len();
+        let artifacts_root = code_text_artifacts_root(&self.store_root);
+        ensure_private_text_artifacts_root(&artifacts_root)?;
+        // Publication and artifact retention share this canonical store lock.
+        // Hold it from the first staging observation until pointer attachment
+        // is durable so retention cannot unlink a newly visible artifact from
+        // a plan made before the descriptor was attached.
+        let lock = acquire_code_generation_store_lock(&self.store_root)
+            .map_err(text_artifact_unavailable)?;
+        let (artifact_hex, artifact_size_bytes) =
+            sha256_private_file_hex_and_size(staging_path, control)?;
         let descriptor = DurableCodeTextArtifactDescriptorV1 {
             generation_id: generation.manifest().generation_id.clone(),
             artifact_file: format!("text-artifact-{artifact_hex}.bin"),
@@ -1578,20 +1737,33 @@ impl DaemonCodeTextArtifactStoreV1 {
                 .map_err(text_artifact_unavailable)?,
             artifact_size_bytes,
         };
-        let artifacts_root = code_text_artifacts_root(&self.store_root);
-        std::fs::create_dir_all(&artifacts_root).map_err(text_artifact_unavailable)?;
         let final_path = artifacts_root.join(&descriptor.artifact_file);
-        if final_path.exists() {
-            // The final name is the content address of these exact bytes, so
-            // an existing file is an idempotent republish: drop the duplicate
-            // staging bytes and still attach the (idempotent) descriptor.
-            std::fs::remove_file(staging_path).map_err(text_artifact_unavailable)?;
-        } else {
-            std::fs::rename(staging_path, &final_path).map_err(text_artifact_unavailable)?;
+        match final_path.symlink_metadata() {
+            Ok(_) => {
+                // A digest-derived name is not proof that an existing filesystem
+                // object contains the named bytes. Verify the stable destination
+                // before withdrawing staging evidence; a symlink, non-regular
+                // object, truncated file, or same-name collision fails closed.
+                let (existing_hex, existing_size_bytes) =
+                    sha256_private_file_hex_and_size(&final_path, control)?;
+                if existing_size_bytes != artifact_size_bytes {
+                    return Err(RetrievalPortError::Contract(
+                        "existing code text artifact does not match its content address".to_owned(),
+                    ));
+                }
+                if existing_hex != artifact_hex {
+                    return Err(RetrievalPortError::Contract(
+                        "existing code text artifact contains different bytes".to_owned(),
+                    ));
+                }
+                std::fs::remove_file(staging_path).map_err(text_artifact_unavailable)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::rename(staging_path, &final_path).map_err(text_artifact_unavailable)?;
+            }
+            Err(error) => return Err(text_artifact_unavailable(error)),
         }
         DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
-            .map_err(text_artifact_unavailable)?;
-        let lock = acquire_code_generation_store_lock(&self.store_root)
             .map_err(text_artifact_unavailable)?;
         let pointer = self
             .publication
@@ -1602,17 +1774,10 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "no durable publication pointer exists for text-artifact attachment".to_owned(),
                 )
             })?;
-        let state_digest_hex = state_digest.strip_prefix("sha256:").unwrap_or(state_digest);
-        let sealed_identity = DurableSealedCodeGenerationIdentityV1 {
-            locator: format!("generation-{state_digest_hex}.json"),
-            digest: ManifestDigest::new(state_digest.to_owned())
-                .map_err(text_artifact_unavailable)?,
-            size_bytes: sealed_bytes_len,
-        };
         attach_verified_text_artifact_under_lock(
             &lock,
             &pointer,
-            &sealed_identity,
+            sealed_identity,
             descriptor.clone(),
         )
         .map_err(text_artifact_unavailable)?;
@@ -1693,7 +1858,7 @@ impl LatestCompleteCodeIndexV1 {
     }
 
     fn activate_text_serving(&self) -> Result<(), RetrievalPortError> {
-        if !self.advance_text_serving(usize::MAX)? {
+        if !self.advance_text_serving(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)? {
             return Err(RetrievalPortError::AuthorityUnavailable(
                 "code-index text serving owners are warming".to_owned(),
             ));
@@ -1896,22 +2061,27 @@ impl LatestCompleteCodeIndexV1 {
         })
     }
 
-    /// Advance at most `maximum_documents` document operations on this sealed
-    /// generation's background text projection. The mutex is both the
+    /// Advance at most `maximum_work` bounded page/finalization operations on
+    /// this sealed generation's durable text artifact. The mutex is both the
     /// generation-owned partial-state authority and the single-flight gate for
     /// concurrent scheduler wakes.
-    fn advance_text_serving(&self, maximum_documents: usize) -> Result<bool, RetrievalPortError> {
-        let result = self.advance_text_serving_inner(maximum_documents);
-        if result.is_err() {
+    fn advance_text_serving(&self, maximum_work: usize) -> Result<bool, RetrievalPortError> {
+        let result = self.advance_text_serving_inner(maximum_work);
+        if result.as_ref().is_err_and(|error| {
+            matches!(
+                error,
+                RetrievalPortError::CapabilityManifestRejected
+                    | RetrievalPortError::GenerationMismatch
+                    | RetrievalPortError::IncompatibleProjection
+                    | RetrievalPortError::Contract(_)
+            )
+        }) {
             self.mark_text_serving_failed();
         }
         result
     }
 
-    fn advance_text_serving_inner(
-        &self,
-        maximum_documents: usize,
-    ) -> Result<bool, RetrievalPortError> {
+    fn advance_text_serving_inner(&self, maximum_work: usize) -> Result<bool, RetrievalPortError> {
         if self.query_owners.get().is_some() {
             return Ok(true);
         }
@@ -1922,54 +2092,7 @@ impl LatestCompleteCodeIndexV1 {
         if self.query_owners.get().is_some() {
             return Ok(true);
         }
-        if let Some(store) = self.text_artifact_store.as_ref() {
-            self.advance_artifact_text_serving(&mut build, store, maximum_documents)
-        } else {
-            self.advance_projection_text_serving(&mut build, maximum_documents)
-        }
-    }
-
-    /// The in-memory fallback journey: build the lexical projection over the
-    /// admitted chunks and install projection-backed owners.
-    fn advance_projection_text_serving(
-        &self,
-        build: &mut Option<CodeTextServingBuildV1>,
-        maximum_documents: usize,
-    ) -> Result<bool, RetrievalPortError> {
-        if build.is_none() {
-            let admitted = self
-                .generation
-                .admitted_chunks()
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-            *build = Some(CodeTextServingBuildV1::Projection(
-                CodeLexicalProjectionBuildV1::new_admitted(
-                    self.text_projection_metadata()?,
-                    admitted.as_ref().clone(),
-                )?,
-            ));
-        }
-        let Some(CodeTextServingBuildV1::Projection(projection_build)) = build.as_mut() else {
-            return Err(RetrievalPortError::Contract(
-                "code-index text projection state is missing".to_owned(),
-            ));
-        };
-        let step = projection_build.advance(maximum_documents)?;
-        let CodeLexicalProjectionBuildStepV1::Ready(lexical_projection) = step else {
-            return Ok(false);
-        };
-        let lexical_projection = *lexical_projection;
-        let authority = exact_serving_authority()?;
-        let exact = ExactLane::new(
-            authority.clone(),
-            lexical_projection.exact_adapter(authority),
-        );
-        let lexical = LexicalLane::new(lexical_projection);
-        let owners = Arc::new(ProductionCodeIndexQueryOwnersV1::Projection { exact, lexical });
-        let _ = self.query_owners.set(Arc::clone(&owners));
-        *build = None;
-        let _ = self.record_index();
-        let _ = self.generation.test_attribution_authority();
-        Ok(true)
+        self.advance_artifact_text_serving(&mut build, maximum_work)
     }
 
     /// The durable-artifact journey: reopen a published head when one exists,
@@ -1977,16 +2100,25 @@ impl LatestCompleteCodeIndexV1 {
     /// bounded page window at a time, finalize, publish, and reopen.
     fn advance_artifact_text_serving(
         &self,
-        build: &mut Option<CodeTextServingBuildV1>,
-        store: &DaemonCodeTextArtifactStoreV1,
-        maximum_documents: usize,
+        build: &mut Option<CodeTextArtifactBuildV1>,
+        maximum_work: usize,
     ) -> Result<bool, RetrievalPortError> {
-        let control = NeverInterruptedControlV1;
+        let store = &self.text_artifact_store;
+        let control = DaemonCodeIndexControlV1::new(
+            Arc::clone(&self.text_control_epoch),
+            Arc::clone(&self.text_control_shutdown),
+        );
         if build.is_none() {
             let generation_id = self.generation.manifest().generation_id.clone();
             if let Some(descriptor) = store.published_descriptor(&generation_id)? {
                 // Durable-head reopen: a restart serves the published
-                // artifact without rebuilding it.
+                // artifact without rebuilding it. Reserve the complete reader
+                // ceiling before even resolving or touching the artifact path.
+                let reader_reservation = store.reserve_resident_memory(
+                    &generation_id,
+                    "code-text-artifact-reader",
+                    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+                )?;
                 let path = code_text_artifact_path(store.store_root(), &descriptor)
                     .map_err(text_artifact_unavailable)?;
                 let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
@@ -1995,10 +2127,26 @@ impl LatestCompleteCodeIndexV1 {
                     descriptor.artifact_size_bytes,
                     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
                     &control,
-                )
-                .map_err(map_text_artifact_error)?;
-                self.install_artifact_owners(store, reader)?;
-                return Ok(true);
+                );
+                match reader {
+                    Ok(reader) => {
+                        self.install_artifact_owners(reader, reader_reservation)?;
+                        return Ok(true);
+                    }
+                    Err(CodeLexicalArtifactErrorV1::Missing(_)) => {
+                        drop(reader_reservation);
+                        store.withdraw_unavailable_descriptor(&descriptor, false)?;
+                    }
+                    Err(CodeLexicalArtifactErrorV1::Corrupt(_)) => {
+                        drop(reader_reservation);
+                        store.withdraw_unavailable_descriptor(&descriptor, true)?;
+                    }
+                    Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
+                        drop(reader_reservation);
+                        store.withdraw_unavailable_descriptor(&descriptor, false)?;
+                    }
+                    Err(error) => return Err(map_text_artifact_error(error)),
+                }
             }
             // The builder's advertised memory ceiling is reserved through the
             // process resident-memory authority before the build allocates.
@@ -2007,103 +2155,137 @@ impl LatestCompleteCodeIndexV1 {
                 "code-text-artifact-build",
                 CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
             )?;
-            let sealed_bytes = Arc::new(
-                self.generation
-                    .encode_sealed()
-                    .map_err(text_artifact_unavailable)?,
-            );
-            let sealed_hex = sha256_hex(&sealed_bytes);
-            let sealed_file_digest = format!("sha256:{sealed_hex}");
-            let envelope_state_digest = sealed_envelope_state_digest(&sealed_bytes)?;
+            let sealed_identity = store.sealed_identity(&generation_id)?;
+            let sealed_hex = sealed_identity
+                .digest
+                .as_str()
+                .strip_prefix("sha256:")
+                .ok_or_else(|| {
+                    RetrievalPortError::Contract(
+                        "durable sealed lexical source digest is not SHA-256".to_owned(),
+                    )
+                })?;
             let artifacts_root = code_text_artifacts_root(store.store_root());
-            std::fs::create_dir_all(&artifacts_root).map_err(text_artifact_unavailable)?;
+            ensure_private_text_artifacts_root(&artifacts_root)?;
             let staging_path = artifacts_root.join(format!(".text-artifact-{sealed_hex}.staging"));
+            let mut source = store.open_sealed_source(&sealed_identity, &control)?;
+            let builder_budget = text_artifact_builder_budget(source.staging_window_bytes())?;
             let metadata = self.text_projection_metadata()?;
             let builder = if staging_path.exists() {
-                CodeLexicalArtifactBuilderV1::open_or_resume(&staging_path, metadata)
+                match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                    &staging_path,
+                    metadata.clone(),
+                    builder_budget,
+                    &control,
+                ) {
+                    Ok(builder) => Ok(builder),
+                    Err(CodeLexicalArtifactErrorV1::Incompatible(_)) => {
+                        store.discard_incompatible_staging(&staging_path, &control)?;
+                        CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                            &staging_path,
+                            metadata,
+                            builder_budget,
+                        )
+                    }
+                    Err(error) => Err(error),
+                }
             } else {
-                CodeLexicalArtifactBuilderV1::create(&staging_path, metadata)
+                CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                    &staging_path,
+                    metadata,
+                    builder_budget,
+                )
             }
             .map_err(map_text_artifact_error)?;
-            let source =
-                self.open_sealed_page_source(&sealed_bytes, &envelope_state_digest, &control)?;
-            *build = Some(CodeTextServingBuildV1::Artifact(CodeTextArtifactBuildV1 {
+            let progress = builder.progress().map_err(map_text_artifact_error)?;
+            if let Some(cursor) = progress.next_cursor.as_ref() {
+                source
+                    .restore_cursor(cursor, &control)
+                    .map_err(map_sealed_page_source_error)?;
+            }
+            *build = Some(CodeTextArtifactBuildV1 {
                 builder,
                 source,
-                sealed_bytes,
-                envelope_state_digest,
-                sealed_file_digest,
+                sealed_identity,
+                source_receipt: None,
                 staging_path,
-                appended_complete: false,
                 _build_reservation: build_reservation,
-            }));
+            });
         }
-        let Some(CodeTextServingBuildV1::Artifact(artifact_build)) = build.as_mut() else {
-            return Err(RetrievalPortError::Contract(
-                "code-index text serving build state does not match the durable-artifact journey"
-                    .to_owned(),
-            ));
-        };
-        // `append_page` is idempotent for already-staged page ordinals, so a
-        // resumed staging file simply replays the pages it already holds.
-        let mut remaining = maximum_documents;
-        while remaining > 0 && !artifact_build.appended_complete {
-            match artifact_build
-                .source
-                .next_page(&control)
+        let artifact_build = build.as_mut().ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "code-index text artifact build state is missing".to_owned(),
+            )
+        })?;
+        let mut remaining = maximum_work.min(TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1);
+        while remaining > 0 && artifact_build.source_receipt.is_none() {
+            let (source, builder) = (&mut artifact_build.source, &mut artifact_build.builder);
+            let admitted = source
+                .next_page_if(&control, |page| {
+                    builder.append_page(page, &control).map(|_| ())
+                })
                 .map_err(map_sealed_page_source_error)?
-            {
+                .map_err(map_text_artifact_error)?;
+            match admitted {
                 VerifiedSealedLexicalPageReadV1::Page(page) => {
-                    artifact_build
-                        .builder
-                        .append_page(&page, &control)
-                        .map_err(map_text_artifact_error)?;
+                    let _ = page;
                     remaining -= 1;
                 }
-                VerifiedSealedLexicalPageReadV1::Complete(_) => {
-                    artifact_build.appended_complete = true;
+                VerifiedSealedLexicalPageReadV1::Complete(receipt) => {
+                    artifact_build.source_receipt = Some(receipt);
                 }
             }
         }
-        if !artifact_build.appended_complete {
+        let Some(source_receipt) = artifact_build.source_receipt.as_ref() else {
+            return Ok(false);
+        };
+        if remaining == 0 {
             return Ok(false);
         }
-        let mut replay = self.open_sealed_page_source(
-            &artifact_build.sealed_bytes,
-            &artifact_build.envelope_state_digest,
-            &control,
-        )?;
-        artifact_build
+        let finalization_rows = remaining
+            .checked_mul(TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1)
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "code text artifact finalization work budget overflowed".to_owned(),
+                )
+            })?;
+        let finalized = artifact_build
             .builder
-            .rebuild_and_finalize(&mut replay, &control)
+            .advance_finalization(source_receipt, finalization_rows, &control)
             .map_err(map_text_artifact_error)?;
-        let Some(CodeTextServingBuildV1::Artifact(finished)) = build.take() else {
-            return Err(RetrievalPortError::Contract(
-                "code-index text serving build state vanished during finalization".to_owned(),
-            ));
-        };
+        if !matches!(
+            finalized,
+            tracedecay_query::retrieval::lexical::CodeLexicalArtifactFinalizationStepV1::Ready(_)
+        ) {
+            return Ok(false);
+        }
+        let finished = build.take().ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "code-index text artifact build state vanished during publication".to_owned(),
+            )
+        })?;
         let CodeTextArtifactBuildV1 {
             builder,
             source,
-            sealed_bytes,
-            envelope_state_digest: _,
-            sealed_file_digest,
+            sealed_identity,
+            source_receipt: _,
             staging_path,
-            appended_complete: _,
             _build_reservation: build_reservation,
         } = finished;
-        let sealed_bytes_len =
-            u64::try_from(sealed_bytes.len()).map_err(text_artifact_unavailable)?;
         // Close the builder's SQLite connection before content-addressing the
         // finalized staging file.
         drop(builder);
         drop(source);
-        drop(sealed_bytes);
         let descriptor = store.publish(
             &staging_path,
             self.generation.as_ref(),
-            sealed_bytes_len,
-            &sealed_file_digest,
+            &sealed_identity,
+            &control,
+        )?;
+        let reader_reservation = store.reserve_resident_memory(
+            &self.generation.manifest().generation_id,
+            "code-text-artifact-reader",
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         )?;
         let final_path = code_text_artifact_path(store.store_root(), &descriptor)
             .map_err(text_artifact_unavailable)?;
@@ -2115,44 +2297,21 @@ impl LatestCompleteCodeIndexV1 {
             &control,
         )
         .map_err(map_text_artifact_error)?;
-        // The build ceiling is released only after the serving reader has
-        // reserved its own retained bytes inside `install_artifact_owners`.
-        self.install_artifact_owners(store, reader)?;
+        self.install_artifact_owners(reader, reader_reservation)?;
         drop(build_reservation);
         Ok(true)
     }
 
-    fn open_sealed_page_source(
-        &self,
-        sealed_bytes: &Arc<Vec<u8>>,
-        state_digest: &str,
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<VerifiedSealedLexicalPageSourceV1<Cursor<Vec<u8>>>, RetrievalPortError> {
-        let admitted_len = u64::try_from(sealed_bytes.len()).map_err(text_artifact_unavailable)?;
-        VerifiedSealedLexicalPageSourceV1::open(
-            Cursor::new(sealed_bytes.as_ref().clone()),
-            admitted_len,
-            ManifestDigest::new(state_digest.to_owned())
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-            TEXT_ARTIFACT_PAGE_CHUNKS_V1,
-            TEXT_ARTIFACT_PAGE_BYTES_V1,
-            control,
-        )
-        .map_err(map_sealed_page_source_error)
-    }
-
     fn install_artifact_owners(
         &self,
-        store: &DaemonCodeTextArtifactStoreV1,
         reader: CodeLexicalArtifactReaderV1,
+        reader_reservation: ResidentMemoryReservationV1,
     ) -> Result<(), RetrievalPortError> {
-        // The reader's measured retained bytes are reserved for as long as
-        // these owners serve; dropping the owners releases the reservation.
-        let reader_reservation = store.reserve_resident_memory(
-            &self.generation.manifest().generation_id.clone(),
-            "code-text-artifact-reader",
-            reader.retained_owned_bytes(),
-        )?;
+        if reader.retained_owned_bytes() > CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 {
+            return Err(RetrievalPortError::Contract(
+                "text-artifact reader exceeded its admitted resident-memory ceiling".to_owned(),
+            ));
+        }
         let authority = exact_serving_authority()?;
         let exact = ExactLane::new(authority.clone(), reader.exact_adapter(authority));
         let lexical = LexicalLane::new(reader);
@@ -3167,11 +3326,14 @@ impl CodeIndexWorktreeSchedulerV1 {
             text_projection_build,
             text_projection_failed,
             text_artifact_store: DaemonCodeTextArtifactStoreV1::bind(
+                &self.store_root,
                 &self.publication,
                 &self.resident_memory,
                 &self.project_id,
                 &self.worktree_id,
             ),
+            text_control_epoch: Arc::clone(&self.epoch),
+            text_control_shutdown: Arc::clone(&self.shutting_down),
             graph_activation,
         }
     }
@@ -3225,11 +3387,14 @@ impl CodeIndexWorktreeSchedulerV1 {
                         text_projection_build: Arc::new(Mutex::new(None)),
                         text_projection_failed: Arc::new(AtomicBool::new(false)),
                         text_artifact_store: DaemonCodeTextArtifactStoreV1::bind(
+                            &self.store_root,
                             &self.publication,
                             &self.resident_memory,
                             &self.project_id,
                             &self.worktree_id,
                         ),
+                        text_control_epoch: Arc::clone(&self.epoch),
+                        text_control_shutdown: Arc::clone(&self.shutting_down),
                         graph_activation: Arc::new(RwLock::new(
                             CodeGraphActivationStateV1::Pending,
                         )),
@@ -3522,42 +3687,106 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// The envelope-embedded state digest a sealed generation opens with.
-///
-/// The sealed codec writes the envelope prefix deterministically as
-/// `{"state_digest":"sha256:<hex>"`, and the verified page source recomputes
-/// and enforces the digest against the inner bytes, so this parse is
-/// plumbing, not trust.
-fn sealed_envelope_state_digest(sealed: &[u8]) -> Result<String, RetrievalPortError> {
-    const PREFIX: &[u8] = b"{\"state_digest\":\"";
-    let rest = sealed.strip_prefix(PREFIX).ok_or_else(|| {
-        RetrievalPortError::Contract(
-            "sealed generation envelope does not begin with its state digest".to_owned(),
-        )
-    })?;
-    let end = rest.iter().position(|byte| *byte == b'"').ok_or_else(|| {
-        RetrievalPortError::Contract(
-            "sealed generation envelope state digest is unterminated".to_owned(),
-        )
-    })?;
-    std::str::from_utf8(&rest[..end])
-        .map(str::to_owned)
-        .map_err(|error| RetrievalPortError::Contract(error.to_string()))
-}
-
 /// Streaming SHA-256 of one file's bytes, as 64 lowercase hex characters.
-fn sha256_file_hex(path: &Path) -> Result<String, std::io::Error> {
-    let mut file = std::fs::File::open(path)?;
+/// Cancellation is checked before opening and after every bounded read, so a
+/// shutdown or superseding generation cannot strand publication in a
+/// corpus-sized uninterruptible hash.
+fn sha256_private_file_hex_and_size(
+    path: &Path,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(String, u64), RetrievalPortError> {
+    checkpoint_text_artifact_control(control)?;
+    let named_metadata = path.symlink_metadata().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RetrievalPortError::AuthorityUnavailable(
+                "code text artifact file is missing".to_owned(),
+            )
+        } else {
+            text_artifact_unavailable(error)
+        }
+    })?;
+    if !named_metadata.file_type().is_file() {
+        return Err(RetrievalPortError::Contract(
+            "code text artifact path is not a regular file".to_owned(),
+        ));
+    }
+    let mut file = open_private_file(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RetrievalPortError::AuthorityUnavailable(
+                "code text artifact file disappeared before open".to_owned(),
+            )
+        } else {
+            RetrievalPortError::Contract(format!(
+                "code text artifact file is not owner-private: {error}"
+            ))
+        }
+    })?;
+    let file_metadata = file.metadata().map_err(text_artifact_unavailable)?;
+    if !file_metadata.is_file() || file_metadata.len() != named_metadata.len() {
+        return Err(RetrievalPortError::Contract(
+            "code text artifact file identity changed before hashing".to_owned(),
+        ));
+    }
+    let identity = Handle::from_file(file.try_clone().map_err(text_artifact_unavailable)?)
+        .map_err(text_artifact_unavailable)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = file.read(&mut buffer).map_err(text_artifact_unavailable)?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
+        checkpoint_text_artifact_control(control)?;
     }
-    Ok(hex::encode(hasher.finalize()))
+    let current_metadata = path.symlink_metadata().map_err(text_artifact_unavailable)?;
+    let current_identity = Handle::from_path(path).map_err(text_artifact_unavailable)?;
+    if !current_metadata.file_type().is_file()
+        || current_metadata.len() != file_metadata.len()
+        || current_identity != identity
+    {
+        return Err(RetrievalPortError::Contract(
+            "code text artifact named file changed while hashing".to_owned(),
+        ));
+    }
+    Ok((hex::encode(hasher.finalize()), file_metadata.len()))
+}
+
+fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortError> {
+    match tracedecay_private_fs::create_private_directory(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            validate_private_directory(path).map_err(|error| {
+                RetrievalPortError::Contract(format!(
+                    "code text artifacts root is not owner-private: {error}"
+                ))
+            })
+        }
+        Err(error) => Err(text_artifact_unavailable(error)),
+    }
+}
+
+fn checkpoint_text_artifact_control(
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), RetrievalPortError> {
+    if control.is_cancelled() {
+        Err(RetrievalPortError::Cancelled)
+    } else if control.is_deadline_exceeded() {
+        Err(RetrievalPortError::BudgetExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+/// Divide the single process reservation between the source's concurrently
+/// retained decode window and the `SQLite` builder. Each component fitting the
+/// ceiling independently is insufficient because both remain live while a
+/// page is admitted.
+fn text_artifact_builder_budget(source_window_bytes: usize) -> Result<usize, RetrievalPortError> {
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1
+        .checked_sub(source_window_bytes)
+        .filter(|remaining| *remaining > 0)
+        .ok_or(RetrievalPortError::BudgetExceeded)
 }
 
 #[cfg(test)]

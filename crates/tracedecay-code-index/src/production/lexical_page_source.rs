@@ -1,5 +1,4 @@
-use std::io::{Read, Seek, SeekFrom};
-use std::ops::Range;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::ExactTechnicalTermV1;
@@ -13,11 +12,33 @@ const PAGE_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-page.v1\0";
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-source.v1\0";
 const IMPORT_DICTIONARY_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-import-dictionary.v1\0";
 const IMPORT_RECORD_DOMAIN: &[u8] = b"import\0";
+const SOURCE_CHAIN_RECORD_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-source-chain.v1\0";
+const IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN: &[u8] =
+    b"tracedecay.sealed-lexical-import-dictionary-chain.v1\0";
+const CURSOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.sealed-lexical-cursor.v1\0";
+
+type PersistedSealedLexicalCursorFields = (
+    String,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    String,
+    String,
+    String,
+);
 
 /// Resume position after one fully admitted lexical page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedSealedLexicalCursorV1 {
+    source_state_digest: ManifestDigest,
     next_file_ordinal: u64,
+    next_file_offset: u64,
     next_chunk_ordinal: u64,
     next_import_ordinal: u64,
     next_page_ordinal: u64,
@@ -30,9 +51,31 @@ pub struct VerifiedSealedLexicalCursorV1 {
 }
 
 impl VerifiedSealedLexicalCursorV1 {
+    fn initial(
+        source_state_digest: ManifestDigest,
+        next_file_offset: u64,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        Ok(Self {
+            source_state_digest,
+            next_file_ordinal: 0,
+            next_file_offset,
+            next_chunk_ordinal: 0,
+            next_import_ordinal: 0,
+            next_page_ordinal: 0,
+            emitted_chunks: 0,
+            emitted_payload_bytes: 0,
+            emitted_imports: 0,
+            emitted_import_payload_bytes: 0,
+            import_dictionary_digest: initial_digest(IMPORT_DICTIONARY_DIGEST_DOMAIN)?,
+            cumulative_digest: initial_digest(SOURCE_DIGEST_DOMAIN)?,
+        })
+    }
+
     pub fn persisted_bytes(&self) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
         serde_json::to_vec(&(
+            self.source_state_digest.as_str(),
             self.next_file_ordinal,
+            self.next_file_offset,
             self.next_chunk_ordinal,
             self.next_page_ordinal,
             self.emitted_chunks,
@@ -42,13 +85,16 @@ impl VerifiedSealedLexicalCursorV1 {
             self.emitted_import_payload_bytes,
             self.import_dictionary_digest.as_str(),
             self.cumulative_digest.as_str(),
+            self.integrity_digest()?.as_str(),
         ))
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
     }
 
     pub fn restore_persisted(bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
         let (
+            source_state_digest,
             next_file_ordinal,
+            next_file_offset,
             next_chunk_ordinal,
             next_page_ordinal,
             emitted_chunks,
@@ -58,14 +104,17 @@ impl VerifiedSealedLexicalCursorV1 {
             emitted_import_payload_bytes,
             import_dictionary_digest,
             cumulative_digest,
-        ): (u64, u64, u64, u64, u64, u64, u64, u64, String, String) = serde_json::from_slice(bytes)
-            .map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "persisted sealed lexical cursor is invalid: {error}"
-                ))
-            })?;
-        Ok(Self {
+            integrity_digest,
+        ): PersistedSealedLexicalCursorFields = serde_json::from_slice(bytes).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "persisted sealed lexical cursor is invalid: {error}"
+            ))
+        })?;
+        let cursor = Self {
+            source_state_digest: ManifestDigest::new(source_state_digest)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
             next_file_ordinal,
+            next_file_offset,
             next_chunk_ordinal,
             next_import_ordinal,
             next_page_ordinal,
@@ -77,7 +126,15 @@ impl VerifiedSealedLexicalCursorV1 {
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
             cumulative_digest: ManifestDigest::new(cumulative_digest)
                 .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
-        })
+        };
+        let integrity_digest = ManifestDigest::new(integrity_digest)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        if cursor.integrity_digest()? != integrity_digest {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "persisted sealed lexical cursor integrity digest does not verify".to_owned(),
+            ));
+        }
+        Ok(cursor)
     }
 
     fn is_initial(&self) -> Result<bool, CodeIndexProductionErrorV1> {
@@ -89,8 +146,41 @@ impl VerifiedSealedLexicalCursorV1 {
             && self.emitted_payload_bytes == 0
             && self.emitted_imports == 0
             && self.emitted_import_payload_bytes == 0
-            && self.import_dictionary_digest == digest_hasher(import_dictionary_hasher())?
-            && self.cumulative_digest == digest_hasher(source_hasher())?)
+            && self.import_dictionary_digest == initial_digest(IMPORT_DICTIONARY_DIGEST_DOMAIN)?
+            && self.cumulative_digest == initial_digest(SOURCE_DIGEST_DOMAIN)?)
+    }
+
+    fn integrity_digest(&self) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
+        let mut hasher = Sha256::new();
+        hasher.update(CURSOR_DIGEST_DOMAIN);
+        hash_record(&mut hasher, self.source_state_digest.as_str().as_bytes())?;
+        hasher.update(self.next_file_ordinal.to_le_bytes());
+        hasher.update(self.next_file_offset.to_le_bytes());
+        hasher.update(self.next_chunk_ordinal.to_le_bytes());
+        hasher.update(self.next_import_ordinal.to_le_bytes());
+        hasher.update(self.next_page_ordinal.to_le_bytes());
+        hasher.update(self.emitted_chunks.to_le_bytes());
+        hasher.update(self.emitted_payload_bytes.to_le_bytes());
+        hasher.update(self.emitted_imports.to_le_bytes());
+        hasher.update(self.emitted_import_payload_bytes.to_le_bytes());
+        hash_record(
+            &mut hasher,
+            self.import_dictionary_digest.as_str().as_bytes(),
+        )?;
+        hash_record(&mut hasher, self.cumulative_digest.as_str().as_bytes())?;
+        digest_hasher(hasher)
+    }
+
+    fn verify_source(
+        &self,
+        source_state_digest: &ManifestDigest,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        if &self.source_state_digest != source_state_digest {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical cursor does not belong to this source state".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn next_file_ordinal(&self) -> u64 {
@@ -148,8 +238,6 @@ pub struct VerifiedSealedLexicalPageV1 {
     chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
     previous_cursor: VerifiedSealedLexicalCursorV1,
-    cumulative_hasher_before: Sha256,
-    import_dictionary_hasher_before: Sha256,
 }
 
 impl VerifiedSealedLexicalPageV1 {
@@ -203,10 +291,11 @@ impl VerifiedSealedLexicalPageV1 {
 
     /// Recompute the exact page payload, import, and cumulative transition.
     ///
-    /// The hidden pre-page hash states are minted only by the verified sealed
-    /// source. Binding them back to `previous` preserves the page-boundary-
-    /// independent source and import dictionary identities while still making
-    /// every builder admission independently fail closed.
+    /// The cursor digest chains are persisted authorities, so a reopened
+    /// source can continue them without replaying accepted pages. Binding the
+    /// transition to `previous` preserves page-boundary-independent source and
+    /// import dictionary identities while every builder admission remains
+    /// independently fail closed.
     pub fn verify_transition(
         &self,
         previous: Option<&VerifiedSealedLexicalCursorV1>,
@@ -224,19 +313,9 @@ impl VerifiedSealedLexicalPageV1 {
             }
             Some(_) | None => {}
         }
-        if digest_hasher(self.cumulative_hasher_before.clone())?
-            != self.previous_cursor.cumulative_digest
-            || digest_hasher(self.import_dictionary_hasher_before.clone())?
-                != self.previous_cursor.import_dictionary_digest
-        {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed lexical page hash state does not match its prior cursor".to_owned(),
-            ));
-        }
-
         let mut page_hasher = page_hasher(self.page_ordinal);
-        let mut cumulative_hasher = self.cumulative_hasher_before.clone();
-        let mut import_dictionary_hasher = self.import_dictionary_hasher_before.clone();
+        let mut cumulative_digest = self.previous_cursor.cumulative_digest.clone();
+        let mut import_dictionary_digest = self.previous_cursor.import_dictionary_digest.clone();
         let mut payload_bytes = 0u64;
         for admitted in &self.chunks {
             let serialized = serde_json::to_vec(admitted.chunk()).map_err(|error| {
@@ -245,7 +324,8 @@ impl VerifiedSealedLexicalPageV1 {
                 ))
             })?;
             hash_record(&mut page_hasher, &serialized)?;
-            hash_record(&mut cumulative_hasher, &serialized)?;
+            cumulative_digest =
+                advance_digest(&cumulative_digest, SOURCE_CHAIN_RECORD_DOMAIN, &serialized)?;
             payload_bytes = payload_bytes
                 .checked_add(u64::try_from(serialized.len()).map_err(|_| {
                     CodeIndexProductionErrorV1::Contract(
@@ -266,8 +346,13 @@ impl VerifiedSealedLexicalPageV1 {
                 ))
             })?;
             hash_import_record(&mut page_hasher, &serialized)?;
-            hash_import_record(&mut cumulative_hasher, &serialized)?;
-            hash_record(&mut import_dictionary_hasher, &serialized)?;
+            cumulative_digest =
+                advance_digest(&cumulative_digest, IMPORT_RECORD_DOMAIN, &serialized)?;
+            import_dictionary_digest = advance_digest(
+                &import_dictionary_digest,
+                IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN,
+                &serialized,
+            )?;
             import_payload_bytes = import_payload_bytes
                 .checked_add(u64::try_from(serialized.len()).map_err(|_| {
                     CodeIndexProductionErrorV1::Contract(
@@ -290,8 +375,8 @@ impl VerifiedSealedLexicalPageV1 {
                 "sealed lexical page import count exceeds u64".to_owned(),
             )
         })?;
-        let expected_cumulative = digest_hasher(cumulative_hasher)?;
-        let expected_import_dictionary = digest_hasher(import_dictionary_hasher)?;
+        let expected_cumulative = cumulative_digest;
+        let expected_import_dictionary = import_dictionary_digest;
         let expected_next_page = self
             .previous_cursor
             .next_page_ordinal
@@ -348,6 +433,7 @@ impl VerifiedSealedLexicalPageV1 {
                             "sealed lexical source import payload overflowed".to_owned(),
                         )
                     })?
+            || self.next_cursor.source_state_digest != self.previous_cursor.source_state_digest
             || self.next_cursor.cumulative_digest != expected_cumulative
             || self.next_cursor.import_dictionary_digest != expected_import_dictionary
         {
@@ -379,8 +465,10 @@ impl VerifiedSealedLexicalPageV1 {
             .as_str()
             .len()
             .saturating_add(self.cumulative_digest.as_str().len())
+            .saturating_add(self.next_cursor.source_state_digest.as_str().len())
             .saturating_add(self.next_cursor.import_dictionary_digest.as_str().len())
             .saturating_add(self.next_cursor.cumulative_digest.as_str().len())
+            .saturating_add(self.previous_cursor.source_state_digest.as_str().len())
             .saturating_add(self.previous_cursor.import_dictionary_digest.as_str().len())
             .saturating_add(self.previous_cursor.cumulative_digest.as_str().len());
         let chunk_bytes = self.chunks.iter().fold(
@@ -518,8 +606,8 @@ impl VerifiedSealedLexicalSourceReceiptV1 {
                 && self.total_payload_bytes == 0
                 && self.total_imports == 0
                 && self.import_payload_bytes == 0
-                && self.import_dictionary_digest == digest_hasher(import_dictionary_hasher())?
-                && self.cumulative_digest == digest_hasher(source_hasher())?
+                && self.import_dictionary_digest == initial_digest(IMPORT_DICTIONARY_DIGEST_DOMAIN)?
+                && self.cumulative_digest == initial_digest(SOURCE_DIGEST_DOMAIN)?
             {
                 return Ok(());
             }
@@ -528,6 +616,7 @@ impl VerifiedSealedLexicalSourceReceiptV1 {
             ));
         };
         if self.page_count != cursor.next_page_ordinal
+            || self.source_state_digest != cursor.source_state_digest
             || self.total_chunks != cursor.emitted_chunks
             || self.total_payload_bytes != cursor.emitted_payload_bytes
             || self.total_imports != cursor.emitted_imports
@@ -557,15 +646,11 @@ struct PendingSealedLexicalPageV1 {
     import_bytes: usize,
     cursor: VerifiedSealedLexicalCursorV1,
     page_hasher: Sha256,
-    cumulative_hasher: Sha256,
-    import_dictionary_hasher: Sha256,
 }
 
 struct StagedSealedLexicalPageV1 {
     page: VerifiedSealedLexicalPageV1,
     cursor: VerifiedSealedLexicalCursorV1,
-    cumulative_hasher: Sha256,
-    import_dictionary_hasher: Sha256,
 }
 
 #[allow(clippy::large_enum_variant)] // staged pages dominate this private read result
@@ -577,20 +662,23 @@ enum StagedSealedLexicalPageReadV1 {
 /// Seekable, bounded lexical projection source over a verified v5/v6 seal.
 ///
 /// Opening performs a streaming structural scan and verifies the exact raw
-/// generation digest. It retains only file byte ranges. Each read decodes and
-/// exact-admits one file at a time, then emits at most the configured chunk and
-/// serialized-payload bounds. Raw sealed bytes never cross this interface.
+/// generation digest. It retains only a constant-size files-array boundary;
+/// each read discovers and decodes the next file from the persisted byte
+/// cursor, then emits at most the configured chunk and serialized-payload
+/// bounds. Raw sealed bytes never cross this interface.
 #[derive(Debug)]
 pub struct VerifiedSealedLexicalPageSourceV1<R> {
     reader: R,
-    file_ranges: Vec<Range<u64>>,
+    file_count: u64,
+    first_file_offset: u64,
+    files_end_offset: u64,
+    maximum_file_bytes: u64,
     source_state_digest: ManifestDigest,
     format_revision: u32,
     maximum_page_chunks: usize,
     maximum_page_bytes: usize,
     cursor: VerifiedSealedLexicalCursorV1,
-    cumulative_hasher: Sha256,
-    import_dictionary_hasher: Sha256,
+    admitted_file: Option<(u64, AdmittedSealedLexicalFileV1)>,
 }
 
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
@@ -607,37 +695,166 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 "sealed lexical page bounds must be non-zero".to_owned(),
             ));
         }
-        let layout = scan_layout(&mut reader, admitted_len, control)?;
+        let layout = scan_layout(&mut reader, admitted_len, None, control)?;
         if layout.state_digest != expected_state_digest {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed generation state digest does not match the admitted source".to_owned(),
             ));
         }
-        let cumulative_hasher = source_hasher();
-        let import_dictionary_hasher = import_dictionary_hasher();
-        let cursor = VerifiedSealedLexicalCursorV1 {
-            next_file_ordinal: 0,
-            next_chunk_ordinal: 0,
-            next_import_ordinal: 0,
-            next_page_ordinal: 0,
-            emitted_chunks: 0,
-            emitted_payload_bytes: 0,
-            emitted_imports: 0,
-            emitted_import_payload_bytes: 0,
-            import_dictionary_digest: digest_hasher(import_dictionary_hasher.clone())?,
-            cumulative_digest: digest_hasher(cumulative_hasher.clone())?,
-        };
+        let cursor = VerifiedSealedLexicalCursorV1::initial(
+            layout.state_digest.clone(),
+            layout.first_file_offset,
+        )?;
         Ok(Self {
             reader,
-            file_ranges: layout.file_ranges,
+            file_count: layout.file_count,
+            first_file_offset: layout.first_file_offset,
+            files_end_offset: layout.files_end_offset,
+            maximum_file_bytes: layout.maximum_file_bytes,
             source_state_digest: layout.state_digest,
             format_revision: layout.format_revision,
             maximum_page_chunks,
             maximum_page_bytes,
             cursor,
-            cumulative_hasher,
-            import_dictionary_hasher,
+            admitted_file: None,
         })
+    }
+
+    /// Open a durable sealed source through its content address.
+    ///
+    /// Unlike [`Self::open`], whose caller already holds the envelope's inner
+    /// state digest, this journey binds the complete file bytes to the digest
+    /// in the durable generation index while the same bounded scan discovers
+    /// the lexical layout. The caller can therefore pass a `File` directly;
+    /// no whole-generation `Vec` is required merely to authenticate it.
+    pub fn open_content_addressed(
+        mut reader: R,
+        admitted_len: u64,
+        expected_file_digest: ManifestDigest,
+        maximum_page_chunks: usize,
+        maximum_page_bytes: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        if maximum_page_chunks == 0 || maximum_page_bytes == 0 {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical page bounds must be non-zero".to_owned(),
+            ));
+        }
+        let layout = scan_layout(
+            &mut reader,
+            admitted_len,
+            Some(&expected_file_digest),
+            control,
+        )?;
+        let cursor = VerifiedSealedLexicalCursorV1::initial(
+            layout.state_digest.clone(),
+            layout.first_file_offset,
+        )?;
+        Ok(Self {
+            reader,
+            file_count: layout.file_count,
+            first_file_offset: layout.first_file_offset,
+            files_end_offset: layout.files_end_offset,
+            maximum_file_bytes: layout.maximum_file_bytes,
+            source_state_digest: layout.state_digest,
+            format_revision: layout.format_revision,
+            maximum_page_chunks,
+            maximum_page_bytes,
+            cursor,
+            admitted_file: None,
+        })
+    }
+
+    /// Reopen an authenticated durable source at an accepted persisted cursor.
+    ///
+    /// The layout scan authenticates the raw content address but does not
+    /// deserialize file artifacts. Resume validates only the cursor's next
+    /// artifact and emits that page first; previously admitted artifacts are
+    /// never decoded or replayed on the reopen path.
+    pub fn open_content_addressed_at(
+        reader: R,
+        admitted_len: u64,
+        expected_file_digest: ManifestDigest,
+        cursor: VerifiedSealedLexicalCursorV1,
+        maximum_page_chunks: usize,
+        maximum_page_bytes: usize,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        let mut source = Self::open_content_addressed(
+            reader,
+            admitted_len,
+            expected_file_digest,
+            maximum_page_chunks,
+            maximum_page_bytes,
+            control,
+        )?;
+        source.restore_cursor(&cursor, control)?;
+        Ok(source)
+    }
+
+    /// Adopt a persisted cursor after binding it to this source and validating
+    /// its first unread file. This deliberately never walks earlier files.
+    pub fn restore_cursor(
+        &mut self,
+        cursor: &VerifiedSealedLexicalCursorV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        checkpoint(control)?;
+        cursor.verify_source(&self.source_state_digest)?;
+        self.admitted_file = None;
+        if cursor.next_file_ordinal > self.file_count {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical cursor exceeds the admitted file layout".to_owned(),
+            ));
+        }
+        if cursor.next_file_ordinal == self.file_count {
+            if cursor.next_chunk_ordinal != 0
+                || cursor.next_import_ordinal != 0
+                || cursor.next_file_offset != self.files_end_offset
+            {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "completed sealed lexical cursor has a non-terminal file position".to_owned(),
+                ));
+            }
+        } else {
+            if cursor.next_file_offset < self.first_file_offset
+                || cursor.next_file_offset >= self.files_end_offset
+            {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical cursor byte offset is outside the files array".to_owned(),
+                ));
+            }
+            self.ensure_admitted_file(cursor.next_file_offset, control)?;
+            let admitted = &self
+                .admitted_file
+                .as_ref()
+                .ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical admitted-file cache is missing".to_owned(),
+                    )
+                })?
+                .1;
+            let chunk_count = u64::try_from(admitted.chunks.len()).map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical file chunk count exceeds u64".to_owned(),
+                )
+            })?;
+            let import_count = u64::try_from(admitted.imports.len()).map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical file import count exceeds u64".to_owned(),
+                )
+            })?;
+            if cursor.next_chunk_ordinal > chunk_count
+                || cursor.next_import_ordinal > import_count
+                || (cursor.next_chunk_ordinal < chunk_count && cursor.next_import_ordinal != 0)
+            {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical cursor is not a valid position in its next file".to_owned(),
+                ));
+            }
+        }
+        self.cursor = cursor.clone();
+        Ok(())
     }
 
     pub fn cursor(&self) -> &VerifiedSealedLexicalCursorV1 {
@@ -652,22 +869,11 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// cursor and the cumulative and import-dictionary hash authorities are
     /// reset to their canonical initial values.
     pub fn rewind(&mut self) -> Result<(), CodeIndexProductionErrorV1> {
-        let cumulative_hasher = source_hasher();
-        let import_hasher = import_dictionary_hasher();
-        self.cursor = VerifiedSealedLexicalCursorV1 {
-            next_file_ordinal: 0,
-            next_chunk_ordinal: 0,
-            next_import_ordinal: 0,
-            next_page_ordinal: 0,
-            emitted_chunks: 0,
-            emitted_payload_bytes: 0,
-            emitted_imports: 0,
-            emitted_import_payload_bytes: 0,
-            import_dictionary_digest: digest_hasher(import_hasher.clone())?,
-            cumulative_digest: digest_hasher(cumulative_hasher.clone())?,
-        };
-        self.cumulative_hasher = cumulative_hasher;
-        self.import_dictionary_hasher = import_hasher;
+        self.cursor = VerifiedSealedLexicalCursorV1::initial(
+            self.source_state_digest.clone(),
+            self.first_file_offset,
+        )?;
+        self.admitted_file = None;
         Ok(())
     }
 
@@ -676,15 +882,16 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     /// at a time) plus the bounded page payload itself. Consumers charge this
     /// window against their memory ledgers before driving the source.
     pub fn staging_window_bytes(&self) -> usize {
-        let largest_file = self
-            .file_ranges
-            .iter()
-            .map(|range| range.end.saturating_sub(range.start))
-            .max()
-            .unwrap_or(0);
-        usize::try_from(largest_file)
-            .unwrap_or(usize::MAX)
+        self.retained_layout_bytes()
+            .saturating_add(usize::try_from(self.maximum_file_bytes).unwrap_or(usize::MAX))
             .saturating_add(self.maximum_page_bytes)
+    }
+
+    /// Fixed retained authority for locating files after the authenticated
+    /// opening scan. This remains constant as the generation's file count
+    /// grows; individual file boundaries are discovered from the byte cursor.
+    pub fn retained_layout_bytes(&self) -> usize {
+        std::mem::size_of::<u64>().saturating_mul(4)
     }
 
     pub fn next_page(
@@ -713,8 +920,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     return Ok(Err(error));
                 }
                 self.cursor = staged.cursor;
-                self.cumulative_hasher = staged.cumulative_hasher;
-                self.import_dictionary_hasher = staged.import_dictionary_hasher;
                 Ok(Ok(VerifiedSealedLexicalPageReadV1::Page(staged.page)))
             }
             StagedSealedLexicalPageReadV1::Complete(receipt) => {
@@ -729,25 +934,24 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     ) -> Result<StagedSealedLexicalPageReadV1, CodeIndexProductionErrorV1> {
         checkpoint(control)?;
         let mut cursor = self.cursor.clone();
-        let mut cumulative_hasher = self.cumulative_hasher.clone();
-        let mut import_dictionary_hasher = self.import_dictionary_hasher.clone();
         let mut page_hasher = page_hasher(cursor.next_page_ordinal);
         let mut chunks = Vec::new();
         let mut page_bytes = 0usize;
         let mut imports = Vec::new();
         let mut import_bytes = 0usize;
 
-        while usize::try_from(cursor.next_file_ordinal)
-            .ok()
-            .is_some_and(|ordinal| ordinal < self.file_ranges.len())
-        {
+        while cursor.next_file_ordinal < self.file_count {
             checkpoint(control)?;
-            let file_ordinal = usize::try_from(cursor.next_file_ordinal).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical file cursor exceeds the platform limit".to_owned(),
-                )
-            })?;
-            let admitted = self.read_admitted_file(file_ordinal)?;
+            self.ensure_admitted_file(cursor.next_file_offset, control)?;
+            let admitted = &self
+                .admitted_file
+                .as_ref()
+                .ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical admitted-file cache is missing".to_owned(),
+                    )
+                })?
+                .1;
             let mut chunk_ordinal = usize::try_from(cursor.next_chunk_ordinal).map_err(|_| {
                 CodeIndexProductionErrorV1::Contract(
                     "sealed lexical chunk cursor exceeds the platform limit".to_owned(),
@@ -785,12 +989,14 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         import_bytes,
                         cursor,
                         page_hasher,
-                        cumulative_hasher,
-                        import_dictionary_hasher,
                     });
                 }
                 hash_record(&mut page_hasher, &serialized)?;
-                hash_record(&mut cumulative_hasher, &serialized)?;
+                cursor.cumulative_digest = advance_digest(
+                    &cursor.cumulative_digest,
+                    SOURCE_CHAIN_RECORD_DOMAIN,
+                    &serialized,
+                )?;
                 page_bytes = page_bytes.checked_add(serialized.len()).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
                         "sealed lexical page byte count overflowed".to_owned(),
@@ -811,8 +1017,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         import_bytes,
                         cursor,
                         page_hasher,
-                        cumulative_hasher,
-                        import_dictionary_hasher,
                     });
                 }
             }
@@ -852,13 +1056,16 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                         import_bytes,
                         cursor,
                         page_hasher,
-                        cumulative_hasher,
-                        import_dictionary_hasher,
                     });
                 }
                 hash_import_record(&mut page_hasher, &serialized)?;
-                hash_import_record(&mut cumulative_hasher, &serialized)?;
-                hash_record(&mut import_dictionary_hasher, &serialized)?;
+                cursor.cumulative_digest =
+                    advance_digest(&cursor.cumulative_digest, IMPORT_RECORD_DOMAIN, &serialized)?;
+                cursor.import_dictionary_digest = advance_digest(
+                    &cursor.import_dictionary_digest,
+                    IMPORT_DICTIONARY_CHAIN_RECORD_DOMAIN,
+                    &serialized,
+                )?;
                 import_bytes = import_bytes.checked_add(serialized.len()).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
                         "sealed lexical import page byte count overflowed".to_owned(),
@@ -872,12 +1079,15 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     )
                 })?;
             }
+            let next_file_offset = admitted.next_file_offset;
+            self.admitted_file = None;
             cursor.next_file_ordinal =
                 cursor.next_file_ordinal.checked_add(1).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
                         "sealed lexical file ordinal overflowed".to_owned(),
                     )
                 })?;
+            cursor.next_file_offset = next_file_offset;
             cursor.next_chunk_ordinal = 0;
             cursor.next_import_ordinal = 0;
             // The page contract serializes every chunk before every import.
@@ -891,8 +1101,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     import_bytes,
                     cursor,
                     page_hasher,
-                    cumulative_hasher,
-                    import_dictionary_hasher,
                 });
             }
         }
@@ -905,8 +1113,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 import_bytes,
                 cursor,
                 page_hasher,
-                cumulative_hasher,
-                import_dictionary_hasher,
             });
         }
         Ok(StagedSealedLexicalPageReadV1::Complete(
@@ -926,41 +1132,16 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
 
     fn read_admitted_file(
         &mut self,
-        file_ordinal: usize,
+        file_offset: u64,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<AdmittedSealedLexicalFileV1, CodeIndexProductionErrorV1> {
-        let range = self.file_ranges.get(file_ordinal).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed lexical file cursor is outside the admitted source".to_owned(),
-            )
-        })?;
-        let byte_len = range.end.checked_sub(range.start).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed lexical file range is not canonical".to_owned(),
-            )
-        })?;
-        let byte_len = usize::try_from(byte_len).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed lexical file range exceeds the platform limit".to_owned(),
-            )
-        })?;
-        if byte_len > self.maximum_page_bytes {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "one sealed lexical file exceeds the bounded decode window".to_owned(),
-            ));
-        }
-        let mut bytes = vec![0; byte_len];
-        self.reader
-            .seek(SeekFrom::Start(range.start))
-            .map_err(|error| {
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed lexical source seek failed: {error}"
-                ))
-            })?;
-        self.reader.read_exact(&mut bytes).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed lexical file read failed: {error}"
-            ))
-        })?;
+        let (bytes, next_file_offset) = read_next_file_bytes(
+            &mut self.reader,
+            file_offset,
+            self.files_end_offset,
+            self.maximum_file_bytes,
+            control,
+        )?;
         let file: PersistedFileGenerationArtifactsV1 =
             serde_json::from_slice(&bytes).map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
@@ -995,7 +1176,28 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
         let chunks = exact_authority
             .admit_all(file.artifacts.chunks.chunks)
             .map_err(CodeIndexProductionErrorV1::Chunk)?;
-        Ok(AdmittedSealedLexicalFileV1 { chunks, imports })
+        Ok(AdmittedSealedLexicalFileV1 {
+            chunks,
+            imports,
+            next_file_offset,
+        })
+    }
+
+    fn ensure_admitted_file(
+        &mut self,
+        file_offset: u64,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        if self
+            .admitted_file
+            .as_ref()
+            .is_some_and(|(cached_offset, _)| *cached_offset == file_offset)
+        {
+            return Ok(());
+        }
+        let admitted = self.read_admitted_file(file_offset, control)?;
+        self.admitted_file = Some((file_offset, admitted));
+        Ok(())
     }
 
     fn commit_page(
@@ -1009,8 +1211,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             import_bytes,
             mut cursor,
             mut page_hasher,
-            cumulative_hasher,
-            import_dictionary_hasher,
         } = pending;
         let page_ordinal = cursor.next_page_ordinal;
         let chunk_count = u64::try_from(chunks.len()).map_err(|_| {
@@ -1071,8 +1271,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     "sealed lexical source import byte count overflowed".to_owned(),
                 )
             })?;
-        cursor.import_dictionary_digest = digest_hasher(import_dictionary_hasher.clone())?;
-        cursor.cumulative_digest = digest_hasher(cumulative_hasher.clone())?;
         hash_cursor(&mut page_hasher, &cursor)?;
         let page = VerifiedSealedLexicalPageV1 {
             page_ordinal,
@@ -1086,34 +1284,33 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             chunks,
             imports,
             previous_cursor: self.cursor.clone(),
-            cumulative_hasher_before: self.cumulative_hasher.clone(),
-            import_dictionary_hasher_before: self.import_dictionary_hasher.clone(),
         };
         Ok(StagedSealedLexicalPageReadV1::Page(
-            StagedSealedLexicalPageV1 {
-                page,
-                cursor,
-                cumulative_hasher,
-                import_dictionary_hasher,
-            },
+            StagedSealedLexicalPageV1 { page, cursor },
         ))
     }
 }
 
+#[derive(Debug)]
 struct AdmittedSealedLexicalFileV1 {
     chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
+    next_file_offset: u64,
 }
 
 struct SealedLexicalLayoutV1 {
     state_digest: ManifestDigest,
     format_revision: u32,
-    file_ranges: Vec<Range<u64>>,
+    file_count: u64,
+    first_file_offset: u64,
+    files_end_offset: u64,
+    maximum_file_bytes: u64,
 }
 
 fn scan_layout<R: Read + Seek>(
     reader: &mut R,
     admitted_len: u64,
+    expected_file_digest: Option<&ManifestDigest>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<SealedLexicalLayoutV1, CodeIndexProductionErrorV1> {
     if admitted_len > MAX_SEALED_CODE_GENERATION_BYTES_V1 {
@@ -1125,6 +1322,7 @@ fn scan_layout<R: Read + Seek>(
         CodeIndexProductionErrorV1::Contract(format!("sealed lexical source seek failed: {error}"))
     })?;
     let mut scanner = LayoutScanner::default();
+    let mut file_hasher = expected_file_digest.map(|_| Sha256::new());
     let read_limit = admitted_len.checked_add(1).ok_or_else(|| {
         CodeIndexProductionErrorV1::Contract("sealed generation length overflowed".to_owned())
     })?;
@@ -1148,6 +1346,9 @@ fn scan_layout<R: Read + Seek>(
         }
         for byte in &buffer[..read] {
             if observed < admitted_len {
+                if let Some(hasher) = file_hasher.as_mut() {
+                    hasher.update([*byte]);
+                }
                 scanner.observe(*byte, observed)?;
             }
             observed = observed.checked_add(1).ok_or_else(|| {
@@ -1165,6 +1366,13 @@ fn scan_layout<R: Read + Seek>(
     if observed != admitted_len {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation length does not match its admitted length".to_owned(),
+        ));
+    }
+    if let (Some(expected), Some(hasher)) = (expected_file_digest, file_hasher)
+        && digest_hasher(hasher)? != *expected
+    {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed lexical source bytes do not match their durable content address".to_owned(),
         ));
     }
     scanner.finish()
@@ -1188,7 +1396,10 @@ struct LayoutScanner {
     generation_digest: Option<ManifestDigest>,
     files_depth: Option<usize>,
     current_file_start: Option<u64>,
-    file_ranges: Vec<Range<u64>>,
+    first_file_offset: Option<u64>,
+    files_end_offset: Option<u64>,
+    file_count: u64,
+    maximum_file_bytes: u64,
 }
 
 impl LayoutScanner {
@@ -1278,7 +1489,23 @@ impl LayoutScanner {
                         .generation_depth
                         .is_some_and(|depth| self.brace_depth == depth + 1)
                 {
-                    self.file_ranges.push(start..offset + 1);
+                    let end = offset.checked_add(1).ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed lexical file end offset overflowed".to_owned(),
+                        )
+                    })?;
+                    let byte_len = end.checked_sub(start).ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed lexical file byte range is invalid".to_owned(),
+                        )
+                    })?;
+                    self.first_file_offset.get_or_insert(start);
+                    self.maximum_file_bytes = self.maximum_file_bytes.max(byte_len);
+                    self.file_count = self.file_count.checked_add(1).ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed lexical file count overflowed".to_owned(),
+                        )
+                    })?;
                     self.current_file_start = None;
                 }
                 if self.generation_depth == Some(self.brace_depth) {
@@ -1307,6 +1534,7 @@ impl LayoutScanner {
             }
             b']' => {
                 if self.files_depth == Some(self.bracket_depth) {
+                    self.files_end_offset = Some(offset);
                     self.files_depth = None;
                 }
                 self.bracket_depth = self.bracket_depth.checked_sub(1).ok_or_else(|| {
@@ -1370,11 +1598,135 @@ impl LayoutScanner {
                 "sealed generation format revision is incompatible".to_owned(),
             ));
         }
+        let files_end_offset = self.files_end_offset.ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation files array is missing".to_owned(),
+            )
+        })?;
+        let first_file_offset = self.first_file_offset.unwrap_or(files_end_offset);
         Ok(SealedLexicalLayoutV1 {
             state_digest,
             format_revision,
-            file_ranges: self.file_ranges,
+            file_count: self.file_count,
+            first_file_offset,
+            files_end_offset,
+            maximum_file_bytes: self.maximum_file_bytes,
         })
+    }
+}
+
+fn read_next_file_bytes<R: Read + Seek>(
+    reader: &mut R,
+    file_offset: u64,
+    files_end_offset: u64,
+    maximum_file_bytes: u64,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(Vec<u8>, u64), CodeIndexProductionErrorV1> {
+    if file_offset >= files_end_offset {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed lexical file cursor is outside the admitted source".to_owned(),
+        ));
+    }
+    let maximum_file_bytes = usize::try_from(maximum_file_bytes).map_err(|_| {
+        CodeIndexProductionErrorV1::Contract(
+            "sealed lexical file window exceeds the platform limit".to_owned(),
+        )
+    })?;
+    reader.seek(SeekFrom::Start(file_offset)).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!("sealed lexical source seek failed: {error}"))
+    })?;
+    let mut reader = BufReader::with_capacity(64 * 1024, reader);
+    let mut bytes = Vec::new();
+    let mut offset = file_offset;
+    let mut brace_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut complete = false;
+    let mut saw_separator = false;
+
+    loop {
+        checkpoint(control)?;
+        let available = reader.fill_buf().map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed lexical file read failed: {error}"
+            ))
+        })?;
+        if available.is_empty() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical file ended before the files array closed".to_owned(),
+            ));
+        }
+        let mut consumed = 0usize;
+        for &byte in available {
+            if offset > files_end_offset {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical file crossed the admitted files array".to_owned(),
+                ));
+            }
+            if !complete {
+                if bytes.len() == maximum_file_bytes {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical file exceeds its admitted decode window".to_owned(),
+                    ));
+                }
+                bytes.push(byte);
+                if in_string {
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        in_string = false;
+                    }
+                } else {
+                    match byte {
+                        b'"' => in_string = true,
+                        b'{' => {
+                            brace_depth = brace_depth.checked_add(1).ok_or_else(|| {
+                                CodeIndexProductionErrorV1::Contract(
+                                    "sealed lexical file nesting overflowed".to_owned(),
+                                )
+                            })?
+                        }
+                        b'}' => {
+                            brace_depth = brace_depth.checked_sub(1).ok_or_else(|| {
+                                CodeIndexProductionErrorV1::Contract(
+                                    "sealed lexical file nesting is invalid".to_owned(),
+                                )
+                            })?;
+                            if brace_depth == 0 {
+                                complete = true;
+                            }
+                        }
+                        _ if bytes.len() == 1 => {
+                            return Err(CodeIndexProductionErrorV1::Contract(
+                                "sealed lexical file does not begin with an object".to_owned(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            } else if !byte.is_ascii_whitespace() {
+                if byte == b',' && !saw_separator {
+                    saw_separator = true;
+                } else if byte == b'{' && saw_separator {
+                    return Ok((bytes, offset));
+                } else if byte == b']' && !saw_separator && offset == files_end_offset {
+                    return Ok((bytes, files_end_offset));
+                } else {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical files array separators are invalid".to_owned(),
+                    ));
+                }
+            }
+            consumed += 1;
+            offset = offset.checked_add(1).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed lexical file cursor overflowed".to_owned(),
+                )
+            })?;
+        }
+        reader.consume(consumed);
     }
 }
 
@@ -1392,16 +1744,22 @@ fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeIndex
     }
 }
 
-fn source_hasher() -> Sha256 {
+fn initial_digest(domain: &[u8]) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
     let mut hasher = Sha256::new();
-    hasher.update(SOURCE_DIGEST_DOMAIN);
-    hasher
+    hasher.update(domain);
+    digest_hasher(hasher)
 }
 
-fn import_dictionary_hasher() -> Sha256 {
+fn advance_digest(
+    previous: &ManifestDigest,
+    record_domain: &[u8],
+    bytes: &[u8],
+) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
     let mut hasher = Sha256::new();
-    hasher.update(IMPORT_DICTIONARY_DIGEST_DOMAIN);
-    hasher
+    hasher.update(record_domain);
+    hash_record(&mut hasher, previous.as_str().as_bytes())?;
+    hash_record(&mut hasher, bytes)?;
+    digest_hasher(hasher)
 }
 
 fn page_hasher(page_ordinal: u64) -> Sha256 {
@@ -1415,6 +1773,7 @@ fn hash_cursor(
     hasher: &mut Sha256,
     cursor: &VerifiedSealedLexicalCursorV1,
 ) -> Result<(), CodeIndexProductionErrorV1> {
+    hash_record(hasher, cursor.source_state_digest.as_str().as_bytes())?;
     hasher.update(cursor.next_file_ordinal.to_le_bytes());
     hasher.update(cursor.next_chunk_ordinal.to_le_bytes());
     hasher.update(cursor.next_import_ordinal.to_le_bytes());

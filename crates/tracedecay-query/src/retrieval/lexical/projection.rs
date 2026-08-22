@@ -32,9 +32,9 @@ pub use artifact::{
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
     CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
-    CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactSectionDigestV1, CodeLexicalImportMembershipWitnessV1,
-    VerifiedCodeLexicalArtifactV1,
+    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactOccurrenceV1,
+    CodeLexicalArtifactReaderV1, CodeLexicalArtifactSectionDigestV1,
+    CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1,
 };
 
 use postings::{ByteNgramBudget, ByteNgramPostings, FuzzyTermIndex};

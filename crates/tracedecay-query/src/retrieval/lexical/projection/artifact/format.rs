@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
+use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkId,
     ExactTechnicalTermV1, FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest,
@@ -12,17 +13,27 @@ use tracedecay_domain::{
 use super::super::{CodeLexicalProjectionMetadataV1, LexicalFieldV1, ProjectedChunkV1};
 use super::CodeLexicalArtifactErrorV1;
 
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 1;
-const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v1\0";
+/// Revision 2 adds durable finalization/integrity state. Revision 1 artifacts
+/// are branch-only staging files and must fail as incompatible rather than be
+/// partially interpreted against this schema.
+// Revision 3 replaces the branch-local computed finalization cursor with
+// native table keys. Resuming a bounded seal must seek an existing primary
+// key, never rebuild a sort key over the whole corpus.
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 3;
+const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v3\0";
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
-pub(super) const SECTION_NAMES: [&str; 7] = [
+pub(super) const SECTION_NAMES: [&str; 11] = [
     "source_pages",
+    "document_integrity",
+    "import_integrity",
     "import_evidence",
     "rows",
     "term_postings",
     "exact_postings",
     "ngram_postings",
-    "statistics",
+    "field_stats",
+    "term_stats",
+    "vocabulary",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,16 +261,85 @@ pub(super) fn padded_receipt(
 pub(super) fn decode_padded_receipt(
     bytes: &[u8],
 ) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
+    if bytes.len() != RECEIPT_RESERVATION_BYTES {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact receipt reservation has the wrong length".to_owned(),
+        ));
+    }
+    let end = bytes.iter().position(|byte| *byte == 0).ok_or_else(|| {
+        CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact receipt is missing its reserved zero tail".to_owned(),
+        )
+    })?;
+    if bytes[end..].iter().any(|byte| *byte != 0) {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact receipt has nonzero bytes after its canonical payload".to_owned(),
+        ));
+    }
     if end == 0 {
         return Ok(None);
     }
-    serde_json::from_slice(&bytes[..end])
-        .map(Some)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))
+    let receipt = serde_json::from_slice(&bytes[..end])
+        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+    if padded_receipt(&receipt)? != bytes {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact receipt is not canonically encoded".to_owned(),
+        ));
+    }
+    Ok(Some(receipt))
+}
+
+/// Decode a fixed-size receipt while honoring the caller's canonical work
+/// control. Reopen paths use this version so a corrupt or cold artifact never
+/// turns an expired epoch into an unbounded padding scan.
+pub(super) fn decode_padded_receipt_with_control(
+    bytes: &[u8],
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
+    super::checkpoint(control)?;
+    if bytes.len() != RECEIPT_RESERVATION_BYTES {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact receipt reservation has the wrong length".to_owned(),
+        ));
+    }
+    let mut end = None;
+    for (ordinal, byte) in bytes.iter().enumerate() {
+        if ordinal.is_multiple_of(1_024) {
+            super::checkpoint(control)?;
+        }
+        if *byte == 0 {
+            end = Some(ordinal);
+            break;
+        }
+    }
+    let end = end.ok_or_else(|| {
+        CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact receipt is missing its reserved zero tail".to_owned(),
+        )
+    })?;
+    for (ordinal, byte) in bytes[end..].iter().enumerate() {
+        if ordinal.is_multiple_of(1_024) {
+            super::checkpoint(control)?;
+        }
+        if *byte != 0 {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact receipt has nonzero bytes after its canonical payload".to_owned(),
+            ));
+        }
+    }
+    if end == 0 {
+        return Ok(None);
+    }
+    super::checkpoint(control)?;
+    let receipt = serde_json::from_slice(&bytes[..end])
+        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+    super::checkpoint(control)?;
+    if padded_receipt(&receipt)? != bytes {
+        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "lexical artifact receipt is not canonically encoded".to_owned(),
+        ));
+    }
+    Ok(Some(receipt))
 }
 
 pub(super) fn new_verified_receipt(
