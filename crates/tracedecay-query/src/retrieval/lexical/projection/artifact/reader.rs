@@ -208,7 +208,8 @@ impl CodeLexicalArtifactReaderV1 {
                 "lexical artifact reader budget leaves {sqlite_budget} bytes, under the {ARTIFACT_SQLITE_CACHE_FLOOR_BYTES}-byte kernel page-cache floor"
             )));
         }
-        configure_reader_window(&connection, cache_budget_bytes, stored_metadata_len)?;
+        let page_cache_bytes =
+            configure_reader_window(&connection, cache_budget_bytes, stored_metadata_len)?;
         let (stored_metadata_bytes, stored_metadata_digest): (Vec<u8>, String) = connection
             .query_row(
                 "SELECT metadata, metadata_digest FROM artifact_state WHERE singleton = 1",
@@ -630,10 +631,8 @@ impl<'a> ArtifactQueryV1<'a> {
             .iter()
             .map(|phrase| {
                 let normalized = normalize_lexical(phrase);
-                (
-                    normalized,
-                    ngram_document_query(NGRAM_NORMALIZED, normalized.as_bytes()),
-                )
+                let query = ngram_document_query(NGRAM_NORMALIZED, normalized.as_bytes());
+                (normalized, query)
             })
             .collect::<BTreeMap<_, _>>();
         let mut phrase_frequencies = BTreeMap::new();
@@ -1364,7 +1363,7 @@ fn configure_reader_window(
     connection: &Connection,
     cache_budget_bytes: usize,
     retained_metadata_bytes: usize,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
+) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let available = cache_budget_bytes
         .checked_sub(retained_metadata_bytes)
         .ok_or_else(|| {
@@ -1392,7 +1391,7 @@ fn configure_reader_window(
     connection
         .pragma_update(None, "temp_store", "FILE")
         .map_err(sqlite_error)?;
-    Ok(())
+    Ok(page_cache_bytes)
 }
 
 fn map_artifact_file_error(error: std::io::Error) -> CodeLexicalArtifactErrorV1 {
