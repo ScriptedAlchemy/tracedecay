@@ -1172,6 +1172,41 @@ enum GraphReplayPoolExposureV1 {
 /// byte against the staged sealed source and retention fails closed on any
 /// mismatch, before any receipt is published.
 ///
+/// Establish the graph replay pool root under the store-owned first-create
+/// contract: retention creates the pool owner-private (0700) on first use,
+/// and any pre-existing path must already validate as an owner-private
+/// directory. The pool root sits directly beside the graph database
+/// (`database_path().with_extension("graph-replay")`), so its parent always
+/// exists and no ancestors are ever manufactured the way `create_dir_all`
+/// would — under a permissive umask that would hard-link already-private
+/// sealed generations into a world-readable pool.
+fn ensure_private_graph_replay_pool_root(
+    pool_root: &Path,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let unsafe_pool_root = |error: &std::io::Error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "graph replay pool root '{}' is not an owner-private directory: {error}",
+            pool_root.display()
+        ))
+    };
+    match tracedecay_private_fs::create_private_directory(pool_root) {
+        Ok(()) => Ok(()),
+        // A concurrent creator may win the creation race; the existing path
+        // is acceptable only if it is already an owner-private directory.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            tracedecay_private_fs::validate_private_directory(pool_root).map_err(
+                |error| match error.kind() {
+                    std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::InvalidInput
+                    | std::io::ErrorKind::NotADirectory => unsafe_pool_root(&error),
+                    _ => storage(error),
+                },
+            )
+        }
+        Err(error) => Err(storage(error)),
+    }
+}
+
 /// Lock order is the code-generation store lock first, then the pool lock:
 /// every caller already holds the store lock, and the daemon's replay
 /// reconciler serializes its pool unlinks behind this same canonical pool
@@ -1184,7 +1219,7 @@ fn expose_staged_generations_to_graph_replay_pool(
     exposure: GraphReplayPoolExposureV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     let stage_root = transaction_stage_root(store_root, &transaction.receipt);
-    std::fs::create_dir_all(pool_root).map_err(storage)?;
+    ensure_private_graph_replay_pool_root(pool_root)?;
     let _pool_lock = acquire_code_generation_store_lock(pool_root)?;
     let mut linked = false;
     for generation in &transaction.receipt.deleted_generations {
@@ -3594,7 +3629,7 @@ mod tests {
     fn retention_refuses_a_corrupt_same_name_graph_replay_pool_entry() {
         let (store, _generations) = fixture_store(5);
         let pool_root = store.path().join("graph-replay-pool");
-        std::fs::create_dir_all(&pool_root).expect("create pool root");
+        tracedecay_private_fs::create_private_directory(&pool_root).expect("create pool root");
         let plan =
             plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
                 .expect("plan retention");
@@ -3653,7 +3688,8 @@ mod tests {
         let generations_root = store.path().join(GENERATIONS_DIRECTORY);
         let canonical_bytes = std::fs::read(generations_root.join(&collectable.generation_file))
             .expect("read collectable bytes");
-        std::fs::create_dir_all(pool_root.join(&collectable.generation_file))
+        tracedecay_private_fs::create_private_directory(&pool_root).expect("create pool root");
+        std::fs::create_dir(pool_root.join(&collectable.generation_file))
             .expect("pre-create directory at the pool path");
 
         let error = execute_code_generation_retention(
@@ -3691,7 +3727,7 @@ mod tests {
     fn retention_refuses_a_symlink_graph_replay_pool_entry() {
         let (store, _generations) = fixture_store(5);
         let pool_root = store.path().join("graph-replay-pool");
-        std::fs::create_dir_all(&pool_root).expect("create pool root");
+        tracedecay_private_fs::create_private_directory(&pool_root).expect("create pool root");
         let plan =
             plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
                 .expect("plan retention");
@@ -3745,7 +3781,7 @@ mod tests {
     fn retention_accepts_an_identical_existing_graph_replay_pool_entry() {
         let (store, _generations) = fixture_store(5);
         let pool_root = store.path().join("graph-replay-pool");
-        std::fs::create_dir_all(&pool_root).expect("create pool root");
+        tracedecay_private_fs::create_private_directory(&pool_root).expect("create pool root");
         let plan =
             plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
                 .expect("plan retention");
