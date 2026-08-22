@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.35](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.34...v0.1.0-beta.35) (2026-08-22)
+
+
+### Bug Fixes
+
+* **benches:** wrap manifests for verified graph publish ([a519d85](https://github.com/ScriptedAlchemy/tracedecay/commit/a519d850606e40c80a513f41292617d86f692e2e))
+* **code-index:** wrap bench manifest for verified publish ([9c16732](https://github.com/ScriptedAlchemy/tracedecay/commit/9c16732d6dce7c5c1f4ff3f1727ad925f0613f19))
+* **context:** preserve git evidence during graph warmup ([a1ae71b](https://github.com/ScriptedAlchemy/tracedecay/commit/a1ae71b9dc49c2d873b166d4e417fa5205488ddb))
+* **context:** propagate terminal graph failures ([db76b58](https://github.com/ScriptedAlchemy/tracedecay/commit/db76b5858ae94295a421070812d134b1510455e8))
+* **graph-db:** wrap bench manifest for verified publish ([f191c77](https://github.com/ScriptedAlchemy/tracedecay/commit/f191c77d5337164c8f56ece7962fd1aeacf5d580))
+* **graph-db:** wrap mismatch bench manifests for verified publish ([4c9c06a](https://github.com/ScriptedAlchemy/tracedecay/commit/4c9c06a6ae1192259722e60e2bc21004c8def950))
+* **release:** detect aliased feature owners ([2b88657](https://github.com/ScriptedAlchemy/tracedecay/commit/2b886570804550e041ca47b27c18f796613e5e7d))
+* **release:** reject shadow feature ownership ([d657644](https://github.com/ScriptedAlchemy/tracedecay/commit/d6576445e3151f4ec832e026898b4856502f4957))
+* **release:** stream release metadata validation ([a362e21](https://github.com/ScriptedAlchemy/tracedecay/commit/a362e21f0391d19696d4148818fd14b7bcf38bcc))
+* **release:** validate exact published prerelease ([583f8a9](https://github.com/ScriptedAlchemy/tracedecay/commit/583f8a95724f8e9f39181bf7b0eaa7b93406dd61))
+* **release:** validate exact published prerelease ([ed1eadc](https://github.com/ScriptedAlchemy/tracedecay/commit/ed1eadc4aca33eea2ca89ae2eb784e915c5e8d31))
+* **release:** validate semantic feature owner ([1e62bb2](https://github.com/ScriptedAlchemy/tracedecay/commit/1e62bb2f65c3f8e7a4f13c7ce92cdaeeda72e098))
+* **release:** validate semantic feature owner ([0eaeed3](https://github.com/ScriptedAlchemy/tracedecay/commit/0eaeed38b508fa1cf7fd30525694709fefd8f0c3))
+* **rusqlite-runtime:** move lease_clock module below production items ([b216304](https://github.com/ScriptedAlchemy/tracedecay/commit/b2163041ace6fdbedd0f8dce0dc7eff10a7061da))
+* **rusqlite-runtime:** move lease_clock test module below production items ([4adb71f](https://github.com/ScriptedAlchemy/tracedecay/commit/4adb71fe20d01e74855771dc726e8631459ae140))
+* **tests:** satisfy workspace clippy gates ([5c34626](https://github.com/ScriptedAlchemy/tracedecay/commit/5c34626e932f08d47823fc5b88c38502f2d1e66a))
+* **tests:** satisfy workspace Clippy gates ([59f7875](https://github.com/ScriptedAlchemy/tracedecay/commit/59f7875414c5a29ed1029b823627af5fe7d20a47))
+
 ## [0.1.0-beta.34](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.33...v0.1.0-beta.34) (2026-08-22)
 
 
