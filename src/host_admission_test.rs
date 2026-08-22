@@ -20,7 +20,8 @@ use tracedecay_store::{ObservationPersistOutcome, ObservationReplayRequest, Obse
 
 use tracedecay_usecases::host_admission::*;
 use tracedecay_usecases::observation::{
-    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
+    CaptureObservationOutcome, CaptureObservationRequest, ExternalSourceProjectionStateV1,
+    ObservationCancellation,
 };
 
 fn initialize_repository(path: &Path) {
@@ -168,10 +169,17 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
         ))
         .await
         .unwrap();
+    // Host ingress commits the observation durably but leaves the
+    // external-source projection queued, so the truthful outcome is
+    // `AcceptedForReplay` carrying the underlying committed persist outcome
+    // with a `Pending` projection state — never a fake immediate persist.
     let (initial_attachment, initial_generation) = match initial {
-        CaptureObservationOutcome::Persisted { outcome, .. }
-            if matches!(*outcome, ObservationPersistOutcome::Committed(_)) =>
-        {
+        CaptureObservationOutcome::AcceptedForReplay {
+            projection_state,
+            outcome,
+            ..
+        } if matches!(*outcome, ObservationPersistOutcome::Committed(_)) => {
+            assert_eq!(projection_state, ExternalSourceProjectionStateV1::Pending);
             let ObservationPersistOutcome::Committed(receipt) = *outcome else {
                 unreachable!("guard matched committed persist outcome");
             };
@@ -180,7 +188,9 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
                 receipt.projection_generation().clone(),
             )
         }
-        other => panic!("expected committed project observation, got {other:?}"),
+        other => {
+            panic!("expected committed project observation accepted for replay, got {other:?}")
+        }
     };
     let initial_provenance = initial_attachment.provenance().unwrap();
     assert_eq!(initial_provenance.capture().project_id(), Some(&project_id));
@@ -204,16 +214,22 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
         ))
         .await
         .unwrap();
+    // The replay is an exact duplicate of the committed observation, and the
+    // queued external-source projection is still pending, so it too arrives as
+    // `AcceptedForReplay` around the underlying `ExactDuplicate` outcome.
     let replay_attachment = match replay {
-        CaptureObservationOutcome::Persisted { outcome, .. }
-            if matches!(*outcome, ObservationPersistOutcome::ExactDuplicate(_)) =>
-        {
+        CaptureObservationOutcome::AcceptedForReplay {
+            projection_state,
+            outcome,
+            ..
+        } if matches!(*outcome, ObservationPersistOutcome::ExactDuplicate(_)) => {
+            assert_eq!(projection_state, ExternalSourceProjectionStateV1::Pending);
             let ObservationPersistOutcome::ExactDuplicate(receipt) = *outcome else {
                 unreachable!("guard matched exact duplicate persist outcome");
             };
             receipt.repository_provenance_attachment().clone()
         }
-        other => panic!("expected exact duplicate replay, got {other:?}"),
+        other => panic!("expected exact duplicate replay accepted for replay, got {other:?}"),
     };
     assert_eq!(replay_attachment, initial_attachment);
 
@@ -255,15 +271,20 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
         .await
         .unwrap();
     let profile_attachment = match profile {
-        CaptureObservationOutcome::Persisted { outcome, .. }
-            if matches!(*outcome, ObservationPersistOutcome::Committed(_)) =>
-        {
+        CaptureObservationOutcome::AcceptedForReplay {
+            projection_state,
+            outcome,
+            ..
+        } if matches!(*outcome, ObservationPersistOutcome::Committed(_)) => {
+            assert_eq!(projection_state, ExternalSourceProjectionStateV1::Pending);
             let ObservationPersistOutcome::Committed(receipt) = *outcome else {
                 unreachable!("guard matched committed persist outcome");
             };
             receipt.repository_provenance_attachment().clone()
         }
-        other => panic!("expected committed profile observation, got {other:?}"),
+        other => {
+            panic!("expected committed profile observation accepted for replay, got {other:?}")
+        }
     };
     assert!(matches!(
         profile_attachment.availability(),
@@ -334,8 +355,11 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
     .unwrap();
     assert!(matches!(
         authoritative,
-        CaptureObservationOutcome::Persisted { outcome, .. }
-            if matches!(*outcome, ObservationPersistOutcome::Committed(_))
+        CaptureObservationOutcome::AcceptedForReplay {
+            projection_state: ExternalSourceProjectionStateV1::Pending,
+            outcome,
+            ..
+        } if matches!(*outcome, ObservationPersistOutcome::Committed(_))
     ));
 
     let mismatch = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
@@ -495,8 +519,11 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
     .unwrap();
     assert!(matches!(
         committed,
-        CaptureObservationOutcome::Persisted { outcome, .. }
-            if matches!(*outcome, ObservationPersistOutcome::Committed(_))
+        CaptureObservationOutcome::AcceptedForReplay {
+            projection_state: ExternalSourceProjectionStateV1::Pending,
+            outcome,
+            ..
+        } if matches!(*outcome, ObservationPersistOutcome::Committed(_))
     ));
 
     drop(daemon_scope);
