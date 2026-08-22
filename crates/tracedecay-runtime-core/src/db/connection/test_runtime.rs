@@ -439,6 +439,41 @@ impl Database {
         mode: TestDatabaseRuntimeMode,
         scope: TestDatabaseRuntimeScope,
     ) -> Result<RegisteredTestRuntimeFixtureV1> {
+        Self::publish_registered_daemon_fixture_with_retirement_control(
+            db_path, authority, mode, None, scope,
+        )
+        .await
+    }
+
+    /// Publishes the same daemon-scoped fixture under identity already minted
+    /// by the production profile authority.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    pub async fn publish_registered_daemon_test_runtime_with_retirement_control_for_profile_identity(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        identity: TestRuntimeProfileIdentityV1,
+        scope: TestDatabaseRuntimeScope,
+    ) -> Result<RegisteredTestRuntimeFixtureV1> {
+        Self::publish_registered_daemon_fixture_with_retirement_control(
+            db_path,
+            authority,
+            mode,
+            Some(identity),
+            scope,
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    async fn publish_registered_daemon_fixture_with_retirement_control(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        identity: Option<TestRuntimeProfileIdentityV1>,
+        scope: TestDatabaseRuntimeScope,
+    ) -> Result<RegisteredTestRuntimeFixtureV1> {
         if authority.role() != super::DatabaseAuthorityRole::Daemon {
             return Err(TraceDecayError::Database {
                 message: "daemon-scoped registered test runtime requires explicit daemon authority"
@@ -447,7 +482,7 @@ impl Database {
             });
         }
         Self::publish_registered_fixture_with_retirement_control(
-            db_path, authority, mode, None, scope,
+            db_path, authority, mode, identity, scope,
         )
         .await
     }
@@ -910,15 +945,20 @@ mod tests {
             "daemon-scoped registered fixture authority",
         )
         .expect("acquire daemon fixture authority");
+        let identity = TestRuntimeProfileIdentityV1::new(
+            BrainId::new("brain.daemon-scoped-fixture").expect("fixture brain identity"),
+            UserProfileId::new("profile.daemon-scoped-fixture").expect("fixture profile identity"),
+        );
 
-        let fixture = Database::publish_registered_daemon_test_runtime_with_retirement_control(
-            &path,
-            &authority,
-            TestDatabaseRuntimeMode::Initialize,
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .expect("publish daemon-scoped registered fixture");
+        let fixture = Database::publish_registered_daemon_test_runtime_with_retirement_control_for_profile_identity(
+                &path,
+                &authority,
+                TestDatabaseRuntimeMode::Initialize,
+                identity.clone(),
+                TestDatabaseRuntimeScope::ProfileSessions,
+            )
+            .await
+            .expect("publish daemon-scoped registered fixture");
         let (owner, _runtime, _retirement) = fixture.into_parts();
         let database = owner.issue_lease().expect("issue daemon-scoped client");
         assert_eq!(
@@ -927,6 +967,13 @@ mod tests {
                 .expect("daemon-scoped write authority")
                 .role(),
             crate::db::DatabaseAuthorityRole::Daemon
+        );
+        assert_eq!(
+            database.registered_binding().shard_id,
+            StoreShardIdV1::profile_sessions(
+                identity.brain_id().clone(),
+                identity.profile_id().clone(),
+            )
         );
 
         let invalid_path = root.path().join("invalid.db");
