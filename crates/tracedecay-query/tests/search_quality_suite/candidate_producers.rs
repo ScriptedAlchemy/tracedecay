@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::{
     CodeIndexImportEvidenceV1, DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1,
     content_digest,
@@ -868,12 +869,20 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
             .rebuild_and_finalize(&mut final_source, &control)
             .expect("rebuild and finalize artifact from verified source")
     };
-    let reader = CodeLexicalArtifactReaderV1::open(
+    let artifact_bytes = std::fs::read(&artifact_path).expect("read finalized artifact");
+    let artifact_digest = ManifestDigest::new(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(&artifact_bytes))
+    ))
+    .expect("artifact content digest");
+    let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
         &artifact_path,
-        &verified,
+        &artifact_digest,
+        u64::try_from(artifact_bytes.len()).expect("artifact length fits u64"),
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
     )
-    .expect("verify and reopen artifact");
+    .expect("verify and reopen content-addressed artifact");
     assert!(reader.retained_owned_bytes() <= CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1);
     let occurrence = reader
         .occurrence_by_chunk(&chunks.last().expect("real source chunk").chunk().id)
@@ -890,7 +899,14 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
         verified.import_dictionary_digest()
     );
 
-    let mut request = lexical_request("render", &["render"], &[], &[], 1, 8);
+    let mut request = lexical_request(
+        "rendre return value",
+        &["rendre"],
+        &[],
+        &["return value"],
+        2,
+        8,
+    );
     request.generation = generation;
     let artifact = LexicalLane::new(reader)
         .retrieve_lexical(&request)
