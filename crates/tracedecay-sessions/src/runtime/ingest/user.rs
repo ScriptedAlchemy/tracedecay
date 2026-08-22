@@ -280,6 +280,16 @@ pub(super) fn provider_selected(
     scope.is_none() || scope == Some(candidate)
 }
 
+pub(super) fn profile_sessions_authority_matches(
+    shard: &tracedecay_store::StoreShardIdV1,
+    brain_id: &BrainId,
+    profile_id: &UserProfileId,
+) -> bool {
+    shard.brain_id == *brain_id
+        && shard.profile_id == *profile_id
+        && shard.scope == StoreShardScopeV1::ProfileSessions
+}
+
 pub async fn ingest_user_global_sources_for_provider_with_authorities<A: SessionIngestAuthority>(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
@@ -402,10 +412,7 @@ pub async fn ingest_user_global_sources_for_provider_with_roots_bounded<
 ) -> IngestPassOutcome {
     let (brain_id, profile_id, registered) = registered;
     let shard = &registered.shard_id();
-    if shard.brain_id != *brain_id
-        || shard.profile_id != *profile_id
-        || shard.scope != StoreShardScopeV1::ProfileSessions
-    {
+    if !profile_sessions_authority_matches(shard, brain_id, profile_id) {
         return IngestPassOutcome::failed(TranscriptCatchUpFailure::new(
             provider.map_or("all", SessionProvider::id),
             "profile_sessions_authority",

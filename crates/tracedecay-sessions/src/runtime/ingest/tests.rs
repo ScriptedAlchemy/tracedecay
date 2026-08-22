@@ -2,8 +2,9 @@
 
 use std::path::PathBuf;
 
-use tracedecay_domain::ProjectId;
+use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_store::StoreShardIdV1;
 
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
@@ -20,7 +21,7 @@ use super::scheduler::{
     plan_user_provider_admission,
 };
 use super::startup::{StartupUserIngestClaim, StartupUserIngestGuard, TranscriptIngestOutcome};
-use super::user::provider_selected;
+use super::user::{profile_sessions_authority_matches, provider_selected};
 
 const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     discovered_units: 16,
@@ -31,6 +32,21 @@ const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     bytes_per_pass: 4096,
     retries: 0,
 };
+
+#[test]
+fn profile_sessions_authority_rejects_a_wrong_brain_id() {
+    let expected_brain = BrainId::new("brain.expected").unwrap();
+    let foreign_brain = BrainId::new("brain.foreign").unwrap();
+    let profile_id = UserProfileId::new("profile.authority-test").unwrap();
+    let registered_shard = StoreShardIdV1::profile_sessions(foreign_brain, profile_id.clone());
+
+    assert!(!profile_sessions_authority_matches(
+        &registered_shard,
+        &expected_brain,
+        &profile_id,
+    ));
+}
+
 #[tokio::test]
 async fn scoped_transcript_source_home_overrides_ambient_home_without_mutating_it() {
     let isolated_home = tempfile::tempdir().unwrap();
