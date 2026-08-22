@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use tracedecay_application::ApplicationContractError;
@@ -98,6 +98,10 @@ fn same_registered_store_authority(
 enum StoreObservabilityStateV1 {
     Active {
         core: Arc<StoreObservabilityCoreV1>,
+        /// Live alias handles onto this owner. Each
+        /// [`RegisteredObservabilityProducerV1`] surrenders its single
+        /// release token exactly once — by explicit shutdown or by drop —
+        /// so this registry-owned count is the one refcount authority.
         aliases: usize,
     },
     Stopping {
@@ -109,6 +113,49 @@ enum StoreObservabilityStateV1 {
 struct StoreObservabilityEntryV1 {
     database: crate::global_db::RegisteredGlobalDbLeaseV1,
     state: StoreObservabilityStateV1,
+}
+
+/// One project root's request to mount observability for an exact registered
+/// store. An incumbent owner must carry the same configuration provenance and
+/// match every store-authority identity field; `policy_revision` is this
+/// root's own provenance, stamped by the resulting alias frontend rather than
+/// compared against the incumbent.
+pub(crate) struct StoreObservabilityMountV1 {
+    pub(crate) configuration_provenance_revision: ManifestDigest,
+    pub(crate) authorized_scope_ref: String,
+    pub(crate) producer_revision: String,
+    pub(crate) configuration_revision: String,
+    pub(crate) policy_revision: String,
+    pub(crate) delivery_capacity: usize,
+}
+
+/// Why observability could not be mounted for a registered store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StoreObservabilityMountErrorV1 {
+    /// A live owner for this exact store carries a different configuration
+    /// provenance or identity. The mount is refused rather than silently
+    /// aliased or given a second store owner.
+    Busy,
+    /// The last alias is draining. Replacement owners are refused until the
+    /// drain finishes and the store entry retires.
+    Retiring,
+    /// The last owner shutdown failed and is remembered: mounting again
+    /// could overlap a worker whose drain never completed.
+    ShutdownFailed,
+    /// Registry or owner-start infrastructure was unavailable.
+    Unavailable(&'static str),
+}
+
+impl fmt::Display for StoreObservabilityMountErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let code = match self {
+            Self::Busy => "store_observability_busy",
+            Self::Retiring => "store_observability_retiring",
+            Self::ShutdownFailed => "store_observability_shutdown_failed",
+            Self::Unavailable(reason) => reason,
+        };
+        formatter.write_str(code)
+    }
 }
 
 /// Live observability owners keyed by exact registered-store authority.
@@ -130,85 +177,98 @@ impl StoreObservabilityRegistryV1 {
     }
 
     /// Attach an alias to the incumbent owners of this exact registered
-    /// store, or start them. An incumbent whose identity the caller does not
-    /// accept refuses the mount instead of running a second store owner.
-    pub(crate) fn acquire_or_start<E>(
+    /// store, or start them via `start_producer`. An incumbent that does not
+    /// match the mount's store-authority fields refuses the mount instead of
+    /// running a second store owner.
+    pub(crate) fn acquire_or_start(
         &self,
         database: &crate::global_db::RegisteredGlobalDbLeaseV1,
-        configuration_provenance_revision: &ManifestDigest,
-        accepts_incumbent: impl FnOnce(&ObservabilityProducerIdentityV1) -> bool,
-        emission_identity: impl FnOnce(
-            &ObservabilityProducerIdentityV1,
-        ) -> ObservabilityProducerIdentityV1,
-        refused: impl FnOnce() -> E,
-        start_producer: impl FnOnce() -> Result<BoundedObservabilityProducerV1, E>,
-        delivery_capacity: usize,
-        unavailable: impl Fn(&'static str) -> E,
-    ) -> Result<RegisteredObservabilityProducerV1, E> {
-        let mut entries = self.lock_entries().map_err(&unavailable)?;
+        mount: &StoreObservabilityMountV1,
+        start_producer: impl FnOnce() -> Result<
+            BoundedObservabilityProducerV1,
+            StoreObservabilityMountErrorV1,
+        >,
+    ) -> Result<RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1> {
+        let mut entries = self
+            .lock_entries()
+            .map_err(StoreObservabilityMountErrorV1::Unavailable)?;
         if let Some(entry) = entries
             .iter_mut()
             .find(|entry| same_registered_store_authority(&entry.database, database))
         {
-            match &mut entry.state {
+            return match &mut entry.state {
                 StoreObservabilityStateV1::Active { core, aliases } => {
-                    if core.configuration_provenance_revision != *configuration_provenance_revision
-                        || !accepts_incumbent(core.producer.identity())
+                    let incumbent = core.producer.identity();
+                    if core.configuration_provenance_revision
+                        != mount.configuration_provenance_revision
+                        || incumbent.authorized_scope_ref != mount.authorized_scope_ref
+                        || incumbent.producer_revision != mount.producer_revision
+                        || incumbent.configuration_revision != mount.configuration_revision
                     {
-                        return Err(refused());
+                        return Err(StoreObservabilityMountErrorV1::Busy);
                     }
-                    let emission_identity = emission_identity(core.producer.identity());
+                    // The alias joins the incumbent's boot stream and stamps
+                    // this root's own policy provenance.
+                    let emission_identity = ObservabilityProducerIdentityV1 {
+                        authorized_scope_ref: mount.authorized_scope_ref.clone(),
+                        process_boot_id: incumbent.process_boot_id.clone(),
+                        producer_revision: mount.producer_revision.clone(),
+                        configuration_revision: mount.configuration_revision.clone(),
+                        policy_revision: mount.policy_revision.clone(),
+                    };
+                    let next_aliases = aliases.checked_add(1).ok_or(
+                        StoreObservabilityMountErrorV1::Unavailable(
+                            "store_observability_alias_capacity_exhausted",
+                        ),
+                    )?;
                     let producer = Arc::new(
                         core.producer
                             .alias_with_policy_identity(emission_identity)
-                            .map_err(&unavailable)?,
+                            .map_err(StoreObservabilityMountErrorV1::Unavailable)?,
                     );
-                    let next_aliases = aliases.checked_add(1).ok_or_else(|| {
-                        unavailable("store_observability_alias_capacity_exhausted")
-                    })?;
                     let registered = RegisteredObservabilityProducerV1::alias(
                         self.clone(),
                         Arc::clone(core),
                         producer,
                     )
-                    .map_err(&unavailable)?;
+                    .map_err(StoreObservabilityMountErrorV1::Unavailable)?;
                     *aliases = next_aliases;
-                    return Ok(registered);
+                    Ok(registered)
                 }
                 StoreObservabilityStateV1::Stopping { .. } => {
-                    return Err(unavailable("store_observability_retiring"));
+                    Err(StoreObservabilityMountErrorV1::Retiring)
                 }
                 StoreObservabilityStateV1::Failed => {
-                    return Err(unavailable("store_observability_shutdown_failed"));
+                    Err(StoreObservabilityMountErrorV1::ShutdownFailed)
                 }
-            }
+            };
         }
         let producer = start_producer()?;
         let core = Arc::new(
             StoreObservabilityCoreV1::start(
                 database.clone(),
-                configuration_provenance_revision.clone(),
+                mount.configuration_provenance_revision.clone(),
                 producer,
-                delivery_capacity,
+                mount.delivery_capacity,
             )
-            .map_err(&unavailable)?,
+            .map_err(StoreObservabilityMountErrorV1::Unavailable)?,
         );
         let registered = RegisteredObservabilityProducerV1::alias(
             self.clone(),
             Arc::clone(&core),
             Arc::clone(&core.producer),
         )
-        .map_err(&unavailable)?;
+        .map_err(StoreObservabilityMountErrorV1::Unavailable)?;
         entries.push(StoreObservabilityEntryV1 {
             database: database.clone(),
-            state: StoreObservabilityStateV1::Active {
-                core: Arc::clone(&core),
-                aliases: 1,
-            },
+            state: StoreObservabilityStateV1::Active { core, aliases: 1 },
         });
         Ok(registered)
     }
 
+    /// Surrenders one alias release. Reports whether it was the last one, in
+    /// which case the entry is now `Stopping` and the caller must drain the
+    /// core and then finish the retirement.
     fn begin_retirement(
         &self,
         core: &Arc<StoreObservabilityCoreV1>,
@@ -255,10 +315,13 @@ impl StoreObservabilityRegistryV1 {
         Ok(true)
     }
 
+    /// Settles a `Stopping` entry: a releasable retirement removes it so a
+    /// fresh owner may mount; a genuine shutdown failure is remembered as
+    /// `Failed` and refuses all future mounts.
     fn finish_retirement(
         &self,
         core: &Arc<StoreObservabilityCoreV1>,
-        succeeded: bool,
+        releasable: bool,
     ) -> Result<(), ApplicationContractError> {
         let mut entries =
             self.lock_entries()
@@ -277,7 +340,7 @@ impl StoreObservabilityRegistryV1 {
                 field: "store_observability_retiring_owner",
             });
         };
-        if succeeded {
+        if releasable {
             entries.remove(index);
         } else {
             entries[index].state = StoreObservabilityStateV1::Failed;
@@ -293,7 +356,11 @@ pub(crate) struct RegisteredObservabilityProducerV1 {
     producer: Arc<BoundedObservabilityProducerV1>,
     delivery_settlement_authority: Arc<DeliverySettlementAuthorityV1>,
     delivery_settlements: Arc<BoundedDeliverySettlementRecorderV1>,
-    released: AtomicBool,
+    /// The single release token: `Some` exactly while this alias is counted
+    /// by its store entry. It is taken once — by the consuming [`Self::shutdown`]
+    /// or by drop — so the registry's alias count is derived from exactly one
+    /// release per handle, with no separate released flag to keep consistent.
+    release: Option<Arc<StoreObservabilityCoreV1>>,
 }
 
 impl RegisteredObservabilityProducerV1 {
@@ -313,11 +380,11 @@ impl RegisteredObservabilityProducerV1 {
         );
         Ok(Self {
             registry,
+            release: Some(Arc::clone(&core)),
             core,
             producer,
             delivery_settlement_authority,
             delivery_settlements,
-            released: AtomicBool::new(false),
         })
     }
 
@@ -350,21 +417,22 @@ impl RegisteredObservabilityProducerV1 {
             && *self.producer.identity() == *identity
     }
 
-    /// Releases this alias from its store entry, reporting whether it was the
-    /// last one. Idempotent: shutdown and drop release at most once.
-    fn begin_retirement(&self) -> Result<bool, ApplicationContractError> {
-        if self.released.swap(true, Ordering::AcqRel) {
-            return Ok(false);
-        }
-        self.registry.begin_retirement(&self.core)
-    }
-
-    pub(crate) async fn shutdown(&self) -> Result<(), ApplicationContractError> {
-        if !self.begin_retirement()? {
+    /// Releases this alias; the last release drains and closes the store
+    /// owners. Consuming the handle is what makes the release single-shot:
+    /// the token taken here is the same one drop would take.
+    pub(crate) async fn shutdown(mut self) -> Result<(), ApplicationContractError> {
+        let Some(core) = self.release.take() else {
+            // Unreachable for an owned handle: only drop takes the token
+            // otherwise. Releasing twice is an idempotent no-op by contract.
+            return Ok(());
+        };
+        let registry = self.registry.clone();
+        drop(self);
+        if !registry.begin_retirement(&core)? {
             return Ok(());
         }
-        let result = self.core.shutdown().await;
-        let retirement = self.registry.finish_retirement(&self.core, result.is_ok());
+        let result = core.shutdown().await;
+        let retirement = registry.finish_retirement(&core, result.is_ok());
         match result {
             Ok(()) => retirement,
             Err(error) => {
@@ -382,7 +450,10 @@ impl RegisteredObservabilityProducerV1 {
 
 impl Drop for RegisteredObservabilityProducerV1 {
     fn drop(&mut self) {
-        let is_last = match self.begin_retirement() {
+        let Some(core) = self.release.take() else {
+            return;
+        };
+        let is_last = match self.registry.begin_retirement(&core) {
             Ok(is_last) => is_last,
             Err(error) => {
                 tracing::warn!(%error, "observability alias release was incomplete");
@@ -392,22 +463,32 @@ impl Drop for RegisteredObservabilityProducerV1 {
         if !is_last {
             return;
         }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            if let Err(error) = self.registry.finish_retirement(&self.core, false) {
-                tracing::warn!(%error, "observability owner failure could not be retained");
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                let registry = self.registry.clone();
+                runtime.spawn(async move {
+                    let result = core.shutdown().await;
+                    if let Err(error) = &result {
+                        tracing::warn!(%error, "dropped observability owner shutdown was incomplete");
+                    }
+                    if let Err(error) = registry.finish_retirement(&core, result.is_ok()) {
+                        tracing::warn!(%error, "dropped observability retirement was incomplete");
+                    }
+                });
             }
-            return;
-        };
-        let registry = self.registry.clone();
-        let core = Arc::clone(&self.core);
-        runtime.spawn(async move {
-            let result = core.shutdown().await;
-            if let Err(error) = &result {
-                tracing::warn!(%error, "dropped observability owner shutdown was incomplete");
+            Err(_) => {
+                // A drop without a runtime is a teardown accident, not a
+                // shutdown failure: release the store entry instead of
+                // poisoning it so a future daemon runtime can mount fresh
+                // owners. The owner workers settle on their own runtime as
+                // their queues close when the core drops.
+                tracing::warn!(
+                    "observability owners dropped without a runtime; released without an awaited drain"
+                );
+                if let Err(error) = self.registry.finish_retirement(&core, true) {
+                    tracing::warn!(%error, "dropped observability retirement was incomplete");
+                }
             }
-            if let Err(error) = registry.finish_retirement(&core, result.is_ok()) {
-                tracing::warn!(%error, "dropped observability retirement was incomplete");
-            }
-        });
+        }
     }
 }

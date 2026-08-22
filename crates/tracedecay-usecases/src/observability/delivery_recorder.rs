@@ -40,6 +40,26 @@ enum RecorderControl {
     },
 }
 
+/// Store-owner state shared by every linked root's admission frontend: the
+/// spool, wake lane, lifecycle, and worker exist exactly once per started
+/// recorder. Frontends are cheap identity carriers over one `Arc` of this
+/// core, so aliasing is handle construction and shutdown drains the one
+/// worker no matter which frontend drives it.
+struct DeliverySettlementRecorderCoreV1 {
+    /// The founding owner identity every alias must match on the
+    /// store-authority fields; frontends stamp their own policy revision.
+    identity: ObservabilityProducerIdentityV1,
+    wake: mpsc::Sender<()>,
+    control: mpsc::Sender<RecorderControl>,
+    // `state` and `spool` stay `Arc` because the spawned worker shares them.
+    // The worker must not hold the core itself: the wake sender lives in the
+    // core, so a worker-held core could never observe channel closure.
+    state: Arc<AtomicU8>,
+    spool: Arc<DeliveryRecorderSpoolV1>,
+    admission: Mutex<()>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
 /// Bounded, daemon-owned durable write-behind lane for post-delivery receipts.
 ///
 /// Surface adapters offer only outcomes they observed at a real write, flush,
@@ -48,13 +68,10 @@ enum RecorderControl {
 /// pressure therefore delays SQLite work without erasing delivery evidence;
 /// transient failures remain replayable across process restart.
 pub struct BoundedDeliverySettlementRecorderV1 {
+    core: Arc<DeliverySettlementRecorderCoreV1>,
+    /// The identity stamped on receipts admitted through this frontend. It
+    /// differs from the core owner identity only in policy provenance.
     identity: ObservabilityProducerIdentityV1,
-    wake: mpsc::Sender<()>,
-    control: mpsc::Sender<RecorderControl>,
-    state: Arc<AtomicU8>,
-    admission: Arc<Mutex<()>>,
-    spool: Arc<DeliveryRecorderSpoolV1>,
-    worker: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl BoundedDeliverySettlementRecorderV1 {
@@ -75,6 +92,7 @@ impl BoundedDeliverySettlementRecorderV1 {
         let state = Arc::new(AtomicU8::new(RECORDER_RUNNING));
         let worker_state = Arc::clone(&state);
         let worker_spool = Arc::clone(&spool);
+        let identity = authority.identity().clone();
         let worker = runtime.spawn(run_recorder(
             Arc::clone(&authority),
             worker_spool,
@@ -82,39 +100,31 @@ impl BoundedDeliverySettlementRecorderV1 {
             control_rx,
             worker_state,
         ));
-        Ok(Self {
-            identity: authority.identity().clone(),
+        let core = Arc::new(DeliverySettlementRecorderCoreV1 {
+            identity: identity.clone(),
             wake,
             control,
             state,
-            admission: Arc::new(Mutex::new(())),
             spool,
-            worker: Arc::new(Mutex::new(Some(worker))),
-        })
+            admission: Mutex::new(()),
+            worker: Mutex::new(Some(worker)),
+        });
+        Ok(Self { core, identity })
     }
 
     /// Attach one linked root's policy-specific admission frontend to this
-    /// recorder's existing spool, wake lane, lifecycle, and worker.
+    /// recorder's shared core: one spool, wake lane, lifecycle, and worker.
     pub fn alias_with_policy_identity(
         &self,
         identity: ObservabilityProducerIdentityV1,
     ) -> Result<Self, &'static str> {
         identity.validate()?;
-        if identity.authorized_scope_ref != self.identity.authorized_scope_ref
-            || identity.process_boot_id != self.identity.process_boot_id
-            || identity.producer_revision != self.identity.producer_revision
-            || identity.configuration_revision != self.identity.configuration_revision
-        {
+        if !identity.is_policy_alias_of(&self.core.identity) {
             return Err("delivery_settlement_recorder_alias_identity");
         }
         Ok(Self {
+            core: Arc::clone(&self.core),
             identity,
-            wake: self.wake.clone(),
-            control: self.control.clone(),
-            state: Arc::clone(&self.state),
-            admission: Arc::clone(&self.admission),
-            spool: Arc::clone(&self.spool),
-            worker: Arc::clone(&self.worker),
         })
     }
 
@@ -126,13 +136,14 @@ impl BoundedDeliverySettlementRecorderV1 {
         let receipt = DeliveryRecorderSourceReceiptV1::new(settlement, self.identity.clone())
             .map_err(map_spool_admission_error)?;
         let _admission = self
+            .core
             .admission
             .lock()
             .map_err(|_| "delivery_settlement_recorder_lock_poisoned")?;
-        if self.state.load(Ordering::Acquire) != RECORDER_RUNNING {
+        if self.core.state.load(Ordering::Acquire) != RECORDER_RUNNING {
             return Err("delivery_settlement_recorder_closed");
         }
-        match self.spool.append(&receipt) {
+        match self.core.spool.append(&receipt) {
             Ok(_) => {}
             Err(DeliveryRecorderSpoolError::Full) => {
                 return Ok(DeliverySettlementRecordOutcomeV1::DroppedAtCapacity);
@@ -141,7 +152,7 @@ impl BoundedDeliverySettlementRecorderV1 {
         }
         // A full wake queue is safe: the durable receipt is already visible to
         // the active worker's bounded scan and periodic restart replay.
-        match self.wake.try_send(()) {
+        match self.core.wake.try_send(()) {
             Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {
                 Ok(DeliverySettlementRecordOutcomeV1::Enqueued)
             }
@@ -152,6 +163,16 @@ impl BoundedDeliverySettlementRecorderV1 {
     }
 
     pub async fn shutdown(
+        &self,
+    ) -> Result<DeliverySettlementRecorderSummaryV1, ApplicationContractError> {
+        self.core.shutdown().await
+    }
+}
+
+impl DeliverySettlementRecorderCoreV1 {
+    /// Shutdown lives only on the core: any frontend may drive it, and the
+    /// lifecycle compare-and-swap admits exactly one drain.
+    async fn shutdown(
         &self,
     ) -> Result<DeliverySettlementRecorderSummaryV1, ApplicationContractError> {
         {
