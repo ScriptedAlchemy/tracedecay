@@ -53,7 +53,7 @@ pub use connection::{
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use connection::{
     RegisteredTestRuntimeFixtureV1, RegisteredTestRuntimeRetirementControlV1,
-    TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+    TestDatabaseRuntimeMode, TestDatabaseRuntimeScope, TestRuntimeProfileIdentityV1,
 };
 pub use external_source::install_external_source_schema;
 pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};

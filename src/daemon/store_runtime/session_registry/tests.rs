@@ -83,10 +83,14 @@ async fn project_sessions_pending_convergence(
         "seed project sessions registered schema fixture",
     )
     .expect("project sessions fixture database authority");
-    let (database, _) = crate::db::Database::publish_registered_test_runtime(
+    let (database, _) = crate::db::Database::publish_registered_test_runtime_for_profile_identity(
         &sessions_path,
         &authority,
         crate::db::TestDatabaseRuntimeMode::Initialize,
+        crate::db::TestRuntimeProfileIdentityV1::new(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+        ),
         crate::db::TestDatabaseRuntimeScope::ProjectSessions {
             project_id: project_id.clone(),
         },
