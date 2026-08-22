@@ -1108,6 +1108,12 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
         &ActiveControl,
     )
     .expect("content-addressed source opens");
+    let retained_layout_bytes = initial.retained_layout_bytes();
+    assert_eq!(
+        retained_layout_bytes,
+        std::mem::size_of::<u64>() * 4,
+        "source mount authority must not retain one byte range per file"
+    );
     let first = match initial.next_page(&ActiveControl).expect("first page") {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must emit a first page"),
@@ -1179,6 +1185,20 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
         .expect("foreign generation seals");
     let foreign_digest =
         id::<ManifestDigest>(&format!("sha256:{}", hex::encode(Sha256::digest(&foreign))));
+    let foreign_source = VerifiedSealedLexicalPageSourceV1::open_content_addressed(
+        Cursor::new(foreign.clone()),
+        u64::try_from(foreign.len()).expect("foreign sealed length"),
+        foreign_digest.clone(),
+        64,
+        1024 * 1024,
+        &ActiveControl,
+    )
+    .expect("one-file content-addressed source opens");
+    assert_eq!(
+        foreign_source.retained_layout_bytes(),
+        retained_layout_bytes,
+        "retained source layout must remain constant between one and two files"
+    );
     let error = VerifiedSealedLexicalPageSourceV1::open_content_addressed_at(
         Cursor::new(foreign.clone()),
         u64::try_from(foreign.len()).expect("foreign sealed length"),
