@@ -1,5 +1,7 @@
 #[cfg(feature = "test-transport")]
 use crate::support::*;
+#[cfg(feature = "test-transport")]
+use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
@@ -126,7 +128,15 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
 
     let consolidation = &run.report["applied_consolidations"][0];
     assert_eq!(consolidation["action"], json!("merge"));
-    assert_eq!(consolidation["activation_status"], json!("applied"));
+    // The record spells this field `application_status`; the old
+    // `activation_status` spelling asserted a field the production record
+    // never emitted, so the comparison was Null vs "applied" and failed.
+    assert_eq!(consolidation["application_status"], json!("applied"));
+    assert_eq!(
+        consolidation["tombstone_label"],
+        json!(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
+    );
+    assert_ne!(consolidation["tombstone_label"], consolidation["reason"]);
     assert_eq!(
         consolidation["target_skill_id"],
         json!("automation-run-review")
