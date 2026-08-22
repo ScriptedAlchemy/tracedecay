@@ -59,6 +59,9 @@ use tracedecay_store::{
     ObservationProjectionStore, ObservationStore, ObservationStoreError, ObservationWrite,
     ProjectionPersistOutcome, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::{Dispatch, Event, Metadata, Subscriber};
 
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::params;

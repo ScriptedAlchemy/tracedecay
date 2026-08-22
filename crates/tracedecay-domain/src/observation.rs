@@ -2307,6 +2307,11 @@ fn domain_digest(
     domain: &[u8],
     value: &impl Serialize,
 ) -> Result<String, ObservationContractError> {
+    tracing::trace!(
+        target: "tracedecay::observation_admission_work",
+        work = "identity_derivation",
+        "derive canonical observation identity"
+    );
     let bytes =
         canonical_json_bytes(value).map_err(|_| ObservationContractError::CanonicalEncoding)?;
     let mut hasher = Sha256::new();
@@ -2349,6 +2354,11 @@ fn accepted_identity_digests(
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {
+    tracing::trace!(
+        target: "tracedecay::observation_admission_work",
+        work = "payload_digest",
+        "digest canonical observation payload"
+    );
     format_sha256(&Sha256::digest(bytes))
 }
 

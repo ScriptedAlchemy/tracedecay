@@ -41,6 +41,13 @@ use super::super::{
     exact_field_for_kind,
 };
 
+const DOCUMENT_TERM_POSTINGS_QUERY: &str =
+    "SELECT field, term, frequency FROM term_postings WHERE document_id = ?1 ORDER BY field, term";
+const DOCUMENT_EXACT_POSTINGS_QUERY: &str =
+    "SELECT field, term FROM exact_postings WHERE document_id = ?1 ORDER BY field, term";
+const DOCUMENT_NGRAM_POSTINGS_QUERY: &str =
+    "SELECT kind, ngram FROM ngram_postings WHERE document_id = ?1 ORDER BY kind, ngram";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FinalizationSectionV1 {
     SourcePages,
@@ -312,9 +319,7 @@ struct StableArtifactFileIdentityV1 {
     #[cfg(windows)]
     volume_serial_number: u32,
     #[cfg(windows)]
-    file_index_high: u32,
-    #[cfg(windows)]
-    file_index_low: u32,
+    file_index: u64,
 }
 
 pub struct CodeLexicalArtifactBuilderV1 {
@@ -763,11 +768,11 @@ fn open_bound_builder_connection(
 fn stable_file_identity(
     file: &File,
 ) -> Result<StableArtifactFileIdentityV1, CodeLexicalArtifactErrorV1> {
-    let metadata = file.metadata().map_err(private_staging_error)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
 
+        let metadata = file.metadata().map_err(private_staging_error)?;
         Ok(StableArtifactFileIdentityV1 {
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -775,12 +780,12 @@ fn stable_file_identity(
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
+        let information = tracedecay_runtime_core::windows_file::information(file)
+            .map_err(private_staging_error)?;
 
         Ok(StableArtifactFileIdentityV1 {
-            volume_serial_number: metadata.volume_serial_number(),
-            file_index_high: metadata.file_index_high(),
-            file_index_low: metadata.file_index_low(),
+            volume_serial_number: information.volume_serial_number,
+            file_index: information.file_index,
         })
     }
 }
@@ -1236,6 +1241,9 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             ) WITHOUT ROWID;
             CREATE TABLE vocabulary (term TEXT PRIMARY KEY) WITHOUT ROWID;
             CREATE INDEX term_postings_by_term ON term_postings(term, field, document_id);
+            CREATE INDEX term_postings_by_document ON term_postings(document_id, field, term);
+            CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term);
+            CREATE INDEX ngram_postings_by_document ON ngram_postings(document_id, kind, ngram);
             CREATE TRIGGER content_epoch_source_pages_insert AFTER INSERT ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER content_epoch_source_pages_update AFTER UPDATE ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER content_epoch_source_pages_delete AFTER DELETE ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
@@ -1613,7 +1621,7 @@ fn advance_native_section_rows<P: rusqlite::Params>(
             section,
             FinalizationSectionV1::DocumentIntegrity | FinalizationSectionV1::ImportIntegrity
         ) {
-            verify_integrity_row(transaction, section, row)?;
+            verify_integrity_row(transaction, section, row, control)?;
         }
         absorb_section_row(
             section.name(),
@@ -1686,12 +1694,13 @@ fn verify_integrity_row(
     transaction: &Transaction<'_>,
     section: FinalizationSectionV1,
     row: &rusqlite::Row<'_>,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let expected: String = row.get(1).map_err(sqlite_error)?;
     let actual = match section {
         FinalizationSectionV1::DocumentIntegrity => match row.get_ref(0).map_err(sqlite_error)? {
             ValueRef::Integer(document) if document >= 0 => {
-                document_integrity_digest(transaction, document)?
+                document_integrity_digest(transaction, document, control)?
             }
             _ => {
                 return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -1970,7 +1979,7 @@ fn append_page_rows(
                 params![document, artifact_row.id.as_str(), bytes],
             )
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        let digest = document_integrity_digest(transaction, document)?;
+        let digest = document_integrity_digest(transaction, document, control)?;
         transaction
             .execute(
                 "INSERT INTO document_integrity(document_id, digest) VALUES (?1, ?2)",
@@ -2071,7 +2080,9 @@ fn insert_exact_posting(
 fn document_integrity_digest(
     transaction: &Transaction<'_>,
     document: i64,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v1\0");
     hasher.update(document.to_le_bytes());
@@ -2081,6 +2092,7 @@ fn document_integrity_digest(
         "row",
         "SELECT row FROM rows WHERE document_id = ?1",
         document,
+        control,
     )?;
     if row_count != 1 {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(format!(
@@ -2091,22 +2103,25 @@ fn document_integrity_digest(
         transaction,
         &mut hasher,
         "term_posting",
-        "SELECT field, term, frequency FROM term_postings WHERE document_id = ?1 ORDER BY field, term",
+        DOCUMENT_TERM_POSTINGS_QUERY,
         document,
+        control,
     )?;
     hash_document_table(
         transaction,
         &mut hasher,
         "exact_posting",
-        "SELECT field, term FROM exact_postings WHERE document_id = ?1 ORDER BY field, term",
+        DOCUMENT_EXACT_POSTINGS_QUERY,
         document,
+        control,
     )?;
     hash_document_table(
         transaction,
         &mut hasher,
         "ngram_posting",
-        "SELECT kind, ngram FROM ngram_postings WHERE document_id = ?1 ORDER BY kind, ngram",
+        DOCUMENT_NGRAM_POSTINGS_QUERY,
         document,
+        control,
     )?;
     integrity_digest(hasher)
 }
@@ -2117,7 +2132,9 @@ fn hash_document_table(
     table: &str,
     query: &str,
     document: i64,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<u64, CodeLexicalArtifactErrorV1> {
+    checkpoint(control)?;
     hasher.update(
         u64::try_from(table.len())
             .map_err(contract_number)?
@@ -2129,6 +2146,7 @@ fn hash_document_table(
     let mut rows = statement.query([document]).map_err(sqlite_error)?;
     let mut count = 0u64;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
+        checkpoint(control)?;
         hasher.update(b"row\0");
         for column in 0..column_count {
             hash_value(hasher, row.get_ref(column).map_err(sqlite_error)?)?;
@@ -2538,6 +2556,155 @@ fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::StatementStatus;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ActiveControl;
+
+    impl CodeIndexExecutionControlV1 for ActiveControl {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    struct CancelAtCheckpoint {
+        checkpoint: usize,
+        observations: AtomicUsize,
+    }
+
+    impl CodeIndexExecutionControlV1 for CancelAtCheckpoint {
+        fn is_cancelled(&self) -> bool {
+            self.observations.fetch_add(1, Ordering::SeqCst) + 1 >= self.checkpoint
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn one_document_integrity_row_does_not_visit_unrelated_generation_rows() {
+        let mut connection = Connection::open_in_memory().expect("open artifact database");
+        create_schema(&connection).expect("create artifact schema");
+        let transaction = connection.transaction().expect("start seed transaction");
+        for document_id in 0..2_048i64 {
+            transaction
+                .execute(
+                    "INSERT INTO term_postings(field, term, document_id, frequency) VALUES ('body', ?1, ?2, 1)",
+                    params![format!("term-{document_id:04}"), document_id],
+                )
+                .expect("seed term posting");
+            transaction
+                .execute(
+                    "INSERT INTO exact_postings(field, term, document_id) VALUES ('symbol', ?1, ?2)",
+                    params![document_id.to_le_bytes().as_slice(), document_id],
+                )
+                .expect("seed exact posting");
+            transaction
+                .execute(
+                    "INSERT INTO ngram_postings(kind, ngram, document_id) VALUES (1, ?1, ?2)",
+                    params![document_id, document_id],
+                )
+                .expect("seed ngram posting");
+        }
+        transaction.commit().expect("commit seed transaction");
+
+        for query in [
+            DOCUMENT_TERM_POSTINGS_QUERY,
+            DOCUMENT_EXACT_POSTINGS_QUERY,
+            DOCUMENT_NGRAM_POSTINGS_QUERY,
+        ] {
+            let mut statement = connection.prepare(query).expect("prepare integrity query");
+            {
+                let mut rows = statement.query([1_024i64]).expect("query one document");
+                assert!(rows.next().expect("read matching row").is_some());
+                assert!(rows.next().expect("finish matching rows").is_none());
+            }
+            assert_eq!(
+                statement.get_status(StatementStatus::FullscanStep),
+                0,
+                "one document must not visit unrelated generation rows"
+            );
+            assert_eq!(
+                statement.get_status(StatementStatus::Sort),
+                0,
+                "one document must not sort unrelated generation rows"
+            );
+        }
+    }
+
+    #[test]
+    fn document_integrity_hashing_cancels_without_advancing_finalization() {
+        let mut connection = Connection::open_in_memory().expect("open artifact database");
+        create_schema(&connection).expect("create artifact schema");
+        let transaction = connection
+            .transaction()
+            .expect("start artifact transaction");
+        transaction
+            .execute(
+                "INSERT INTO rows(document_id, chunk_id, row) VALUES (0, 'chunk', X'01')",
+                [],
+            )
+            .expect("seed row");
+        for ordinal in 0..64i64 {
+            transaction
+                .execute(
+                    "INSERT INTO term_postings(field, term, document_id, frequency) VALUES ('body', ?1, 0, 1)",
+                    [format!("term-{ordinal:02}")],
+                )
+                .expect("seed term posting");
+        }
+        let digest = document_integrity_digest(&transaction, 0, &ActiveControl)
+            .expect("derive append receipt");
+        transaction
+            .execute(
+                "INSERT INTO document_integrity(document_id, digest) VALUES (0, ?1)",
+                [digest.as_str()],
+            )
+            .expect("seed document receipt");
+
+        let mut state = PersistedFinalizationStateV1 {
+            phase: PersistedFinalizationPhaseV1::Build,
+            section_ordinal: 1,
+            section_row_count: 0,
+            section_last_key: None,
+            section_accumulator: initial_section_accumulator("document_integrity")
+                .expect("initial accumulator")
+                .to_vec(),
+            completed_sections: Vec::new(),
+            completed_rows: 0,
+            content_epoch: 0,
+            source_state_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
+                .expect("test source-state digest"),
+        };
+        let control = CancelAtCheckpoint {
+            checkpoint: 8,
+            observations: AtomicUsize::new(0),
+        };
+        let error = advance_native_section_rows(
+            &transaction,
+            FinalizationSectionV1::DocumentIntegrity,
+            FinalizationSectionV1::DocumentIntegrity.seek_query(false),
+            params![1i64],
+            &mut state,
+            &control,
+        )
+        .expect_err("cancel nested document hashing");
+
+        assert!(matches!(
+            error,
+            CodeLexicalArtifactErrorV1::Interrupted(
+                tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled
+            )
+        ));
+        assert_eq!(state.section_row_count, 0);
+        assert_eq!(state.completed_rows, 0);
+        assert_eq!(state.section_last_key, None);
+    }
 
     #[test]
     fn bounded_finalization_resume_seeks_each_native_section_index() {

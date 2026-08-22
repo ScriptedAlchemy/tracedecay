@@ -5826,6 +5826,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+ "tracing",
  "url",
 ]
 
@@ -5978,6 +5979,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-graph-db",
  "tracedecay-private-fs",
+ "tracedecay-runtime-core",
  "tracedecay-temporal-query",
  "zeroize",
 ]

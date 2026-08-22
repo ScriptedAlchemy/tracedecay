@@ -17,10 +17,10 @@ use super::CodeLexicalArtifactErrorV1;
 /// are branch-only staging files and must fail as incompatible rather than be
 /// partially interpreted against this schema.
 // Revision 3 replaces the branch-local computed finalization cursor with
-// native table keys. Resuming a bounded seal must seek an existing primary
-// key, never rebuild a sort key over the whole corpus.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 3;
-const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v3\0";
+// native table keys. Revision 4 adds document-leading indexes so verifying
+// one document's receipt never scans an unrelated generation.
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 4;
+const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v4\0";
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
 pub(super) const SECTION_NAMES: [&str; 11] = [
     "source_pages",

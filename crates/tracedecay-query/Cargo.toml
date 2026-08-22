@@ -26,6 +26,9 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 zeroize = "1.9.0"
 
+[target.'cfg(windows)'.dependencies]
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+
 [features]
 # Explicit opt-in (same policy as `test-transport` on the runtime crate):
 # exposes `*_for_test` constructors to dependent crates' test builds only.
