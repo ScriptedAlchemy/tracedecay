@@ -96,6 +96,60 @@ impl GlobalDbObservationStore {
         Arc::clone(&self.persist_probe)
     }
 
+    /// Converges typed coverage past a terminally refused record when the
+    /// candidate stands at the sequential scan frontier; any other shape
+    /// (covered replay, stale expected cursor, gap, generation jump) leaves
+    /// every ledger untouched. One typed cursor read plus, at the frontier,
+    /// one typed `admission_refused` advance — no record decode, no identity
+    /// derivation, no payload hashing.
+    async fn converge_refused_coverage(
+        &self,
+        write: &AnchoredObservationWrite,
+    ) -> ObservationStoreResult<()> {
+        let identity = write.observation().identity();
+        let actual_cursor =
+            read_runtime_source_cursor(&self.runtime, identity.source(), identity.scope())?;
+        if !refused_scan_frontier(write, actual_cursor.as_ref()) {
+            return Ok(());
+        }
+        self.advance_refused_coverage(write).await
+    }
+
+    /// Records the typed `admission_refused` advance that moves the source
+    /// cursor past a refused record's coverage.
+    async fn advance_refused_coverage(
+        &self,
+        write: &AnchoredObservationWrite,
+    ) -> ObservationStoreResult<()> {
+        let identity = write.observation().identity();
+        let mut advance = ObservationCursorAdvance::for_ordering(
+            identity.source().clone(),
+            identity.scope().clone(),
+            identity.generation(),
+            identity.ordering_domain(),
+            write.expected_cursor().cloned(),
+            identity.position(),
+            ObservationCoverageReason::AdmissionRefused,
+        )?;
+        match (
+            write.next_cursor().file_identity(),
+            write.next_cursor().resume_fingerprint(),
+        ) {
+            (Some(file_identity), Some(resume_fingerprint)) => {
+                advance = advance.with_resume_checkpoint(file_identity, resume_fingerprint);
+            }
+            (None, None) => {}
+            _ => {
+                return Err(runtime_storage_error(
+                    "record refused admission coverage",
+                    "cursor resume checkpoint is incomplete",
+                ));
+            }
+        }
+        self.advance_source_cursor(advance).await?;
+        Ok(())
+    }
+
     pub async fn converge_projection_predecessor(
         &self,
     ) -> ProjectionStoreResult<ProjectionPredecessorConvergence> {
@@ -128,6 +182,15 @@ impl ObservationStore for GlobalDbObservationStore {
         )
         .await?
         {
+            // The terminal answers the refusal, but the candidate may stand
+            // at a NEW scan frontier the first refusal never covered — a
+            // rescan generation, or coverage lost to a failure between the
+            // marker commit and its cursor advance. Production ingest aborts
+            // a pass on this collision, so if coverage does not converge HERE
+            // a refused record at end-of-file would be re-read, re-decoded,
+            // and re-hashed by every later rescan forever. Converging costs
+            // one typed cursor-advance write and touches no record content.
+            self.converge_refused_coverage(&write).await?;
             return Err(ObservationStoreError::ObservationCollision {
                 observation_id: Box::new(observation_id),
                 existing_digest: Box::new(retained_digest),
@@ -179,27 +242,15 @@ impl ObservationStore for GlobalDbObservationStore {
             // authoritative state — rows, cursor, ledger — left untouched;
             // an already-covered candidate is a replayed verification probe
             // and is likewise left untouched.
-            let identity = candidate.identity();
-            let actual_cursor =
-                read_runtime_source_cursor(runtime, identity.source(), identity.scope())?;
-            let candidate_covered = actual_cursor.as_ref().is_some_and(|cursor| {
-                cursor.generation() == identity.generation()
-                    && cursor.ordering_domain() == identity.ordering_domain()
-                    && cursor.position() >= identity.position().end()
-            });
-            let scan_contiguous = match write.expected_cursor() {
-                Some(cursor)
-                    if cursor.generation() == identity.generation()
-                        && cursor.ordering_domain() == identity.ordering_domain() =>
-                {
-                    cursor.position() == identity.position().start()
-                }
-                Some(_) | None => identity.position().start() == 0,
-            };
-            if !candidate_covered
-                && scan_contiguous
-                && actual_cursor.as_ref() == write.expected_cursor()
-            {
+            if refused_scan_frontier(
+                &write,
+                read_runtime_source_cursor(
+                    runtime,
+                    candidate.identity().source(),
+                    candidate.identity().scope(),
+                )?
+                .as_ref(),
+            ) {
                 record_admission_refusal(
                     &self.database,
                     &observation_id,
@@ -207,31 +258,7 @@ impl ObservationStore for GlobalDbObservationStore {
                     existing.observation().payload_reference().digest(),
                 )
                 .await?;
-                let mut advance = ObservationCursorAdvance::for_ordering(
-                    identity.source().clone(),
-                    identity.scope().clone(),
-                    identity.generation(),
-                    identity.ordering_domain(),
-                    write.expected_cursor().cloned(),
-                    identity.position(),
-                    ObservationCoverageReason::AdmissionRefused,
-                )?;
-                match (
-                    write.next_cursor().file_identity(),
-                    write.next_cursor().resume_fingerprint(),
-                ) {
-                    (Some(file_identity), Some(resume_fingerprint)) => {
-                        advance = advance.with_resume_checkpoint(file_identity, resume_fingerprint);
-                    }
-                    (None, None) => {}
-                    _ => {
-                        return Err(runtime_storage_error(
-                            "record refused admission coverage",
-                            "cursor resume checkpoint is incomplete",
-                        ));
-                    }
-                }
-                self.advance_source_cursor(advance).await?;
+                self.advance_refused_coverage(&write).await?;
             }
             return Err(ObservationStoreError::ObservationCollision {
                 observation_id: Box::new(observation_id),
@@ -707,6 +734,37 @@ fn read_runtime_retrieval_anchor_by_alias(
             "read observation retrieval anchor by alias",
             "runtime returned a mismatched observation read result",
         )),
+    }
+}
+
+/// Whether a refused candidate stands at the sequential scan frontier: the
+/// durable cursor has NOT covered its range, the caller's expected cursor
+/// matches the durable one (so an advance is a pure forward move, never a
+/// regression), and the record either continues the current generation
+/// contiguously or restarts a new generation from position zero. Coverage is
+/// recorded only for this shape — the one production ingest actually loops
+/// on; gaps and stale views prove the caller is not the scan frontier.
+fn refused_scan_frontier(
+    write: &AnchoredObservationWrite,
+    actual_cursor: Option<&ClaudeSourceCursorV1>,
+) -> bool {
+    let identity = write.observation().identity();
+    let candidate_covered = actual_cursor.is_some_and(|cursor| {
+        cursor.generation() == identity.generation()
+            && cursor.ordering_domain() == identity.ordering_domain()
+            && cursor.position() >= identity.position().end()
+    });
+    if candidate_covered || actual_cursor != write.expected_cursor() {
+        return false;
+    }
+    match write.expected_cursor() {
+        Some(cursor)
+            if cursor.generation() == identity.generation()
+                && cursor.ordering_domain() == identity.ordering_domain() =>
+        {
+            cursor.position() == identity.position().start()
+        }
+        Some(_) | None => identity.position().start() == 0,
     }
 }
 
